@@ -103,6 +103,7 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   String text, {
   String? appId,
   List<String>? filesId,
+  String? expectedAuthenticatedUid,
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) return;
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
@@ -115,6 +116,7 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   await for (var line in makeStreamingApiCall(
     url: url,
     body: jsonEncode({'text': text, 'file_ids': filesId}),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
   )) {
     var messageChunk = parseMessageChunk(line, messageId);
     if (messageChunk != null) {
@@ -207,6 +209,7 @@ Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
 Future<List<MessageFile>?> uploadFilesServer(
   List<File> files, {
   String? appId,
+  String? expectedAuthenticatedUid,
 }) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw StateError('AI consent is required before file upload');
@@ -217,7 +220,11 @@ Future<List<MessageFile>?> uploadFilesServer(
   }
 
   try {
-    var response = await makeMultipartApiCall(url: url, files: files);
+    var response = await makeMultipartApiCall(
+      url: url,
+      files: files,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+    );
 
     if (response.statusCode == 200) {
       Logger.debug(

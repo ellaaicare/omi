@@ -23,6 +23,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -33,6 +34,7 @@ import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
 import 'package:omi/services/wals.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -123,6 +125,12 @@ class CaptureProvider extends ChangeNotifier
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
   Future<bool>? _systemAudioStartFuture;
+  ActiveWalAuthority? _systemAudioCaptureAuthority;
+  Timer? _systemAudioCacheTimer;
+  int _captureGeneration = 0;
+
+  bool _isCaptureCurrent(int generation, ActiveWalAuthority authority) =>
+      generation == _captureGeneration && authority.isCurrent();
 
   bool _isLoadingInProgressConversation = false;
 
@@ -168,6 +176,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   CaptureProvider() {
+    _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
     _connectionStateListener = ConnectivityService().onConnectionChange.listen((bool isConnected) {
       onConnectionStateChanged(isConnected);
     });
@@ -306,6 +315,7 @@ class CaptureProvider extends ChangeNotifier
       false; // Track if session was started by legacy long press (3) vs new toggle (1), TODO: remove this flag later
 
   StreamSubscription? _storageStream;
+  late final Object _accountIsolationProducerToken;
 
   get storageStream => _storageStream;
 
@@ -535,9 +545,11 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future streamButton(String deviceId) async {
+    final generation = _captureGeneration;
     Logger.debug('streamButton in capture_provider');
-    _bleButtonStream?.cancel();
-    _bleButtonStream = await _getBleButtonListener(deviceId, onButtonReceived: (List<int> value) {
+    await _bleButtonStream?.cancel();
+    final subscription = await _getBleButtonListener(deviceId, onButtonReceived: (List<int> value) {
+      if (generation != _captureGeneration) return;
       final snapshot = List<int>.from(value);
       if (snapshot.isEmpty || snapshot.length < 4) return;
       var buttonState = ByteData.view(Uint8List.fromList(snapshot.sublist(0, 4).reversed.toList()).buffer).getUint32(0);
@@ -636,6 +648,11 @@ class CaptureProvider extends ChangeNotifier
         _endVoiceCommandSession(deviceId);
       }
     });
+    if (generation != _captureGeneration) {
+      await subscription?.cancel();
+      return;
+    }
+    _bleButtonStream = subscription;
   }
 
   Future streamAudioToWs(String deviceId, BleAudioCodec codec) async {
@@ -644,12 +661,25 @@ class CaptureProvider extends ChangeNotifier
       _bleBytesStream = null;
       return;
     }
+    final generation = _captureGeneration;
+    final captureAuthority = WalOwnerAuthority.active();
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
+      _bleBytesStream = null;
+      return;
+    }
     Logger.debug('streamAudioToWs in capture_provider');
-    _bleBytesStream?.cancel();
+    await _bleBytesStream?.cancel();
     _startMetricsTracking();
-    _bleBytesStream = await _getBleAudioBytesListener(deviceId, onAudioBytesReceived: (List<int> value) {
+    final subscription = await _getBleAudioBytesListener(deviceId, onAudioBytesReceived: (List<int> value) {
       final snapshot = List<int>.from(value);
       if (snapshot.isEmpty || snapshot.length < 3) return;
+
+      // Keep late frames bound to the capture-start authority. Unknown/stale
+      // frames are retained for quarantine and never inherit the next account.
+      if (!_isCaptureCurrent(generation, captureAuthority)) {
+        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: null);
+        return;
+      }
 
       // Track bytes received from BLE
       _blesBytesReceived += snapshot.length;
@@ -671,7 +701,7 @@ class CaptureProvider extends ChangeNotifier
         setIsWalSupported(checkWalSupported);
       }
       if (_isWalSupported) {
-        _wal.getSyncs().phone.onByteStream(snapshot);
+        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
       }
 
       // Send WS
@@ -691,6 +721,11 @@ class CaptureProvider extends ChangeNotifier
         }
       }
     });
+    if (!_isCaptureCurrent(generation, captureAuthority)) {
+      await subscription?.cancel();
+      return;
+    }
+    _bleBytesStream = subscription;
     notifyListeners();
   }
 
@@ -804,12 +839,17 @@ class CaptureProvider extends ChangeNotifier
   Future<void> _initiateDevicePhotoStreaming() async {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (_recordingDevice == null) return;
+    final generation = _captureGeneration;
+    final captureAuthority = WalOwnerAuthority.active();
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
     final deviceId = _recordingDevice!.id;
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null) return;
+    if (connection == null || !_isCaptureCurrent(generation, captureAuthority)) return;
 
     await connection.performCameraStartPhotoController();
-    _blePhotoStream = await connection.performGetImageListener(onImageReceived: (orientedImage) async {
+    if (!_isCaptureCurrent(generation, captureAuthority)) return;
+    final subscription = await connection.performGetImageListener(onImageReceived: (orientedImage) async {
+      if (!_isCaptureCurrent(generation, captureAuthority)) return;
       final rotatedImageBytes = rotateImage(orientedImage);
       final String tempId = 'temp_img_${DateTime.now().millisecondsSinceEpoch}';
       final String base64Image = base64Encode(rotatedImageBytes);
@@ -824,6 +864,7 @@ class CaptureProvider extends ChangeNotifier
       final totalChunks = (base64Image.length / chunkSize).ceil();
 
       for (int i = 0; i < totalChunks; i++) {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
         final start = i * chunkSize;
         final end = (start + chunkSize > base64Image.length) ? base64Image.length : start + chunkSize;
         final chunk = base64Image.substring(start, end);
@@ -842,6 +883,11 @@ class CaptureProvider extends ChangeNotifier
         await Future.delayed(const Duration(milliseconds: 20)); // Small delay to prevent flooding
       }
     });
+    if (!_isCaptureCurrent(generation, captureAuthority)) {
+      await subscription?.cancel();
+      return;
+    }
+    _blePhotoStream = subscription;
     notifyListeners();
   }
 
@@ -909,11 +955,18 @@ class CaptureProvider extends ChangeNotifier
     _calculateMetricsRates();
   }
 
-  Future _closeBleStream() async {
-    await _bleBytesStream?.cancel();
-    await _blePhotoStream?.cancel();
+  Future<void> _closeBleStream({bool stopCamera = true}) async {
+    final bytesStream = _bleBytesStream;
+    final photoStream = _blePhotoStream;
+    final buttonStream = _bleButtonStream;
+    _bleBytesStream = null;
+    _blePhotoStream = null;
+    _bleButtonStream = null;
+    await bytesStream?.cancel();
+    await photoStream?.cancel();
+    await buttonStream?.cancel();
     _stopMetricsTracking();
-    if (_recordingDevice != null) {
+    if (stopCamera && _recordingDevice != null) {
       var connection = await ServiceManager.instance().device.ensureConnection(_recordingDevice!.id);
       if (connection != null && await connection.hasPhotoStreamingCharacteristic()) {
         await connection.performCameraStopPhotoController();
@@ -924,6 +977,7 @@ class CaptureProvider extends ChangeNotifier
 
   @override
   void dispose() {
+    EllaAccountIsolationService.unregisterCaptureProducer(_accountIsolationProducerToken);
     _bleBytesStream?.cancel();
     _blePhotoStream?.cancel();
     _socket?.unsubscribe(this);
@@ -978,18 +1032,23 @@ class CaptureProvider extends ChangeNotifier
 
   streamRecording() async {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    final generation = _captureGeneration;
+    final captureAuthority = WalOwnerAuthority.active();
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
     updateRecordingState(RecordingState.initialising);
     await Permission.microphone.request();
+    if (!_isCaptureCurrent(generation, captureAuthority)) return;
 
     // Send current location when conversation starts
     _sendCurrentGeolocation();
 
     // prepare
     await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
+    if (!_isCaptureCurrent(generation, captureAuthority)) return;
 
     // record
     await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
-      if (_socket?.state == SocketServiceState.connected) {
+      if (_isCaptureCurrent(generation, captureAuthority) && _socket?.state == SocketServiceState.connected) {
         _socket?.send(bytes);
       }
     }, onRecording: () {
@@ -1003,9 +1062,37 @@ class CaptureProvider extends ChangeNotifier
 
   stopStreamRecording() async {
     await _cleanupCurrentState();
-    ServiceManager.instance().mic.stop();
+    await ServiceManager.instance().mic.stop();
     updateRecordingState(RecordingState.stop);
     await _socket?.stop(reason: 'stop stream recording');
+  }
+
+  Future<void> stopForAccountTransition() async {
+    _captureGeneration++;
+    _voiceCommandTimeoutTimer?.cancel();
+    _voiceCommandTimeoutTimer = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _keepAliveTimer?.cancel();
+    _keepAliveTimer = null;
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _systemAudioCacheTimer?.cancel();
+    _systemAudioCacheTimer = null;
+    _systemAudioCaptureAuthority = null;
+    _commandBytes = [];
+    _voiceCommandSession = null;
+    _systemAudioBuffer.clear();
+    await _closeBleStream(stopCamera: false);
+    if (ServiceManager.isInitialized) {
+      await ServiceManager.instance().mic.stop();
+      if (PlatformService.isDesktop) {
+        await ServiceManager.instance().systemAudio.stopAndClearCallbacks();
+      }
+    }
+    await _socket?.stop(reason: 'account transition');
+    reset();
+    updateRecordingState(RecordingState.stop);
   }
 
   Future streamDeviceRecording({BtDevice? device}) async {
@@ -1055,6 +1142,7 @@ class CaptureProvider extends ChangeNotifier
       return false;
     }
 
+    final generation = _captureGeneration;
     if (!SharedPreferencesUtil().aiConsentAccepted) {
       final context = MyApp.navigatorKey.currentContext;
       if (context == null || !await AiConsentCoordinator.ensure(context)) return false;
@@ -1067,29 +1155,37 @@ class CaptureProvider extends ChangeNotifier
 
     _systemAudioBuffer = [];
     _systemAudioCaching = true;
-    Future.delayed(const Duration(seconds: 3), () {
+    _systemAudioCaptureAuthority = WalOwnerAuthority.active();
+    final captureAuthority = _systemAudioCaptureAuthority;
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return false;
+    _systemAudioCacheTimer?.cancel();
+    _systemAudioCacheTimer = Timer(const Duration(seconds: 3), () {
+      if (!_isCaptureCurrent(generation, captureAuthority)) return;
       _systemAudioCaching = false;
       _flushSystemAudioBuffer();
     });
 
     bool permissionsGranted = await _checkAndRequestSystemAudioPermissions();
-    if (permissionsGranted) {
-      await _startSystemAudioCapture();
-      return recordingState == RecordingState.systemAudioRecord;
+    if (permissionsGranted && _isCaptureCurrent(generation, captureAuthority)) {
+      await _startSystemAudioCapture(generation, captureAuthority);
+      return _isCaptureCurrent(generation, captureAuthority) && recordingState == RecordingState.systemAudioRecord;
     } else {
       updateRecordingState(RecordingState.stop);
       return false;
     }
   }
 
-  Future<void> _startSystemAudioCapture() async {
+  Future<void> _startSystemAudioCapture(int generation, ActiveWalAuthority captureAuthority) async {
     await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
+    if (!_isCaptureCurrent(generation, captureAuthority)) return;
 
     await ServiceManager.instance().systemAudio.start(
           onFormatReceived: (Map<String, dynamic> format) async {
             // This callback is for information only, no action needed.
           },
-          onByteReceived: _processSystemAudioByteReceived,
+          onByteReceived: (bytes) {
+            if (_isCaptureCurrent(generation, captureAuthority)) _processSystemAudioByteReceived(bytes);
+          },
           onRecording: () {
             updateRecordingState(RecordingState.systemAudioRecord);
             _startRecordingTimer();
@@ -1225,7 +1321,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   void _flushSystemAudioBuffer() {
-    if (_socket?.state == SocketServiceState.connected) {
+    if (_systemAudioCaptureAuthority?.isCurrent() == true && _socket?.state == SocketServiceState.connected) {
       while (_systemAudioBuffer.length >= 320) {
         final chunk = _systemAudioBuffer.sublist(0, 320);
         _socket?.send(chunk);
@@ -1244,7 +1340,7 @@ class CaptureProvider extends ChangeNotifier
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
 
-    ServiceManager.instance().systemAudio.stop();
+    await ServiceManager.instance().systemAudio.stop();
     _isPaused = false;
     _stopRecordingTimer();
     await _socket?.stop(reason: 'manual stop');
@@ -1843,6 +1939,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   void _processSystemAudioByteReceived(Uint8List bytes) {
+    if (_systemAudioCaptureAuthority?.isCurrent() != true) return;
     _systemAudioBuffer.addAll(bytes);
     if (!_systemAudioCaching) {
       _flushSystemAudioBuffer();

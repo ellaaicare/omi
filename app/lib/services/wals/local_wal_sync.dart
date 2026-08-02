@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
-import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_interfaces.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
@@ -20,6 +19,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
   List<List<int>> _frames = [];
   List<bool> _frameSynced = [];
+  List<WalOwner?> _frameOwners = [];
 
   Timer? _chunkingTimer;
   Timer? _flushingTimer;
@@ -131,6 +131,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     _frames = [];
     _frameSynced = [];
+    _frameOwners = [];
   }
 
   @override
@@ -143,6 +144,7 @@ class LocalWalSyncImpl implements LocalWalSync {
     await _flush();
     _frames = [];
     _frameSynced = [];
+    _frameOwners = [];
 
     _framesPerSecond = codec.getFramesPerSecond();
     _codec = codec;
@@ -174,7 +176,18 @@ class LocalWalSyncImpl implements LocalWalSync {
     var timerStart = timerEnd - (high - low) ~/ _framesPerSecond;
     var chunkFrameCount = high - low;
 
-    bool shouldStored = SharedPreferencesUtil().unlimitedLocalStorageEnabled;
+    final authority = _activeAuthority();
+    final capturedOwners = _frameOwners.sublist(low, high);
+    final firstOwner = capturedOwners.first;
+    final oneExactOwner =
+        firstOwner != null && capturedOwners.every((candidate) => candidate?.matches(firstOwner) == true);
+    final owner = oneExactOwner && authority != null && authority.isCurrent() && firstOwner.matches(authority.owner)
+        ? firstOwner
+        : null;
+
+    // Unknown, mixed, or stale-owner audio is evidence that must be retained in
+    // quarantine even when it is shorter than the normal loss threshold.
+    bool shouldStored = SharedPreferencesUtil().unlimitedLocalStorageEnabled || owner == null;
     if (!shouldStored) {
       bool synced = true;
       var losses = 0;
@@ -200,11 +213,9 @@ class LocalWalSyncImpl implements LocalWalSync {
           break;
         }
       }
-      Logger.debug("${low} - ${high} - ${syncedOffset} - ${chunkFrameCount} - ${_framesPerSecond}");
+      Logger.debug("$low - $high - $syncedOffset - $chunkFrameCount - $_framesPerSecond");
 
       Wal wal;
-      final authority = _activeAuthority();
-      final owner = authority != null && authority.isCurrent() ? authority.owner : null;
       var walIdx = _wals.indexWhere((w) =>
           w.timerStart == timerStart &&
           w.device == (_deviceId ?? "omi") &&
@@ -252,6 +263,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     _frames.removeRange(0, pivot);
     _frameSynced.removeRange(0, pivot);
+    _frameOwners.removeRange(0, pivot);
   }
 
   Future _flush() async {
@@ -345,9 +357,10 @@ class LocalWalSyncImpl implements LocalWalSync {
   }
 
   @override
-  void onByteStream(List<int> value) async {
+  void onByteStream(List<int> value, {required WalOwner? ownerAtCapture}) {
     _frames.add(value);
     _frameSynced.add(false);
+    _frameOwners.add(ownerAtCapture);
   }
 
   @override

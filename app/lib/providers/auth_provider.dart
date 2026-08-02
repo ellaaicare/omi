@@ -63,18 +63,18 @@ class AuthenticationProvider extends BaseProvider {
   /// Sets up fake authentication for simulator testing
   /// This allows automated tests to run without user interaction
   Future<void> _setupSimulatorAuth() async {
-    // Set test UID to match test server expectations
+    // Try to sign in anonymously for Firebase if needed
+    try {
+      if (_auth.currentUser == null) {
+        await AuthService.instance.runIdentityTransition(_auth.signInAnonymously);
+      }
+    } catch (_) {}
+
+    // Set test state only after transition cleanup invalidated the prior owner.
     SharedPreferencesUtil().uid = "test-uid";
     SharedPreferencesUtil().email = "test@simulator.local";
     SharedPreferencesUtil().givenName = "Test";
     SharedPreferencesUtil().onboardingCompleted = true; // Skip onboarding
-
-    // Try to sign in anonymously for Firebase if needed
-    try {
-      if (_auth.currentUser == null) {
-        await _auth.signInAnonymously();
-      }
-    } catch (_) {}
 
     notifyListeners();
   }

@@ -155,6 +155,30 @@ void main() {
     expect(listener.synced, isEmpty);
   });
 
+  test('audio delivered after transition is quarantined even after account B becomes current', () async {
+    final ownerB = _owner('uid-b');
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerB);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => ownerB,
+      activeAuthority: () => _authority(ownerB, () => true),
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+
+    for (var i = 0; i < 751; i++) {
+      sync.onByteStream([0, 0, i % 255, 1, 2, 3], ownerAtCapture: null);
+    }
+    await sync.stop();
+
+    final captured = await sync.getAllWals();
+    expect(captured, hasLength(1));
+    expect(captured.single.owner, isNull);
+    expect(captured.single.status, WalStatus.quarantined);
+    expect(captured.single.quarantineReason, 'capture_without_owner');
+    expect(await WalFileManager.getQuarantineCount(), 1);
+  });
+
   test('owner equality includes authority generation and revocation fails closed', () async {
     final original = _owner('uid-a');
     final newerGeneration = WalOwner(

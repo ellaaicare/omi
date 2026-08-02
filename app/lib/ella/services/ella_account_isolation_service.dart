@@ -22,9 +22,29 @@ class EllaAccountIsolationService {
   final FutureOr<void> Function()? stopServices;
   final FutureOr<void> Function()? quarantineLegacy;
 
+  static final Map<Object, FutureOr<void> Function()> _captureProducers = {};
+
+  static Object registerCaptureProducer(FutureOr<void> Function() stop) {
+    final token = Object();
+    _captureProducers[token] = stop;
+    return token;
+  }
+
+  static void unregisterCaptureProducer(Object token) {
+    _captureProducers.remove(token);
+  }
+
+  static Future<void> _stopRegisteredCaptureProducers() async {
+    final producers = List<FutureOr<void> Function()>.from(_captureProducers.values);
+    for (final stop in producers) {
+      await stop();
+    }
+  }
+
   Future<void> stopForAccountTransition() async {
     SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
     EllaAccountCommitBarrier.quiesceForAccountTransition();
+    await _stopRegisteredCaptureProducers();
     if (ServiceManager.isInitialized) {
       await ServiceManager.instance().stopCaptureForAccountTransition();
     }

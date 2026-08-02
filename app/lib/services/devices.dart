@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
-
 import 'package:collection/collection.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -17,7 +15,7 @@ import 'package:omi/utils/mutex.dart';
 
 abstract class IDeviceService {
   void start();
-  void stop();
+  Future<void> stop();
   Future<void> discover({String? desirableDeviceId, int timeout = 5});
 
   Future<DeviceConnection?> ensureConnection(String deviceId, {bool force = false});
@@ -115,6 +113,7 @@ class DeviceService implements IDeviceService {
       final results = await Future.wait(discoveryFutures);
 
       // Combine all discovered devices
+      if (_status == DeviceServiceStatus.stop) return;
       for (final devices in results) {
         discoveredDevices.addAll(devices);
       }
@@ -126,7 +125,7 @@ class DeviceService implements IDeviceService {
         await ensureConnection(desirableDeviceId, force: true);
       }
     } finally {
-      _status = DeviceServiceStatus.ready;
+      if (_status != DeviceServiceStatus.stop) _status = DeviceServiceStatus.ready;
     }
   }
 
@@ -187,7 +186,7 @@ class DeviceService implements IDeviceService {
   }
 
   @override
-  void stop() {
+  Future<void> stop() async {
     _status = DeviceServiceStatus.stop;
     onStatusChanged(_status);
 
@@ -195,6 +194,8 @@ class DeviceService implements IDeviceService {
     for (final discoverer in _discoverers) {
       discoverer.stop();
     }
+
+    await disconnectDevice();
 
     _subscriptions.clear();
     _devices.clear();
@@ -290,10 +291,15 @@ class DeviceService implements IDeviceService {
 
   @override
   Future<void> disconnectDevice() async {
-    if (_connection != null) {
-      Logger.debug("DeviceService: Disconnecting device...");
-      await _connection?.disconnect();
-      _connection = null;
+    await _mutex.acquire();
+    try {
+      if (_connection != null) {
+        Logger.debug("DeviceService: Disconnecting device...");
+        await _connection?.disconnect();
+        _connection = null;
+      }
+    } finally {
+      _mutex.release();
     }
   }
 }

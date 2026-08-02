@@ -8,20 +8,49 @@ import 'package:omi/providers/base_provider.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
+typedef CreatePersonRequest = Future<Person?> Function(String name, String expectedAuthenticatedUid);
+typedef UpdatePersonRequest = Future<bool> Function(String personId, String name, String expectedAuthenticatedUid);
+typedef DeletePersonRequest = Future<bool> Function(String personId, String expectedAuthenticatedUid);
+typedef DeletePersonSampleRequest = Future<bool> Function(
+  String personId,
+  int sampleIndex,
+  String expectedAuthenticatedUid,
+);
+
 class PeopleProvider extends BaseProvider {
   PeopleProvider({
     Future<List<Person>> Function()? fetchPeople,
     SharedPreferencesUtil? preferences,
     ActiveAccountAuthorityProvider? activeAuthority,
+    CreatePersonRequest? createPersonRequest,
+    UpdatePersonRequest? updatePersonRequest,
+    DeletePersonRequest? deletePersonRequest,
+    DeletePersonSampleRequest? deleteSampleRequest,
   })  : _fetchPeople = fetchPeople ?? getAllPeople,
         _preferences = preferences ?? SharedPreferencesUtil(),
-        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount {
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
+        _createPersonRequest =
+            createPersonRequest ?? ((name, expectedUid) => createPerson(name, expectedAuthenticatedUid: expectedUid)),
+        _updatePersonRequest = updatePersonRequest ??
+            ((personId, name, expectedUid) => updatePersonName(personId, name, expectedAuthenticatedUid: expectedUid)),
+        _deletePersonRequest = deletePersonRequest ??
+            ((personId, expectedUid) => deletePerson(personId, expectedAuthenticatedUid: expectedUid)),
+        _deleteSampleRequest = deleteSampleRequest ??
+            ((personId, sampleIndex, expectedUid) => deletePersonSpeechSample(
+                  personId,
+                  sampleIndex,
+                  expectedAuthenticatedUid: expectedUid,
+                )) {
     people = _preferences.cachedPeople;
   }
 
   final Future<List<Person>> Function() _fetchPeople;
   final SharedPreferencesUtil _preferences;
   final ActiveAccountAuthorityProvider _activeAuthority;
+  final CreatePersonRequest _createPersonRequest;
+  final UpdatePersonRequest _updatePersonRequest;
+  final DeletePersonRequest _deletePersonRequest;
+  final DeletePersonSampleRequest _deleteSampleRequest;
   int _operationGeneration = 0;
   late List<Person> people;
   Map<String, List<String>> samplesUrl = {};
@@ -48,8 +77,14 @@ class PeopleProvider extends BaseProvider {
     notifyListeners();
   }
 
+  EllaAccountCommitLease? _beginAccountCommit() =>
+      EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+
+  bool _canCommit(EllaAccountCommitLease lease, int generation) =>
+      generation == _operationGeneration && lease.isCurrent;
+
   setPeople() async {
-    final lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+    final lease = _beginAccountCommit();
     if (lease == null) {
       loading = false;
       return;
@@ -101,66 +136,101 @@ class PeopleProvider extends BaseProvider {
 
   Future<Person?> createPersonProvider(String name) async {
     if (loading) return null;
+    final lease = _beginAccountCommit();
+    if (lease == null) return null;
+    final generation = _operationGeneration;
     loading = true;
     notifyListeners();
 
-    Person? newPerson = await createPerson(name);
-    if (newPerson == null) {
-      loading = false;
-      notifyListeners();
-      return null;
+    try {
+      final newPerson = await _createPersonRequest(name, lease.authority.uid);
+      if (!_canCommit(lease, generation) || newPerson == null) return null;
+
+      people.add(newPerson);
+      people.sort((a, b) => a.name.compareTo(b.name));
+      _preferences.cachedPeople = people;
+
+      return newPerson;
+    } finally {
+      if (_canCommit(lease, generation)) {
+        loading = false;
+        notifyListeners();
+      }
+      lease.close();
     }
-
-    people.add(newPerson);
-    people.sort((a, b) => a.name.compareTo(b.name));
-    SharedPreferencesUtil().cachedPeople = people;
-
-    loading = false;
-    notifyListeners();
-    return newPerson;
   }
 
-  void updatePersonProvider(Person person, String name) async {
+  Future<void> updatePersonProvider(Person person, String name) async {
     if (loading) return;
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     loading = true;
     notifyListeners();
 
-    await updatePersonName(person.id, name);
-    final index = people.indexWhere((p) => p.id == person.id);
-    if (index != -1) {
-      people[index] = Person(
-        id: person.id,
-        name: name,
-        createdAt: person.createdAt,
-        updatedAt: DateTime.now(),
-        speechSamples: person.speechSamples,
-      );
-      people.sort((a, b) => a.name.compareTo(b.name));
-      SharedPreferencesUtil().cachedPeople = people;
+    try {
+      final success = await _updatePersonRequest(person.id, name, lease.authority.uid);
+      if (!success || !_canCommit(lease, generation)) return;
+      final index = people.indexWhere((p) => p.id == person.id);
+      if (index != -1) {
+        people[index] = Person(
+          id: person.id,
+          name: name,
+          createdAt: person.createdAt,
+          updatedAt: DateTime.now(),
+          speechSamples: person.speechSamples,
+        );
+        people.sort((a, b) => a.name.compareTo(b.name));
+        _preferences.cachedPeople = people;
+      }
+    } finally {
+      if (_canCommit(lease, generation)) {
+        loading = false;
+        notifyListeners();
+      }
+      lease.close();
     }
-
-    loading = false;
-    notifyListeners();
   }
 
   Future<void> deletePersonSample(int personIdx, int sampleIdx) async {
-    String personId = people[personIdx].id;
+    if (personIdx < 0 || personIdx >= people.length) return;
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    final personId = people[personIdx].id;
 
-    bool success = await deletePersonSpeechSample(personId, sampleIdx);
-    if (success) {
-      people[personIdx].speechSamples!.removeAt(sampleIdx);
-      SharedPreferencesUtil().replaceCachedPerson(people[personIdx]);
-      notifyListeners();
-    } else {
-      Logger.debug('Failed to delete speech sample at index: $sampleIdx');
+    try {
+      final success = await _deleteSampleRequest(personId, sampleIdx, lease.authority.uid);
+      if (!_canCommit(lease, generation)) return;
+      final currentIndex = people.indexWhere((person) => person.id == personId);
+      if (success && currentIndex != -1) {
+        final samples = people[currentIndex].speechSamples;
+        if (samples != null && sampleIdx >= 0 && sampleIdx < samples.length) {
+          samples.removeAt(sampleIdx);
+          _preferences.replaceCachedPerson(people[currentIndex]);
+          notifyListeners();
+        }
+      } else if (!success) {
+        Logger.debug('Failed to delete speech sample at index: $sampleIdx');
+      }
+    } finally {
+      lease.close();
     }
   }
 
-  void deletePersonProvider(Person person) {
-    deletePerson(person.id);
-    people.remove(person);
-    SharedPreferencesUtil().cachedPeople = people;
-    notifyListeners();
+  Future<void> deletePersonProvider(Person person) async {
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      final success = await _deletePersonRequest(person.id, lease.authority.uid);
+      if (!success || !_canCommit(lease, generation)) return;
+      people.removeWhere((candidate) => candidate.id == person.id);
+      _preferences.cachedPeople = people;
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   @override

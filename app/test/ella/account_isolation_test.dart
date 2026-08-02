@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -196,6 +197,171 @@ void main() {
     expect(calls, ['capture', 'v2v', 'guardian', 'wal-services', 'quarantine']);
   });
 
+  test('identity transition waits for a capture producer that is mid-write', () async {
+    final writeStarted = Completer<void>();
+    final releaseWrite = Completer<void>();
+    var identity = 'uid-a';
+    final token = EllaAccountIsolationService.registerCaptureProducer(() async {
+      writeStarted.complete();
+      await releaseWrite.future;
+    });
+    addTearDown(() => EllaAccountIsolationService.unregisterCaptureProducer(token));
+
+    final transition = () async {
+      await EllaAccountIsolationService(
+        stopV2v: () {},
+        stopGuardian: () {},
+        stopServices: () {},
+        quarantineLegacy: () {},
+      ).stopForAccountTransition();
+      identity = 'uid-b';
+    }();
+
+    await writeStarted.future;
+    await Future<void>.delayed(Duration.zero);
+    expect(identity, 'uid-a');
+    releaseWrite.complete();
+    await transition;
+    expect(identity, 'uid-b');
+  });
+
+  test('file picker started under A cannot upload or attach after switch to B', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final picker = Completer<List<File>>();
+    var uploads = 0;
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      filePicker: (_) => picker.future,
+      fileUploader: (files, appId, expectedUid) async {
+        uploads++;
+        return [_messageFile('attachment-a')];
+      },
+    );
+
+    final pending = provider.selectFile();
+    await Future<void>.delayed(Duration.zero);
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    picker.complete([File('${Directory.systemTemp.path}/account-a-private.txt')]);
+    await pending;
+
+    expect(uploads, 0);
+    expect(provider.selectedFiles, isEmpty);
+    expect(provider.uploadedFiles, isEmpty);
+  });
+
+  test('desktop Ask-AI carries one A lease across attachment upload and stream start', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final uploadStarted = Completer<void>();
+    final uploadResult = Completer<List<MessageFile>?>();
+    var streamStarts = 0;
+    final emitted = <Map<String, dynamic>>[];
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      fileUploader: (files, appId, expectedUid) {
+        expect(expectedUid, 'uid-a');
+        uploadStarted.complete();
+        return uploadResult.future;
+      },
+      askAiStreamSender: (message, fileIds, expectedUid) {
+        streamStarts++;
+        return Stream.value(ServerMessageChunk('stale', 'must not emit', MessageChunkType.data));
+      },
+      askAiResponseSink: (chunk) => emitted.add(chunk),
+    );
+
+    final pending = provider.handleAskAIForTesting(
+      MethodCall('sendQuery', {
+        'message': 'Account A question',
+        'filePath': '${Directory.systemTemp.path}/account-a-private.txt',
+      }),
+    );
+    await uploadStarted.future;
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    uploadResult.complete([_messageFile('attachment-a')]);
+    await pending;
+
+    expect(streamStarts, 0);
+    expect(emitted, isEmpty);
+    expect(provider.uploadedFiles, isEmpty);
+  });
+
+  test('people create response started under A cannot commit under B', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    final response = Completer<Person?>();
+    final provider = PeopleProvider(
+      preferences: prefs,
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      createPersonRequest: (name, expectedUid) => response.future,
+    );
+
+    final pending = provider.createPersonProvider('Account A person');
+    await Future<void>.delayed(Duration.zero);
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    response.complete(_person('person-a'));
+    expect(await pending, isNull);
+    expect(provider.people, isEmpty);
+    expect(prefs.cachedPeople, isEmpty);
+  });
+
+  test('people update, sample delete, and person delete discard A responses after switch', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    final original = _person('person-a');
+    prefs.cachedPeople = [original];
+    final updateResult = Completer<bool>();
+    final sampleResult = Completer<bool>();
+    final deleteResult = Completer<bool>();
+    final provider = PeopleProvider(
+      preferences: prefs,
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      updatePersonRequest: (personId, name, expectedUid) => updateResult.future,
+      deleteSampleRequest: (personId, sampleIndex, expectedUid) => sampleResult.future,
+      deletePersonRequest: (personId, expectedUid) => deleteResult.future,
+    );
+
+    final update = provider.updatePersonProvider(original, 'Changed under A');
+    await Future<void>.delayed(Duration.zero);
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    updateResult.complete(true);
+    await update;
+    expect(provider.people, isEmpty);
+
+    prefs.uid = 'uid-a';
+    prefs.cachedPeople = [original];
+    final sampleProvider = PeopleProvider(
+      preferences: prefs,
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      deleteSampleRequest: (personId, sampleIndex, expectedUid) => sampleResult.future,
+    );
+    final sample = sampleProvider.deletePersonSample(0, 0);
+    await Future<void>.delayed(Duration.zero);
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    sampleResult.complete(true);
+    await sample;
+    expect(sampleProvider.people, isEmpty);
+
+    prefs.uid = 'uid-a';
+    prefs.cachedPeople = [original];
+    final deleteProvider = PeopleProvider(
+      preferences: prefs,
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      deletePersonRequest: (personId, expectedUid) => deleteResult.future,
+    );
+    final deletion = deleteProvider.deletePersonProvider(original);
+    await Future<void>.delayed(Duration.zero);
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    deleteResult.complete(true);
+    await deletion;
+    expect(deleteProvider.people, isEmpty);
+  });
+
   test('workspace proof is opaque and route states remain honest without receipts', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-private-value';
     await prefs.saveString('aiConsentProfileBindingId', 'profile-private-value');
@@ -297,6 +463,17 @@ Person _person(String id) => Person(
       name: id,
       createdAt: DateTime.utc(2026, 8, 2),
       updatedAt: DateTime.utc(2026, 8, 2),
+      speechSamples: ['sample-a'],
+    );
+
+MessageFile _messageFile(String id) => MessageFile(
+      'provider-$id',
+      null,
+      '$id.txt',
+      'text/plain',
+      id,
+      DateTime.utc(2026, 8, 2),
+      null,
     );
 
 extension on Memory {

@@ -103,12 +103,16 @@ void main() {
     expect(mutationFiles, {'services/auth_service.dart'});
 
     final auth = File('${lib.path}/services/auth_service.dart').readAsStringSync();
-    expect(auth, contains('Future<T> _runIdentityTransition<T>'));
+    expect(auth, contains('Future<T> runIdentityTransition<T>'));
     expect(auth.indexOf('stopForAccountTransition()'), lessThan(auth.indexOf('return mutation();')));
-    expect(auth, contains('Future<void> signOut() => _runIdentityTransition(FirebaseAuth.instance.signOut)'));
+    expect(auth, contains('Future<void> signOut() => runIdentityTransition(FirebaseAuth.instance.signOut)'));
     expect(auth, contains('replaceIdentityWithCredential'));
 
+    final provider = File('${lib.path}/providers/auth_provider.dart').readAsStringSync();
+    expect(provider, contains('runIdentityTransition(_auth.signInAnonymously)'));
+
     final isolation = File('${lib.path}/ella/services/ella_account_isolation_service.dart').readAsStringSync();
+    expect(isolation, contains('await _stopRegisteredCaptureProducers()'));
     expect(
       isolation.indexOf('stopCaptureForAccountTransition()'),
       lessThan(isolation.indexOf('stopCapture?.call()')),
@@ -121,14 +125,18 @@ void main() {
       services.indexOf('Future<void> stopCaptureForAccountTransition()'),
     );
     for (final requiredStop in [
-      '_socket.stop()',
-      '_wal.stop()',
-      '_mic.stop()',
-      '_device.stop()',
-      '_systemAudio.stop()'
+      'await _socket.stop()',
+      'await _wal.stop()',
+      'await _mic.stop()',
+      'await _device.stop()',
+      'await _systemAudio.stop()'
     ]) {
       expect(suspend, contains(requiredStop));
     }
+
+    final capture = File('${lib.path}/providers/capture_provider.dart').readAsStringSync();
+    expect(capture, contains('registerCaptureProducer(stopForAccountTransition)'));
+    expect(capture, contains('ownerAtCapture: null'));
   });
 }
 

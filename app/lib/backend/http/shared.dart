@@ -99,12 +99,14 @@ Future<http.Response?> makeApiCall({
   Duration? timeout,
   int? retries,
   bool? requireAuthCheck,
+  String? expectedAuthenticatedUid,
 }) async {
   try {
     final shouldCheckAuth = requireAuthCheck ?? _isRequiredAuthCheck(url);
     Map<String, String> builtHeaders = await buildHeaders(
       requireAuthCheck: shouldCheckAuth,
       fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
     );
 
     final effectiveTimeout =
@@ -124,6 +126,7 @@ Future<http.Response?> makeApiCall({
         builtHeaders = await buildHeaders(
           requireAuthCheck: shouldCheckAuth,
           fromHeaders: headers,
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
         );
         response = await HttpPoolManager.instance.send(
           () => _buildRequest(url, builtHeaders, body, method),
@@ -224,9 +227,14 @@ Stream<String> makeStreamingApiCall({
   Map<String, String> headers = const {},
   String body = '',
   String method = 'POST',
+  String? expectedAuthenticatedUid,
 }) async* {
   try {
-    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
+    final builtHeaders = await buildHeaders(
+      requireAuthCheck: _isRequiredAuthCheck(url),
+      fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+    );
 
     var request = http.Request(method, Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -234,6 +242,10 @@ Stream<String> makeStreamingApiCall({
     if (body.isNotEmpty) {
       request.headers['Content-Type'] = 'application/json';
       request.body = body;
+    }
+
+    if (expectedAuthenticatedUid != null && AuthService.instance.getFirebaseUser()?.uid != expectedAuthenticatedUid) {
+      throw StateError('Authenticated account changed immediately before streaming request');
     }
 
     var streamedResponse = await HttpPoolManager.instance.sendStreaming(request);

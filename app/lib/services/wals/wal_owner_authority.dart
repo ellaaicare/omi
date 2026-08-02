@@ -5,6 +5,7 @@ import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/services/wals/wal.dart';
 
 abstract interface class AccountCommitAuthority {
+  String get uid;
   bool isCurrent();
 }
 
@@ -14,6 +15,9 @@ class ActiveWalAuthority implements AccountCommitAuthority {
   final WalOwner owner;
   final AiConsentAuthoritySnapshot consent;
   final bool Function()? currentCheck;
+
+  @override
+  String get uid => owner.uid;
 
   @override
   bool isCurrent({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
@@ -33,6 +37,7 @@ class AccountGenerationAuthority implements AccountCommitAuthority {
   });
 
   final SharedPreferencesUtil preferences;
+  @override
   final String uid;
   final int generation;
 

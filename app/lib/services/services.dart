@@ -86,9 +86,9 @@ class ServiceManager {
   Future<void> suspendForAccountTransition() async {
     await _socket.stop();
     await _wal.stop();
-    _mic.stop();
-    _device.stop();
-    if (Platform.isMacOS) _systemAudio.stop();
+    await _mic.stop();
+    await _device.stop();
+    if (Platform.isMacOS) await _systemAudio.stop();
     _started = false;
   }
 
@@ -97,18 +97,18 @@ class ServiceManager {
   /// any optional UI/provider cleanup callback.
   Future<void> stopCaptureForAccountTransition() async {
     await _socket.stop();
-    _mic.stop();
-    _device.stop();
-    if (Platform.isMacOS) _systemAudio.stop();
+    await _mic.stop();
+    await _device.stop();
+    if (Platform.isMacOS) await _systemAudio.stopAndClearCallbacks();
   }
 
-  void deinit() async {
+  Future<void> deinit() async {
     ConnectivityService().dispose();
     await _wal.stop();
-    _mic.stop();
-    _device.stop();
+    await _mic.stop();
+    await _device.stop();
     if (Platform.isMacOS) {
-      _systemAudio.stop();
+      await _systemAudio.stopAndClearCallbacks();
     }
     _started = false;
   }
@@ -178,6 +178,9 @@ Future onStart(ServiceInstance service) async {
 class BackgroundService {
   late FlutterBackgroundService _service;
   BackgroundServiceStatus? _status;
+  StreamSubscription? _recordAudioByteStream;
+  StreamSubscription? _recordStateStream;
+  Completer<void>? _recorderStopped;
 
   BackgroundServiceStatus? get status => _status;
 
@@ -232,18 +235,21 @@ class BackgroundService {
     instance.stopSelf();
   }
 
-  void startRecorder({
+  Future<void> startRecorder({
     required Function(Uint8List bytes) onByteReceived,
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
-  }) {
-    StreamSubscription? recordAudioByteStream = _service.on('recorder.ui.audioBytes').listen((event) {
+  }) async {
+    await _recordAudioByteStream?.cancel();
+    await _recordStateStream?.cancel();
+    final stopped = Completer<void>();
+    _recorderStopped = stopped;
+    _recordAudioByteStream = _service.on('recorder.ui.audioBytes').listen((event) {
       Uint8List bytes = Uint8List.fromList(event!['data'].cast<int>());
       onByteReceived(bytes);
     });
-    StreamSubscription? recordStateStream;
-    recordStateStream = _service.on('recorder.ui.stateUpdate').listen((event) {
+    _recordStateStream = _service.on('recorder.ui.stateUpdate').listen((event) {
       if (event!['state'] == 'recording') {
         if (onRecording != null) {
           onRecording();
@@ -253,14 +259,8 @@ class BackgroundService {
           onInitializing();
         }
       } else if (event['state'] == 'stopped') {
-        // Close streams
-        recordAudioByteStream.cancel();
-        recordStateStream?.cancel();
-
-        // Callback
-        if (onStop != null) {
-          onStop();
-        }
+        onStop?.call();
+        if (!stopped.isCompleted) stopped.complete();
       }
     });
 
@@ -268,8 +268,17 @@ class BackgroundService {
     _service.invoke("recorder.start");
   }
 
-  void stopRecorder() {
+  Future<void> stopRecorder() async {
+    await _recordAudioByteStream?.cancel();
+    _recordAudioByteStream = null;
     _service.invoke("recorder.stop");
+    final stopped = _recorderStopped;
+    if (stopped != null && !stopped.isCompleted) {
+      await stopped.future.timeout(const Duration(seconds: 3), onTimeout: () {});
+    }
+    await _recordStateStream?.cancel();
+    _recordStateStream = null;
+    _recorderStopped = null;
   }
 }
 
@@ -286,7 +295,7 @@ abstract class IMicRecorderService {
     Function()? onStop,
     Function()? onInitializing,
   });
-  void stop();
+  Future<void> stop();
 }
 
 class MicRecorderBackgroundService implements IMicRecorderService {
@@ -305,7 +314,7 @@ class MicRecorderBackgroundService implements IMicRecorderService {
   }) async {
     await _runner.ensureRunning();
 
-    _runner.startRecorder(
+    await _runner.startRecorder(
       onByteReceived: onByteReceived,
       onRecording: onRecording,
       onStop: onStop,
@@ -316,8 +325,8 @@ class MicRecorderBackgroundService implements IMicRecorderService {
   }
 
   @override
-  void stop() {
-    _runner.stopRecorder();
+  Future<void> stop() async {
+    await _runner.stopRecorder();
   }
 }
 
@@ -325,7 +334,8 @@ class MicRecorderService implements IMicRecorderService {
   RecorderServiceStatus? _status;
 
   late FlutterSoundRecorder _recorder;
-  late StreamController<Uint8List> _controller;
+  StreamController<Uint8List>? _controller;
+  StreamSubscription<Uint8List>? _audioSubscription;
 
   Function(Uint8List bytes)? _onByteReceived;
   Function? _onRecording;
@@ -369,13 +379,13 @@ class MicRecorderService implements IMicRecorderService {
     _controller = StreamController<Uint8List>();
 
     await _recorder.startRecorder(
-      toStream: _controller.sink,
+      toStream: _controller!.sink,
       codec: Codec.pcm16,
       numChannels: 1,
       sampleRate: 16000,
       bufferSize: 8192,
     );
-    _controller.stream.listen((buffer) {
+    _audioSubscription = _controller!.stream.listen((buffer) {
       Uint8List audioBytes = buffer;
       if (_onByteReceived != null) {
         _onByteReceived!(audioBytes);
@@ -387,15 +397,23 @@ class MicRecorderService implements IMicRecorderService {
   }
 
   @override
-  void stop() {
-    _recorder.stopRecorder();
-    _controller.close();
+  Future<void> stop() async {
+    final onStop = _onStop;
+    _onByteReceived = null;
+    if (_status == RecorderServiceStatus.recording || _status == RecorderServiceStatus.initialising) {
+      try {
+        await _recorder.stopRecorder();
+      } catch (_) {}
+    }
+    await _audioSubscription?.cancel();
+    _audioSubscription = null;
+    final controller = _controller;
+    if (controller != null && !controller.isClosed) await controller.close();
+    _controller = null;
 
     // callback
     _status = RecorderServiceStatus.stop;
-    if (_onStop != null) {
-      _onStop!();
-    }
+    onStop?.call();
 
     _onByteReceived = null;
     _onStop = null;
@@ -419,8 +437,8 @@ abstract class ISystemAudioRecorderService {
     Function(String deviceName, double micLevel, double systemAudioLevel)? onMicrophoneStatus,
     Function()? onStoppedAutomatically,
   });
-  void stop();
-  void stopAndClearCallbacks();
+  Future<void> stop();
+  Future<void> stopAndClearCallbacks();
   void setOnRecordingStartedFromNub(Function() callback);
   void setIsRecordingPausedCallback(bool Function() callback);
   // TODO: Add status property
@@ -709,9 +727,9 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
   }
 
   @override
-  void stop() {
+  Future<void> stop() async {
     try {
-      _channel.invokeMethod('stop');
+      await _channel.invokeMethod('stop');
     } catch (e) {
       _isRecording = false;
       _onError?.call(e.toString());
@@ -723,11 +741,11 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
   /// Stop recording and immediately clear callbacks to prevent them from being
   /// called when the native stop completes
   @override
-  void stopAndClearCallbacks() {
+  Future<void> stopAndClearCallbacks() async {
     _isRecording = false;
     _clearCallbacks();
     try {
-      _channel.invokeMethod('stop');
+      await _channel.invokeMethod('stop');
     } catch (e) {
       Logger.debug('DesktopSystemAudioRecorderService: Error stopping: $e');
     }

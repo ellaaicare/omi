@@ -37,12 +37,12 @@ class AuthService {
 
   AuthService._internal();
 
-  Future<T> _runIdentityTransition<T>(Future<T> Function() mutation) async {
+  Future<T> runIdentityTransition<T>(Future<T> Function() mutation) async {
     await const EllaAccountIsolationService().stopForAccountTransition();
     return mutation();
   }
 
-  Future<UserCredential> replaceIdentityWithCredential(AuthCredential credential) => _runIdentityTransition(() async {
+  Future<UserCredential> replaceIdentityWithCredential(AuthCredential credential) => runIdentityTransition(() async {
         await FirebaseAuth.instance.signOut();
         return FirebaseAuth.instance.signInWithCredential(credential);
       });
@@ -73,7 +73,7 @@ class AuthService {
 
     // Once signed in, return the UserCredential
     try {
-      var result = await _runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      var result = await runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
       await _updateUserPreferences(result, 'google');
       return result;
     } catch (_) {
@@ -150,7 +150,7 @@ class AuthService {
 
   Future<void> signInAnonymously() async {
     try {
-      await _runIdentityTransition(FirebaseAuth.instance.signInAnonymously);
+      await runIdentityTransition(FirebaseAuth.instance.signInAnonymously);
       var user = FirebaseAuth.instance.currentUser!;
       SharedPreferencesUtil().uid = user.uid;
       await getIdToken();
@@ -159,7 +159,7 @@ class AuthService {
     }
   }
 
-  Future<void> signOut() => _runIdentityTransition(FirebaseAuth.instance.signOut);
+  Future<void> signOut() => runIdentityTransition(FirebaseAuth.instance.signOut);
 
   Future<String?> getIdToken() async {
     try {
@@ -321,7 +321,7 @@ class AuthService {
 
     // Use custom token if enabled and available
     if (useCustomToken && customToken != null) {
-      return _runIdentityTransition(() => FirebaseAuth.instance.signInWithCustomToken(customToken));
+      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCustomToken(customToken));
     }
 
     // Fallback to OAuth credentials
@@ -330,10 +330,10 @@ class AuthService {
 
     if (provider == 'google') {
       final credential = GoogleAuthProvider.credential(idToken: idToken, accessToken: accessToken);
-      return _runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
     } else if (provider == 'apple') {
       final credential = OAuthProvider('apple.com').credential(idToken: idToken, accessToken: accessToken);
-      return _runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
     } else {
       throw Exception('Unsupported provider: $provider');
     }

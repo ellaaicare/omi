@@ -211,12 +211,13 @@ Future<bool> getPrivateCloudSyncEnabled() async {
   return false;
 }
 
-Future<Person?> createPerson(String name) async {
+Future<Person?> createPerson(String name, {String? expectedAuthenticatedUid}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people',
     headers: {},
     method: 'POST',
     body: jsonEncode({'name': name}),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
   );
   if (response == null) return null;
   Logger.debug('createPerson response: ${response.body}');
@@ -262,36 +263,43 @@ Future<List<Person>> getAllPeople({bool includeSpeechSamples = true}) async {
   return [];
 }
 
-Future<bool> updatePersonName(String personId, String newName) async {
+Future<bool> updatePersonName(String personId, String newName, {String? expectedAuthenticatedUid}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId/name?value=$newName',
     headers: {},
     method: 'PATCH',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
   );
   if (response == null) return false;
   Logger.debug('updatePersonName response: ${response.body}');
   return response.statusCode == 200;
 }
 
-Future<bool> deletePerson(String personId) async {
+Future<bool> deletePerson(String personId, {String? expectedAuthenticatedUid}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId',
     headers: {},
     method: 'DELETE',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
   );
   if (response == null) return false;
   Logger.debug('deletePerson response: ${response.body}');
   return response.statusCode == 204;
 }
 
-Future<bool> deletePersonSpeechSample(String personId, int sampleIndex) async {
+Future<bool> deletePersonSpeechSample(
+  String personId,
+  int sampleIndex, {
+  String? expectedAuthenticatedUid,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId/speech-samples/$sampleIndex',
     headers: {},
     method: 'DELETE',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
   );
   if (response == null) return false;
   Logger.debug('deletePersonSpeechSample response: ${response.body}');

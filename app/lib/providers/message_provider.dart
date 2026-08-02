@@ -39,6 +39,18 @@ typedef ChatAppsRetriever = Future<List<App>> Function();
 typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(String text);
 typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(List<File> files);
 typedef VoiceTempFileSaver = Future<File> Function(List<List<int>> audioBytes, int startTime, int frameSize);
+typedef AttachmentFilePicker = Future<List<File>> Function(int remainingSlots);
+typedef MessageFileUploader = Future<List<MessageFile>?> Function(
+  List<File> files,
+  String? appId,
+  String expectedAuthenticatedUid,
+);
+typedef AskAiStreamSender = Stream<ServerMessageChunk> Function(
+  String message,
+  List<String>? fileIds,
+  String expectedAuthenticatedUid,
+);
+typedef AskAiResponseSink = FutureOr<void> Function(Map<String, dynamic> chunk);
 
 class MessageProvider extends ChangeNotifier {
   static late MethodChannel _askAIChannel;
@@ -49,11 +61,23 @@ class MessageProvider extends ChangeNotifier {
     EllaChatStreamSender? ellaChatStreamSender,
     VoiceChatStreamSender? voiceChatStreamSender,
     VoiceTempFileSaver? voiceTempFileSaver,
+    AttachmentFilePicker? filePicker,
+    MessageFileUploader? fileUploader,
+    AskAiStreamSender? askAiStreamSender,
+    AskAiResponseSink? askAiResponseSink,
   })  : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps,
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
         _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
         _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
-        _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile {
+        _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile,
+        _filePicker = filePicker,
+        _fileUploader = fileUploader ??
+            ((files, appId, expectedUid) =>
+                uploadFilesServer(files, appId: appId, expectedAuthenticatedUid: expectedUid)),
+        _askAiStreamSender = askAiStreamSender ??
+            ((message, fileIds, expectedUid) =>
+                sendMessageStreamServer(message, filesId: fileIds, expectedAuthenticatedUid: expectedUid)),
+        _askAiResponseSink = askAiResponseSink {
     if (PlatformService.isDesktop) {
       _askAIChannel = const MethodChannel('com.omi/ask_ai');
       _askAIChannel.setMethodCallHandler(_handleAskAIMethodCall);
@@ -65,6 +89,10 @@ class MessageProvider extends ChangeNotifier {
   final EllaChatStreamSender _ellaChatStreamSender;
   final VoiceChatStreamSender _voiceChatStreamSender;
   final VoiceTempFileSaver _voiceTempFileSaver;
+  final AttachmentFilePicker? _filePicker;
+  final MessageFileUploader _fileUploader;
+  final AskAiStreamSender _askAiStreamSender;
+  final AskAiResponseSink? _askAiResponseSink;
   int _operationGeneration = 0;
 
   static Future<List<App>> _retrieveInstalledChatApps() async {
@@ -126,6 +154,11 @@ class MessageProvider extends ChangeNotifier {
 
   EllaAccountCommitLease? _beginAccountCommit() =>
       EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+
+  Future<EllaAccountCommitLease?> _beginProtectedOperation() async {
+    if (!await _ensureAiConsent()) return null;
+    return _beginAccountCommit();
+  }
 
   bool _canCommit(EllaAccountCommitLease lease, int generation) =>
       generation == _operationGeneration && lease.isCurrent;
@@ -192,33 +225,42 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
 
-    List<File> filesToAdd = [];
-    List<String> typesToAdd = [];
+    final lease = await _beginProtectedOperation();
+    if (lease == null) return;
+    final generation = _operationGeneration;
 
-    for (var file in files) {
-      String ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
-      if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext)) {
-        typesToAdd.add('image');
-      } else {
-        typesToAdd.add('file');
-      }
-      filesToAdd.add(file);
-    }
+    try {
+      List<File> filesToAdd = [];
+      List<String> typesToAdd = [];
 
-    if (filesToAdd.isNotEmpty) {
-      selectedFiles.addAll(filesToAdd);
-      selectedFileTypes.addAll(typesToAdd);
-      try {
-        await uploadFiles(filesToAdd, appProvider?.selectedChatAppId);
-      } catch (e) {
-        Logger.debug('Failed to upload files: $e');
-        if (selectedFiles.length >= filesToAdd.length) {
-          selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
-          selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
+      for (var file in files) {
+        String ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
+        if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext)) {
+          typesToAdd.add('image');
+        } else {
+          typesToAdd.add('file');
         }
-        AppSnackbar.showSnackbarError('File upload failed. Please try again.');
+        filesToAdd.add(file);
       }
-      notifyListeners();
+
+      if (filesToAdd.isNotEmpty && _canCommit(lease, generation)) {
+        selectedFiles.addAll(filesToAdd);
+        selectedFileTypes.addAll(typesToAdd);
+        try {
+          await _uploadFilesWithLease(filesToAdd, appProvider?.selectedChatAppId, lease, generation);
+        } catch (e) {
+          if (!_canCommit(lease, generation)) return;
+          Logger.debug('Failed to upload files: $e');
+          if (selectedFiles.length >= filesToAdd.length) {
+            selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
+            selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
+          }
+          AppSnackbar.showSnackbarError('File upload failed. Please try again.');
+        }
+        if (_canCommit(lease, generation)) notifyListeners();
+      }
+    } finally {
+      lease.close();
     }
   }
 
@@ -251,23 +293,27 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void captureImage() async {
+  Future<void> captureImage() async {
     final l10n = MyApp.navigatorKey.currentContext?.l10n;
     if (PlatformService.isDesktop) {
       AppSnackbar.showSnackbarError(l10n?.msgCameraNotAvailable ?? 'Camera capture is not available on this platform');
       return;
     }
 
+    final lease = await _beginProtectedOperation();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     try {
       var res = await ImagePicker().pickImage(source: ImageSource.camera);
-      if (res != null) {
-        selectedFiles.add(File(res.path));
+      if (res != null && _canCommit(lease, generation)) {
+        final file = File(res.path);
+        selectedFiles.add(file);
         selectedFileTypes.add('image');
-        var index = selectedFiles.length - 1;
-        await uploadFiles([selectedFiles[index]], appProvider?.selectedChatAppId);
-        notifyListeners();
+        await _uploadFilesWithLease([file], appProvider?.selectedChatAppId, lease, generation);
+        if (_canCommit(lease, generation)) notifyListeners();
       }
     } on PlatformException catch (e) {
+      if (!_canCommit(lease, generation)) return;
       if (e.code == 'camera_access_denied') {
         AppSnackbar.showSnackbarError(
           l10n?.msgCameraPermissionDenied ?? 'Camera permission denied. Please allow access to camera',
@@ -278,17 +324,24 @@ class MessageProvider extends ChangeNotifier {
         );
       }
     } catch (e) {
-      AppSnackbar.showSnackbarError(l10n?.msgPhotoError ?? 'Error taking photo. Please try again.');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(l10n?.msgPhotoError ?? 'Error taking photo. Please try again.');
+      }
+    } finally {
+      lease.close();
     }
   }
 
-  void selectImage() async {
+  Future<void> selectImage() async {
     final l10n = MyApp.navigatorKey.currentContext?.l10n;
     if (selectedFiles.length >= 4) {
       AppSnackbar.showSnackbarError(l10n?.msgMaxImagesLimit ?? 'You can only select up to 4 images');
       return;
     }
 
+    final lease = await _beginProtectedOperation();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     try {
       List<File> files = [];
 
@@ -313,13 +366,17 @@ class MessageProvider extends ChangeNotifier {
             return;
           }
         } on PlatformException catch (e) {
-          AppSnackbar.showSnackbarError(
-            l10n?.msgFilePickerError(e.message ?? '') ?? 'Error opening file picker: ${e.message}',
-          );
+          if (_canCommit(lease, generation)) {
+            AppSnackbar.showSnackbarError(
+              l10n?.msgFilePickerError(e.message ?? '') ?? 'Error opening file picker: ${e.message}',
+            );
+          }
           return;
         } catch (e) {
           Logger.debug('FilePicker general error: $e');
-          AppSnackbar.showSnackbarError(l10n?.msgSelectImagesError(e.toString()) ?? 'Error selecting images: $e');
+          if (_canCommit(lease, generation)) {
+            AppSnackbar.showSnackbarError(l10n?.msgSelectImagesError(e.toString()) ?? 'Error selecting images: $e');
+          }
           return;
         }
       } else {
@@ -338,14 +395,15 @@ class MessageProvider extends ChangeNotifier {
         }
       }
 
-      if (files.isNotEmpty) {
+      if (files.isNotEmpty && _canCommit(lease, generation)) {
         selectedFiles.addAll(files);
         selectedFileTypes.addAll(files.map((e) => 'image'));
-        await uploadFiles(files, appProvider?.selectedChatAppId);
+        await _uploadFilesWithLease(files, appProvider?.selectedChatAppId, lease, generation);
       }
-      notifyListeners();
+      if (_canCommit(lease, generation)) notifyListeners();
     } on PlatformException catch (e) {
       Logger.debug('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
+      if (!_canCommit(lease, generation)) return;
       if (e.code == 'photo_access_denied') {
         AppSnackbar.showSnackbarError(
           l10n?.msgPhotosPermissionDenied ?? 'Photos permission denied. Please allow access to photos to select images',
@@ -357,48 +415,70 @@ class MessageProvider extends ChangeNotifier {
       }
     } catch (e) {
       Logger.debug('🖼️ General exception during image picking: $e');
-      AppSnackbar.showSnackbarError(l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.',
+        );
+      }
+    } finally {
+      lease.close();
     }
   }
 
-  void selectFile() async {
+  Future<void> selectFile() async {
     final l10n = MyApp.navigatorKey.currentContext?.l10n;
     if (selectedFiles.length >= 4) {
       AppSnackbar.showSnackbarError(l10n?.msgMaxFilesLimit ?? 'You can only select up to 4 files');
       return;
     }
 
+    final lease = await _beginProtectedOperation();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     try {
-      var res = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowMultiple: true,
-        allowedExtensions: ['jpeg', 'md', 'pdf', 'gif', 'doc', 'png', 'pptx', 'txt', 'xlsx', 'webp'],
-        dialogTitle: 'Select files',
-        withData: false,
-        withReadStream: false,
-      );
-
-      if (res != null && res.files.isNotEmpty) {
-        List<File> files = [];
-        for (var r in res.files) {
-          if (r.path != null && files.length < (4 - selectedFiles.length)) {
-            files.add(File(r.path!));
+      List<File> files;
+      if (_filePicker != null) {
+        files = await _filePicker!(4 - selectedFiles.length);
+      } else {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowMultiple: true,
+          allowedExtensions: ['jpeg', 'md', 'pdf', 'gif', 'doc', 'png', 'pptx', 'txt', 'xlsx', 'webp'],
+          dialogTitle: 'Select files',
+          withData: false,
+          withReadStream: false,
+        );
+        files = [];
+        if (result != null) {
+          for (final platformFile in result.files) {
+            if (platformFile.path != null && files.length < (4 - selectedFiles.length)) {
+              files.add(File(platformFile.path!));
+            }
           }
         }
+      }
 
-        if (files.isNotEmpty) {
-          selectedFiles.addAll(files);
-          selectedFileTypes.addAll(files.map((e) => 'file'));
-          await uploadFiles(files, appProvider?.selectedChatAppId);
-        }
+      if (!_canCommit(lease, generation)) return;
+      if (files.isNotEmpty) {
+        selectedFiles.addAll(files);
+        selectedFileTypes.addAll(files.map((e) => 'file'));
+        await _uploadFilesWithLease(files, appProvider?.selectedChatAppId, lease, generation);
+      }
+      if (_canCommit(lease, generation)) {
         notifyListeners();
       }
     } on PlatformException catch (e) {
-      AppSnackbar.showSnackbarError(
-        l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}',
-      );
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}',
+        );
+      }
     } catch (e) {
-      AppSnackbar.showSnackbarError(l10n?.msgSelectFilesGenericError ?? 'Error selecting files. Please try again.');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(l10n?.msgSelectFilesGenericError ?? 'Error selecting files. Please try again.');
+      }
+    } finally {
+      lease.close();
     }
   }
 
@@ -421,30 +501,42 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
-    if (!await _ensureAiConsent()) return null;
-    final lease = _beginAccountCommit();
+    final lease = await _beginProtectedOperation();
     if (lease == null) return null;
     final generation = _operationGeneration;
     try {
-      if (files.isNotEmpty) {
-        setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
-        var res = await uploadFilesServer(files, appId: appId);
-        if (!_canCommit(lease, generation)) return null;
-        if (res != null) {
-          uploadedFiles.addAll(res);
-        } else {
-          clearSelectedFiles();
-          final l10n = MyApp.navigatorKey.currentContext?.l10n;
-          AppSnackbar.showSnackbarError(l10n?.msgUploadFileFailed ?? 'Failed to upload file, please try again later');
-        }
-        setMultiUploadingFileStatus(files.map((e) => e.path).toList(), false);
-        notifyListeners();
-        return res;
-      }
-
-      return null;
+      return await _uploadFilesWithLease(files, appId, lease, generation);
     } finally {
       lease.close();
+    }
+  }
+
+  Future<List<MessageFile>?> _uploadFilesWithLease(
+    List<File> files,
+    String? appId,
+    EllaAccountCommitLease lease,
+    int generation,
+  ) async {
+    if (files.isEmpty || !_canCommit(lease, generation)) return null;
+    final paths = files.map((file) => file.path).toList();
+    setMultiUploadingFileStatus(paths, true);
+    try {
+      if (!_canCommit(lease, generation)) return null;
+      final result = await _fileUploader(files, appId, lease.authority.uid);
+      if (!_canCommit(lease, generation)) return null;
+      if (result != null) {
+        uploadedFiles.addAll(result);
+      } else {
+        clearSelectedFiles();
+        final l10n = MyApp.navigatorKey.currentContext?.l10n;
+        AppSnackbar.showSnackbarError(l10n?.msgUploadFileFailed ?? 'Failed to upload file, please try again later');
+      }
+      return result;
+    } finally {
+      if (_canCommit(lease, generation)) {
+        setMultiUploadingFileStatus(paths, false);
+        notifyListeners();
+      }
     }
   }
 
@@ -861,8 +953,20 @@ class MessageProvider extends ChangeNotifier {
     return appProvider?.apps.firstWhereOrNull((p) => p.id == appId);
   }
 
-  Future<void> _handleAskAIMethodCall(MethodCall call) async {
-    if (!PlatformService.isDesktop) {
+  Future<void> _emitAskAiChunk(Map<String, dynamic> chunk) async {
+    final sink = _askAiResponseSink;
+    if (sink != null) {
+      await sink(chunk);
+    } else {
+      await _askAIChannel.invokeMethod('aiResponseChunk', chunk);
+    }
+  }
+
+  @visibleForTesting
+  Future<void> handleAskAIForTesting(MethodCall call) => _handleAskAIMethodCall(call, allowAnyPlatform: true);
+
+  Future<void> _handleAskAIMethodCall(MethodCall call, {bool allowAnyPlatform = false}) async {
+    if (!allowAnyPlatform && !PlatformService.isDesktop) {
       return;
     }
     switch (call.method) {
@@ -871,24 +975,31 @@ class MessageProvider extends ChangeNotifier {
         final message = args['message'] as String;
         final filePath = args['filePath'] as String?;
 
-        List<String>? fileIds;
-        if (filePath != null && filePath.isNotEmpty) {
-          final file = File(filePath);
-          final uploadedFilesResult = await uploadFiles([file], null);
-          if (uploadedFilesResult != null) {
-            fileIds = uploadedFilesResult.map((f) => f.id).toList();
-          } else {
-            final l10n = MyApp.navigatorKey.currentContext?.l10n;
-            _askAIChannel.invokeMethod('aiResponseChunk', {
-              'type': 'error',
-              'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.',
-            });
-            return;
-          }
-        }
+        final lease = await _beginProtectedOperation();
+        if (lease == null) return;
+        final generation = _operationGeneration;
 
         try {
-          await for (var chunk in sendMessageStreamServer(message, filesId: fileIds)) {
+          List<String>? fileIds;
+          if (filePath != null && filePath.isNotEmpty) {
+            final file = File(filePath);
+            final uploadedFilesResult = await _uploadFilesWithLease([file], null, lease, generation);
+            if (!_canCommit(lease, generation)) return;
+            if (uploadedFilesResult != null) {
+              fileIds = uploadedFilesResult.map((f) => f.id).toList();
+            } else {
+              final l10n = MyApp.navigatorKey.currentContext?.l10n;
+              await _emitAskAiChunk({
+                'type': 'error',
+                'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.',
+              });
+              return;
+            }
+          }
+
+          if (!_canCommit(lease, generation)) return;
+          await for (var chunk in _askAiStreamSender(message, fileIds, lease.authority.uid)) {
+            if (!_canCommit(lease, generation)) return;
             final chunkMap = {
               'type': chunk.type.toString().split('.').last,
               'text': chunk.text,
@@ -897,16 +1008,19 @@ class MessageProvider extends ChangeNotifier {
             if (chunk.type == MessageChunkType.done && chunk.message != null) {
               chunkMap['text'] = chunk.message!.text;
             }
-            _askAIChannel.invokeMethod('aiResponseChunk', chunkMap);
+            await _emitAskAiChunk(chunkMap);
           }
         } catch (e) {
+          if (!_canCommit(lease, generation)) return;
           final failedChunk = ServerMessageChunk.failedMessage();
           final chunkMap = {
             'type': failedChunk.type.toString().split('.').last,
             'text': failedChunk.text,
             'messageId': failedChunk.messageId,
           };
-          _askAIChannel.invokeMethod('aiResponseChunk', chunkMap);
+          await _emitAskAiChunk(chunkMap);
+        } finally {
+          lease.close();
         }
         break;
       default:
