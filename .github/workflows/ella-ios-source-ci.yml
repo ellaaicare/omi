@@ -125,16 +125,18 @@ jobs:
       - name: Run Guardian data-only production boundary tests
         working-directory: .
         run: |
-          python3 -m pip install --disable-pip-version-check \
+          python3 -m venv "$RUNNER_TEMP/guardian-python"
+          source "$RUNNER_TEMP/guardian-python/bin/activate"
+          python -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
             python-multipart==0.0.9
-          python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
-          python3 -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
+          python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
+          python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
-          python3 -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python -m pytest backend/tests/unit/test_ella_user_route_auth.py
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
