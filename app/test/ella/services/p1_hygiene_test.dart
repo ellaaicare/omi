@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/services/ella_legal_links.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
+import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/utils/debugging/crashlytics_manager.dart';
 import 'package:omi/utils/log_redaction.dart';
 
@@ -61,18 +62,10 @@ void main() {
 
   test('Guardian capability is default-off and cannot be enabled publicly or by invitation', () {
     expect(isEllaGuardianConfigured, isFalse);
-    expect(
-      allowsGuardianSurface(isPublicBuild: true, isInvitationBuild: false, guardianConfigured: true),
-      isFalse,
-    );
-    expect(
-      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: true, guardianConfigured: true),
-      isFalse,
-    );
-    expect(
-      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: false),
-      isFalse,
-    );
+    expect(allowsGuardianSurface(isPublicBuild: true, isInvitationBuild: false, guardianConfigured: true), isFalse);
+    expect(allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: true, guardianConfigured: true), isFalse);
+    expect(allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: false), isFalse);
+    expect(allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: true), isTrue);
   });
 
   test('native Guardian polling, playback reporting, and injection require explicit availability', () {
@@ -81,7 +74,9 @@ void main() {
     final polling = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianModePollingService.swift').readAsStringSync();
     final appDelegate = File('${appRoot.path}/ios/Runner/AppDelegate.swift').readAsStringSync();
 
-    expect(manager, contains('private var enabled = false'));
+    expect(manager, contains('private let leaseGate = GuardianWorkLeaseGate()'));
+    expect(manager, contains('private var injectionTasks: [UUID: Task<Void, Never>]'));
+    expect(manager, contains('performIfCurrent(lease)'));
     expect(manager, contains('func configureAvailability(_ enabled: Bool)'));
     expect(manager, contains('guard GuardianModeAvailability.shared.isEnabled else'));
     expect(
@@ -89,8 +84,10 @@ void main() {
       lessThan(manager.indexOf('try audioSession.setActive(true)')),
     );
     expect(
-      manager.indexOf('guard GuardianModeAvailability.shared.isEnabled else { return }',
-          manager.indexOf('func reportPlaybackEvent')),
+      manager.indexOf(
+        'guard GuardianModeAvailability.shared.isEnabled else { return }',
+        manager.indexOf('func reportPlaybackEvent'),
+      ),
       lessThan(manager.indexOf('URLSession.shared.dataTask', manager.indexOf('func reportPlaybackEvent'))),
     );
     expect(
@@ -99,10 +96,27 @@ void main() {
     );
     expect(polling, contains('guard isPolling, GuardianModeAvailability.shared.isEnabled else'));
     expect(appDelegate, contains('case "configureAvailability":'));
-    expect(
-      appDelegate,
-      contains('reason == .oldDeviceUnavailable && GuardianModeAvailability.shared.isEnabled'),
+    expect(appDelegate, contains('case "clearNotificationResidue":'));
+    expect(appDelegate, contains('reason == .oldDeviceUnavailable && GuardianModeAvailability.shared.isEnabled'));
+  });
+
+  test('Guardian notification payload shapes and scoped cleanup fail closed', () async {
+    expect(EllaNotificationHandler.isGuardianPayload({'type': 'ella_notification', 'urgency': 'NORMAL'}), isTrue);
+    expect(EllaNotificationHandler.isGuardianPayload({'type': 'ella_emergency_confirmation'}), isTrue);
+    expect(EllaNotificationHandler.isGuardianPayload({'urgency': 'EMERGENCY'}), isTrue);
+    expect(EllaNotificationHandler.isGuardianPayload({'type': 'merge_completed'}), isFalse);
+
+    final calls = <String>[];
+    await EllaNotificationHandler.clearGuardianNotificationResidue(
+      cancelDelivered: (group) async => calls.add('delivered:$group'),
+      cancelPending: (group) async => calls.add('pending:$group'),
+      clearNative: () async => calls.add('native'),
     );
+    expect(calls, [
+      'delivered:${EllaNotificationHandler.guardianNotificationGroupKey}',
+      'pending:${EllaNotificationHandler.guardianNotificationGroupKey}',
+      'native',
+    ]);
   });
 
   test('WAL diagnostics contain no stable owner namespace, identifier, or account path', () {
@@ -138,8 +152,9 @@ void main() {
 
   test('every direct Firebase identity mutation is behind unconditional quiescence', () {
     final lib = Directory('${_appRoot().path}/lib');
-    final mutation =
-        RegExp(r'FirebaseAuth\.instance\.(?:signOut|signInWithCredential|signInAnonymously|signInWithCustomToken)');
+    final mutation = RegExp(
+      r'FirebaseAuth\.instance\.(?:signOut|signInWithCredential|signInAnonymously|signInWithCustomToken)',
+    );
     final mutationFiles = lib
         .listSync(recursive: true)
         .whereType<File>()
@@ -159,10 +174,7 @@ void main() {
 
     final isolation = File('${lib.path}/ella/services/ella_account_isolation_service.dart').readAsStringSync();
     expect(isolation, contains('await _stopRegisteredCaptureProducers()'));
-    expect(
-      isolation.indexOf('stopCaptureForAccountTransition()'),
-      lessThan(isolation.indexOf('stopCapture?.call()')),
-    );
+    expect(isolation.indexOf('stopCaptureForAccountTransition()'), lessThan(isolation.indexOf('stopCapture?.call()')));
     expect(isolation.indexOf('quiesceForAccountTransition()'), lessThan(isolation.indexOf('stopCapture?.call()')));
 
     final services = File('${lib.path}/services/services.dart').readAsStringSync();
@@ -175,7 +187,7 @@ void main() {
       'await _wal.stop()',
       'await _mic.stop()',
       'await _device.stop()',
-      'await _systemAudio.stop()'
+      'await _systemAudio.stop()',
     ]) {
       expect(suspend, contains(requiredStop));
     }

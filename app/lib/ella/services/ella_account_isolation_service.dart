@@ -5,6 +5,7 @@ import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/utils/wal_file_manager.dart';
 
 class EllaAccountIsolationService {
@@ -14,6 +15,8 @@ class EllaAccountIsolationService {
     this.stopGuardian,
     this.stopServices,
     this.quarantineLegacy,
+    this.stopNotificationAudio,
+    this.clearGuardianNotifications,
   });
 
   final FutureOr<void> Function()? stopCapture;
@@ -21,6 +24,8 @@ class EllaAccountIsolationService {
   final FutureOr<void> Function()? stopGuardian;
   final FutureOr<void> Function()? stopServices;
   final FutureOr<void> Function()? quarantineLegacy;
+  final FutureOr<void> Function()? stopNotificationAudio;
+  final FutureOr<void> Function()? clearGuardianNotifications;
 
   static final Map<Object, FutureOr<void> Function()> _captureProducers = {};
 
@@ -44,6 +49,21 @@ class EllaAccountIsolationService {
   Future<void> stopForAccountTransition() async {
     SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
     EllaAccountCommitBarrier.quiesceForAccountTransition();
+    if (stopGuardian != null) {
+      await stopGuardian!.call();
+    } else {
+      await GuardianModeService().stopForAccountTransition();
+    }
+    if (stopNotificationAudio != null) {
+      await stopNotificationAudio!.call();
+    } else {
+      await EllaNotificationHandler.stopAudio();
+    }
+    if (clearGuardianNotifications != null) {
+      await clearGuardianNotifications!.call();
+    } else {
+      await EllaNotificationHandler.clearGuardianNotificationResidue();
+    }
     await _stopRegisteredCaptureProducers();
     if (ServiceManager.isInitialized) {
       await ServiceManager.instance().stopCaptureForAccountTransition();
@@ -53,11 +73,6 @@ class EllaAccountIsolationService {
       await stopV2v!.call();
     } else {
       await V2VClient.disconnectActiveForAccountTransition();
-    }
-    if (stopGuardian != null) {
-      await stopGuardian!.call();
-    } else {
-      await GuardianModeService().stopForAccountTransition();
     }
     if (stopServices != null) {
       await stopServices!.call();

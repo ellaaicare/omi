@@ -23,6 +23,10 @@ extension FlutterError: Error {}
   private var notificationTitleOnKill: String?
   private var notificationBodyOnKill: String?
 
+  private var encodedEllaDartDefines: String? {
+    Bundle.main.object(forInfoDictionaryKey: "EllaDartDefines") as? String
+  }
+
   var session: WCSession?
     var flutterWatchAPI: WatchRecorderFlutterAPI?
   private var audioChunks: [Int: (Data, Double)] = [:] // (audioData, sampleRate)
@@ -42,6 +46,7 @@ extension FlutterError: Error {}
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    clearScopedGuardianNotifications()
 
     // Configure audio session for background recording
     do {
@@ -365,7 +370,27 @@ extension FlutterError: Error {}
       didReceiveRemoteNotification userInfo: [AnyHashable: Any],
       fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
   ) {
-      print("AppDelegate: Received remote notification: \(userInfo)")
+      let lifecycle: GuardianNotificationLifecycle
+      switch application.applicationState {
+      case .active:
+          lifecycle = .foreground
+      case .background:
+          lifecycle = .background
+      case .inactive:
+          lifecycle = .terminated
+      @unknown default:
+          lifecycle = .terminated
+      }
+
+      if GuardianNotificationPolicy.disposition(
+          for: userInfo,
+          lifecycle: lifecycle,
+          encodedDartDefines: encodedEllaDartDefines
+      ) == .suppress {
+          clearScopedGuardianNotifications()
+          completionHandler(.noData)
+          return
+      }
 
       // Check if it's Apple Reminders sync
       if let type = userInfo["type"] as? String, type == "apple_reminders_sync" {
@@ -382,6 +407,38 @@ extension FlutterError: Error {}
       }
 
       super.application(application, didReceiveRemoteNotification: userInfo, fetchCompletionHandler: completionHandler)
+  }
+
+  private func clearScopedGuardianNotifications(completion: (() -> Void)? = nil) {
+      let center = UNUserNotificationCenter.current()
+      center.getDeliveredNotifications { delivered in
+          let identifiers = delivered.compactMap { notification -> String? in
+              let content = notification.request.content
+              return GuardianNotificationPolicy.isScopedGuardianNotification(
+                  userInfo: content.userInfo,
+                  threadIdentifier: content.threadIdentifier,
+                  categoryIdentifier: content.categoryIdentifier
+              ) ? notification.request.identifier : nil
+          }
+          if !identifiers.isEmpty {
+              center.removeDeliveredNotifications(withIdentifiers: identifiers)
+          }
+
+          center.getPendingNotificationRequests { pending in
+              let pendingIdentifiers = pending.compactMap { request -> String? in
+                  let content = request.content
+                  return GuardianNotificationPolicy.isScopedGuardianNotification(
+                      userInfo: content.userInfo,
+                      threadIdentifier: content.threadIdentifier,
+                      categoryIdentifier: content.categoryIdentifier
+                  ) ? request.identifier : nil
+              }
+              if !pendingIdentifiers.isEmpty {
+                  center.removePendingNotificationRequests(withIdentifiers: pendingIdentifiers)
+              }
+              completion?()
+          }
+      }
   }
 
   private func handleAppleRemindersSync(
@@ -829,6 +886,13 @@ extension AppDelegate: WCSessionDelegate {
         case "stop":
             GuardianModeManager.shared.stop()
             result(["status": "idle"])
+
+        case "clearNotificationResidue":
+            clearScopedGuardianNotifications {
+                DispatchQueue.main.async {
+                    result(["status": "cleared"])
+                }
+            }
 
         case "getState":
             let state = GuardianModeManager.shared.getState()

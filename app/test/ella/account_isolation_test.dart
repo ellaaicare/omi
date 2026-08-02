@@ -132,14 +132,13 @@ void main() {
       final state = _PeopleLeaseState();
       final authority = _DriftingPeopleAuthority(state, drift);
       var requests = 0;
-      HttpPoolManager.instance.replaceClientForTesting(MockClient((request) async {
-        requests++;
-        return http.Response('[]', 200);
-      }));
-      final provider = PeopleProvider(
-        preferences: prefs,
-        activeAuthority: () => authority,
-      )..loading = true;
+      HttpPoolManager.instance.replaceClientForTesting(
+        MockClient((request) async {
+          requests++;
+          return http.Response('[]', 200);
+        }),
+      );
+      final provider = PeopleProvider(preferences: prefs, activeAuthority: () => authority)..loading = true;
 
       await provider.setPeople();
 
@@ -162,15 +161,17 @@ void main() {
     final firstResponse = Completer<http.Response>();
     final secondResponse = Completer<http.Response>();
     var requests = 0;
-    HttpPoolManager.instance.replaceClientForTesting(MockClient((request) {
-      requests++;
-      if (requests == 1) {
-        firstStarted.complete();
-        return firstResponse.future;
-      }
-      secondStarted.complete();
-      return secondResponse.future;
-    }));
+    HttpPoolManager.instance.replaceClientForTesting(
+      MockClient((request) {
+        requests++;
+        if (requests == 1) {
+          firstStarted.complete();
+          return firstResponse.future;
+        }
+        secondStarted.complete();
+        return secondResponse.future;
+      }),
+    );
     final provider = PeopleProvider(
       preferences: prefs,
       activeAuthority: () {
@@ -240,7 +241,7 @@ void main() {
     );
 
     final pending = provider.sendVoiceMessageStreamToServer([
-      [1, 2, 3]
+      [1, 2, 3],
     ]);
     await started.future;
     await _quiesce();
@@ -280,6 +281,8 @@ void main() {
   test('capture, V2V reconnect, Guardian poll, WAL and legacy quarantine stop in order', () async {
     final calls = <String>[];
     final service = EllaAccountIsolationService(
+      stopNotificationAudio: () => calls.add('notification-audio'),
+      clearGuardianNotifications: () => calls.add('notification-residue'),
       stopCapture: () => calls.add('capture'),
       stopV2v: () => calls.add('v2v'),
       stopGuardian: () => calls.add('guardian'),
@@ -289,7 +292,15 @@ void main() {
 
     await service.stopForAccountTransition();
 
-    expect(calls, ['capture', 'v2v', 'guardian', 'wal-services', 'quarantine']);
+    expect(calls, [
+      'guardian',
+      'notification-audio',
+      'notification-residue',
+      'capture',
+      'v2v',
+      'wal-services',
+      'quarantine',
+    ]);
   });
 
   test('identity transition waits for a capture producer that is mid-write', () async {
@@ -304,6 +315,8 @@ void main() {
 
     final transition = () async {
       await EllaAccountIsolationService(
+        stopNotificationAudio: () {},
+        clearGuardianNotifications: () {},
         stopV2v: () {},
         stopGuardian: () {},
         stopServices: () {},
@@ -583,8 +596,9 @@ void main() {
       }
       return null;
     });
-    addTearDown(() =>
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),
+    );
     final service = DesktopSystemAudioRecorderService(channel: channel);
     var callbacks = 0;
     final start = service.start(onByteReceived: (_) => callbacks++, onFormatReceived: (_) {});
@@ -604,8 +618,9 @@ void main() {
       if (call.method == 'stop') throw TimeoutException('native system-audio stop not acknowledged');
       return null;
     });
-    addTearDown(() =>
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),
+    );
 
     final service = DesktopSystemAudioRecorderService(channel: channel);
     await expectLater(service.stopForAccountTransition(), throwsA(anything));
@@ -615,10 +630,12 @@ void main() {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     final originalGeneration = prefs.aiConsentAuthorityGeneration;
     var requests = 0;
-    HttpPoolManager.instance.replaceClientForTesting(MockClient((request) async {
-      requests++;
-      return http.Response('{}', 200);
-    }));
+    HttpPoolManager.instance.replaceClientForTesting(
+      MockClient((request) async {
+        requests++;
+        return http.Response('{}', 200);
+      }),
+    );
     const url = 'https://production-boundary.invalid/protected';
 
     final jsonAuthority = _GenerationChangingAuthority(prefs: prefs, mutateAfterCheck: 2);
@@ -733,11 +750,7 @@ void main() {
     });
     await prefs.markEllaProvisioningVerified('uid-private-value', at: DateTime.utc(2026, 8, 2));
 
-    final status = EllaWorkspaceStatus.current(
-      preferences: prefs,
-      uid: 'uid-private-value',
-      email: 'new@example.test',
-    );
+    final status = EllaWorkspaceStatus.current(preferences: prefs, uid: 'uid-private-value', email: 'new@example.test');
 
     expect(status.workspaceVerified, isTrue);
     expect(status.workspaceFingerprint, matches(RegExp(r'^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$')));
@@ -812,6 +825,8 @@ class _DriftingPeopleAuthority implements AccountCommitAuthority {
 }
 
 EllaAccountIsolationService _accountBarrier() => EllaAccountIsolationService(
+      stopNotificationAudio: () {},
+      clearGuardianNotifications: () {},
       stopV2v: () {},
       stopGuardian: () {},
       stopServices: () {},
@@ -819,14 +834,8 @@ EllaAccountIsolationService _accountBarrier() => EllaAccountIsolationService(
     );
 
 class _ProductionRecorderFixture {
-  _ProductionRecorderFixture({
-    required Duration stopTimeout,
-    bool holdNativeStop = false,
-    Object? nativeStopError,
-  })  : native = _ControlledFlutterSoundRecorderPlatform(
-          holdStop: holdNativeStop,
-          stopError: nativeStopError,
-        ),
+  _ProductionRecorderFixture({required Duration stopTimeout, bool holdNativeStop = false, Object? nativeStopError})
+      : native = _ControlledFlutterSoundRecorderPlatform(holdStop: holdNativeStop, stopError: nativeStopError),
         background = _FakeBackgroundServicePlatform() {
     _originalRecorderPlatform = FlutterSoundRecorderPlatform.instance;
     FlutterSoundRecorderPlatform.instance = native;
@@ -1015,6 +1024,8 @@ Future<void> _grantAuthority(SharedPreferencesUtil prefs, String uid) async {
 }
 
 Future<void> _quiesce() => EllaAccountIsolationService(
+      stopNotificationAudio: () {},
+      clearGuardianNotifications: () {},
       stopCapture: () {},
       stopV2v: () {},
       stopGuardian: () {},
@@ -1047,11 +1058,8 @@ ActiveWalAuthority _activeAuthority(String uid, bool Function() current) {
   );
 }
 
-ServerConversation _conversation(String id, String overview) => ServerConversation(
-      id: id,
-      createdAt: DateTime.now(),
-      structured: Structured('Title', overview),
-    );
+ServerConversation _conversation(String id, String overview) =>
+    ServerConversation(id: id, createdAt: DateTime.now(), structured: Structured('Title', overview));
 
 Memory _memory(String id, String uid) => Memory(
       id: id,
@@ -1071,15 +1079,8 @@ Person _person(String id) => Person(
       speechSamples: ['sample-a'],
     );
 
-MessageFile _messageFile(String id) => MessageFile(
-      'provider-$id',
-      null,
-      '$id.txt',
-      'text/plain',
-      id,
-      DateTime.utc(2026, 8, 2),
-      null,
-    );
+MessageFile _messageFile(String id) =>
+    MessageFile('provider-$id', null, '$id.txt', 'text/plain', id, DateTime.utc(2026, 8, 2), null);
 
 class _DelayedDiscoverer implements DeviceDiscoverer {
   _DelayedDiscoverer(this._stop);

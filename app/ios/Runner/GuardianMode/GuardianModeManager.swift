@@ -5,21 +5,28 @@ import Combine
 final class GuardianModeAvailability {
     static let shared = GuardianModeAvailability()
 
-    private let lock = NSLock()
-    private var enabled = false
+    private let leaseGate = GuardianWorkLeaseGate()
 
     private init() {}
 
     var isEnabled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return enabled
+        leaseGate.isEnabled
     }
 
     func setEnabled(_ enabled: Bool) {
-        lock.lock()
-        self.enabled = enabled
-        lock.unlock()
+        leaseGate.setEnabled(enabled)
+    }
+
+    func captureLease() -> GuardianWorkLease? {
+        leaseGate.captureLease()
+    }
+
+    func isCurrent(_ lease: GuardianWorkLease) -> Bool {
+        leaseGate.isCurrent(lease)
+    }
+
+    func performIfCurrent(_ lease: GuardianWorkLease, _ sideEffect: () -> Bool) -> Bool {
+        leaseGate.performIfCurrent(lease, sideEffect)
     }
 }
 
@@ -39,6 +46,7 @@ class GuardianModeManager: NSObject {
     private let queue = DispatchQueue(label: "com.ella.guardianmode")
     private var cancellables = Set<AnyCancellable>()
     private var healthTimer: DispatchSourceTimer?
+    private var injectionTasks: [UUID: Task<Void, Never>] = [:]
 
     // Buffer configuration
     private let initialQueueDepth = 50
@@ -65,8 +73,9 @@ class GuardianModeManager: NSObject {
     // MARK: - Public API
 
     func configureAvailability(_ enabled: Bool) {
-        GuardianModeAvailability.shared.setEnabled(enabled)
-        if !enabled {
+        if enabled {
+            GuardianModeAvailability.shared.setEnabled(true)
+        } else {
             stop()
         }
     }
@@ -136,11 +145,19 @@ class GuardianModeManager: NSObject {
 
     /// Stop Guardian Mode
     func stop() {
+        // Advance the native generation before waiting for the manager queue.
+        // An older task can no longer begin an insert/play side effect after
+        // this call returns from setEnabled.
         GuardianModeAvailability.shared.setEnabled(false)
         queue.sync {
             GuardianModePollingService.shared.stopPolling()
 
+            let tasks = Array(injectionTasks.values)
+            injectionTasks.removeAll()
+            tasks.forEach { $0.cancel() }
+
             guard isActive else {
+                cancellables.removeAll()
                 NSLog("GuardianMode: Already stopped, ignoring stop()")
                 return
             }
@@ -347,7 +364,7 @@ class GuardianModeManager: NSObject {
         // Increment sequence counter on queue for thread-safety
         queue.async { [weak self] in
             guard let self = self else { return }
-            guard GuardianModeAvailability.shared.isEnabled else { return }
+            guard let lease = GuardianModeAvailability.shared.captureLease() else { return }
             self.injectionSequence += 1
             self.totalInjections += 1
             let seq = self.injectionSequence
@@ -358,7 +375,9 @@ class GuardianModeManager: NSObject {
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
 
             // Inject remote audio directly (no download - progressive streaming)
-            Task {
+            let taskId = UUID()
+            let task = Task { [weak self] in
+                guard let self else { return }
                 await self.injectRemoteAudioDirect(
                     remoteURL: audioURL,
                     eventId: eventId,
@@ -367,9 +386,14 @@ class GuardianModeManager: NSObject {
                     metadata: playbackMetadata,
                     seq: seq,
                     filename: filename,
-                    attempt: 1
+                    attempt: 1,
+                    lease: lease
                 )
+                self.queue.async { [weak self] in
+                    self?.injectionTasks.removeValue(forKey: taskId)
+                }
             }
+            self.injectionTasks[taskId] = task
         }
     }
 
@@ -383,27 +407,37 @@ class GuardianModeManager: NSObject {
         metadata: [String: Any]?,
         seq: Int,
         filename: String,
-        attempt: Int
+        attempt: Int,
+        lease: GuardianWorkLease
     ) async {
-        guard GuardianModeAvailability.shared.isEnabled else { return }
-        // Must be called on self.queue
-        guard let player = self.audioPlayer, self.isActive else {
+        guard !Task.isCancelled, GuardianModeAvailability.shared.isCurrent(lease) else { return }
+
+        var leasedPlayer: AVQueuePlayer?
+        var injectedItem: AVPlayerItem?
+        let inserted = queue.sync {
+            GuardianModeAvailability.shared.performIfCurrent(lease) {
+                guard self.isActive, let player = self.audioPlayer else { return false }
+                let audioItem = AVPlayerItem(url: remoteURL)
+                guard player.canInsert(audioItem, after: nil) else { return false }
+                player.insert(audioItem, after: nil)
+                leasedPlayer = player
+                injectedItem = audioItem
+                return true
+            }
+        }
+        guard inserted, let player = leasedPlayer, let audioItem = injectedItem else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
                 triggerType: triggerType,
                 metadata: metadata,
-                error: "not_active"
+                error: "not_active",
+                lease: lease
             )
-            await MainActor.run { self.failedInjections += 1 }
+            recordFailedInjectionIfCurrent(lease)
             return
         }
-
-        let audioItem = AVPlayerItem(url: remoteURL)
-
-        // Insert into queue FIRST - this triggers AVPlayer to start loading!
-        player.insert(audioItem, after: nil)
 
         // Wait for item to become ready (production logging - minimal)
         let startTime = Date()
@@ -411,6 +445,7 @@ class GuardianModeManager: NSObject {
         var iteration = 0
 
         while audioItem.status == .unknown {
+            guard !Task.isCancelled, GuardianModeAvailability.shared.isCurrent(lease) else { return }
             iteration += 1
 
             // Check for error
@@ -421,9 +456,10 @@ class GuardianModeManager: NSObject {
                     traceId: traceId,
                     triggerType: triggerType,
                     metadata: metadata,
-                    error: error.localizedDescription
+                    error: error.localizedDescription,
+                    lease: lease
                 )
-                await MainActor.run { self.failedInjections += 1 }
+                recordFailedInjectionIfCurrent(lease)
                 return
             }
 
@@ -435,9 +471,10 @@ class GuardianModeManager: NSObject {
                     traceId: traceId,
                     triggerType: triggerType,
                     metadata: metadata,
-                    error: "ready_timeout"
+                    error: "ready_timeout",
+                    lease: lease
                 )
-                await MainActor.run { self.failedInjections += 1 }
+                recordFailedInjectionIfCurrent(lease)
                 return
             }
 
@@ -447,8 +484,14 @@ class GuardianModeManager: NSObject {
             }
 
             // Wait 50ms before checking again
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return
+            }
         }
+
+        guard !Task.isCancelled, GuardianModeAvailability.shared.isCurrent(lease) else { return }
 
         // Check if buffering succeeded
         if audioItem.status == .failed {
@@ -459,9 +502,10 @@ class GuardianModeManager: NSObject {
                 traceId: traceId,
                 triggerType: triggerType,
                 metadata: metadata,
-                error: errorMsg
+                error: errorMsg,
+                lease: lease
             )
-            await MainActor.run { self.failedInjections += 1 }
+            recordFailedInjectionIfCurrent(lease)
             return
         }
 
@@ -472,9 +516,10 @@ class GuardianModeManager: NSObject {
                 traceId: traceId,
                 triggerType: triggerType,
                 metadata: metadata,
-                error: "unexpected_status_\(audioItem.status.rawValue)"
+                error: "unexpected_status_\(audioItem.status.rawValue)",
+                lease: lease
             )
-            await MainActor.run { self.failedInjections += 1 }
+            recordFailedInjectionIfCurrent(lease)
             return
         }
 
@@ -487,6 +532,7 @@ class GuardianModeManager: NSObject {
             NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
         }
         // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
+        guard GuardianModeAvailability.shared.isCurrent(lease) else { return }
         reportPlaybackEvent(
             eventType: "started",
             queueItemId: eventId,
@@ -497,11 +543,11 @@ class GuardianModeManager: NSObject {
         )
 
         // Observe when playback completes
-        NotificationCenter.default
+        let completionObserver = NotificationCenter.default
             .publisher(for: .AVPlayerItemDidPlayToEndTime, object: audioItem)
             .first()
             .sink { [weak self] _ in
-                guard let self = self else { return }
+                guard let self = self, GuardianModeAvailability.shared.isCurrent(lease) else { return }
                 NSLog("PLAYBACK_COMPLETE #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
                 self.reportPlaybackEvent(
                     eventType: "completed",
@@ -511,13 +557,33 @@ class GuardianModeManager: NSObject {
                     durationMs: Int(Date().timeIntervalSince(startTime) * 1000),
                     metadata: metadata
                 )
-                self.queue.async { self.successfulInjections += 1 }
+                self.queue.async {
+                    guard GuardianModeAvailability.shared.isCurrent(lease) else { return }
+                    self.successfulInjections += 1
+                }
             }
-            .store(in: &cancellables)
+
+        let registered = queue.sync {
+            GuardianModeAvailability.shared.performIfCurrent(lease) {
+                guard self.isActive, self.audioPlayer === player else { return false }
+                self.cancellables.insert(completionObserver)
+                return true
+            }
+        }
+        guard registered else {
+            completionObserver.cancel()
+            return
+        }
 
         // Ensure player is actually playing
-        if player.rate == 0 {
-            player.play()
+        queue.sync {
+            GuardianModeAvailability.shared.performIfCurrent(lease) {
+                guard self.isActive, self.audioPlayer === player else { return false }
+                if player.rate == 0 {
+                    player.play()
+                }
+                return true
+            }
         }
     }
 
@@ -526,8 +592,10 @@ class GuardianModeManager: NSObject {
         traceId: String?,
         triggerType: String?,
         metadata: [String: Any]?,
-        error: String
+        error: String,
+        lease: GuardianWorkLease
     ) {
+        guard GuardianModeAvailability.shared.isCurrent(lease) else { return }
         var eventMetadata = metadata ?? [:]
         eventMetadata["error"] = error
         reportPlaybackEvent(
@@ -538,6 +606,13 @@ class GuardianModeManager: NSObject {
             durationMs: 0,
             metadata: eventMetadata
         )
+    }
+
+    private func recordFailedInjectionIfCurrent(_ lease: GuardianWorkLease) {
+        queue.async { [weak self] in
+            guard GuardianModeAvailability.shared.isCurrent(lease) else { return }
+            self?.failedInjections += 1
+        }
     }
 
     // MARK: - Cache Cleanup

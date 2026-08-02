@@ -114,7 +114,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       channelKey,
       isAppInForeground: false,
     );
-  } else if (messageType == 'ella_notification') {
+  } else if (messageType == 'ella_notification' || EllaNotificationHandler.isGuardianPayload(data)) {
     await EllaNotificationHandler.handleEllaNotification(data, channelKey, isAppInForeground: false);
   }
 }
@@ -154,6 +154,7 @@ Future _init() async {
 
   await PlatformManager.initializeServices();
   await NotificationService.instance.initialize();
+  await EllaNotificationHandler.stopAndClearGuardianResidue();
 
   // Register FCM background message handler
   if (PlatformManager().isFCMSupported) {

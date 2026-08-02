@@ -18,6 +18,7 @@ from .llm.notifications import (
 
 # iOS bundle ID for APNs
 IOS_BUNDLE_ID = 'com.friend-app-with-wearable.ios12'
+ELLA_IOS_BUNDLE_ID = 'com.ellaaicare.ella'
 
 # Error codes that indicate a token is permanently invalid
 PERMANENT_FAILURE_CODES = frozenset(
@@ -54,7 +55,7 @@ def _build_android_config(tag: str, priority: str = 'normal', is_data_only: bool
     return messaging.AndroidConfig(**config_kwargs)
 
 
-def _build_apns_config(tag: str, is_background: bool = False) -> messaging.APNSConfig:
+def _build_apns_config(tag: str, is_background: bool = False, apns_topic: str = IOS_BUNDLE_ID) -> messaging.APNSConfig:
     """Build APNs configuration with deduplication."""
     headers = {'apns-collapse-id': tag}
 
@@ -63,7 +64,7 @@ def _build_apns_config(tag: str, is_background: bool = False) -> messaging.APNSC
             {
                 'apns-push-type': 'background',
                 'apns-priority': '5',
-                'apns-topic': IOS_BUNDLE_ID,
+                'apns-topic': apns_topic,
             }
         )
         return messaging.APNSConfig(
@@ -110,6 +111,7 @@ def _build_message(
     data: dict = None,
     is_background: bool = False,
     priority: str = 'normal',
+    apns_topic: str = IOS_BUNDLE_ID,
 ) -> messaging.Message:
     """Build a complete FCM message with proper platform configs."""
     # Extract title/body for webpush config (browsers need explicit values)
@@ -123,7 +125,7 @@ def _build_message(
         notification=notification,
         data=data,
         android=_build_android_config(tag, priority, is_data_only=(notification is None)),
-        apns=_build_apns_config(tag, is_background),
+        apns=_build_apns_config(tag, is_background, apns_topic),
         webpush=_build_webpush_config(tag, title, body, link),
     )
 
@@ -136,6 +138,7 @@ def _send_to_user(
     is_background: bool = False,
     priority: str = 'normal',
     tokens: list = None,
+    apns_topic: str = IOS_BUNDLE_ID,
 ) -> int:
     """Send a message to all user's devices using batch send. Returns count of successful sends."""
     if tokens is None:
@@ -145,7 +148,7 @@ def _send_to_user(
         return 0
 
     # Build messages for all tokens
-    messages = [_build_message(token, tag, notification, data, is_background, priority) for token in tokens]
+    messages = [_build_message(token, tag, notification, data, is_background, priority, apns_topic) for token in tokens]
 
     try:
         response = messaging.send_each(messages)
@@ -183,6 +186,23 @@ def send_notification(user_id: str, title: str, body: str, data: dict = None, to
     tag = _generate_notification_tag(user_id, title, body, data)
     notification = messaging.Notification(title=title, body=body)
     _send_to_user(user_id, tag, notification=notification, data=data, tokens=tokens)
+
+
+def send_guardian_notification(user_id: str, title: str, body: str, data: dict, tokens: list = None):
+    """Send Ella/Guardian payloads data-only so APNs cannot display before app policy runs."""
+    payload = dict(data)
+    payload['title'] = title
+    payload['body'] = body
+    tag = _generate_notification_tag(user_id, title, body, payload)
+    return _send_to_user(
+        user_id,
+        tag,
+        data=payload,
+        is_background=True,
+        priority='high',
+        tokens=tokens,
+        apns_topic=ELLA_IOS_BUNDLE_ID,
+    )
 
 
 async def send_subscription_paid_personalized_notification(user_id: str, data: dict = None):

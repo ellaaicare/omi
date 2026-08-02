@@ -7,6 +7,9 @@ on:
       - main
     paths:
       - app/**
+      - backend/ella/routers/callbacks.py
+      - backend/utils/notifications.py
+      - backend/tests/unit/test_guardian_notification_delivery.py
       - .github/workflows/ella-ios-source-ci.yml
   workflow_dispatch:
 
@@ -69,7 +72,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/ella/routers/callbacks.py|backend/utils/notifications.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -100,6 +103,20 @@ jobs:
             echo "Potential secret found in PR diff." >&2
             exit 1
           fi
+
+      - name: Run executable native Guardian race and delivery boundary tests
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc \
+            app/ios/Runner/GuardianMode/GuardianNativePolicy.swift \
+            app/ios/Tests/GuardianNativePolicyTests.swift \
+            -o "$RUNNER_TEMP/guardian-native-policy-tests"
+          "$RUNNER_TEMP/guardian-native-policy-tests"
+
+      - name: Run Guardian data-only production boundary tests
+        working-directory: .
+        run: python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2

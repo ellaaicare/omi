@@ -249,7 +249,7 @@ class _FCMNotificationService implements NotificationInterface {
             isAppInForeground: true,
           );
           return;
-        } else if (messageType == 'ella_notification') {
+        } else if (messageType == 'ella_notification' || EllaNotificationHandler.isGuardianPayload(data)) {
           EllaNotificationHandler.handleEllaNotification(
             data,
             channel.channelKey!,
