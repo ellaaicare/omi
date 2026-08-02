@@ -13,6 +13,7 @@ import asyncpg
 
 from database import authority_advisory_lock, voice_canary
 from database.ella_provisioning import invalidate_self_hosted_authority_on_connection
+from database.runtime_targets import SELF_HOSTED_RUNTIME_TARGET_MODES
 
 AuthorityDecision = Literal["granted", "declined", "revoked"]
 
@@ -411,7 +412,7 @@ async def synchronize_grant(
                         user_id,
                         entitlement["revision"],
                     )
-                    if target_result != "UPDATE 1":
+                    if target_result != f"UPDATE {len(SELF_HOSTED_RUNTIME_TARGET_MODES)}":
                         raise ManagedCloudAuthorityUnavailable("invitation_runtime_target_missing")
                 return dict(row)
     except ManagedCloudAuthorityUnavailable:

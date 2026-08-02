@@ -166,7 +166,7 @@ ALTER TABLE ella_runtime_targets
             AND endpoint_ref IS NULL
             AND credential_ref IS NULL
             AND invitation_target_id IS NOT NULL
-            AND mode = 'hermes-chat'
+            AND mode IN ('hermes-chat', 'hermes-voice')
             AND (
                 (status = 'reserved' AND runtime_binding_id IS NULL)
                 OR (status = 'ready' AND runtime_binding_id IS NOT NULL)
@@ -176,7 +176,7 @@ ALTER TABLE ella_runtime_targets
     ) NOT VALID;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ella_runtime_targets_invitation_target_key
-    ON ella_runtime_targets(invitation_target_id)
+    ON ella_runtime_targets(invitation_target_id, mode)
     WHERE invitation_target_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ella_runtime_targets_active_hermes_profile_key

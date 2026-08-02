@@ -161,7 +161,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 135
+          test "$collected" -eq 137
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -176,6 +176,8 @@ jobs:
           required_ids=(
             "tests/unit/test_invitation_redemption.py::test_redeem_rejects_unverified_firebase_email_before_authority_or_database"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
+            "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
+            "tests/unit/test_pilot_invite_admin.py::test_operator_examples_never_embed_plaintext_email_or_legacy_email_argument"
             "tests/unit/test_ella_onboarding_contract.py::test_onboarding_ensure_requires_current_ai_consent_dependency"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_invitation_admission_precedes_identity_and_job_writes"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_authority_drift_blocks_before_provider_call"

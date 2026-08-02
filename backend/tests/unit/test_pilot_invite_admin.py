@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,9 +13,13 @@ from scripts import pilot_invite_admin
 
 
 def _issue_args(root: Path, output: Path, *, email: str = "pilot@example.test") -> argparse.Namespace:
+    email_input = root / "scope.input"
+    if email:
+        email_input.write_text(f"{email}\n", encoding="utf-8")
+        email_input.chmod(0o600)
     return argparse.Namespace(
         kind="ordinary",
-        email=email,
+        email_input_file=str(email_input) if email else None,
         expires_at=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
         expected_environment="unit-test",
         approved_code_output_root=str(root),
@@ -81,9 +86,85 @@ def test_protected_show_once_operator_never_prints_code_or_email(tmp_path, monke
     assert "pilot@example.test" not in streams.out
     assert "pilot@example.test" not in streams.err
     assert oct(output.stat().st_mode & 0o777) == "0o400"
-    assert captured["email"] == "pilot@example.test"
+    assert captured["allowed_email_hash"] == pilot_invite_admin._email_hash(config, "pilot@example.test")
+    assert "email" not in captured
     assert captured["code"] == code
     assert captured["code_file_existed"] is False
+
+
+def test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    caplog,
+):
+    root = tmp_path / "handoff"
+    root.mkdir(mode=0o700)
+    output = root / "pilot.code"
+    secret_email = "private.person@example.test"
+    args = _issue_args(root, output, email=secret_email)
+    argv = [
+        "issue",
+        "--kind",
+        "ordinary",
+        "--email-input-file",
+        args.email_input_file,
+        "--expires-at",
+        args.expires_at,
+        "--expected-environment",
+        args.expected_environment,
+        "--approved-code-output-root",
+        args.approved_code_output_root,
+        "--code-output-file",
+        args.code_output_file,
+    ]
+    assert secret_email not in argv
+    parsed = pilot_invite_admin._parser().parse_args(argv)
+    assert parsed.email_input_file == args.email_input_file
+    assert not hasattr(parsed, "email")
+
+    secret_code = "WXYZ-2345"
+    assert secret_email not in argv
+    assert secret_code not in argv
+    for sensitive_argv in (["issue", "--email", secret_email], ["show", secret_code]):
+        with pytest.raises(pilot_invite_admin.PilotInvitationError) as forbidden:
+            pilot_invite_admin._reject_sensitive_argv(sensitive_argv)
+        assert forbidden.value.code == "secret_argv_forbidden"
+        assert secret_email not in str(forbidden.value)
+        assert secret_code not in str(forbidden.value)
+
+    async def ambiguous():
+        raise RuntimeError(f"provider detail must stay hidden: {secret_email}")
+
+    monkeypatch.setattr(pilot_invite_admin, "_main", ambiguous)
+    assert pilot_invite_admin._run_cli() == 2
+    streams = capsys.readouterr()
+    assert secret_email not in streams.out
+    assert secret_email not in streams.err
+    assert "outcome_ambiguous" in streams.err
+    assert secret_email not in caplog.text
+
+    receipt = {
+        "receipt_id": "11111111-1111-1111-1111-111111111111",
+        "kind": "ordinary",
+        "state": "sent",
+        "email_scoped": True,
+        "idempotent": False,
+    }
+    pilot_invite_admin._print_receipt("issue", receipt, code_output_file=str(output))
+    rendered = capsys.readouterr().out
+    assert secret_email not in rendered
+    assert '"content_free": true' in rendered
+
+
+def test_operator_examples_never_embed_plaintext_email_or_legacy_email_argument():
+    root = Path(__file__).resolve().parents[2]
+    rendered = (root / "ella" / "docs" / "INVITE_REDEMPTION_CONTROL_PLANE.md").read_text(encoding="utf-8")
+    assert not re.search(r"--email(?:=|\s)", rendered)
+    assert not re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", rendered)
+    assert not re.search(r"[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}", rendered)
+    assert "--email-input-file" in rendered
+    assert "approved root-owned" in rendered
 
 
 def test_protected_rotate_is_show_once_and_content_free(tmp_path, monkeypatch, capsys):

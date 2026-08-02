@@ -14,6 +14,19 @@ sys.modules.setdefault("database.conversations", conversations_module)
 from ella.routers import chat, resolve, voice
 from ella.services.provisioning import ProvisioningError
 
+RUNTIME_AUTHORITY_DIGEST = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def voice_authority_defaults(monkeypatch):
+    monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", False)
+    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(
+        voice,
+        "runtime_authority_identity",
+        lambda _runtime: SimpleNamespace(digest=RUNTIME_AUTHORITY_DIGEST),
+    )
+
 
 def _request():
     return Request({"type": "http", "method": "POST", "path": "/v1/ella/chat/stream", "headers": []})
@@ -233,6 +246,182 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
     assert claims["voice_mode"] == "v4"
     assert claims["provider"] == "grok-voice"
     assert claims["isolated_runtime"] is True
+
+
+def test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry(monkeypatch):
+    runtime = SimpleNamespace(target_entitlement_revision=7)
+    policy_calls = []
+
+    async def resolve_runtime(uid, **kwargs):
+        assert uid == "invited-user"
+        assert kwargs == {"target_mode": "hermes-voice"}
+        return runtime
+
+    async def evaluate_issuance(**kwargs):
+        policy_calls.append(kwargs)
+        return SimpleNamespace(
+            allowed=True,
+            code="ok",
+            entitlement={"revision": 7},
+            quota={"daily_used_s": 0},
+        )
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: uid == "invited-user")
+    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: uid == "invited-user")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve_runtime)
+    monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", evaluate_issuance)
+    monkeypatch.setattr(voice, "resolve_processor", lambda _provider: (_ for _ in ()).throw(AssertionError("legacy")))
+    monkeypatch.setattr(voice, "V2V_PROVIDERS", {})
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(uid="invited-user", provider="grok-voice"),
+            authenticated_uid="invited-user",
+        )
+    )
+
+    assert result.provider == "hermes"
+    assert result.voice_mode == "hermes-voice"
+    assert result.voice_endpoint.endswith("?mode=hermes-voice")
+    assert len(policy_calls) == 1
+    assert {key: value for key, value in policy_calls[0].items() if key != "correlation_id"} == {
+        "uid": "invited-user",
+        "provider": "hermes",
+        "model": voice.SELF_HOSTED_RUNTIME_MODEL,
+        "mode": "hermes-voice",
+    }
+    assert policy_calls[0]["correlation_id"]
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+    assert claims["provider"] == "hermes"
+    assert claims["voice_mode"] == "hermes-voice"
+    assert claims["runtime_authority_digest"] == RUNTIME_AUTHORITY_DIGEST
+    assert claims["entitlement_revision"] == 7
+
+
+def test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_provider(monkeypatch):
+    runtimes = [
+        SimpleNamespace(target_entitlement_revision=7, marker="issued"),
+        SimpleNamespace(target_entitlement_revision=7, marker="drifted"),
+    ]
+    policy_calls = []
+
+    async def resolve_runtime(_uid, **kwargs):
+        assert kwargs == {"target_mode": "hermes-voice"}
+        return runtimes.pop(0)
+
+    async def evaluate_issuance(**kwargs):
+        policy_calls.append(kwargs)
+        return SimpleNamespace(
+            allowed=True,
+            code="ok",
+            entitlement={"revision": 7},
+            quota={},
+        )
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve_runtime)
+    monkeypatch.setattr(
+        voice,
+        "runtime_authority_identity",
+        lambda runtime: SimpleNamespace(digest=("a" if runtime.marker == "issued" else "b") * 64),
+    )
+    monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", evaluate_issuance)
+    monkeypatch.setattr(voice, "V2V_PROVIDERS", {})
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(uid="invited-user", provider="openai-native-realtime"),
+                authenticated_uid="invited-user",
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "voice_runtime_authority_changed"}
+    assert len(policy_calls) == 1
+    assert runtimes == []
+
+
+@pytest.mark.parametrize(
+    "authority_code",
+    [
+        "self_hosted_invitation_runtime_not_provisioned",
+        "runtime_admission_no_entitlement",
+        "runtime_admission_entitlement_stale",
+        "self_hosted_runtime_consent_authority_epoch_invalid",
+        "self_hosted_runtime_target_lineage_stale",
+        "runtime_admission_provider_not_allowed",
+        "runtime_admission_model_not_allowed",
+        "runtime_admission_mode_not_allowed",
+        "invitation_runtime_fallback_enabled",
+        "runtime_ownership_mismatch",
+        "runtime_not_ready",
+    ],
+)
+def test_self_hosted_voice_session_authority_denials_precede_provider_setup(monkeypatch, authority_code):
+    provider_calls = []
+
+    async def deny_runtime(uid, **kwargs):
+        assert uid == "invited-user"
+        assert kwargs == {"target_mode": "hermes-voice"}
+        raise ProvisioningError(authority_code, retryable=False)
+
+    async def forbidden_policy(**kwargs):
+        provider_calls.append(kwargs)
+        raise AssertionError("policy/provider setup must not run after authority denial")
+
+    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", deny_runtime)
+    monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", forbidden_policy)
+    monkeypatch.setattr(voice, "V2V_PROVIDERS", {})
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(uid="invited-user", provider="gemini-live"),
+                authenticated_uid="invited-user",
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": authority_code}
+    assert provider_calls == []
 
 
 def test_memory_scoped_voice_session_resolves_server_context_and_signs_ids(monkeypatch):

@@ -26,7 +26,11 @@ from ella.services import ai_consent
 from ella.services import consent_authority, invitation_authority
 from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_authority_enabled
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+    runtime_authority_identity,
+)
 from scripts import pilot_invite_admin
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
@@ -484,7 +488,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
             code_file_existed=False,
             code_file_ref_hmac="f" * 64,
             kind="ordinary",
-            email=email,
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -496,7 +500,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert first["revision"] == second["revision"] == 1
 
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
+            rows = await conn.fetch(
                 """
                 SELECT
                     app_user.omi_uid, app_user.email, app_user.profile_class,
@@ -525,6 +529,8 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
                 """,
                 issued["receipt_id"],
             )
+        assert len(rows) == 2
+        row = rows[0]
         assert row["omi_uid"] == uid
         assert row["email"] == email
         assert row["profile_class"] == "real"
@@ -533,13 +539,12 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert row["redemption_user_id"] is not None
         assert row["redemption_consent_pending"] is True
         assert row["consent_receipt_ref_hmac"] is None
-        assert (row["provider"], row["mode"], row["target_status"]) == (
-            "hermes",
-            "hermes-chat",
-            "reserved",
-        )
-        assert row["runtime_binding_id"] is None
-        assert row["target_entitlement_revision"] == row["entitlement_revision"] == 1
+        assert {(item["provider"], item["mode"], item["target_status"]) for item in rows} == {
+            ("hermes", "hermes-chat", "reserved"),
+            ("hermes", "hermes-voice", "reserved"),
+        }
+        assert all(item["runtime_binding_id"] is None for item in rows)
+        assert all(item["target_entitlement_revision"] == item["entitlement_revision"] == 1 for item in rows)
         assert row["consumed_slots"] == 1
 
         grant = managed_cloud_consent.ManagedCloudGrant(
@@ -590,17 +595,18 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         )
         assert activated["id"] == staged["id"]
         async with pool.acquire() as conn:
-            ready_target = await conn.fetchrow(
+            ready_targets = await conn.fetch(
                 """
-                SELECT status, runtime_binding_id
+                SELECT mode, status, runtime_binding_id
                 FROM ella_runtime_targets
                 WHERE invitation_target_id IS NOT NULL
                   AND account_user_id = $1
                 """,
                 admission["user_id"],
             )
-        assert ready_target["status"] == "ready"
-        assert ready_target["runtime_binding_id"] == staged["id"]
+        assert {target["mode"] for target in ready_targets} == {"hermes-chat", "hermes-voice"}
+        assert all(target["status"] == "ready" for target in ready_targets)
+        assert all(target["runtime_binding_id"] == staged["id"] for target in ready_targets)
 
         after_consent_retry = await _redeem_self_hosted(uid, email, "WXYZ-2345")
         assert after_consent_retry["revision"] == 3
@@ -634,7 +640,7 @@ def test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed():
             code_file_existed=False,
             code_file_ref_hmac="a" * 64,
             kind="ordinary",
-            email="approved@example.test",
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, "approved@example.test"),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -661,7 +667,7 @@ def test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed():
             code_file_existed=False,
             code_file_ref_hmac="b" * 64,
             kind="ordinary",
-            email="",
+            allowed_email_hash=None,
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -704,7 +710,7 @@ def test_pilot_operator_ordinary_and_reviewer_rows_obey_migration_constraints():
             code_file_existed=False,
             code_file_ref_hmac="c" * 64,
             kind="ordinary",
-            email="pilot@example.test",
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, "pilot@example.test"),
             expires_at=datetime.now(timezone.utc) + timedelta(days=90),
             environment="postgres-test",
             config=CONFIG,
@@ -714,7 +720,7 @@ def test_pilot_operator_ordinary_and_reviewer_rows_obey_migration_constraints():
             code_file_existed=False,
             code_file_ref_hmac="d" * 64,
             kind="app_review",
-            email="",
+            allowed_email_hash=None,
             expires_at=None,
             environment="postgres-test",
             config=CONFIG,
@@ -724,7 +730,7 @@ def test_pilot_operator_ordinary_and_reviewer_rows_obey_migration_constraints():
             code_file_existed=True,
             code_file_ref_hmac="d" * 64,
             kind="app_review",
-            email="",
+            allowed_email_hash=None,
             expires_at=None,
             environment="postgres-test",
             config=CONFIG,
@@ -785,7 +791,7 @@ def test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope(
             code_file_existed=False,
             code_file_ref_hmac="8" * 64,
             kind="ordinary",
-            email="rotate@example.test",
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, "rotate@example.test"),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -864,7 +870,7 @@ def test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed():
             code_file_existed=False,
             code_file_ref_hmac="e" * 64,
             kind="app_review",
-            email="",
+            allowed_email_hash=None,
             expires_at=None,
             environment="postgres-test",
             config=CONFIG,
@@ -903,7 +909,7 @@ def test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed():
             code_file_existed=False,
             code_file_ref_hmac="6" * 64,
             kind="ordinary",
-            email="",
+            allowed_email_hash=None,
             expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             environment="postgres-test",
             config=CONFIG,
@@ -926,7 +932,7 @@ def test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed():
             code_file_existed=False,
             code_file_ref_hmac="7" * 64,
             kind="ordinary",
-            email="",
+            allowed_email_hash=None,
             expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             environment="postgres-test",
             config=CONFIG,
@@ -984,10 +990,13 @@ def test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review
         )
 
         async def issue(index: int):
+            email_input = root / f"scope-{index}.input"
+            email_input.write_text(f"pilot-{index}@example.test\n", encoding="utf-8")
+            email_input.chmod(0o600)
             return await pilot_invite_admin._issue(
                 argparse.Namespace(
                     kind="ordinary",
-                    email=f"pilot-{index}@example.test",
+                    email_input_file=str(email_input),
                     expires_at=expires_at,
                     expected_environment="postgres-test",
                     approved_code_output_root=str(root),
@@ -1025,7 +1034,7 @@ def test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review
         await pilot_invite_admin._issue(
             argparse.Namespace(
                 kind="app_review",
-                email="",
+                email_input_file=None,
                 expires_at=None,
                 expected_environment="postgres-test",
                 approved_code_output_root=str(root),
@@ -1059,10 +1068,13 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
         root = tmp_path / "pilot-handoff"
         root.mkdir(mode=0o700)
         output = root / "stable-expiry.code"
+        email_input = root / "scope.input"
+        email_input.write_text("recovery@example.test\n", encoding="utf-8")
+        email_input.chmod(0o600)
         expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).replace(microsecond=0).isoformat()
         args = argparse.Namespace(
             kind="ordinary",
-            email="recovery@example.test",
+            email_input_file=str(email_input),
             expires_at=expires_at,
             expected_environment="postgres-test",
             approved_code_output_root=str(root),
@@ -1119,7 +1131,7 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
             code_file_existed=False,
             code_file_ref_hmac="b" * 64,
             kind="ordinary",
-            email=email,
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -1147,6 +1159,166 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
         assert runtime.runtime_target_mode == "hermes-chat"
         assert runtime.expected_model == SELF_HOSTED_RUNTIME_MODEL
         assert runtime.consent_authority_epoch
+
+        voice_runtime = await resolve_isolated_runtime(
+            uid,
+            repository=repository,
+            target_mode="hermes-voice",
+        )
+        assert voice_runtime is not None
+        assert voice_runtime.binding_id == str(staged["id"])
+        assert voice_runtime.provider == "hermes"
+        assert voice_runtime.runtime_target_mode == "hermes-voice"
+        assert voice_runtime.expected_model == SELF_HOSTED_RUNTIME_MODEL
+        assert voice_runtime.account_user_id == voice_runtime.profile_user_id
+
+        async def assert_voice_denied(update_sql: str, restore_sql: str) -> None:
+            async with pool.acquire() as conn:
+                await conn.execute(update_sql, uid)
+            with pytest.raises(ProvisioningError) as drifted:
+                await resolve_isolated_runtime(
+                    uid,
+                    repository=repository,
+                    target_mode="hermes-voice",
+                )
+            assert drifted.value.code == "self_hosted_invitation_runtime_not_provisioned"
+            async with pool.acquire() as conn:
+                await conn.execute(restore_sql, uid)
+
+        await assert_voice_denied(
+            """
+            UPDATE ella_runtime_targets target SET status = 'disabled'
+            FROM users app_user
+            WHERE target.account_user_id = app_user.id
+              AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+            """,
+            """
+            UPDATE ella_runtime_targets target SET status = 'ready'
+            FROM users app_user
+            WHERE target.account_user_id = app_user.id
+              AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+            """,
+        )
+        await assert_voice_denied(
+            "UPDATE voice_entitlements SET status = 'suspended' WHERE uid = $1",
+            "UPDATE voice_entitlements SET status = 'active' WHERE uid = $1",
+        )
+        await assert_voice_denied(
+            "UPDATE voice_entitlements SET consent_authority_epoch = gen_random_uuid() WHERE uid = $1",
+            """
+            UPDATE voice_entitlements entitlement
+            SET consent_authority_epoch = authority.authority_epoch
+            FROM users app_user, ella_managed_cloud_consent_authority authority
+            WHERE entitlement.uid = $1 AND app_user.omi_uid = entitlement.uid
+              AND authority.user_id = app_user.id
+            """,
+        )
+        await assert_voice_denied(
+            """
+            UPDATE ella_runtime_targets target SET scope_hash = 'sha256:' || repeat('f', 64)
+            FROM users app_user
+            WHERE target.account_user_id = app_user.id
+              AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+            """,
+            f"""
+            UPDATE ella_runtime_targets target SET scope_hash = '{ai_consent.CURRENT_SCOPE_HASH}'
+            FROM users app_user
+            WHERE target.account_user_id = app_user.id
+              AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+            """,
+        )
+        await assert_voice_denied(
+            "UPDATE voice_entitlements SET provider_allowlist = ARRAY['hermes', 'retained']::text[] WHERE uid = $1",
+            "UPDATE voice_entitlements SET provider_allowlist = ARRAY['hermes']::text[] WHERE uid = $1",
+        )
+        await assert_voice_denied(
+            "UPDATE voice_entitlements SET model_allowlist = ARRAY['drifted-model']::text[] WHERE uid = $1",
+            f"UPDATE voice_entitlements SET model_allowlist = ARRAY['{SELF_HOSTED_RUNTIME_MODEL}']::text[] WHERE uid = $1",
+        )
+        await assert_voice_denied(
+            "UPDATE voice_entitlements SET mode_allowlist = ARRAY['hermes-chat']::text[] WHERE uid = $1",
+            "UPDATE voice_entitlements SET mode_allowlist = ARRAY['hermes-chat', 'hermes-voice']::text[] WHERE uid = $1",
+        )
+        await assert_voice_denied(
+            """
+            UPDATE voice_entitlements
+            SET fallback_policy = '{"enabled":true,"order":["retained"]}'::jsonb
+            WHERE uid = $1
+            """,
+            """
+            UPDATE voice_entitlements
+            SET fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+            WHERE uid = $1
+            """,
+        )
+        async with pool.acquire() as conn:
+            await _ensure_users(conn, ["voice-drift-owner"], profile_class="real")
+            owner_id = await conn.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            drift_owner_id = await conn.fetchval("SELECT id FROM users WHERE omi_uid = 'voice-drift-owner'")
+            voice_target_id = await conn.fetchval(
+                """
+                SELECT target.id
+                FROM ella_runtime_targets target
+                JOIN users app_user ON app_user.id = target.account_user_id
+                WHERE app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+                """,
+                uid,
+            )
+        await assert_voice_denied(
+            f"""
+            UPDATE ella_runtime_targets target SET profile_user_id = '{drift_owner_id}'::uuid
+            FROM users app_user
+            WHERE target.account_user_id = app_user.id
+              AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+            """,
+            f"""
+            UPDATE ella_runtime_targets target SET profile_user_id = '{owner_id}'::uuid
+            FROM users app_user
+            WHERE target.account_user_id = app_user.id
+              AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+            """,
+        )
+        await assert_voice_denied(
+            f"""
+            UPDATE ella_runtime_targets
+            SET account_user_id = '{drift_owner_id}'::uuid
+            WHERE id = '{voice_target_id}'::uuid AND $1::text IS NOT NULL
+            """,
+            f"""
+            UPDATE ella_runtime_targets
+            SET account_user_id = '{owner_id}'::uuid
+            WHERE id = '{voice_target_id}'::uuid AND $1::text IS NOT NULL
+            """,
+        )
+        await assert_voice_denied(
+            """
+            UPDATE ella_runtime_bindings binding SET active = FALSE
+            FROM users app_user
+            WHERE binding.user_id = app_user.id AND app_user.omi_uid = $1
+              AND binding.provider = 'hermes'
+            """,
+            """
+            UPDATE ella_runtime_bindings binding SET active = TRUE
+            FROM users app_user
+            WHERE binding.user_id = app_user.id AND app_user.omi_uid = $1
+              AND binding.provider = 'hermes'
+            """,
+        )
+
+        issued_identity = runtime_authority_identity(voice_runtime)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_runtime_targets target SET updated_at = target.updated_at + INTERVAL '1 second'
+                FROM users app_user
+                WHERE target.account_user_id = app_user.id
+                  AND app_user.omi_uid = $1 AND target.mode = 'hermes-voice'
+                """,
+                uid,
+            )
+        rerouted_voice = await resolve_isolated_runtime(uid, repository=repository, target_mode="hermes-voice")
+        assert rerouted_voice is not None
+        assert runtime_authority_identity(rerouted_voice).digest != issued_identity.digest
 
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1184,7 +1356,7 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
             code_file_existed=False,
             code_file_ref_hmac="c" * 64,
             kind="app_review",
-            email="",
+            allowed_email_hash=None,
             expires_at=None,
             environment="postgres-test",
             config=CONFIG,
@@ -1294,7 +1466,15 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
                 [uid for uid, _email in users],
                 staged["id"],
             )
-        assert tuple(state.values()) == ("revoked", "released", 2, 2, 2, 0, 0, 1, 2)
+        assert tuple(state.values()) == ("revoked", "released", 2, 4, 2, 0, 0, 1, 2)
+
+        with pytest.raises(ProvisioningError) as revoked_voice:
+            await resolve_isolated_runtime(
+                users[0][0],
+                repository=repository,
+                target_mode="hermes-voice",
+            )
+        assert revoked_voice.value.code == "self_hosted_invitation_runtime_not_provisioned"
 
         await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(users[0][0]))
         with pytest.raises((RuntimePoolClaimError, RuntimeError)):
@@ -1336,7 +1516,7 @@ def test_self_hosted_consent_authority_change_invalidates_runtime(
             code_file_existed=False,
             code_file_ref_hmac="e" * 64,
             kind="ordinary",
-            email=email,
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -1374,6 +1554,13 @@ def test_self_hosted_consent_authority_change_invalidates_runtime(
             )
 
         assert await repository.get_self_hosted_invitation_admission(uid) is None
+        with pytest.raises(ProvisioningError) as denied_voice:
+            await resolve_isolated_runtime(
+                uid,
+                repository=repository,
+                target_mode="hermes-voice",
+            )
+        assert denied_voice.value.code == "self_hosted_invitation_runtime_not_provisioned"
         with pytest.raises((RuntimePoolClaimError, RuntimeError)):
             await repository.activate_runtime_binding(
                 uid=uid,
@@ -1387,7 +1574,7 @@ def test_self_hosted_consent_authority_change_invalidates_runtime(
                 """
                 SELECT
                     (SELECT status FROM voice_entitlements WHERE uid = $1) AS entitlement_status,
-                    (SELECT target.status FROM ella_runtime_targets target
+                    (SELECT MIN(target.status) FROM ella_runtime_targets target
                      JOIN users app_user ON app_user.id = target.account_user_id
                      WHERE app_user.omi_uid = $1 AND target.provider = 'hermes') AS target_status,
                     (SELECT COUNT(*) FROM ella_invitation_targets invitation_target
@@ -1432,7 +1619,7 @@ def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypat
             code_file_existed=False,
             code_file_ref_hmac="d" * 64,
             kind="ordinary",
-            email=email,
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             environment="postgres-test",
             config=CONFIG,
@@ -1504,7 +1691,7 @@ def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypat
                 """
                 SELECT
                     (SELECT status FROM voice_entitlements WHERE uid = $1) AS entitlement_status,
-                    (SELECT target.status FROM ella_runtime_targets target
+                    (SELECT MIN(target.status) FROM ella_runtime_targets target
                      JOIN users app_user ON app_user.id = target.account_user_id
                      WHERE app_user.omi_uid = $1 AND target.provider = 'hermes') AS target_status,
                     (SELECT COUNT(*) FROM ella_runtime_bindings binding

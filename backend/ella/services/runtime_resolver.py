@@ -129,21 +129,42 @@ class CloudRuntimeAuthorityIdentity:
     digest: str
 
 
-def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
-    if runtime.provider != CLOUD_RUNTIME_PROVIDER:
-        raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
-    if (
-        runtime.runtime_target_mode not in CLOUD_RUNTIME_TARGET_MODES
-        or not runtime.runtime_target_id
-        or not runtime.runtime_target_updated_at
-        or not runtime.target_endpoint_ref
-        or not runtime.target_credential_ref
-        or runtime.target_entitlement_revision < 1
-        or not runtime.consent_authority_epoch
+def runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
+    """Hash the exact binding/target/owner authority used across awaited work."""
+    invitation_self_hosted = runtime.provider == SELF_HOSTED_RUNTIME_PROVIDER and bool(runtime.runtime_target_id)
+    if runtime.provider == CLOUD_RUNTIME_PROVIDER:
+        target_complete = bool(
+            runtime.runtime_target_mode in CLOUD_RUNTIME_TARGET_MODES
+            and runtime.runtime_target_id
+            and runtime.runtime_target_updated_at
+            and runtime.target_endpoint_ref
+            and runtime.target_credential_ref
+            and runtime.target_entitlement_revision >= 1
+            and runtime.consent_authority_epoch
+        )
+        missing_code = "hermes_cloud_runtime_target_identity_missing"
+    elif invitation_self_hosted:
+        target_complete = bool(
+            runtime.runtime_target_mode in SELF_HOSTED_RUNTIME_TARGET_MODES
+            and runtime.runtime_target_updated_at
+            and runtime.target_entitlement_revision >= 1
+            and runtime.consent_authority_epoch
+            and not runtime.target_endpoint_ref
+            and not runtime.target_credential_ref
+        )
+        missing_code = "self_hosted_runtime_target_identity_missing"
+    elif runtime.provider == SELF_HOSTED_RUNTIME_PROVIDER:
+        target_complete = bool(runtime.binding_id and runtime.revision >= 1)
+        missing_code = "hermes_runtime_binding_identity_missing"
+    else:
+        raise ProvisioningError("invalid_runtime_provider", retryable=False)
+    if not target_complete or (
+        runtime.provider != CLOUD_RUNTIME_PROVIDER and (not runtime.account_user_id or not runtime.profile_user_id)
     ):
-        raise ProvisioningError("hermes_cloud_runtime_target_identity_missing", retryable=False)
+        raise ProvisioningError(missing_code, retryable=False)
     material = {
         "uid": runtime.uid,
+        "provider": runtime.provider,
         "binding_id": runtime.binding_id,
         "binding_revision": runtime.revision,
         "runtime_instance_id": runtime.runtime_instance_id,
@@ -154,6 +175,8 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
         "target_credential_ref": runtime.target_credential_ref,
         "target_entitlement_revision": runtime.target_entitlement_revision,
         "consent_authority_epoch": runtime.consent_authority_epoch,
+        "account_user_id": runtime.account_user_id,
+        "profile_user_id": runtime.profile_user_id,
         "endpoint_sha256": hashlib.sha256(runtime.gateway_url.encode("utf-8")).hexdigest(),
         "credential_sha256": hashlib.sha256(runtime.gateway_token.encode("utf-8")).hexdigest(),
         "profile_class": runtime.profile_class,
@@ -177,9 +200,15 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
     ).hexdigest()
     return CloudRuntimeAuthorityIdentity(
         uid=runtime.uid,
-        target_mode=runtime.runtime_target_mode,
+        target_mode=runtime.runtime_target_mode or "retained",
         digest=digest,
     )
+
+
+def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
+    if runtime.provider != CLOUD_RUNTIME_PROVIDER:
+        raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+    return runtime_authority_identity(runtime)
 
 
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:

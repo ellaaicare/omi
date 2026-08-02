@@ -580,6 +580,12 @@ class EllaProvisioningRepository:
               ON target.invitation_target_id = redemption.invitation_target_id
              AND target.account_user_id = app_user.id
              AND target.profile_user_id = app_user.id
+             AND target.mode = 'hermes-chat'
+            JOIN ella_runtime_targets voice_target
+              ON voice_target.invitation_target_id = redemption.invitation_target_id
+             AND voice_target.account_user_id = app_user.id
+             AND voice_target.profile_user_id = app_user.id
+             AND voice_target.mode = 'hermes-voice'
             JOIN ella_managed_cloud_consent_authority authority
               ON authority.user_id = app_user.id
             WHERE app_user.omi_uid = $1
@@ -600,13 +606,21 @@ class EllaProvisioningRepository:
               AND authority.profile_binding_id IS NOT NULL
               AND redemption.consent_pending = FALSE
               AND target.provider = $2
-              AND target.mode = 'hermes-chat'
               AND target.status IN ('reserved', 'ready')
               AND target.entitlement_revision = entitlement.revision
               AND target.policy_version = entitlement.consent_policy_version
               AND target.processor_set_hash = entitlement.consent_processor_set_hash
               AND target.scope_version = entitlement.consent_scope_version
               AND target.scope_hash = entitlement.consent_scope_hash
+              AND voice_target.role = target.role
+              AND voice_target.provider = target.provider
+              AND voice_target.status = target.status
+              AND voice_target.runtime_binding_id IS NOT DISTINCT FROM target.runtime_binding_id
+              AND voice_target.entitlement_revision = target.entitlement_revision
+              AND voice_target.policy_version = target.policy_version
+              AND voice_target.processor_set_hash = target.processor_set_hash
+              AND voice_target.scope_version = target.scope_version
+              AND voice_target.scope_hash = target.scope_hash
               AND authority.policy_version = entitlement.consent_policy_version
               AND authority.processor_set_hash = entitlement.consent_processor_set_hash
               AND authority.scope_version = entitlement.consent_scope_version
@@ -2856,6 +2870,13 @@ class EllaProvisioningRepository:
                             entitlement.consent_authority_epoch,
                             invitation.id AS invitation_id
                         FROM ella_runtime_targets target
+                        JOIN ella_runtime_targets voice_target
+                          ON voice_target.invitation_target_id = target.invitation_target_id
+                         AND voice_target.account_user_id = target.account_user_id
+                         AND voice_target.profile_user_id = target.profile_user_id
+                         AND voice_target.role = target.role
+                         AND voice_target.provider = target.provider
+                         AND voice_target.mode = 'hermes-voice'
                         JOIN ella_invitation_targets invitation_target
                           ON invitation_target.id = target.invitation_target_id
                         JOIN ella_invitation_redemptions redemption
@@ -2883,6 +2904,13 @@ class EllaProvisioningRepository:
                           AND target.processor_set_hash = $6
                           AND target.scope_version = $7
                           AND target.scope_hash = $8
+                          AND voice_target.status = target.status
+                          AND voice_target.runtime_binding_id IS NOT DISTINCT FROM target.runtime_binding_id
+                          AND voice_target.entitlement_revision = target.entitlement_revision
+                          AND voice_target.policy_version = target.policy_version
+                          AND voice_target.processor_set_hash = target.processor_set_hash
+                          AND voice_target.scope_version = target.scope_version
+                          AND voice_target.scope_hash = target.scope_hash
                           AND invitation_target.required_profile_class = 'real'
                           AND invitation_target.consumed_at IS NOT NULL
                           AND invitation_target.revoked_at IS NULL
@@ -2913,7 +2941,7 @@ class EllaProvisioningRepository:
                           AND consent.processor_set_hash = target.processor_set_hash
                           AND consent.scope_version = target.scope_version
                           AND consent.scope_hash = target.scope_hash
-                        FOR UPDATE OF target, invitation_target, redemption,
+                        FOR UPDATE OF target, voice_target, invitation_target, redemption,
                             invitation, entitlement, consent
                         """,
                         selected["user_id"],
@@ -2963,25 +2991,25 @@ class EllaProvisioningRepository:
                         if not activated_entitlement:
                             raise RuntimePoolClaimError("invitation_entitlement_activation_stale")
                         entitlement_revision = int(activated_entitlement["revision"])
-                    target = await connection.fetchrow(
+                    targets = await connection.fetch(
                         """
                         UPDATE ella_runtime_targets
                         SET runtime_binding_id = $2,
                             status = 'ready',
                             entitlement_revision = $3,
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE id = $1
-                          AND invitation_target_id = $4
+                        WHERE invitation_target_id = $1
                           AND status IN ('reserved', 'ready')
                           AND (runtime_binding_id IS NULL OR runtime_binding_id = $2)
-                        RETURNING id
+                          AND mode = ANY($4::text[])
+                        RETURNING id, mode
                         """,
-                        authority["target_id"],
+                        authority["invitation_target_id"],
                         selected["id"],
                         entitlement_revision,
-                        authority["invitation_target_id"],
+                        list(SELF_HOSTED_RUNTIME_TARGET_MODES),
                     )
-                    if not target:
+                    if {str(target["mode"]) for target in targets} != set(SELF_HOSTED_RUNTIME_TARGET_MODES):
                         raise RuntimePoolClaimError("invitation_runtime_target_stale")
 
                 await connection.execute(

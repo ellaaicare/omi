@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,8 @@ MAX_EXPIRY = timedelta(days=400)
 MAX_NON_REVIEW_PILOTS = 5
 PILOT_CAPACITY_LOCK = "self-hosted-pilot-capacity-v1"
 SAFE_CONTEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MAX_EMAIL_INPUT_BYTES = 320
+EMAIL_INPUT_ALLOWED_MODES = {0o400, 0o600}
 
 
 class PilotInvitationError(RuntimeError):
@@ -83,6 +86,75 @@ def _safe_context(value: str, *, code: str) -> str:
 
 def _email_hash(config: invitations.InvitationConfig, email: str) -> Optional[str]:
     return invitations.email_hash_for(config, email) if email else None
+
+
+def _read_protected_email(
+    *,
+    approved_root: str,
+    email_input_file: str,
+    expected_owner_uid: int,
+) -> str:
+    """Read one email through a no-follow root-owned file boundary."""
+    if (
+        not approved_root
+        or not email_input_file
+        or not os.path.isabs(approved_root)
+        or not os.path.isabs(email_input_file)
+        or os.path.normpath(approved_root) != approved_root
+        or os.path.normpath(email_input_file) != email_input_file
+        or Path(email_input_file).parent != Path(approved_root)
+    ):
+        raise PilotInvitationError("email_input_path_invalid")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+        file_flags |= os.O_NOFOLLOW
+    try:
+        root_descriptor = os.open(approved_root, directory_flags)
+    except OSError as exc:
+        raise PilotInvitationError("email_input_unavailable") from exc
+    try:
+        root_metadata = os.fstat(root_descriptor)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != expected_owner_uid
+            or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        ):
+            raise PilotInvitationError("email_input_insecure")
+        try:
+            descriptor = os.open(Path(email_input_file).name, file_flags, dir_fd=root_descriptor)
+        except OSError as exc:
+            raise PilotInvitationError("email_input_unavailable") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != expected_owner_uid
+                or stat.S_IMODE(metadata.st_mode) not in EMAIL_INPUT_ALLOWED_MODES
+                or metadata.st_nlink != 1
+                or not 3 <= metadata.st_size <= MAX_EMAIL_INPUT_BYTES
+            ):
+                raise PilotInvitationError("email_input_insecure")
+            raw = os.read(descriptor, MAX_EMAIL_INPUT_BYTES + 1)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(root_descriptor)
+    if len(raw) > MAX_EMAIL_INPUT_BYTES:
+        raise PilotInvitationError("email_input_invalid")
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PilotInvitationError("email_input_invalid") from exc
+    if decoded.endswith("\n"):
+        decoded = decoded[:-1]
+    if not decoded or decoded != decoded.strip() or "\n" in decoded or "\r" in decoded or "\x00" in decoded:
+        raise PilotInvitationError("email_input_invalid")
+    normalized = decoded.lower()
+    if len(normalized) > 254 or normalized.count("@") != 1 or any(character.isspace() for character in normalized):
+        raise PilotInvitationError("email_input_invalid")
+    return normalized
 
 
 def _absolute_expiry(value: str) -> datetime:
@@ -234,7 +306,7 @@ async def _issue_invitation(
     code_file_existed: bool,
     code_file_ref_hmac: str,
     kind: str,
-    email: str,
+    allowed_email_hash: Optional[str],
     expires_at: Optional[datetime],
     environment: str,
     config: invitations.InvitationConfig,
@@ -258,7 +330,6 @@ async def _issue_invitation(
     if not normalized_code:
         raise PilotInvitationError("issue_contract_invalid")
     invitation_code_hmac = invitations.code_hmac(config, normalized_code)
-    allowed_email_hash = _email_hash(config, email)
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -746,7 +817,19 @@ def _configuration() -> invitations.InvitationConfig:
 async def _issue(args: argparse.Namespace) -> None:
     config = _configuration()
     environment = _safe_context(args.expected_environment, code="environment_invalid")
-    email = (args.email or "").strip().lower()
+    allowed_email_hash = None
+    if args.email_input_file:
+        email = _read_protected_email(
+            approved_root=args.approved_code_output_root,
+            email_input_file=args.email_input_file,
+            expected_owner_uid=ROOT_UID,
+        )
+        try:
+            allowed_email_hash = _email_hash(config, email)
+        except ValueError as exc:
+            raise PilotInvitationError("email_input_invalid") from exc
+        finally:
+            email = ""
     expiry = None
     if args.kind == "ordinary":
         if not args.expires_at:
@@ -754,7 +837,6 @@ async def _issue(args: argparse.Namespace) -> None:
         expiry = _absolute_expiry(args.expires_at)
     elif args.expires_at is not None:
         raise PilotInvitationError("reviewer_expiry_forbidden")
-    allowed_email_hash = _email_hash(config, email)
     code_file_ref_hmac = invitations.invitation_code_file_ref(config, args.code_output_file)
 
     def recovery_binding_for_code(code: str) -> str:
@@ -780,7 +862,7 @@ async def _issue(args: argparse.Namespace) -> None:
             code_file_existed=prepared.existed,
             code_file_ref_hmac=code_file_ref_hmac,
             kind=args.kind,
-            email=email,
+            allowed_email_hash=allowed_email_hash,
             expires_at=expiry,
             environment=environment,
             config=config,
@@ -839,7 +921,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     issue = subparsers.add_parser("issue")
     issue.add_argument("--kind", required=True, choices=["ordinary", "app_review"])
-    issue.add_argument("--email", default="")
+    issue.add_argument("--email-input-file")
     issue.add_argument("--expires-at")
     issue.add_argument("--expected-environment", required=True)
     issue.add_argument("--approved-code-output-root", required=True)
@@ -866,6 +948,18 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reject_sensitive_argv(arguments: list[str]) -> None:
+    """Refuse likely plaintext identity or invitation codes before argparse can echo them."""
+    if any(
+        argument == "--email"
+        or argument.startswith("--email=")
+        or "@" in argument
+        or bool(invitations.normalize_invite_code(argument))
+        for argument in arguments
+    ):
+        raise PilotInvitationError("secret_argv_forbidden")
+
+
 async def _show_and_print(args: argparse.Namespace) -> None:
     _print_receipt("show", await _show_invitation(receipt_id=args.receipt_id))
 
@@ -886,18 +980,24 @@ async def _revoke_and_print(args: argparse.Namespace) -> None:
 
 async def _main() -> None:
     _require_root()
+    _reject_sensitive_argv(sys.argv[1:])
     args = _parser().parse_args()
     await args.handler(args)
 
 
-if __name__ == "__main__":
+def _run_cli() -> int:
     try:
         asyncio.run(_main())
     except (PilotInvitationError, ProtectedCodeFileError) as exc:
         print(json.dumps({"status": "error", "code": exc.code}), file=sys.stderr)
-        sys.exit(1)
+        return 1
     except KeyboardInterrupt:
-        sys.exit(130)
+        return 130
     except Exception:
         print(json.dumps({"status": "error", "code": "outcome_ambiguous"}), file=sys.stderr)
-        sys.exit(2)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_run_cli())

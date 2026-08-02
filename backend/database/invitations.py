@@ -1376,11 +1376,11 @@ async def _redeem_locked_invitation(
                 status, policy_version, processor_set_hash, scope_version,
                 scope_hash, entitlement_revision, invitation_target_id,
                 metadata
-            ) VALUES (
-                $1, $1, 'user', 'hermes-chat', 'hermes',
+            ) SELECT
+                $1, $1, 'user', mode.value, 'hermes',
                 'reserved', $2, $3, $4, $5, $6, $7,
                 '{"source":"invitation","content_free":true}'::jsonb
-            )
+            FROM unnest($8::text[]) AS mode(value)
             """,
             user["id"],
             pilot_admission.policy_version,
@@ -1389,6 +1389,7 @@ async def _redeem_locked_invitation(
             pilot_admission.scope_hash,
             entitlement_revision,
             target["id"],
+            list(SELF_HOSTED_RUNTIME_TARGET_MODES),
         )
     if kind == "ordinary":
         await conn.execute(
