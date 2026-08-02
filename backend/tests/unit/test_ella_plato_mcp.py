@@ -35,9 +35,9 @@ def _load_module(monkeypatch):
     _install_stubs()
     monkeypatch.setenv("ELLA_PLATO_MCP_TOKEN", "test-token")
     monkeypatch.setenv("ELLA_PLATO_MCP_RATE_LIMIT_PER_MINUTE", "0")
-    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://legacy-authority:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
     monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "legacy-test-token")
-    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-authority:8210")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
     monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-test-token")
     sys.modules.pop("ella.routers.plato_mcp", None)
     module = importlib.import_module("ella.routers.plato_mcp")
@@ -79,9 +79,9 @@ def test_plato_mcp_rejects_missing_and_invalid_token(monkeypatch):
 def test_plato_workspace_search_uses_retained_authority_pair(monkeypatch):
     module = _load_module(monkeypatch)
     monkeypatch.setenv("ELLA_PLATO_UID", "retained-uid")
-    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://legacy-authority:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
     monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "legacy-test-token")
-    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-authority:8210")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
     monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-test-token")
     captured = {}
 
@@ -109,15 +109,15 @@ def test_plato_workspace_search_uses_retained_authority_pair(monkeypatch):
     monkeypatch.setattr(module.httpx, "AsyncClient", AsyncClient)
 
     assert asyncio.run(module._fetch_workspace_search("memory", 3)) == []
-    assert captured["url"] == "http://legacy-authority:8200/workspace/ella-omi-retained-uid/search"
+    assert captured["url"] == "http://100.76.138.56:8200/workspace/ella-omi-retained-uid/search"
     assert captured["headers"] == {"Authorization": "Bearer legacy-test-token"}
 
 
 def test_plato_workspace_authority_conflict_fails_before_http(monkeypatch):
     module = _load_module(monkeypatch)
-    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://legacy-authority:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
     monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "shared-test-token")
-    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-authority:8210")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
     monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "shared-test-token")
 
     class ForbiddenAsyncClient:

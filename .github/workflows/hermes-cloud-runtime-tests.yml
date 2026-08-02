@@ -474,7 +474,7 @@ jobs:
               tests/unit/test_ella_plato_mcp.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 200
+          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 418
           required_authority_split_ids=(
             "tests/unit/test_ella_provision_authority_split.py::test_new_user_auto_provision_posts_only_to_hermes_authority"
             "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_url_swap]"
@@ -484,6 +484,16 @@ jobs:
             "tests/unit/test_ella_provision_authority_split.py::test_sync_identity_posts_only_to_hermes_authority"
             "tests/unit/test_ella_provision_authority_split.py::test_async_identity_sync_posts_only_to_hermes_authority"
             "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_reject_before_http_database_state_or_thread[metadata_destination-reconcile]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_revalidates_after_client_entry_before_send[url]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_claimed_worker_stops_after_inflight_http_authority_drift[token]"
+            "tests/unit/test_ella_provision_authority_split.py::test_claimed_worker_rechecks_before_every_post_http_mutation[activate_runtime_binding-1-forbidden2-binding_reference]"
+            "tests/unit/test_ella_provision_authority_split.py::test_auto_provision_stops_database_write_after_inflight_http_drift[destination_policy]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_detects_inflight_http_drift_before_later_effects[binding_secret-async]"
+            "tests/unit/test_ella_provision_authority_split.py::test_fire_and_forget_rechecks_after_thread_construction_before_execution[token]"
+            "tests/unit/test_ella_provision_authority_split.py::test_reconciliation_stops_batch_and_state_after_first_inflight_drift[url]"
+            "tests/unit/test_ella_provision_authority_split.py::test_hostnames_fail_closed_before_multiple_answer_or_rebinding_dns"
+            "tests/unit/test_ella_provision_authority_split.py::test_legacy_mapped_ipv6_socket_equivalence_collides"
+            "tests/unit/test_ella_provision_authority_split.py::test_http_transports_disable_redirects_proxies_and_environment_drift"
             "tests/unit/test_ella_provision_authority_split.py::test_retained_history_consumers_remain_on_legacy_authority_pair"
             "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_search_uses_retained_authority_pair"
             "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_authority_conflict_fails_before_http"

@@ -17,7 +17,11 @@ from typing import Optional
 import asyncpg
 import httpx
 
-from ella.utils.provision_authority import ProvisionAuthority, ProvisionAuthorityError, hermes_provision_authority
+from ella.utils.provision_authority import (
+    ProvisionAuthorityError,
+    ProvisionAuthoritySnapshot,
+    hermes_provision_authority,
+)
 
 logger = logging.getLogger("ella.auto_provision")
 
@@ -128,7 +132,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
     """
     try:
         try:
-            authority = hermes_provision_authority()
+            authority_snapshot = hermes_provision_authority().snapshot()
         except ProvisionAuthorityError as exc:
             logger.error(exc.code)
             return {"success": False, "error": exc.code}
@@ -149,7 +153,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             return await _provision_with_payload(
                 uid,
                 {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name},
-                authority=authority,
+                authority_snapshot=authority_snapshot,
             )
 
         # 2. Extract identity data
@@ -185,11 +189,12 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             payload["medications"] = medications if isinstance(medications, list) else [medications]
 
         # 4. Call provision API
-        result = await _provision_with_payload(uid, payload, authority=authority)
+        result = await _provision_with_payload(uid, payload, authority_snapshot=authority_snapshot)
 
         # 5. Write phone back to users.identities if present and provision succeeded
         if result.get("success") and phone:
             try:
+                hermes_provision_authority(authority_snapshot)
                 await pool.execute(
                     """
                     UPDATE users SET identities = COALESCE(identities, '{}'::jsonb) || $1::jsonb
@@ -198,6 +203,10 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
                     json.dumps({"phone": phone}),
                     uid,
                 )
+                hermes_provision_authority(authority_snapshot)
+            except ProvisionAuthorityError as exc:
+                logger.error(exc.code)
+                return {"success": False, "error": exc.code}
             except Exception:
                 logger.warning("auto_provision_identity_write_failed")
 
@@ -212,7 +221,7 @@ async def _provision_with_payload(
     uid: str,
     payload: dict,
     *,
-    authority: Optional[ProvisionAuthority] = None,
+    authority_snapshot: ProvisionAuthoritySnapshot | None = None,
 ) -> dict:
     """Send a provision request with the given payload.
 
@@ -224,16 +233,20 @@ async def _provision_with_payload(
         dict with success/error/cluster keys
     """
     del uid
+    send_snapshot: ProvisionAuthoritySnapshot | None = None
     try:
-        resolved_authority = authority or hermes_provision_authority()
-        headers = {"Authorization": f"Bearer {resolved_authority.token}"}
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        entry_snapshot = hermes_provision_authority(authority_snapshot).snapshot()
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False) as client:
+            payload_authority = hermes_provision_authority(entry_snapshot)
+            request_payload = dict(payload)
+            resolved_authority = hermes_provision_authority(payload_authority.snapshot())
+            send_snapshot = resolved_authority.snapshot()
             response = await client.post(
                 f"{resolved_authority.base_url}/provision",
-                headers=headers,
-                json=payload,
+                headers={"Authorization": f"Bearer {resolved_authority.token}"},
+                json=request_payload,
             )
+            hermes_provision_authority(send_snapshot)
 
             if response.status_code == 200:
                 data = response.json()
@@ -246,6 +259,12 @@ async def _provision_with_payload(
         logger.error(exc.code)
         return {"success": False, "error": exc.code}
     except httpx.TimeoutException:
+        if send_snapshot is not None:
+            try:
+                hermes_provision_authority(send_snapshot)
+            except ProvisionAuthorityError as exc:
+                logger.error(exc.code)
+                return {"success": False, "error": exc.code}
         logger.error("auto_provision_timeout")
         return {"success": False, "error": "auto_provision_timeout"}
     except Exception:

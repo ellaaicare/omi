@@ -74,7 +74,7 @@ def _verified_identity(uid: str, payload: OnboardingEnsureRequest) -> VerifiedId
     try:
         firebase_user = auth.get_user(uid)
     except Exception as exc:
-        logger.warning("Firebase user lookup failed for authenticated uid=%s: %s", uid, type(exc).__name__)
+        logger.warning("Firebase user lookup failed: %s", type(exc).__name__)
         raise HTTPException(status_code=401, detail={"code": "auth_required"}) from exc
 
     email = str(getattr(firebase_user, "email", "") or "").strip()
@@ -100,10 +100,10 @@ async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[di
     try:
         repository = await EllaProvisioningRepository.create()
         if await repository.has_active_retained_runtime(uid):
-            logger.info("Using retained-account onboarding compatibility for uid=%s", uid)
+            logger.info("Using retained-account onboarding compatibility")
             return retained_compatibility_receipt(target_schema_version)
     except Exception as exc:
-        logger.exception("Retained-account onboarding lookup failed for uid=%s", uid)
+        logger.error("Retained-account onboarding lookup failed")
         raise HTTPException(status_code=503, detail={"code": "provisioning_unavailable"}) from exc
     return None
 
@@ -132,12 +132,21 @@ async def ensure_onboarding(
         if receipt:
             return receipt
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
-    if not cloud_provisioning_enabled(uid) and (self_hosted_provisioning_enabled(uid) or provisioning_enabled(uid)):
+    hermes_required = not cloud_provisioning_enabled(uid) and (
+        self_hosted_provisioning_enabled(uid) or provisioning_enabled(uid)
+    )
+    authority_snapshot = None
+    if hermes_required:
         try:
-            HermesProvisionClient.resolve_authority()
+            authority_snapshot = HermesProvisionClient.snapshot_authority()
         except ProvisioningError as exc:
             raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     identity = _verified_identity(uid, payload)
+    if authority_snapshot is not None:
+        try:
+            HermesProvisionClient.snapshot_authority(authority_snapshot)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     coordinator = await _coordinator()
     try:
         job, binding, claimed = await coordinator.ensure_job(
@@ -148,6 +157,7 @@ async def ensure_onboarding(
                 **_payload_dict(payload),
                 "effective_target_schema_version": target_schema_version,
             },
+            authority_snapshot=authority_snapshot,
         )
     except IdentityConflictError as exc:
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from exc
@@ -159,7 +169,17 @@ async def ensure_onboarding(
 
     receipt = public_receipt(job, binding)
     if claimed:
-        background_tasks.add_task(coordinator.process_claimed_job, job=job, identity=identity)
+        try:
+            if authority_snapshot is not None:
+                HermesProvisionClient.snapshot_authority(authority_snapshot)
+            background_tasks.add_task(
+                coordinator.process_claimed_job,
+                job=job,
+                identity=identity,
+                authority_snapshot=authority_snapshot,
+            )
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
         response.status_code = 202
     elif receipt["state"] in {"queued", "provisioning", "retryable", "rolling_back"}:
         response.status_code = 202
