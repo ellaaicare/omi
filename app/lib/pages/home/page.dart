@@ -20,6 +20,7 @@ import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/chat/page.dart';
@@ -337,12 +338,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
           }
           break;
         case "settings":
-          // Use context from the current widget instead of navigator key for bottom sheet
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              SettingsDrawer.show(context);
-            }
-          });
+          if (allowsInheritedOmiSurface()) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) SettingsDrawer.show(context);
+            });
+          }
           if (detailPageId == 'data-privacy') {
             MyApp.navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const DataPrivacyPage()));
           }
@@ -406,7 +406,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     });
 
     _listenToMessagesFromNotification();
-    _listenToFreemiumThreshold();
+    if (allowsInheritedOmiSurface()) _listenToFreemiumThreshold();
     _checkForAnnouncements();
 
     super.initState();

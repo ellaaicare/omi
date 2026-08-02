@@ -21,6 +21,7 @@ import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_legal_links.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
@@ -102,6 +103,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   }
 
   void _unlockDeveloperSettings() {
+    if (!allowsInheritedOmiSurface()) return;
     setState(() {
       _versionTapCount += 1;
       if (_versionTapCount >= 7) _developerUnlocked = true;
@@ -410,7 +412,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             if (_appVersion.isNotEmpty)
               Center(
                 child: GestureDetector(
-                  onTap: _unlockDeveloperSettings,
+                  onTap: allowsInheritedOmiSurface() ? _unlockDeveloperSettings : null,
                   child: Text(_appVersion, style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled)),
                 ),
               ),
