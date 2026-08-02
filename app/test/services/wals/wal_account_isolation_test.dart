@@ -3,14 +3,19 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/services/wals/flash_page_wal_sync.dart';
 import 'package:omi/services/wals/local_wal_sync.dart';
+import 'package:omi/services/wals/sdcard_wal_sync.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_interfaces.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/audio_player_utils.dart';
 import 'package:omi/utils/wal_file_manager.dart';
 
 void main() {
@@ -20,6 +25,8 @@ void main() {
   late _Listener listener;
 
   setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
     directory = await Directory.systemTemp.createTemp('ella-wal-isolation-');
     listener = _Listener();
     WalFileManager.resetForTesting();
@@ -147,7 +154,137 @@ void main() {
     expect(wal.quarantineReason, 'upload_authority_changed_in_flight');
     expect(listener.synced, isEmpty);
   });
+
+  test('owner equality includes authority generation and revocation fails closed', () async {
+    final original = _owner('uid-a');
+    final newerGeneration = WalOwner(
+      uid: original.uid,
+      profileBindingId: original.profileBindingId,
+      bindingRevision: original.bindingRevision,
+      consentReceiptId: original.consentReceiptId,
+      authorityGenerationAtCapture: original.authorityGenerationAtCapture + 1,
+    );
+    expect(original.matches(newerGeneration), isFalse);
+
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantOperationalAuthority(prefs, 'uid-a');
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNotNull);
+    prefs.declineAiConsent();
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
+  });
+
+  test('persisted-only provisioning and consent cannot create active authority', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    prefs.acceptAiConsent(
+      receiptId: 'aicr_uid-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-uid-a',
+      serverDecidedAt: '2026-08-02T00:00:00Z',
+    );
+    await prefs.saveEllaProvisioningReceipt('uid-a', _provisioningReceipt());
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
+
+    await prefs.markEllaProvisioningVerified('uid-a');
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
+    await SharedPreferencesUtil.init();
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
+  });
+
+  test('SD and flash ownerless downloaded bytes stay quarantined and are never uploaded', () async {
+    final owner = _owner('uid-a');
+    var uploads = 0;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: owner);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => owner,
+      activeAuthority: () => _authority(owner, () => true),
+      upload: (files, uid) async {
+        uploads++;
+        return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+      },
+    );
+    await sync.initializeForTesting();
+
+    for (final storage in [WalStorage.sdcard, WalStorage.flashPage]) {
+      final marker = storage == WalStorage.sdcard ? 31 : 41;
+      final audio = File('${directory.path}/${storage.name}.bin')..writeAsBytesSync([marker, marker + 1]);
+      final wal = _wal(owner: null, path: audio.path)
+        ..originalStorage = storage
+        ..status = WalStatus.quarantined
+        ..quarantineReason = 'device_owner_provenance_unverified';
+      await sync.addExternalWal(wal);
+    }
+    await sync.syncAll();
+
+    expect(uploads, 0);
+    expect(await sync.getAllWals(), isEmpty);
+    expect(await WalFileManager.getQuarantineCount(), 2);
+    final preserved = Directory('${directory.path}/ella_wal_quarantine')
+        .listSync()
+        .whereType<File>()
+        .where((file) => file.path.endsWith('.bin'))
+        .map((file) => file.readAsBytesSync())
+        .toList();
+    expect(preserved, contains(equals([31, 32])));
+    expect(preserved, contains(equals([41, 42])));
+  });
+
+  test('ownerless and prior-owner device audio cannot sync, clear, acknowledge, or become active', () async {
+    final sd = SDCardWalSyncImpl(listener);
+    final flash = FlashPageWalSyncImpl(listener);
+    final ownerlessSd = _deviceWal(WalStorage.sdcard, owner: null);
+    final priorOwnerFlash = _deviceWal(WalStorage.flashPage, owner: _owner('uid-prior'));
+
+    await sd.syncWal(wal: ownerlessSd);
+    await sd.deleteWal(ownerlessSd);
+    await flash.syncWal(wal: priorOwnerFlash);
+    await flash.deleteWal(priorOwnerFlash);
+
+    expect(ownerlessSd.status, WalStatus.quarantined);
+    expect(priorOwnerFlash.status, WalStatus.quarantined);
+    expect(await sd.getMissingWals(), isEmpty);
+    expect(await flash.getMissingWals(), isEmpty);
+    expect(listener.synced, isEmpty);
+  });
+
+  test('ownerless and quarantined audio is never playable or shareable', () {
+    final audio = File('${directory.path}/audio.bin')..writeAsBytesSync([1, 2, 3]);
+    final ownerless = _wal(owner: null, path: audio.path);
+    final quarantined = _wal(owner: _owner('uid-a'), path: audio.path)..status = WalStatus.quarantined;
+    final active = _wal(owner: _owner('uid-a'), path: audio.path);
+
+    expect(AudioPlayerUtils().canPlayOrShare(ownerless), isFalse);
+    expect(AudioPlayerUtils().canPlayOrShare(quarantined), isFalse);
+    expect(AudioPlayerUtils().canPlayOrShare(active), isTrue);
+  });
 }
+
+Future<void> _grantOperationalAuthority(SharedPreferencesUtil prefs, String uid) async {
+  prefs.acceptAiConsent(
+    receiptId: 'aicr_$uid',
+    uid: uid,
+    profileBindingId: 'profile-$uid',
+    serverDecidedAt: '2026-08-02T00:00:00Z',
+  );
+  await prefs.saveEllaProvisioningReceipt(uid, _provisioningReceipt());
+  await prefs.markEllaProvisioningVerified(uid);
+  prefs.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: 'aicr_$uid',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-$uid',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+}
+
+Map<String, dynamic> _provisioningReceipt() => {
+      'state': 'ready',
+      'binding_state': 'active',
+      'binding_revision': 3,
+      'effective_policy_revision': 'policy-3',
+    };
 
 WalOwner _owner(String uid) => WalOwner(
       uid: uid,
@@ -181,6 +318,16 @@ Wal _wal({required WalOwner? owner, required String path}) => Wal(
       storage: WalStorage.disk,
       filePath: path,
       owner: owner,
+    );
+
+Wal _deviceWal(WalStorage storage, {required WalOwner? owner}) => Wal(
+      timerStart: 1,
+      codec: BleAudioCodec.opus,
+      seconds: 1,
+      status: WalStatus.quarantined,
+      storage: storage,
+      owner: owner,
+      quarantineReason: 'device_owner_provenance_unverified',
     );
 
 class _Listener implements IWalSyncListener {

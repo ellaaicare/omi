@@ -60,9 +60,8 @@ class AudioPlayerUtils extends ChangeNotifier {
   bool isPlaying(String id) => _currentPlayingId == id;
 
   bool canPlayOrShare(Wal wal) {
-    return (wal.filePath != null && wal.filePath!.isNotEmpty) ||
-        wal.data.isNotEmpty ||
-        wal.storage == WalStorage.sdcard;
+    if (wal.status == WalStatus.quarantined || wal.owner == null) return false;
+    return (wal.filePath != null && wal.filePath!.isNotEmpty) || wal.data.isNotEmpty;
   }
 
   Future<void> togglePlayback(Wal wal) async {
@@ -101,7 +100,7 @@ class AudioPlayerUtils extends ChangeNotifier {
     final audioFilePath = await _getOrCreateAudioFile(wal);
     if (audioFilePath == null) {
       _resetPlaybackState();
-      Logger.debug('AudioPlayerUtils: Unable to create playable audio file for WAL ${wal.id}');
+      Logger.debug('AudioPlayerUtils: Unable to create playable audio for an active WAL');
       return;
     }
 

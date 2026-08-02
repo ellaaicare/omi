@@ -27,6 +27,10 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
   static int _aiConsentAuthorityGeneration = 0;
+  static String _verifiedEllaProvisioningUid = '';
+  static int _verifiedEllaProvisioningBindingRevision = 0;
+  static String _verifiedEllaProvisioningPolicyRevision = '';
+  static int _verifiedEllaProvisioningAuthorityGeneration = -1;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
@@ -51,6 +55,7 @@ class SharedPreferencesUtil {
   static Future<void> init() async {
     _preferences = await SharedPreferences.getInstance();
     clearAiConsentServerVerification();
+    _clearEllaProvisioningServerVerification();
   }
 
   set uid(String value) {
@@ -356,7 +361,13 @@ class SharedPreferencesUtil {
   static void _invalidateAiConsentAuthority() {
     _aiConsentAuthorityGeneration++;
     clearAiConsentServerVerification();
+    _clearEllaProvisioningServerVerification();
   }
+
+  /// Invalidates every delayed account operation before Firebase identity is
+  /// allowed to change. This is intentionally synchronous so no in-flight
+  /// result can commit while transition quiescence is awaiting service stops.
+  void invalidateAccountAuthorityForTransition() => _invalidateAiConsentAuthority();
 
   void acceptAiConsent({
     String receiptId = '',
@@ -765,8 +776,46 @@ class SharedPreferencesUtil {
   String _ellaProvisioningVerifiedAtKey(String uid) => 'ellaProvisioningVerifiedAt:$uid';
 
   Future<void> markEllaProvisioningVerified(String uid, {DateTime? at}) async {
-    if (uid.isEmpty || uid != this.uid) return;
+    final receipt = getEllaProvisioningReceipt(uid);
+    final state = receipt?['state']?.toString().toLowerCase();
+    final bindingState = receipt?['binding_state']?.toString().toLowerCase();
+    final bindingRevision = receipt?['binding_revision'];
+    final policyRevision = receipt?['effective_policy_revision']?.toString() ?? '';
+    if (uid.isEmpty ||
+        uid != this.uid ||
+        state != 'ready' ||
+        bindingState != 'active' ||
+        bindingRevision is! int ||
+        bindingRevision <= 0 ||
+        policyRevision.isEmpty) {
+      _clearEllaProvisioningServerVerification();
+      return;
+    }
+    _verifiedEllaProvisioningUid = uid;
+    _verifiedEllaProvisioningBindingRevision = bindingRevision;
+    _verifiedEllaProvisioningPolicyRevision = policyRevision;
+    _verifiedEllaProvisioningAuthorityGeneration = _aiConsentAuthorityGeneration;
     await saveString(_ellaProvisioningVerifiedAtKey(uid), (at ?? DateTime.now()).toUtc().toIso8601String());
+  }
+
+  bool hasCurrentEllaProvisioningAuthority({required String uid, required int bindingRevision}) {
+    if (uid.isEmpty || uid != this.uid || bindingRevision <= 0) return false;
+    final receipt = getEllaProvisioningReceipt(uid);
+    return _verifiedEllaProvisioningUid == uid &&
+        _verifiedEllaProvisioningBindingRevision == bindingRevision &&
+        _verifiedEllaProvisioningPolicyRevision.isNotEmpty &&
+        _verifiedEllaProvisioningAuthorityGeneration == _aiConsentAuthorityGeneration &&
+        receipt?['state']?.toString().toLowerCase() == 'ready' &&
+        receipt?['binding_state']?.toString().toLowerCase() == 'active' &&
+        receipt?['binding_revision'] == bindingRevision &&
+        receipt?['effective_policy_revision'] == _verifiedEllaProvisioningPolicyRevision;
+  }
+
+  static void _clearEllaProvisioningServerVerification() {
+    _verifiedEllaProvisioningUid = '';
+    _verifiedEllaProvisioningBindingRevision = 0;
+    _verifiedEllaProvisioningPolicyRevision = '';
+    _verifiedEllaProvisioningAuthorityGeneration = -1;
   }
 
   DateTime? getEllaProvisioningVerifiedAt(String uid) =>

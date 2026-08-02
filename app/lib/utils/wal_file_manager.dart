@@ -123,13 +123,12 @@ class WalFileManager {
   static Future<void> bindExternalWal(Wal wal, {WalOwner? owner}) async {
     await init(activeOwner: owner);
     final activeOwner = owner ?? _activeOwner;
-    if (activeOwner == null) {
-      await quarantineWal(wal, reason: 'capture_without_owner');
+    if (activeOwner == null || wal.owner == null || !wal.owner!.matches(activeOwner)) {
+      await quarantineWal(wal, reason: 'external_owner_provenance_unverified');
       return;
     }
 
     final sourcePath = wal.filePath;
-    wal.owner = activeOwner;
     wal.quarantineReason = null;
     if (wal.status == WalStatus.quarantined) wal.status = WalStatus.miss;
     if (sourcePath == null || sourcePath.isEmpty) return;
@@ -172,7 +171,7 @@ class WalFileManager {
     }
     if (persist) {
       final current = await _readWals(_quarantineWalFile);
-      current.removeWhere((candidate) => candidate.id == wal.id);
+      current.removeWhere((candidate) => candidate.id == wal.id && candidate.filePath == wal.filePath);
       current.add(wal);
       await _writeWals(_quarantineWalFile, null, current);
     }
@@ -255,7 +254,7 @@ class WalFileManager {
       if (jsonData is! Map<String, dynamic> || jsonData['wals'] is! List) return [];
       return Wal.fromJsonList(jsonData['wals'] as List);
     } catch (error) {
-      Logger.debug('WalFileManager: Could not read ${file.path}: $error');
+      Logger.debug('WalFileManager: Could not read isolated WAL manifest: ${error.runtimeType}');
       return [];
     }
   }

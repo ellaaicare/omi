@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-
 import 'package:path_provider/path_provider.dart';
 
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
@@ -16,6 +14,8 @@ import 'package:omi/utils/logger.dart';
 class FlashPageWalSyncImpl implements FlashPageWalSync {
   static const int pagesPerChunk = 25;
   static const Duration _persistBatchDuration = Duration(seconds: 90);
+  // Current flash-page protocol has no signed owner/provenance proof.
+  static const bool _deviceOwnerProofProtocolAvailable = false;
 
   List<Wal> _wals = const [];
   BtDevice? _device;
@@ -29,7 +29,6 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
 
   bool _isSyncing = false;
   bool _cancelRequested = false;
-  String? _currentDeviceId;
 
   @override
   bool get isSyncing => _isSyncing;
@@ -90,6 +89,10 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
 
   @override
   Future deleteWal(Wal wal) async {
+    if (!_canMutateDeviceWal(wal)) {
+      Logger.debug('FlashPageSync: Refused delete/ack for unverified device audio');
+      return;
+    }
     _wals.removeWhere((w) => w.id == wal.id);
 
     if (_device != null && wal.status == WalStatus.synced) {
@@ -130,7 +133,7 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
       wals.add(Wal(
         codec: BleAudioCodec.opus,
         timerStart: timerStart,
-        status: WalStatus.miss,
+        status: WalStatus.quarantined,
         storage: WalStorage.flashPage,
         seconds: estimatedSeconds,
         storageOffset: _oldestPage,
@@ -140,6 +143,7 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
         deviceModel: deviceModel,
         totalFrames: pageCount * framesPerFlashPage,
         syncedFrameOffset: 0,
+        quarantineReason: 'device_owner_provenance_unverified',
       ));
     }
 
@@ -148,8 +152,14 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
 
   @override
   Future<List<Wal>> getMissingWals() async {
-    return _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.flashPage).toList();
+    return _wals.where(_canMutateDeviceWal).toList();
   }
+
+  bool _canMutateDeviceWal(Wal wal) =>
+      _deviceOwnerProofProtocolAvailable &&
+      wal.storage == WalStorage.flashPage &&
+      wal.status == WalStatus.miss &&
+      wal.owner != null;
 
   @override
   Future start() async {
@@ -168,7 +178,7 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
     IWalSyncProgressListener? progress,
     IWifiConnectionListener? connectionListener,
   }) async {
-    var wals = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.flashPage).toList();
+    var wals = _wals.where(_canMutateDeviceWal).toList();
     if (wals.isEmpty) {
       Logger.debug("FlashPageSync: All downloaded!");
       return null;
@@ -211,6 +221,10 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
     IWalSyncProgressListener? progress,
     IWifiConnectionListener? connectionListener,
   }) async {
+    if (!_canMutateDeviceWal(wal)) {
+      Logger.debug('FlashPageSync: Refused transfer for unverified device audio');
+      return null;
+    }
     var walToSync = _wals.where((w) => w == wal).toList().first;
 
     walToSync.isSyncing = true;
@@ -239,7 +253,6 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
     if (_device == null) return false;
 
     String deviceId = _device!.id;
-    _currentDeviceId = deviceId;
     _cancelRequested = false;
 
     try {
@@ -351,7 +364,7 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
           if (filePath != null) {
             filesSaved++;
             Logger.debug(
-                "FlashPageSync: Saved batch #$filesSaved to disk (${accumulatedFrames.length} frames, ts=$batchMinTimestamp)");
+                'FlashPageSync: Preserved quarantined batch #$filesSaved (${accumulatedFrames.length} frames)');
 
             if (lastProcessedIndex != null) {
               try {
@@ -473,7 +486,7 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
       progress?.onWalSyncedProgress(1.0);
       return true; // Completed successfully
     } catch (e) {
-      Logger.debug("FlashPageSync: Error: $e");
+      Logger.debug('FlashPageSync: Quarantined transfer failed (${e.runtimeType})');
       _isSyncing = false;
 
       // Clear sync progress info on error
@@ -515,7 +528,7 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
 
       return filePath;
     } catch (e) {
-      Logger.debug("FlashPageSync: Save batch error: $e");
+      Logger.debug('FlashPageSync: Quarantined batch preservation failed (${e.runtimeType})');
       return null;
     }
   }
@@ -536,17 +549,18 @@ class FlashPageWalSyncImpl implements FlashPageWalSync {
       timerStart: timestampMs ~/ 1000,
       filePath: fileName,
       storage: WalStorage.disk,
-      status: WalStatus.miss,
+      status: WalStatus.quarantined,
       device: sourceWal.device,
       deviceModel: sourceWal.deviceModel ?? "Limitless",
       seconds: seconds,
       totalFrames: frameCount,
       syncedFrameOffset: 0,
       originalStorage: WalStorage.flashPage,
+      quarantineReason: 'device_owner_provenance_unverified',
     );
 
     await _localSync!.addExternalWal(localWal);
-    Logger.debug("FlashPageSync: Registered chunk (ts: $timestampMs, ${seconds}s) with LocalWalSync");
+    Logger.debug('FlashPageSync: Registered one quarantined chunk with local preservation');
   }
 
   @override

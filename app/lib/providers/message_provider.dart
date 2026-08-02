@@ -21,6 +21,8 @@ import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/main.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -34,12 +36,24 @@ import 'package:omi/utils/streaming_text_coalescer.dart';
 bool get _isEllaApp => true;
 
 typedef ChatAppsRetriever = Future<List<App>> Function();
+typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(String text);
+typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(List<File> files);
+typedef VoiceTempFileSaver = Future<File> Function(List<List<int>> audioBytes, int startTime, int frameSize);
 
 class MessageProvider extends ChangeNotifier {
   static late MethodChannel _askAIChannel;
 
-  MessageProvider({ChatAppsRetriever? chatAppsRetriever})
-      : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps {
+  MessageProvider({
+    ChatAppsRetriever? chatAppsRetriever,
+    ActiveAccountAuthorityProvider? activeAuthority,
+    EllaChatStreamSender? ellaChatStreamSender,
+    VoiceChatStreamSender? voiceChatStreamSender,
+    VoiceTempFileSaver? voiceTempFileSaver,
+  })  : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps,
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
+        _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
+        _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
+        _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile {
     if (PlatformService.isDesktop) {
       _askAIChannel = const MethodChannel('com.omi/ask_ai');
       _askAIChannel.setMethodCallHandler(_handleAskAIMethodCall);
@@ -47,6 +61,11 @@ class MessageProvider extends ChangeNotifier {
   }
 
   final ChatAppsRetriever _chatAppsRetriever;
+  final ActiveAccountAuthorityProvider _activeAuthority;
+  final EllaChatStreamSender _ellaChatStreamSender;
+  final VoiceChatStreamSender _voiceChatStreamSender;
+  final VoiceTempFileSaver _voiceTempFileSaver;
+  int _operationGeneration = 0;
 
   static Future<List<App>> _retrieveInstalledChatApps() async {
     final result = await retrieveAppsSearch(installedApps: true, limit: 50);
@@ -86,6 +105,7 @@ class MessageProvider extends ChangeNotifier {
   }
 
   void reset() {
+    _operationGeneration++;
     messages = [];
     isLoadingMessages = false;
     hasCachedMessages = false;
@@ -95,6 +115,7 @@ class MessageProvider extends ChangeNotifier {
     aiStreamProgress = 1.0;
     firstTimeLoadingText = '';
     chatApps = [];
+    isLoadingChatApps = false;
     selectedFiles = [];
     selectedFileTypes = [];
     uploadedFiles = [];
@@ -102,6 +123,12 @@ class MessageProvider extends ChangeNotifier {
     uploadingFiles = {};
     notifyListeners();
   }
+
+  EllaAccountCommitLease? _beginAccountCommit() =>
+      EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+
+  bool _canCommit(EllaAccountCommitLease lease, int generation) =>
+      generation == _operationGeneration && lease.isCurrent;
 
   void setChatApps(List<App> apps) {
     chatApps = apps;
@@ -115,19 +142,26 @@ class MessageProvider extends ChangeNotifier {
 
   Future<void> fetchChatApps() async {
     if (SharedPreferencesUtil.isPublicBuild || isLoadingChatApps) return;
-
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     isLoadingChatApps = true;
     notifyListeners();
 
     try {
       final apps = await _chatAppsRetriever();
+      if (!_canCommit(lease, generation)) return;
       chatApps = apps.where((app) => app.worksWithChat()).toList();
     } catch (e) {
+      if (!_canCommit(lease, generation)) return;
       Logger.debug('Error fetching chat apps: $e');
       chatApps = [];
     } finally {
-      isLoadingChatApps = false;
-      notifyListeners();
+      if (_canCommit(lease, generation)) {
+        isLoadingChatApps = false;
+        notifyListeners();
+      }
+      lease.close();
     }
   }
 
@@ -388,22 +422,30 @@ class MessageProvider extends ChangeNotifier {
 
   Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
     if (!await _ensureAiConsent()) return null;
-    if (files.isNotEmpty) {
-      setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
-      var res = await uploadFilesServer(files, appId: appId);
-      if (res != null) {
-        uploadedFiles.addAll(res);
-      } else {
-        clearSelectedFiles();
-        final l10n = MyApp.navigatorKey.currentContext?.l10n;
-        AppSnackbar.showSnackbarError(l10n?.msgUploadFileFailed ?? 'Failed to upload file, please try again later');
+    final lease = _beginAccountCommit();
+    if (lease == null) return null;
+    final generation = _operationGeneration;
+    try {
+      if (files.isNotEmpty) {
+        setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
+        var res = await uploadFilesServer(files, appId: appId);
+        if (!_canCommit(lease, generation)) return null;
+        if (res != null) {
+          uploadedFiles.addAll(res);
+        } else {
+          clearSelectedFiles();
+          final l10n = MyApp.navigatorKey.currentContext?.l10n;
+          AppSnackbar.showSnackbarError(l10n?.msgUploadFileFailed ?? 'Failed to upload file, please try again later');
+        }
+        setMultiUploadingFileStatus(files.map((e) => e.path).toList(), false);
+        notifyListeners();
+        return res;
       }
-      setMultiUploadingFileStatus(files.map((e) => e.path).toList(), false);
-      notifyListeners();
-      return res;
-    }
 
-    return null;
+      return null;
+    } finally {
+      lease.close();
+    }
   }
 
   void removeLocalMessage(String id) {
@@ -412,60 +454,69 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future refreshMessages({bool dropdownSelected = false}) async {
-    setLoadingMessages(true);
-    if (SharedPreferencesUtil().demoMode) {
-      messages = DemoFixtures.chatMessages();
-      setHasCachedMessages(true);
-      setLoadingMessages(false);
-      notifyListeners();
-      return;
-    }
-    if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
-      setHasCachedMessages(true);
-    }
-
-    // Ella mode: use local cache first, fall back to server history API.
-    final isEllaApp = _isEllaApp; // TODO: replace with flavor check
-    if (isEllaApp) {
-      final cached = SharedPreferencesUtil().cachedMessages;
-      if (cached.isNotEmpty) {
-        messages = cached;
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      setLoadingMessages(true);
+      if (SharedPreferencesUtil().demoMode) {
+        messages = DemoFixtures.chatMessages();
+        setHasCachedMessages(true);
+        setLoadingMessages(false);
+        notifyListeners();
+        return;
+      }
+      if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
         setHasCachedMessages(true);
       }
 
-      // Always try to rehydrate from server so a bad local/demo cache from a
-      // previous TestFlight cannot mask the real account timeline.
-      final history = await fetchEllaChatHistory(limit: 50);
-      if (history.isNotEmpty) {
-        messages = history;
+      // Ella mode: use local cache first, fall back to server history API.
+      final isEllaApp = _isEllaApp; // TODO: replace with flavor check
+      if (isEllaApp) {
+        final cached = SharedPreferencesUtil().cachedMessages;
+        if (cached.isNotEmpty) {
+          messages = cached;
+          setHasCachedMessages(true);
+        }
+
+        // Always try to rehydrate from server so a bad local/demo cache from a
+        // previous TestFlight cannot mask the real account timeline.
+        final history = await fetchEllaChatHistory(limit: 50);
+        if (!_canCommit(lease, generation)) return;
+        if (history.isNotEmpty) {
+          messages = history;
+          SharedPreferencesUtil().cachedMessages = messages;
+          setHasCachedMessages(true);
+        }
+        messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        setLoadingMessages(false);
+        notifyListeners();
+        return;
+      }
+
+      // Stock OMI mode: fetch from /v2/messages as before
+      // Preserve locally-injected voice messages before server fetch
+      final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
+      messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
+      if (!_canCommit(lease, generation)) return;
+      if (messages.isEmpty) {
+        messages = SharedPreferencesUtil().cachedMessages;
+      } else {
+        // Merge back voice messages that aren't on server yet
+        for (final vm in localVoiceMessages) {
+          if (messages.firstWhereOrNull((m) => m.id == vm.id) == null) {
+            messages.add(vm);
+          }
+        }
         SharedPreferencesUtil().cachedMessages = messages;
         setHasCachedMessages(true);
       }
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
       notifyListeners();
-      return;
+    } finally {
+      lease.close();
     }
-
-    // Stock OMI mode: fetch from /v2/messages as before
-    // Preserve locally-injected voice messages before server fetch
-    final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
-    messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
-    if (messages.isEmpty) {
-      messages = SharedPreferencesUtil().cachedMessages;
-    } else {
-      // Merge back voice messages that aren't on server yet
-      for (final vm in localVoiceMessages) {
-        if (messages.firstWhereOrNull((m) => m.id == vm.id) == null) {
-          messages.add(vm);
-        }
-      }
-      SharedPreferencesUtil().cachedMessages = messages;
-      setHasCachedMessages(true);
-    }
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    setLoadingMessages(false);
-    notifyListeners();
   }
 
   void setMessagesFromCache() {
@@ -478,39 +529,63 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<ServerMessage>> getMessagesFromServer({bool dropdownSelected = false}) async {
-    final l10n = MyApp.navigatorKey.currentContext?.l10n;
-    if (!hasCachedMessages) {
-      firstTimeLoadingText = l10n?.msgReadingMemories ?? 'Reading your memories...';
+    final lease = _beginAccountCommit();
+    if (lease == null) return const [];
+    final generation = _operationGeneration;
+    try {
+      final l10n = MyApp.navigatorKey.currentContext?.l10n;
+      if (!hasCachedMessages) {
+        firstTimeLoadingText = l10n?.msgReadingMemories ?? 'Reading your memories...';
+        notifyListeners();
+      }
+      setLoadingMessages(true);
+      var mes = await getMessagesServer(appId: appProvider?.selectedChatAppId, dropdownSelected: dropdownSelected);
+      if (!_canCommit(lease, generation)) return const [];
+      if (!hasCachedMessages) {
+        firstTimeLoadingText = l10n?.msgLearningMemories ?? 'Learning from your memories...';
+        notifyListeners();
+      }
+      messages = mes;
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      setLoadingMessages(false);
       notifyListeners();
+      return messages;
+    } finally {
+      lease.close();
     }
-    setLoadingMessages(true);
-    var mes = await getMessagesServer(appId: appProvider?.selectedChatAppId, dropdownSelected: dropdownSelected);
-    if (!hasCachedMessages) {
-      firstTimeLoadingText = l10n?.msgLearningMemories ?? 'Learning from your memories...';
-      notifyListeners();
-    }
-    messages = mes;
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    setLoadingMessages(false);
-    notifyListeners();
-    return messages;
   }
 
   Future setMessageNps(ServerMessage message, int value, {String? reason}) async {
-    await setMessageResponseRating(message.id, value, reason: reason);
-    message.askForNps = false;
-    // Update local message rating so it persists when scrolling
-    message.rating = value == 0 ? null : value;
-    notifyListeners();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      await setMessageResponseRating(message.id, value, reason: reason);
+      if (!_canCommit(lease, generation)) return;
+      message.askForNps = false;
+      // Update local message rating so it persists when scrolling
+      message.rating = value == 0 ? null : value;
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   Future clearChat() async {
-    setClearingChat(true);
-    var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
-    messages = mes;
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    setClearingChat(false);
-    notifyListeners();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      setClearingChat(true);
+      var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
+      if (!_canCommit(lease, generation)) return;
+      messages = mes;
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      setClearingChat(false);
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   void addMessageLocally(String messageText) {
@@ -556,194 +631,230 @@ class MessageProvider extends ChangeNotifier {
     BleAudioCodec? codec,
   }) async {
     if (!await _ensureAiConsent()) return;
-    var file = await FileUtils.saveAudioBytesToTempFile(
-      audioBytes,
-      DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
-      codec?.getFrameSize() ?? 160,
-    );
-
-    var currentAppId = appProvider?.selectedChatAppId;
-    if (currentAppId == 'no_selected') {
-      currentAppId = null;
-    }
-    String chatTargetId = currentAppId ?? 'omi';
-    App? targetApp = currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
-    bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
-
-    MixpanelManager().chatVoiceInputUsed(chatTargetId: chatTargetId, isPersonaChat: isPersonaChat);
-
-    setShowTypingIndicator(true);
-    var message = ServerMessage.empty();
-    messages.add(message);
-    var aiIndex = messages.length - 1;
-    final textCoalescer = StreamingTextCoalescer();
-    notifyListeners();
-
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final operationGeneration = _operationGeneration;
     try {
-      bool firstChunkRecieved = false;
-      await for (var chunk in sendVoiceMessageStreamServer([file])) {
-        if (!firstChunkRecieved &&
-            [
-              MessageChunkType.message,
-              MessageChunkType.data,
-              MessageChunkType.done,
-              MessageChunkType.think,
-            ].contains(chunk.type)) {
-          firstChunkRecieved = true;
-          if (onFirstChunkRecived != null) {
-            onFirstChunkRecived();
-          }
-        }
+      var file = await _voiceTempFileSaver(
+        audioBytes,
+        DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
+        codec?.getFrameSize() ?? 160,
+      );
+      if (!_canCommit(lease, operationGeneration)) return;
 
-        if (chunk.type == MessageChunkType.think) {
-          message.thinkings.add(chunk.text);
-          notifyListeners();
-          continue;
-        }
+      var currentAppId = appProvider?.selectedChatAppId;
+      if (currentAppId == 'no_selected') {
+        currentAppId = null;
+      }
+      String chatTargetId = currentAppId ?? 'omi';
+      App? targetApp =
+          currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
+      bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
 
-        if (chunk.type == MessageChunkType.data) {
-          final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
-          if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
-          message.text = textCoalescer.addPartial(utteranceId, chunk.text);
-          notifyListeners();
-          continue;
-        }
+      MixpanelManager().chatVoiceInputUsed(chatTargetId: chatTargetId, isPersonaChat: isPersonaChat);
 
-        if (chunk.type == MessageChunkType.done) {
-          if (chunk.message != null) {
-            message = chunk.message!;
-            messages[aiIndex] = message;
-          }
-          textCoalescer.complete(chunk.messageId);
-          notifyListeners();
-          continue;
-        }
+      if (!_canCommit(lease, operationGeneration)) return;
+      setShowTypingIndicator(true);
+      var message = ServerMessage.empty();
+      messages.add(message);
+      var aiIndex = messages.length - 1;
+      final textCoalescer = StreamingTextCoalescer();
+      notifyListeners();
 
-        if (chunk.type == MessageChunkType.message) {
-          final incoming = chunk.message;
-          if (incoming != null) {
-            final existingIndex = messages.indexWhere((candidate) => candidate.id == incoming.id);
-            if (existingIndex >= 0) {
-              messages[existingIndex] = incoming;
-              if (existingIndex == aiIndex) message = incoming;
-            } else {
-              messages.insert(aiIndex, incoming);
-              aiIndex++;
+      try {
+        bool firstChunkRecieved = false;
+        await for (var chunk in _voiceChatStreamSender([file])) {
+          if (!_canCommit(lease, operationGeneration)) return;
+          if (!firstChunkRecieved &&
+              [
+                MessageChunkType.message,
+                MessageChunkType.data,
+                MessageChunkType.done,
+                MessageChunkType.think,
+              ].contains(chunk.type)) {
+            firstChunkRecieved = true;
+            if (onFirstChunkRecived != null) {
+              onFirstChunkRecived();
             }
           }
-          notifyListeners();
-          continue;
-        }
 
-        if (chunk.type == MessageChunkType.error) {
-          message.text = chunk.text;
-          notifyListeners();
-          continue;
+          if (chunk.type == MessageChunkType.think) {
+            message.thinkings.add(chunk.text);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.data) {
+            final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
+            if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
+            message.text = textCoalescer.addPartial(utteranceId, chunk.text);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.done) {
+            if (chunk.message != null) {
+              message = chunk.message!;
+              messages[aiIndex] = message;
+            }
+            textCoalescer.complete(chunk.messageId);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.message) {
+            final incoming = chunk.message;
+            if (incoming != null) {
+              final existingIndex = messages.indexWhere((candidate) => candidate.id == incoming.id);
+              if (existingIndex >= 0) {
+                messages[existingIndex] = incoming;
+                if (existingIndex == aiIndex) message = incoming;
+              } else {
+                messages.insert(aiIndex, incoming);
+                aiIndex++;
+              }
+            }
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.error) {
+            message.text = chunk.text;
+            notifyListeners();
+            continue;
+          }
         }
+      } catch (e) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        message.text = ServerMessageChunk.failedMessage().text;
+        notifyListeners();
       }
-    } catch (e) {
-      message.text = ServerMessageChunk.failedMessage().text;
-      notifyListeners();
-    }
 
-    setShowTypingIndicator(false);
+      if (_canCommit(lease, operationGeneration)) setShowTypingIndicator(false);
+    } finally {
+      lease.close();
+    }
   }
 
   Future sendMessageStreamToServer(String text) async {
     if (!await _ensureAiConsent()) return;
-    if (SharedPreferencesUtil().demoMode) {
-      messages = DemoFixtures.chatMessages();
-      setSendingMessage(false);
-      setShowTypingIndicator(false);
-      notifyListeners();
-      return;
-    }
-    aiStreamProgress = 0.0;
-    setShowTypingIndicator(true);
-    var currentAppId = appProvider?.selectedChatAppId;
-    if (currentAppId == 'no_selected') {
-      currentAppId = null;
-    }
-
-    String chatTargetId = currentAppId ?? 'omi';
-    App? targetApp = currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
-    bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
-
-    MixpanelManager().chatMessageSent(
-      message: text,
-      includesFiles: uploadedFiles.isNotEmpty,
-      numberOfFiles: uploadedFiles.length,
-      chatTargetId: chatTargetId,
-      isPersonaChat: isPersonaChat,
-      isVoiceInput: _isNextMessageFromVoice,
-    );
-    _isNextMessageFromVoice = false;
-
-    var message = ServerMessage.empty(appId: currentAppId);
-    messages.add(message);
-    final aiIndex = messages.length - 1;
-    final textCoalescer = StreamingTextCoalescer();
-    notifyListeners();
-    List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
-    clearSelectedFiles();
-    clearUploadedFiles();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final operationGeneration = _operationGeneration;
     try {
-      // Ella uses its own simple chat endpoint; OMI uses the graph chat
-      final isEllaApp = _isEllaApp; // TODO: replace with flavor check
-      var stream =
-          isEllaApp ? sendEllaChatStream(text) : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
-      await for (var chunk in stream) {
-        if (chunk.type == MessageChunkType.think) {
-          message.thinkings.add(chunk.text);
-          notifyListeners();
-          continue;
-        }
+      if (SharedPreferencesUtil().demoMode) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        messages = DemoFixtures.chatMessages();
+        setSendingMessage(false);
+        setShowTypingIndicator(false);
+        notifyListeners();
+        return;
+      }
+      if (!_canCommit(lease, operationGeneration)) return;
+      aiStreamProgress = 0.0;
+      setShowTypingIndicator(true);
+      var currentAppId = appProvider?.selectedChatAppId;
+      if (currentAppId == 'no_selected') {
+        currentAppId = null;
+      }
 
-        if (chunk.type == MessageChunkType.data) {
-          final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
-          if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
-          message.text = textCoalescer.addPartial(utteranceId, chunk.text);
-          aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
-          HapticFeedback.lightImpact();
-          notifyListeners();
-          continue;
-        }
+      String chatTargetId = currentAppId ?? 'omi';
+      App? targetApp =
+          currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
+      bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
 
-        if (chunk.type == MessageChunkType.done) {
-          // Guard: OpenAI-style done chunks may have null message
-          if (chunk.message != null) {
-            message = chunk.message!;
-            messages[aiIndex] = message;
+      MixpanelManager().chatMessageSent(
+        message: text,
+        includesFiles: uploadedFiles.isNotEmpty,
+        numberOfFiles: uploadedFiles.length,
+        chatTargetId: chatTargetId,
+        isPersonaChat: isPersonaChat,
+        isVoiceInput: _isNextMessageFromVoice,
+      );
+      _isNextMessageFromVoice = false;
+
+      if (!_canCommit(lease, operationGeneration)) return;
+      var message = ServerMessage.empty(appId: currentAppId);
+      messages.add(message);
+      final aiIndex = messages.length - 1;
+      final textCoalescer = StreamingTextCoalescer();
+      notifyListeners();
+      List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
+      clearSelectedFiles();
+      clearUploadedFiles();
+      try {
+        // Ella uses its own simple chat endpoint; OMI uses the graph chat
+        final isEllaApp = _isEllaApp; // TODO: replace with flavor check
+        var stream = isEllaApp
+            ? _ellaChatStreamSender(text)
+            : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
+        await for (var chunk in stream) {
+          if (!_canCommit(lease, operationGeneration)) return;
+          if (chunk.type == MessageChunkType.think) {
+            message.thinkings.add(chunk.text);
+            notifyListeners();
+            continue;
           }
-          textCoalescer.complete(chunk.messageId);
-          notifyListeners();
-          continue;
-        }
 
-        if (chunk.type == MessageChunkType.error) {
-          message.text = chunk.text;
-          notifyListeners();
-          continue;
+          if (chunk.type == MessageChunkType.data) {
+            final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
+            if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
+            message.text = textCoalescer.addPartial(utteranceId, chunk.text);
+            aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
+            HapticFeedback.lightImpact();
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.done) {
+            // Guard: OpenAI-style done chunks may have null message
+            if (chunk.message != null) {
+              message = chunk.message!;
+              messages[aiIndex] = message;
+            }
+            textCoalescer.complete(chunk.messageId);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.error) {
+            message.text = chunk.text;
+            notifyListeners();
+            continue;
+          }
+        }
+      } catch (e) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        message.text = ServerMessageChunk.failedMessage().text;
+        notifyListeners();
+      } finally {
+        if (_canCommit(lease, operationGeneration)) {
+          aiStreamProgress = 1.0;
+          setShowTypingIndicator(false);
+          setSendingMessage(false);
+          // Persist only while the exact account authority remains current.
+          SharedPreferencesUtil().cachedMessages = messages;
         }
       }
-    } catch (e) {
-      message.text = ServerMessageChunk.failedMessage().text;
-      notifyListeners();
     } finally {
-      aiStreamProgress = 1.0;
-      setShowTypingIndicator(false);
-      setSendingMessage(false);
-      // Persist full message list to cache so Ella messages survive refresh
-      SharedPreferencesUtil().cachedMessages = messages;
+      lease.close();
     }
   }
 
   Future sendInitialAppMessage(App? app) async {
-    setSendingMessage(true);
-    ServerMessage message = await getInitialAppMessage(app?.id);
-    addMessage(message);
-    setSendingMessage(false);
-    notifyListeners();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      setSendingMessage(true);
+      ServerMessage message = await getInitialAppMessage(app?.id);
+      if (!_canCommit(lease, generation)) return;
+      addMessage(message);
+      setSendingMessage(false);
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   App? messageSenderApp(String? appId) {

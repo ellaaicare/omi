@@ -52,16 +52,28 @@ class LocalWalSyncImpl implements LocalWalSync {
   @override
   Future<void> addExternalWal(Wal wal) async {
     await _waitForInitialization();
-    await WalFileManager.bindExternalWal(wal, owner: _currentOwner());
+    final authority = _activeAuthority();
+    if (authority == null || !authority.isCurrent() || wal.owner == null || !wal.owner!.matches(authority.owner)) {
+      await WalFileManager.quarantineWal(wal, reason: 'external_owner_provenance_unverified');
+      listener.onWalUpdated();
+      Logger.debug('LocalWalSync: Quarantined external WAL without exact owner authority');
+      return;
+    }
+    await WalFileManager.bindExternalWal(wal, owner: authority.owner);
+    if (!authority.isCurrent()) {
+      await WalFileManager.quarantineWal(wal, reason: 'external_authority_changed_in_flight');
+      listener.onWalUpdated();
+      return;
+    }
     final existingIndex = _wals.indexWhere((w) => w.id == wal.id);
     if (existingIndex >= 0) {
-      Logger.debug("LocalWalSync: WAL ${wal.id} already exists, skipping");
+      Logger.debug('LocalWalSync: Exact-owner external WAL already exists, skipping');
       return;
     }
     _wals.add(wal);
     await _saveWalsToFile();
     listener.onWalUpdated();
-    Logger.debug("LocalWalSync: Added external WAL ${wal.id} (${wal.seconds}s)");
+    Logger.debug('LocalWalSync: Added exact-owner external WAL (${wal.seconds}s)');
   }
 
   @override
@@ -191,7 +203,8 @@ class LocalWalSyncImpl implements LocalWalSync {
       Logger.debug("${low} - ${high} - ${syncedOffset} - ${chunkFrameCount} - ${_framesPerSecond}");
 
       Wal wal;
-      final owner = _currentOwner();
+      final authority = _activeAuthority();
+      final owner = authority != null && authority.isCurrent() ? authority.owner : null;
       var walIdx = _wals.indexWhere((w) =>
           w.timerStart == timerStart &&
           w.device == (_deviceId ?? "omi") &&
@@ -271,7 +284,7 @@ class LocalWalSyncImpl implements LocalWalSync {
         wal.filePath = file.path;
         wal.storage = WalStorage.disk;
 
-        Logger.debug("_flush file ${wal.filePath}");
+        Logger.debug('LocalWalSync: Flushed one WAL to account-isolated storage');
 
         _wals[i] = wal;
       }
@@ -296,7 +309,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           }
         }
       } catch (e) {
-        Logger.debug(e.toString());
+        Logger.debug('LocalWalSync: Account-isolated WAL deletion failed (${e.runtimeType})');
         return false;
       }
     }
@@ -389,26 +402,24 @@ class LocalWalSyncImpl implements LocalWalSync {
       final batch = <Wal>[];
       for (var j = left; j <= right; j++) {
         final wal = wals[j];
-        Logger.debug("sync id ${wal.id} ${wal.timerStart}");
+        Logger.debug('LocalWalSync: Preparing one pending WAL');
         if (wal.filePath == null) {
-          Logger.debug("file path is not found. wal id ${wal.id}");
+          Logger.debug('LocalWalSync: Pending WAL has no file reference');
           wal.status = WalStatus.corrupted;
           continue;
         }
 
         final fullPath = await WalFileManager.resolveWalFilePath(wal);
-        Logger.debug("sync wal: ${wal.id} file: $fullPath");
-
         try {
           if (fullPath == null) {
-            Logger.debug("could not construct file path for wal id ${wal.id}");
+            Logger.debug('LocalWalSync: Could not resolve isolated WAL file');
             wal.status = WalStatus.corrupted;
             continue;
           }
 
           final file = File(fullPath);
           if (!file.existsSync()) {
-            Logger.debug("file $fullPath does not exist");
+            Logger.debug('LocalWalSync: Isolated WAL file does not exist');
             wal.status = WalStatus.corrupted;
             continue;
           }
@@ -417,7 +428,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           wal.isSyncing = true;
         } catch (e) {
           wal.status = WalStatus.corrupted;
-          Logger.debug(e.toString());
+          Logger.debug('LocalWalSync: Account-isolated WAL read failed (${e.runtimeType})');
         }
       }
 
@@ -451,7 +462,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           listener.onWalSynced(wal);
         }
       } catch (e) {
-        Logger.debug('Local WAL sync batch failed: $e, continuing with remaining files');
+        Logger.debug('LocalWalSync: Batch failed (${e.runtimeType}); continuing');
         for (final wal in batch) {
           _clearSyncState(wal);
         }

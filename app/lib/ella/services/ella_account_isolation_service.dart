@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/services/services.dart';
@@ -22,6 +23,11 @@ class EllaAccountIsolationService {
   final FutureOr<void> Function()? quarantineLegacy;
 
   Future<void> stopForAccountTransition() async {
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    if (ServiceManager.isInitialized) {
+      await ServiceManager.instance().stopCaptureForAccountTransition();
+    }
     await stopCapture?.call();
     if (stopV2v != null) {
       await stopV2v!.call();

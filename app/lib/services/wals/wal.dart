@@ -44,7 +44,8 @@ class WalOwner {
       uid == other.uid &&
       profileBindingId == other.profileBindingId &&
       bindingRevision == other.bindingRevision &&
-      consentReceiptId == other.consentReceiptId;
+      consentReceiptId == other.consentReceiptId &&
+      authorityGenerationAtCapture == other.authorityGenerationAtCapture;
 
   factory WalOwner.fromJson(Map<String, dynamic> json) => WalOwner(
         uid: json['uid'] as String? ?? '',

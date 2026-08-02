@@ -3,20 +3,26 @@ import 'package:just_audio/just_audio.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/person.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/providers/base_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
 class PeopleProvider extends BaseProvider {
   PeopleProvider({
     Future<List<Person>> Function()? fetchPeople,
     SharedPreferencesUtil? preferences,
+    ActiveAccountAuthorityProvider? activeAuthority,
   })  : _fetchPeople = fetchPeople ?? getAllPeople,
-        _preferences = preferences ?? SharedPreferencesUtil() {
+        _preferences = preferences ?? SharedPreferencesUtil(),
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount {
     people = _preferences.cachedPeople;
   }
 
   final Future<List<Person>> Function() _fetchPeople;
   final SharedPreferencesUtil _preferences;
+  final ActiveAccountAuthorityProvider _activeAuthority;
+  int _operationGeneration = 0;
   late List<Person> people;
   Map<String, List<String>> samplesUrl = {};
 
@@ -33,6 +39,7 @@ class PeopleProvider extends BaseProvider {
   }
 
   void reset() {
+    _operationGeneration++;
     people = [];
     samplesUrl = {};
     currentPlayingPersonIndex = null;
@@ -42,21 +49,23 @@ class PeopleProvider extends BaseProvider {
   }
 
   setPeople() async {
-    final expectedUid = _preferences.uid;
-    if (expectedUid.isEmpty) {
+    final lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+    if (lease == null) {
       loading = false;
       return;
     }
-    final value = await _fetchPeople();
-    if (_preferences.uid != expectedUid) {
+    final generation = _operationGeneration;
+    try {
+      final value = await _fetchPeople();
+      if (generation != _operationGeneration || !lease.isCurrent) return;
       loading = false;
-      return;
+      people = value;
+      _preferences.cachedPeople = people;
+      Logger.debug('${people.length} people refreshed');
+      notifyListeners();
+    } finally {
+      lease.close();
     }
-    loading = false;
-    people = value;
-    _preferences.cachedPeople = people;
-    Logger.debug("${_preferences.cachedPeople.length} people");
-    notifyListeners();
   }
 
   void _setupAudioPlayerListeners() {

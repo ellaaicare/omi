@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/services/ella_legal_links.dart';
@@ -56,4 +58,84 @@ void main() {
     expect(allowsInheritedOmiSurface(isPublicBuild: false), isTrue);
     expect(allowsUnverifiedEllaSurface(isPublicBuild: false), isTrue);
   });
+
+  test('WAL diagnostics contain no stable owner namespace, identifier, or account path', () {
+    final sources = [
+      'lib/services/wals/local_wal_sync.dart',
+      'lib/services/wals/sdcard_wal_sync.dart',
+      'lib/services/wals/flash_page_wal_sync.dart',
+      'lib/utils/wal_file_manager.dart',
+      'lib/utils/audio_player_utils.dart',
+      'lib/providers/sync_provider.dart',
+    ];
+    final loggerInvocation = RegExp(r'Logger\.(?:debug|info|warn|error)\(.*?\);', dotAll: true);
+    final forbidden = [
+      'storageNamespace',
+      'wal.id',
+      'wal.filePath',
+      r'$filePath',
+      '_accountsDirectory',
+      'profileBindingId',
+      'consentReceiptId',
+      'owner.uid',
+    ];
+
+    for (final relativePath in sources) {
+      final source = File('${_appRoot().path}/$relativePath').readAsStringSync();
+      for (final match in loggerInvocation.allMatches(source)) {
+        for (final value in forbidden) {
+          expect(match.group(0), isNot(contains(value)), reason: '$relativePath diagnostic exposed $value');
+        }
+      }
+    }
+  });
+
+  test('every direct Firebase identity mutation is behind unconditional quiescence', () {
+    final lib = Directory('${_appRoot().path}/lib');
+    final mutation =
+        RegExp(r'FirebaseAuth\.instance\.(?:signOut|signInWithCredential|signInAnonymously|signInWithCustomToken)');
+    final mutationFiles = lib
+        .listSync(recursive: true)
+        .whereType<File>()
+        .where((file) => file.path.endsWith('.dart') && mutation.hasMatch(file.readAsStringSync()))
+        .map((file) => file.path.substring(lib.path.length + 1))
+        .toSet();
+    expect(mutationFiles, {'services/auth_service.dart'});
+
+    final auth = File('${lib.path}/services/auth_service.dart').readAsStringSync();
+    expect(auth, contains('Future<T> _runIdentityTransition<T>'));
+    expect(auth.indexOf('stopForAccountTransition()'), lessThan(auth.indexOf('return mutation();')));
+    expect(auth, contains('Future<void> signOut() => _runIdentityTransition(FirebaseAuth.instance.signOut)'));
+    expect(auth, contains('replaceIdentityWithCredential'));
+
+    final isolation = File('${lib.path}/ella/services/ella_account_isolation_service.dart').readAsStringSync();
+    expect(
+      isolation.indexOf('stopCaptureForAccountTransition()'),
+      lessThan(isolation.indexOf('stopCapture?.call()')),
+    );
+    expect(isolation.indexOf('quiesceForAccountTransition()'), lessThan(isolation.indexOf('stopCapture?.call()')));
+
+    final services = File('${lib.path}/services/services.dart').readAsStringSync();
+    final suspend = services.substring(
+      services.indexOf('Future<void> suspendForAccountTransition()'),
+      services.indexOf('Future<void> stopCaptureForAccountTransition()'),
+    );
+    for (final requiredStop in [
+      '_socket.stop()',
+      '_wal.stop()',
+      '_mic.stop()',
+      '_device.stop()',
+      '_systemAudio.stop()'
+    ]) {
+      expect(suspend, contains(requiredStop));
+    }
+  });
+}
+
+Directory _appRoot() {
+  final current = Directory.current;
+  if (File('${current.path}/pubspec.yaml').existsSync()) return current;
+  final nested = Directory('${current.path}/app');
+  if (File('${nested.path}/pubspec.yaml').existsSync()) return nested;
+  throw StateError('Unable to locate Flutter app root from ${current.path}');
 }

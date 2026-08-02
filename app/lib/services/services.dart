@@ -84,13 +84,22 @@ class ServiceManager {
   }
 
   Future<void> suspendForAccountTransition() async {
-    if (!_started) return;
     await _socket.stop();
     await _wal.stop();
     _mic.stop();
     _device.stop();
     if (Platform.isMacOS) _systemAudio.stop();
     _started = false;
+  }
+
+  /// Stops every physical capture surface even when provider state is absent
+  /// or service startup did not finish. Account transitions call this before
+  /// any optional UI/provider cleanup callback.
+  Future<void> stopCaptureForAccountTransition() async {
+    await _socket.stop();
+    _mic.stop();
+    _device.stop();
+    if (Platform.isMacOS) _systemAudio.stop();
   }
 
   void deinit() async {

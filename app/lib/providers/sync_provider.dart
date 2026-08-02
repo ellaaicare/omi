@@ -167,7 +167,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     _updateSyncState(_syncState.toIdle());
     await _performSync(
       operation: () => _walService.getSyncs().syncWal(wal: wal, progress: this, connectionListener: connectionListener),
-      context: 'sync WAL ${wal.id}',
+      context: 'sync one WAL',
       failedWal: wal,
     );
   }
@@ -197,7 +197,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       }
     } catch (e) {
       final errorMessage = _formatSyncError(e, failedWal);
-      Logger.debug('SyncProvider: Error in $context: $errorMessage');
+      Logger.debug('SyncProvider: $context failed (${e.runtimeType})');
       _updateSyncState(_syncState.toError(message: errorMessage, failedWal: failedWal));
     }
   }

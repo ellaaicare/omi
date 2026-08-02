@@ -73,5 +73,5 @@ Future<void> signOutAndClearUserData(BuildContext context) async {
   await SharedPreferencesUtil().clear();
 
   // Sign out of Firebase
-  await AuthService.instance.signOut(accountIsolationApplied: true);
+  await AuthService.instance.signOut();
 }

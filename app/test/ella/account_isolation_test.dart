@@ -1,15 +1,24 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/memory.dart';
+import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
+import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/services/ella_workspace_status.dart';
+import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/providers/memories_provider.dart';
+import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
+import 'package:omi/services/wals/wal.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -78,15 +87,98 @@ void main() {
   test('people response after account switch is not cached under the new account', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     final response = Completer<List<Person>>();
-    final provider = PeopleProvider(preferences: prefs, fetchPeople: () => response.future);
+    final provider = PeopleProvider(
+      preferences: prefs,
+      fetchPeople: () => response.future,
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+    );
 
     final pending = provider.setPeople();
+    await _quiesce();
     prefs.uid = 'uid-b';
     response.complete([_person('person-a')]);
     await pending;
 
     expect(prefs.cachedPeople, isEmpty);
     expect(provider.people, isEmpty);
+  });
+
+  test('account switch during Ella chat streaming cannot mutate or persist under the next account', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final controller = StreamController<ServerMessageChunk>();
+    final started = Completer<void>();
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      ellaChatStreamSender: (text) {
+        started.complete();
+        return controller.stream;
+      },
+    );
+
+    final pending = provider.sendMessageStreamToServer('account A message');
+    await started.future;
+    await _quiesce();
+    prefs.uid = 'uid-b';
+    controller.add(ServerMessageChunk('message-a', 'stale response', MessageChunkType.data));
+    await controller.close();
+    await pending;
+
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+  });
+
+  test('account switch during voice streaming cannot mutate or persist under the next account', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final controller = StreamController<ServerMessageChunk>();
+    final started = Completer<void>();
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      voiceTempFileSaver: (bytes, startTime, frameSize) async =>
+          File('${Directory.systemTemp.path}/ella-voice-authority-test.bin')..writeAsBytesSync([1, 2, 3]),
+      voiceChatStreamSender: (files) {
+        started.complete();
+        return controller.stream;
+      },
+    );
+
+    final pending = provider.sendVoiceMessageStreamToServer([
+      [1, 2, 3]
+    ]);
+    await started.future;
+    await _quiesce();
+    prefs.uid = 'uid-b';
+    controller.add(ServerMessageChunk('voice-a', 'stale voice response', MessageChunkType.data));
+    await controller.close();
+    await pending;
+
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+  });
+
+  test('account switch during conversation reprocessing cannot persist account A result under B', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    final response = Completer<ServerConversation?>();
+    final started = Completer<void>();
+    final provider = ConversationDetailProvider(
+      preferences: prefs,
+      activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
+      reprocessConversation: (id, {appId}) {
+        started.complete();
+        return response.future;
+      },
+    )..setCachedConversation(_conversation('conversation-a', 'before'));
+
+    final pending = provider.reprocessConversation();
+    await started.future;
+    await _quiesce();
+    prefs.uid = 'uid-b';
+    response.complete(_conversation('conversation-a', 'stale account A result'));
+
+    expect(await pending, isFalse);
+    expect(provider.loadingReprocessConversation, isFalse);
+    expect(prefs.modifiedConversationDetails, isNull);
   });
 
   test('capture, V2V reconnect, Guardian poll, WAL and legacy quarantine stop in order', () async {
@@ -150,6 +242,45 @@ Future<void> _grantAuthority(SharedPreferencesUtil prefs, String uid) async {
     scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
   );
 }
+
+Future<void> _quiesce() => EllaAccountIsolationService(
+      stopCapture: () {},
+      stopV2v: () {},
+      stopGuardian: () {},
+      stopServices: () {},
+      quarantineLegacy: () {},
+    ).stopForAccountTransition();
+
+ActiveWalAuthority _activeAuthority(String uid, bool Function() current) {
+  final owner = WalOwner(
+    uid: uid,
+    profileBindingId: 'profile-$uid',
+    bindingRevision: 3,
+    consentReceiptId: 'aicr_$uid',
+    authorityGenerationAtCapture: 7,
+  );
+  return ActiveWalAuthority(
+    owner: owner,
+    consent: AiConsentAuthoritySnapshot(
+      generation: 7,
+      uid: uid,
+      verifiedPersonaId: null,
+      profileBindingId: owner.profileBindingId,
+      receiptId: owner.consentReceiptId,
+      policyVersion: 'v8',
+      processorSetHash: 'processors',
+      scopeVersion: 'scope-v2',
+      scopeHash: 'scope',
+    ),
+    currentCheck: current,
+  );
+}
+
+ServerConversation _conversation(String id, String overview) => ServerConversation(
+      id: id,
+      createdAt: DateTime.now(),
+      structured: Structured('Title', overview),
+    );
 
 Memory _memory(String id, String uid) => Memory(
       id: id,
