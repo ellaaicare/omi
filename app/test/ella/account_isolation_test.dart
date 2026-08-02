@@ -4,6 +4,9 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_background_service_platform_interface/flutter_background_service_platform_interface.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+import 'package:flutter_sound_platform_interface/flutter_sound_recorder_platform_interface.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -102,7 +105,7 @@ void main() {
     final response = Completer<List<Person>>();
     final provider = PeopleProvider(
       preferences: prefs,
-      fetchPeople: () => response.future,
+      fetchPeople: (_) => response.future,
       activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
     );
 
@@ -114,6 +117,86 @@ void main() {
 
     expect(prefs.cachedPeople, isEmpty);
     expect(provider.people, isEmpty);
+  });
+
+  test('production People GET rejects same-UID lease drift before egress and recovers loading', () async {
+    for (final drift in _PeopleLeaseDrift.values) {
+      SharedPreferences.setMockInitialValues({});
+      await SharedPreferencesUtil.init();
+      final prefs = SharedPreferencesUtil()
+        ..uid = 'uid-a'
+        ..authToken = 'test-token'
+        ..tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
+      final cached = _person('cached-a');
+      prefs.cachedPeople = [cached];
+      final state = _PeopleLeaseState();
+      final authority = _DriftingPeopleAuthority(state, drift);
+      var requests = 0;
+      HttpPoolManager.instance.replaceClientForTesting(MockClient((request) async {
+        requests++;
+        return http.Response('[]', 200);
+      }));
+      final provider = PeopleProvider(
+        preferences: prefs,
+        activeAuthority: () => authority,
+      )..loading = true;
+
+      await provider.setPeople();
+
+      expect(requests, 0, reason: '$drift must fail before the real HTTP client send');
+      expect(provider.loading, isFalse, reason: '$drift must not strand the current account loading state');
+      expect(provider.people.single.id, cached.id);
+      expect(prefs.cachedPeople.single.id, cached.id);
+      expect(authority.checks, greaterThanOrEqualTo(4));
+    }
+  });
+
+  test('stale production People GET completion cannot clear active next-account loading', () async {
+    final prefs = SharedPreferencesUtil()
+      ..uid = 'uid-a'
+      ..authToken = 'test-token'
+      ..tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
+    var currentUid = 'uid-a';
+    final firstStarted = Completer<void>();
+    final secondStarted = Completer<void>();
+    final firstResponse = Completer<http.Response>();
+    final secondResponse = Completer<http.Response>();
+    var requests = 0;
+    HttpPoolManager.instance.replaceClientForTesting(MockClient((request) {
+      requests++;
+      if (requests == 1) {
+        firstStarted.complete();
+        return firstResponse.future;
+      }
+      secondStarted.complete();
+      return secondResponse.future;
+    }));
+    final provider = PeopleProvider(
+      preferences: prefs,
+      activeAuthority: () {
+        final authorityUid = currentUid;
+        return _activeAuthority(authorityUid, () => prefs.uid == authorityUid);
+      },
+    )..loading = true;
+
+    final accountA = provider.setPeople();
+    await firstStarted.future;
+    prefs.uid = 'uid-b';
+    currentUid = 'uid-b';
+    final accountB = provider.setPeople();
+    await secondStarted.future;
+
+    firstResponse.complete(http.Response('[${jsonEncode(_personJson('person-a'))}]', 200));
+    await accountA;
+    expect(provider.loading, isTrue);
+    expect(provider.people, isEmpty);
+    expect(prefs.cachedPeople, isEmpty);
+
+    secondResponse.complete(http.Response('[${jsonEncode(_personJson('person-b'))}]', 200));
+    await accountB;
+    expect(provider.loading, isFalse);
+    expect(provider.people.single.id, 'person-b');
+    expect(prefs.cachedPeople.single.id, 'person-b');
   });
 
   test('account switch during Ella chat streaming cannot mutate or persist under the next account', () async {
@@ -409,6 +492,76 @@ void main() {
     await expectLater(service.stopForAccountTransition(), throwsA(isA<TimeoutException>()));
   });
 
+  test('production isolate bridge awaits physical stop and fences late producers before transition mutation', () async {
+    final fixture = _ProductionRecorderFixture(stopTimeout: const Duration(seconds: 1), holdNativeStop: true);
+    addTearDown(fixture.dispose);
+    var frames = 0;
+    await fixture.mic.start(onByteReceived: (_) => frames++);
+    await fixture.native.startEntered.future;
+    final token = EllaAccountIsolationService.registerCaptureProducer(fixture.mic.stopForAccountTransition);
+    addTearDown(() => EllaAccountIsolationService.unregisterCaptureProducer(token));
+    var identityMutated = false;
+
+    final transition = _accountBarrier().stopForAccountTransition().then((_) => identityMutated = true);
+    await fixture.native.stopEntered.future;
+    await Future<void>.delayed(Duration.zero);
+    expect(identityMutated, isFalse);
+    expect(fixture.background.stopResults, isEmpty);
+
+    fixture.native.releaseStop();
+    await transition;
+    expect(identityMutated, isTrue);
+    expect(fixture.background.stopResults.single['status'], 'stopped');
+
+    fixture.native.emit(Uint8List.fromList([1, 2, 3]));
+    fixture.background.invoke('recorder.start', {'generation': 1});
+    await Future<void>.delayed(Duration.zero);
+    expect(frames, 0);
+    expect(fixture.native.startCalls, 1);
+  });
+
+  test('production isolate bridge propagates native stop error and blocks transition mutation', () async {
+    final fixture = _ProductionRecorderFixture(
+      stopTimeout: const Duration(seconds: 1),
+      nativeStopError: StateError('physical recorder stop failed'),
+    );
+    addTearDown(fixture.dispose);
+    var frames = 0;
+    await fixture.mic.start(onByteReceived: (_) => frames++);
+    await fixture.native.startEntered.future;
+    final token = EllaAccountIsolationService.registerCaptureProducer(fixture.mic.stopForAccountTransition);
+    addTearDown(() => EllaAccountIsolationService.unregisterCaptureProducer(token));
+    var identityMutated = false;
+
+    final transition = _accountBarrier().stopForAccountTransition().then((_) => identityMutated = true);
+    await expectLater(transition, throwsA(isA<BackgroundRecorderStopException>()));
+
+    expect(identityMutated, isFalse);
+    expect(fixture.background.stopResults.single['status'], 'error');
+    expect(fixture.background.stopResults.single['error'], contains('physical recorder stop failed'));
+    fixture.native.emit(Uint8List.fromList([1, 2, 3]));
+    expect(frames, 0);
+  });
+
+  test('production isolate bridge timeout fails closed before transition mutation', () async {
+    final fixture = _ProductionRecorderFixture(stopTimeout: const Duration(milliseconds: 30), holdNativeStop: true);
+    addTearDown(fixture.dispose);
+    await fixture.mic.start(onByteReceived: (_) {});
+    await fixture.native.startEntered.future;
+    final token = EllaAccountIsolationService.registerCaptureProducer(fixture.mic.stopForAccountTransition);
+    addTearDown(() => EllaAccountIsolationService.unregisterCaptureProducer(token));
+    var identityMutated = false;
+
+    final transition = _accountBarrier().stopForAccountTransition().then((_) => identityMutated = true);
+    await fixture.native.stopEntered.future;
+    await expectLater(transition, throwsA(isA<TimeoutException>()));
+
+    expect(identityMutated, isFalse);
+    expect(fixture.background.stopResults, isEmpty);
+    fixture.native.releaseStop();
+    await fixture.background.waitForStopResult();
+  });
+
   test('desktop transition cancels and awaits a start paused in the native state callback', () async {
     const channel = MethodChannel('ella.capture.quiescence.test');
     final isRecordingEntered = Completer<void>();
@@ -596,6 +749,253 @@ void main() {
   });
 }
 
+Map<String, dynamic> _personJson(String id) => _person(id).toJson();
+
+enum _PeopleLeaseDrift { generation, reprovision, revocation }
+
+class _PeopleLeaseState {
+  String uid = 'uid-a';
+  String profileBindingId = 'profile-a';
+  int bindingRevision = 3;
+  String consentReceiptId = 'aicr_uid-a';
+  bool consentCurrent = true;
+  int authorityGeneration = 7;
+}
+
+class _DriftingPeopleAuthority implements AccountCommitAuthority {
+  _DriftingPeopleAuthority(this.state, this.drift)
+      : _uid = state.uid,
+        _profileBindingId = state.profileBindingId,
+        _bindingRevision = state.bindingRevision,
+        _consentReceiptId = state.consentReceiptId,
+        _authorityGeneration = state.authorityGeneration;
+
+  final _PeopleLeaseState state;
+  final _PeopleLeaseDrift drift;
+  final String _uid;
+  final String _profileBindingId;
+  final int _bindingRevision;
+  final String _consentReceiptId;
+  final int _authorityGeneration;
+  int checks = 0;
+
+  @override
+  String get uid => _uid;
+
+  @override
+  bool isCurrent() {
+    checks++;
+    final current = state.uid == _uid &&
+        state.profileBindingId == _profileBindingId &&
+        state.bindingRevision == _bindingRevision &&
+        state.consentReceiptId == _consentReceiptId &&
+        state.consentCurrent &&
+        state.authorityGeneration == _authorityGeneration;
+    if (checks == 3) {
+      switch (drift) {
+        case _PeopleLeaseDrift.generation:
+          state.authorityGeneration++;
+          break;
+        case _PeopleLeaseDrift.reprovision:
+          state.bindingRevision++;
+          break;
+        case _PeopleLeaseDrift.revocation:
+          state.consentCurrent = false;
+          break;
+      }
+    }
+    return current;
+  }
+
+  @override
+  bool isExactCurrent() => isCurrent();
+}
+
+EllaAccountIsolationService _accountBarrier() => EllaAccountIsolationService(
+      stopV2v: () {},
+      stopGuardian: () {},
+      stopServices: () {},
+      quarantineLegacy: () {},
+    );
+
+class _ProductionRecorderFixture {
+  _ProductionRecorderFixture({
+    required Duration stopTimeout,
+    bool holdNativeStop = false,
+    Object? nativeStopError,
+  })  : native = _ControlledFlutterSoundRecorderPlatform(
+          holdStop: holdNativeStop,
+          stopError: nativeStopError,
+        ),
+        background = _FakeBackgroundServicePlatform() {
+    _originalRecorderPlatform = FlutterSoundRecorderPlatform.instance;
+    FlutterSoundRecorderPlatform.instance = native;
+    FlutterBackgroundServicePlatform.instance = background;
+    mic = MicRecorderBackgroundService(runner: BackgroundService(recorderStopTimeout: stopTimeout));
+  }
+
+  final _ControlledFlutterSoundRecorderPlatform native;
+  final _FakeBackgroundServicePlatform background;
+  late final FlutterSoundRecorderPlatform _originalRecorderPlatform;
+  late final MicRecorderBackgroundService mic;
+
+  Future<void> dispose() async {
+    native.releaseStop();
+    background.shutdown();
+    await Future<void>.delayed(Duration.zero);
+    FlutterSoundRecorderPlatform.instance = _originalRecorderPlatform;
+  }
+}
+
+class _FakeBackgroundServicePlatform extends FlutterBackgroundServicePlatform {
+  final Map<String, StreamController<Map<String, dynamic>?>> _isolateStreams = {};
+  final Map<String, StreamController<Map<String, dynamic>?>> _uiStreams = {};
+  final List<Map<String, dynamic>> stopResults = [];
+  final Completer<void> _stopResultReceived = Completer<void>();
+  late final _FakeServiceInstance _serviceInstance = _FakeServiceInstance(this);
+  Function(ServiceInstance service)? _onStart;
+  bool _running = false;
+
+  StreamController<Map<String, dynamic>?> _controller(
+    Map<String, StreamController<Map<String, dynamic>?>> streams,
+    String method,
+  ) =>
+      streams.putIfAbsent(method, StreamController<Map<String, dynamic>?>.broadcast);
+
+  @override
+  Future<bool> configure({
+    required IosConfiguration iosConfiguration,
+    required AndroidConfiguration androidConfiguration,
+  }) async {
+    _onStart = androidConfiguration.onStart;
+    return true;
+  }
+
+  @override
+  Future<bool> start() async {
+    _running = true;
+    _onStart?.call(_serviceInstance);
+    return true;
+  }
+
+  @override
+  Future<bool> isServiceRunning() async => _running;
+
+  @override
+  void invoke(String method, [Map<String, dynamic>? args]) {
+    _controller(_isolateStreams, method).add(args);
+  }
+
+  @override
+  Stream<Map<String, dynamic>?> on(String method) => _controller(_uiStreams, method).stream;
+
+  void emitToUi(String method, Map<String, dynamic>? args) {
+    if (method == 'recorder.ui.stopResult' && args != null) {
+      stopResults.add(args);
+      if (!_stopResultReceived.isCompleted) _stopResultReceived.complete();
+    }
+    _controller(_uiStreams, method).add(args);
+  }
+
+  Stream<Map<String, dynamic>?> isolateStream(String method) => _controller(_isolateStreams, method).stream;
+
+  Future<void> waitForStopResult() => _stopResultReceived.future;
+
+  void shutdown() => invoke('stop');
+}
+
+class _FakeServiceInstance implements ServiceInstance {
+  _FakeServiceInstance(this.platform);
+
+  final _FakeBackgroundServicePlatform platform;
+
+  @override
+  void invoke(String method, [Map<String, dynamic>? args]) => platform.emitToUi(method, args);
+
+  @override
+  Stream<Map<String, dynamic>?> on(String method) => platform.isolateStream(method);
+
+  @override
+  Future<void> stopSelf() async {
+    platform._running = false;
+  }
+}
+
+class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatform {
+  _ControlledFlutterSoundRecorderPlatform({required bool holdStop, this.stopError})
+      : _stopRelease = holdStop ? Completer<void>() : null;
+
+  final Completer<void>? _stopRelease;
+  final Object? stopError;
+  final Completer<void> startEntered = Completer<void>();
+  final Completer<void> stopEntered = Completer<void>();
+  FlutterSoundRecorderCallback? _callback;
+  int startCalls = 0;
+  int stopCalls = 0;
+
+  @override
+  Future<void> openRecorder(FlutterSoundRecorderCallback callback, {required dynamic logLevel}) async {
+    _callback = callback;
+    callback.openRecorderCompleted(RecorderState.isStopped.index, true);
+  }
+
+  @override
+  Future<void> resetPlugin(FlutterSoundRecorderCallback callback) async {}
+
+  @override
+  Future<void> closeRecorder(FlutterSoundRecorderCallback callback) async {}
+
+  @override
+  Future<bool> isEncoderSupported(FlutterSoundRecorderCallback callback, {required Codec codec}) async => true;
+
+  @override
+  Future<void> startRecorder(
+    FlutterSoundRecorderCallback callback, {
+    Codec? codec,
+    String? path,
+    int sampleRate = 44100,
+    int numChannels = 1,
+    int bitRate = 16000,
+    int bufferSize = 8192,
+    Duration timeSlice = Duration.zero,
+    bool enableVoiceProcessing = false,
+    bool interleaved = true,
+    required bool toStream,
+    AudioSource? audioSource,
+  }) async {
+    _callback = callback;
+    startCalls++;
+    if (!startEntered.isCompleted) startEntered.complete();
+    callback.startRecorderCompleted(RecorderState.isRecording.index, true);
+  }
+
+  @override
+  Future<void> stopRecorder(FlutterSoundRecorderCallback callback) async {
+    stopCalls++;
+    if (stopCalls == 1) {
+      callback.stopRecorderCompleted(RecorderState.isStopped.index, true, null);
+      return;
+    }
+    if (!stopEntered.isCompleted) stopEntered.complete();
+    await _stopRelease?.future;
+    if (stopError != null) throw stopError!;
+    callback.stopRecorderCompleted(RecorderState.isStopped.index, true, null);
+  }
+
+  void emit(Uint8List bytes) => _callback?.interleavedRecording(data: bytes);
+
+  void releaseStop() {
+    final stopRelease = _stopRelease;
+    if (stopRelease != null && !stopRelease.isCompleted) stopRelease.complete();
+  }
+
+  @override
+  int getSampleRate(FlutterSoundRecorderCallback callback) => 16000;
+
+  @override
+  void requestData(FlutterSoundRecorderCallback callback) {}
+}
+
 Future<void> _grantAuthority(SharedPreferencesUtil prefs, String uid) async {
   prefs.acceptAiConsent(
     receiptId: 'aicr_$uid',
@@ -727,7 +1127,7 @@ class _DelayedRecorderRunner implements IBackgroundRecorderRunner {
   void emit(List<int> bytes) => _onByteReceived?.call(Uint8List.fromList(bytes));
 
   @override
-  Future<void> stopRecorder() async {
+  Future<void> stopRecorder({bool quiesce = false}) async {
     stopCalls++;
   }
 }
@@ -745,7 +1145,8 @@ class _TimeoutRecorderRunner implements IBackgroundRecorderRunner {
   }) async {}
 
   @override
-  Future<void> stopRecorder() => Future<void>.error(TimeoutException('native recorder stop not acknowledged'));
+  Future<void> stopRecorder({bool quiesce = false}) =>
+      Future<void>.error(TimeoutException('native recorder stop not acknowledged'));
 }
 
 class _GenerationChangingAuthority implements ExactAccountAuthorityVerifier {

@@ -179,12 +179,13 @@ void main() {
     expect(await WalFileManager.getQuarantineCount(), 1);
   });
 
-  test('transition final drain preserves shorter-than-delay and exact-delay audio byte-for-byte', () async {
+  test('transition final drain preserves below, exact, and above-delay audio byte-for-byte', () async {
     final owner = _owner('uid-a');
     final frameCounts = [
       1,
       newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond() - 1,
-      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond()
+      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond(),
+      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond() + 1,
     ];
 
     for (var caseIndex = 0; caseIndex < frameCounts.length; caseIndex++) {

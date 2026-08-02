@@ -913,7 +913,7 @@ packages:
     source: hosted
     version: "9.25.1"
   flutter_sound_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: flutter_sound_platform_interface
       sha256: c57f996bd8049c71ac744b84439a951ea0bf495f6a229f3981dceb4dde0176a1

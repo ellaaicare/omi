@@ -248,12 +248,16 @@ Future<Person?> getSinglePerson(String personId, {bool includeSpeechSamples = fa
   return null;
 }
 
-Future<List<Person>> getAllPeople({bool includeSpeechSamples = true}) async {
+Future<List<Person>> getAllPeople({
+  bool includeSpeechSamples = true,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people?include_speech_samples=$includeSpeechSamples',
     headers: {},
     method: 'GET',
     body: '',
+    exactAuthority: exactAuthority,
   );
   if (response == null) return [];
   if (response.statusCode == 200) {

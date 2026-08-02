@@ -132,51 +132,109 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 
 @pragma('vm:entry-point')
 Future onStart(ServiceInstance service) async {
-  // Recorder
-  MicRecorderService? recorder;
-  service.on('recorder.start').listen((event) async {
-    recorder = MicRecorderService(isInBG: Platform.isAndroid ? true : false);
-    await recorder?.start(onByteReceived: (bytes) {
-      Uint8List audioBytes = bytes;
-      List<dynamic> audioBytesList = audioBytes.toList();
-      service.invoke("recorder.ui.audioBytes", {"data": audioBytesList});
-    }, onStop: () {
-      service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
-    }, onRecording: () {
-      service.invoke("recorder.ui.stateUpdate", {"state": 'recording'});
+  BackgroundRecorderIsolateBridge(service).start();
+}
+
+/// Owns the production recorder protocol inside the background isolate.
+/// Stop results are request-scoped and are emitted only after native capture
+/// has physically stopped (or failed), never from a generic UI state callback.
+class BackgroundRecorderIsolateBridge {
+  BackgroundRecorderIsolateBridge(this._service, {this.watchdogInterval = const Duration(seconds: 5)});
+
+  final ServiceInstance _service;
+  final Duration watchdogInterval;
+  final _operations = _SerializedCaptureOperations();
+  MicRecorderService? _recorder;
+  Timer? _watchdog;
+  DateTime _pongAt = DateTime.now();
+  int _quiescedThroughGeneration = -1;
+
+  void start() {
+    _service.on('recorder.start').listen((event) {
+      final generation = event?['generation'] as int? ?? 0;
+      if (generation <= _quiescedThroughGeneration) return;
+      unawaited(_operations.run(() => _startRecorder(generation)).catchError(_logBridgeError));
     });
-  });
 
-  service.on('recorder.stop').listen((event) async {
-    service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
-    await recorder?.stop();
-  });
-
-  service.on('stop').listen((event) async {
-    if (recorder?.status != RecorderServiceStatus.stop) {
-      await recorder?.stop();
-    }
-    service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
-    service.stopSelf();
-  });
-
-  // watchdog
-  var pongAt = DateTime.now();
-  service.on('pong').listen((event) async {
-    pongAt = DateTime.now();
-  });
-  Timer.periodic(const Duration(seconds: 5), (timer) async {
-    if (pongAt.isBefore(DateTime.now().subtract(const Duration(seconds: 15)))) {
-      // retire
-      if (recorder?.status != RecorderServiceStatus.stop) {
-        recorder?.stop();
+    _service.on('recorder.stop').listen((event) {
+      final requestId = event?['request_id']?.toString() ?? '';
+      final generation = event?['generation'] as int? ?? 0;
+      final quiesce = event?['quiesce'] == true;
+      if (quiesce && generation > _quiescedThroughGeneration) {
+        _quiescedThroughGeneration = generation;
       }
-      service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
-      service.stopSelf();
+      unawaited(_operations.run(() => _stopRecorder(requestId, quiesce: quiesce)).catchError(_logBridgeError));
+    });
+
+    _service.on('stop').listen((event) {
+      _watchdog?.cancel();
+      unawaited(_operations.run(_stopService).catchError(_logBridgeError));
+    });
+
+    _service.on('pong').listen((event) {
+      _pongAt = DateTime.now();
+    });
+    _watchdog = Timer.periodic(watchdogInterval, _watchdogTick);
+  }
+
+  Future<void> _startRecorder(int generation) async {
+    if (generation <= _quiescedThroughGeneration) return;
+    final recorder = _recorder ??= MicRecorderService(isInBG: Platform.isAndroid);
+    recorder.resumeAfterAccountTransition();
+    await recorder.start(
+      onByteReceived: (bytes) {
+        if (generation <= _quiescedThroughGeneration) return;
+        _service.invoke("recorder.ui.audioBytes", {"data": bytes.toList()});
+      },
+      onStop: () => _service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'}),
+      onRecording: () => _service.invoke("recorder.ui.stateUpdate", {"state": 'recording'}),
+    );
+    if (generation <= _quiescedThroughGeneration) await recorder.stopForAccountTransition();
+  }
+
+  Future<void> _stopRecorder(String requestId, {required bool quiesce}) async {
+    try {
+      final recorder = _recorder;
+      if (recorder != null) {
+        if (quiesce) {
+          await recorder.stopForAccountTransition();
+        } else {
+          await recorder.stop();
+        }
+      }
+      _service.invoke("recorder.ui.stopResult", {"request_id": requestId, "status": 'stopped'});
+    } catch (error) {
+      _service.invoke("recorder.ui.stopResult", {
+        "request_id": requestId,
+        "status": 'error',
+        "error": error.toString(),
+      });
+    }
+  }
+
+  Future<void> _stopService() async {
+    final recorder = _recorder;
+    if (recorder != null && recorder.status != RecorderServiceStatus.stop) await recorder.stopForAccountTransition();
+    _service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
+    await _service.stopSelf();
+  }
+
+  Future<void> _watchdogTick(Timer timer) async {
+    if (_pongAt.isBefore(DateTime.now().subtract(watchdogInterval * 3))) {
+      timer.cancel();
+      try {
+        await _operations.run(_stopService);
+      } catch (error, stackTrace) {
+        Logger.handle(error, stackTrace, message: 'Background recorder watchdog stop failed');
+      }
       return;
     }
-    service.invoke("ui.ping");
-  });
+    _service.invoke("ui.ping");
+  }
+
+  dynamic _logBridgeError(Object error, StackTrace stackTrace) {
+    Logger.debug('Background recorder bridge operation failed: $error');
+  }
 }
 
 abstract interface class IBackgroundRecorderRunner {
@@ -187,7 +245,11 @@ abstract interface class IBackgroundRecorderRunner {
     Function()? onStop,
     Function()? onInitializing,
   });
-  Future<void> stopRecorder();
+  Future<void> stopRecorder({bool quiesce = false});
+}
+
+class BackgroundRecorderStopException extends StateError {
+  BackgroundRecorderStopException(super.message);
 }
 
 class _SerializedCaptureOperations {
@@ -215,18 +277,20 @@ class BackgroundService implements IBackgroundRecorderRunner {
   BackgroundServiceStatus? _status;
   StreamSubscription? _recordAudioByteStream;
   StreamSubscription? _recordStateStream;
-  Completer<void>? _recorderStopped;
+  final Map<String, Completer<void>> _pendingStops = {};
   bool _initialized = false;
+  int _recorderGeneration = 0;
+  int _stopRequestSequence = 0;
   final Duration recorderStopTimeout;
 
   BackgroundServiceStatus? get status => _status;
 
   Future<void> init() async {
+    if (_initialized) return;
     _service = FlutterBackgroundService();
     _status = BackgroundServiceStatus.initiated;
-    _initialized = true;
 
-    await _service.configure(
+    final configured = await _service.configure(
       iosConfiguration: IosConfiguration(
         autoStart: false,
         onForeground: onStart,
@@ -240,7 +304,22 @@ class BackgroundService implements IBackgroundRecorderRunner {
         foregroundServiceTypes: [AndroidForegroundType.microphone],
       ),
     );
+    if (!configured) throw StateError('Background recorder service configuration failed');
 
+    _service.on('recorder.ui.stopResult').listen((event) {
+      final requestId = event?['request_id']?.toString() ?? '';
+      final completer = _pendingStops.remove(requestId);
+      if (completer == null || completer.isCompleted) return;
+      if (event?['status'] == 'stopped') {
+        completer.complete();
+      } else {
+        completer.completeError(
+          BackgroundRecorderStopException(event?['error']?.toString() ?? 'Native recorder stop failed'),
+        );
+      }
+    });
+
+    _initialized = true;
     _status = BackgroundServiceStatus.initiated;
   }
 
@@ -283,8 +362,7 @@ class BackgroundService implements IBackgroundRecorderRunner {
   }) async {
     await _recordAudioByteStream?.cancel();
     await _recordStateStream?.cancel();
-    final stopped = Completer<void>();
-    _recorderStopped = stopped;
+    final generation = ++_recorderGeneration;
     _recordAudioByteStream = _service.on('recorder.ui.audioBytes').listen((event) {
       Uint8List bytes = Uint8List.fromList(event!['data'].cast<int>());
       onByteReceived(bytes);
@@ -300,27 +378,33 @@ class BackgroundService implements IBackgroundRecorderRunner {
         }
       } else if (event['state'] == 'stopped') {
         onStop?.call();
-        if (!stopped.isCompleted) stopped.complete();
       }
     });
 
     // tell service > start record
-    _service.invoke("recorder.start");
+    _service.invoke("recorder.start", {"generation": generation});
   }
 
   @override
-  Future<void> stopRecorder() async {
+  Future<void> stopRecorder({bool quiesce = false}) async {
     if (!_initialized) return;
     await _recordAudioByteStream?.cancel();
     _recordAudioByteStream = null;
-    _service.invoke("recorder.stop");
-    final stopped = _recorderStopped;
-    if (stopped != null && !stopped.isCompleted) {
+    final requestId = '${_recorderGeneration}_${++_stopRequestSequence}';
+    final stopped = Completer<void>();
+    _pendingStops[requestId] = stopped;
+    _service.invoke("recorder.stop", {
+      "request_id": requestId,
+      "generation": _recorderGeneration,
+      "quiesce": quiesce,
+    });
+    try {
       await stopped.future.timeout(recorderStopTimeout);
+    } finally {
+      _pendingStops.remove(requestId);
+      await _recordStateStream?.cancel();
+      _recordStateStream = null;
     }
-    await _recordStateStream?.cancel();
-    _recordStateStream = null;
-    _recorderStopped = null;
   }
 }
 
@@ -364,7 +448,7 @@ class MicRecorderBackgroundService implements IMicRecorderService {
       if (_transitionQuiesced || generation != _generation) return;
       await _runner.ensureRunning();
       if (_transitionQuiesced || generation != _generation) {
-        await _runner.stopRecorder();
+        await _runner.stopRecorder(quiesce: true);
         return;
       }
       await _runner.startRecorder(
@@ -381,7 +465,7 @@ class MicRecorderBackgroundService implements IMicRecorderService {
           if (!_transitionQuiesced && generation == _generation) onInitializing?.call();
         },
       );
-      if (_transitionQuiesced || generation != _generation) await _runner.stopRecorder();
+      if (_transitionQuiesced || generation != _generation) await _runner.stopRecorder(quiesce: true);
     });
   }
 
@@ -395,7 +479,7 @@ class MicRecorderBackgroundService implements IMicRecorderService {
   Future<void> stopForAccountTransition() {
     _transitionQuiesced = true;
     _generation++;
-    return _operations.run(_runner.stopRecorder);
+    return _operations.run(() => _runner.stopRecorder(quiesce: true));
   }
 
   @override
@@ -477,7 +561,7 @@ class MicRecorderService implements IMicRecorderService {
       await _stopNative();
       return;
     }
-    _controller = StreamController<Uint8List>();
+    _controller = StreamController<Uint8List>.broadcast();
 
     await _recorder.startRecorder(
       toStream: _controller!.sink,
@@ -522,24 +606,34 @@ class MicRecorderService implements IMicRecorderService {
   Future<void> _stopNative() async {
     final onStop = _onStop;
     _onByteReceived = null;
-    if (_status == RecorderServiceStatus.recording || _status == RecorderServiceStatus.initialising) {
-      try {
+    Object? stopError;
+    StackTrace? stopStackTrace;
+    try {
+      if (_status == RecorderServiceStatus.recording || _status == RecorderServiceStatus.initialising) {
         await _recorder.stopRecorder();
-      } catch (_) {}
+        if (!_recorder.isStopped) {
+          throw BackgroundRecorderStopException('Native recorder did not acknowledge a physical stop');
+        }
+      }
+    } catch (error, stackTrace) {
+      stopError = error;
+      stopStackTrace = stackTrace;
     }
     await _audioSubscription?.cancel();
     _audioSubscription = null;
-    final controller = _controller;
-    if (controller != null && !controller.isClosed) await controller.close();
-    _controller = null;
-
-    // callback
-    _status = RecorderServiceStatus.stop;
-    onStop?.call();
 
     _onByteReceived = null;
     _onStop = null;
     _onRecording = null;
+    if (stopError != null) Error.throwWithStackTrace(stopError, stopStackTrace!);
+
+    final controller = _controller;
+    if (controller != null && !controller.isClosed) await controller.close();
+    _controller = null;
+
+    // Native stop succeeded, so it is now safe to acknowledge quiescence.
+    _status = RecorderServiceStatus.stop;
+    onStop?.call();
   }
 }
 

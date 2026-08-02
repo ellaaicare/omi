@@ -9,6 +9,7 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
 typedef CreatePersonRequest = Future<Person?> Function(String name, ExactAccountAuthorityVerifier exactAuthority);
+typedef FetchPeopleRequest = Future<List<Person>> Function(ExactAccountAuthorityVerifier exactAuthority);
 typedef UpdatePersonRequest = Future<bool> Function(
   String personId,
   String name,
@@ -23,14 +24,14 @@ typedef DeletePersonSampleRequest = Future<bool> Function(
 
 class PeopleProvider extends BaseProvider {
   PeopleProvider({
-    Future<List<Person>> Function()? fetchPeople,
+    FetchPeopleRequest? fetchPeople,
     SharedPreferencesUtil? preferences,
     ActiveAccountAuthorityProvider? activeAuthority,
     CreatePersonRequest? createPersonRequest,
     UpdatePersonRequest? updatePersonRequest,
     DeletePersonRequest? deletePersonRequest,
     DeletePersonSampleRequest? deleteSampleRequest,
-  })  : _fetchPeople = fetchPeople ?? getAllPeople,
+  })  : _fetchPeople = fetchPeople ?? ((authority) => getAllPeople(exactAuthority: authority)),
         _preferences = preferences ?? SharedPreferencesUtil(),
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
         _createPersonRequest =
@@ -48,7 +49,7 @@ class PeopleProvider extends BaseProvider {
     people = _preferences.cachedPeople;
   }
 
-  final Future<List<Person>> Function() _fetchPeople;
+  final FetchPeopleRequest _fetchPeople;
   final SharedPreferencesUtil _preferences;
   final ActiveAccountAuthorityProvider _activeAuthority;
   final CreatePersonRequest _createPersonRequest;
@@ -88,24 +89,33 @@ class PeopleProvider extends BaseProvider {
   bool _canCommit(EllaAccountCommitLease lease, int generation) =>
       generation == _operationGeneration && lease.isCurrent;
 
-  setPeople() async {
+  Future<void> setPeople() async {
+    final generation = ++_operationGeneration;
+    loading = true;
+    notifyListeners();
     final lease = _beginAccountCommit();
     if (lease == null) {
-      loading = false;
+      _finishPeopleLoad(generation);
       return;
     }
-    final generation = _operationGeneration;
     try {
-      final value = await _fetchPeople();
+      final value = await _fetchPeople(lease);
       if (generation != _operationGeneration || !lease.isCurrent) return;
-      loading = false;
       people = value;
       _preferences.cachedPeople = people;
       Logger.debug('${people.length} people refreshed');
-      notifyListeners();
+    } on ExactAccountAuthorityChangedException {
+      Logger.debug('People refresh discarded after account authority changed');
     } finally {
+      _finishPeopleLoad(generation);
       lease.close();
     }
+  }
+
+  void _finishPeopleLoad(int generation) {
+    if (generation != _operationGeneration) return;
+    loading = false;
+    notifyListeners();
   }
 
   void _setupAudioPlayerListeners() {
