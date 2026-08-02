@@ -8,13 +8,17 @@ import 'package:omi/providers/base_provider.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
-typedef CreatePersonRequest = Future<Person?> Function(String name, String expectedAuthenticatedUid);
-typedef UpdatePersonRequest = Future<bool> Function(String personId, String name, String expectedAuthenticatedUid);
-typedef DeletePersonRequest = Future<bool> Function(String personId, String expectedAuthenticatedUid);
+typedef CreatePersonRequest = Future<Person?> Function(String name, ExactAccountAuthorityVerifier exactAuthority);
+typedef UpdatePersonRequest = Future<bool> Function(
+  String personId,
+  String name,
+  ExactAccountAuthorityVerifier exactAuthority,
+);
+typedef DeletePersonRequest = Future<bool> Function(String personId, ExactAccountAuthorityVerifier exactAuthority);
 typedef DeletePersonSampleRequest = Future<bool> Function(
   String personId,
   int sampleIndex,
-  String expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier exactAuthority,
 );
 
 class PeopleProvider extends BaseProvider {
@@ -30,16 +34,16 @@ class PeopleProvider extends BaseProvider {
         _preferences = preferences ?? SharedPreferencesUtil(),
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
         _createPersonRequest =
-            createPersonRequest ?? ((name, expectedUid) => createPerson(name, expectedAuthenticatedUid: expectedUid)),
+            createPersonRequest ?? ((name, authority) => createPerson(name, exactAuthority: authority)),
         _updatePersonRequest = updatePersonRequest ??
-            ((personId, name, expectedUid) => updatePersonName(personId, name, expectedAuthenticatedUid: expectedUid)),
-        _deletePersonRequest = deletePersonRequest ??
-            ((personId, expectedUid) => deletePerson(personId, expectedAuthenticatedUid: expectedUid)),
+            ((personId, name, authority) => updatePersonName(personId, name, exactAuthority: authority)),
+        _deletePersonRequest =
+            deletePersonRequest ?? ((personId, authority) => deletePerson(personId, exactAuthority: authority)),
         _deleteSampleRequest = deleteSampleRequest ??
-            ((personId, sampleIndex, expectedUid) => deletePersonSpeechSample(
+            ((personId, sampleIndex, authority) => deletePersonSpeechSample(
                   personId,
                   sampleIndex,
-                  expectedAuthenticatedUid: expectedUid,
+                  exactAuthority: authority,
                 )) {
     people = _preferences.cachedPeople;
   }
@@ -74,6 +78,7 @@ class PeopleProvider extends BaseProvider {
     currentPlayingPersonIndex = null;
     currentPlayingIndex = null;
     isPlaying = false;
+    loading = false;
     notifyListeners();
   }
 
@@ -143,7 +148,7 @@ class PeopleProvider extends BaseProvider {
     notifyListeners();
 
     try {
-      final newPerson = await _createPersonRequest(name, lease.authority.uid);
+      final newPerson = await _createPersonRequest(name, lease);
       if (!_canCommit(lease, generation) || newPerson == null) return null;
 
       people.add(newPerson);
@@ -169,7 +174,7 @@ class PeopleProvider extends BaseProvider {
     notifyListeners();
 
     try {
-      final success = await _updatePersonRequest(person.id, name, lease.authority.uid);
+      final success = await _updatePersonRequest(person.id, name, lease);
       if (!success || !_canCommit(lease, generation)) return;
       final index = people.indexWhere((p) => p.id == person.id);
       if (index != -1) {
@@ -200,7 +205,7 @@ class PeopleProvider extends BaseProvider {
     final personId = people[personIdx].id;
 
     try {
-      final success = await _deleteSampleRequest(personId, sampleIdx, lease.authority.uid);
+      final success = await _deleteSampleRequest(personId, sampleIdx, lease);
       if (!_canCommit(lease, generation)) return;
       final currentIndex = people.indexWhere((person) => person.id == personId);
       if (success && currentIndex != -1) {
@@ -223,7 +228,7 @@ class PeopleProvider extends BaseProvider {
     if (lease == null) return;
     final generation = _operationGeneration;
     try {
-      final success = await _deletePersonRequest(person.id, lease.authority.uid);
+      final success = await _deletePersonRequest(person.id, lease);
       if (!success || !_canCommit(lease, generation)) return;
       people.removeWhere((candidate) => candidate.id == person.id);
       _preferences.cachedPeople = people;

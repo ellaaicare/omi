@@ -45,7 +45,7 @@ class EllaAccountCommitBarrier {
   }
 }
 
-class EllaAccountCommitLease {
+class EllaAccountCommitLease implements ExactAccountAuthorityVerifier {
   EllaAccountCommitLease._({required this.token, required this.generation, required this.authority});
 
   final Object token;
@@ -54,6 +54,12 @@ class EllaAccountCommitLease {
   bool _closed = false;
 
   bool get isCurrent => EllaAccountCommitBarrier._isCurrent(this);
+
+  @override
+  String get uid => authority.uid;
+
+  @override
+  bool isExactCurrent() => isCurrent;
 
   void close() => EllaAccountCommitBarrier._close(this);
 }

@@ -155,7 +155,8 @@ void main() {
     expect(listener.synced, isEmpty);
   });
 
-  test('audio delivered after transition is quarantined even after account B becomes current', () async {
+  test('one late frame keeps its capture-start owner and is quarantined after account B becomes current', () async {
+    final ownerA = _owner('uid-a');
     final ownerB = _owner('uid-b');
     await WalFileManager.init(baseDirectory: directory, activeOwner: ownerB);
     final sync = LocalWalSyncImpl(
@@ -166,17 +167,87 @@ void main() {
     await sync.initializeForTesting();
     await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
 
-    for (var i = 0; i < 751; i++) {
-      sync.onByteStream([0, 0, i % 255, 1, 2, 3], ownerAtCapture: null);
-    }
+    sync.onByteStream([0, 0, 1, 1, 2, 3], ownerAtCapture: ownerA);
     await sync.stop();
 
     final captured = await sync.getAllWals();
     expect(captured, hasLength(1));
-    expect(captured.single.owner, isNull);
+    expect(captured.single.owner?.matches(ownerA), isTrue);
+    expect(captured.single.totalFrames, 1);
     expect(captured.single.status, WalStatus.quarantined);
-    expect(captured.single.quarantineReason, 'capture_without_owner');
+    expect(captured.single.quarantineReason, 'account_transition_final_drain');
     expect(await WalFileManager.getQuarantineCount(), 1);
+  });
+
+  test('transition final drain preserves shorter-than-delay and exact-delay audio byte-for-byte', () async {
+    final owner = _owner('uid-a');
+    final frameCounts = [
+      1,
+      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond() - 1,
+      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond()
+    ];
+
+    for (var caseIndex = 0; caseIndex < frameCounts.length; caseIndex++) {
+      WalFileManager.resetForTesting();
+      final caseDirectory = Directory('${directory.path}/case-$caseIndex')..createSync(recursive: true);
+      await WalFileManager.init(baseDirectory: caseDirectory, activeOwner: owner);
+      final sync = LocalWalSyncImpl(
+        listener,
+        currentOwner: () => owner,
+        activeAuthority: () => _authority(owner, () => false),
+      );
+      await sync.initializeForTesting();
+      await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+      final expected = <List<int>>[];
+      for (var frameIndex = 0; frameIndex < frameCounts[caseIndex]; frameIndex++) {
+        final frame = [0, frameIndex ~/ 255, frameIndex % 255, 10, 20, frameIndex % 251];
+        expected.add(frame);
+        sync.onByteStream(frame, ownerAtCapture: owner);
+      }
+
+      await sync.stop();
+
+      final captured = await sync.getAllWals();
+      expect(captured, hasLength(1));
+      expect(captured.single.owner?.matches(owner), isTrue);
+      expect(captured.single.status, WalStatus.quarantined);
+      expect(captured.single.totalFrames, frameCounts[caseIndex]);
+      expect(captured.single.data, expected);
+    }
+  });
+
+  test('transition final drain separates mixed old stale and ownerless frames without losing bytes', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _owner('uid-b');
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerB);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => ownerB,
+      activeAuthority: () => _authority(ownerB, () => true),
+    );
+    await sync.initializeForTesting();
+    final frames = [
+      ([0, 0, 1, 11], ownerA),
+      ([0, 0, 2, 12], ownerA),
+      ([0, 0, 3, 13], null),
+      ([0, 0, 4, 14], ownerB),
+      ([0, 0, 5, 15], ownerA),
+    ];
+    for (final frame in frames) {
+      sync.onByteStream(frame.$1, ownerAtCapture: frame.$2);
+    }
+
+    await sync.stop();
+
+    final captured = await sync.getAllWals();
+    expect(captured, hasLength(4));
+    expect(captured.map((wal) => wal.totalFrames), [2, 1, 1, 1]);
+    expect(captured[0].owner?.matches(ownerA), isTrue);
+    expect(captured[1].owner, isNull);
+    expect(captured[2].owner?.matches(ownerB), isTrue);
+    expect(captured[3].owner?.matches(ownerA), isTrue);
+    expect(captured.expand((wal) => wal.data), frames.map((frame) => frame.$1));
+    expect(captured.every((wal) => wal.status == WalStatus.quarantined), isTrue);
   });
 
   test('owner equality includes authority generation and revocation fails closed', () async {

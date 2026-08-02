@@ -74,6 +74,8 @@ class ServiceManager {
 
   Future<void> start() async {
     if (_started) return;
+    _mic.resumeAfterAccountTransition();
+    if (Platform.isMacOS) _systemAudio.resumeAfterAccountTransition();
     _device.start();
     _wal.start();
     _started = true;
@@ -96,10 +98,12 @@ class ServiceManager {
   /// or service startup did not finish. Account transitions call this before
   /// any optional UI/provider cleanup callback.
   Future<void> stopCaptureForAccountTransition() async {
-    await _socket.stop();
-    await _mic.stop();
-    await _device.stop();
-    if (Platform.isMacOS) await _systemAudio.stopAndClearCallbacks();
+    await Future.wait([
+      _socket.stop(),
+      _mic.stopForAccountTransition(),
+      _device.stop(),
+      if (Platform.isMacOS) _systemAudio.stopForAccountTransition(),
+    ]);
   }
 
   Future<void> deinit() async {
@@ -132,7 +136,7 @@ Future onStart(ServiceInstance service) async {
   MicRecorderService? recorder;
   service.on('recorder.start').listen((event) async {
     recorder = MicRecorderService(isInBG: Platform.isAndroid ? true : false);
-    recorder?.start(onByteReceived: (bytes) {
+    await recorder?.start(onByteReceived: (bytes) {
       Uint8List audioBytes = bytes;
       List<dynamic> audioBytesList = audioBytes.toList();
       service.invoke("recorder.ui.audioBytes", {"data": audioBytesList});
@@ -145,12 +149,12 @@ Future onStart(ServiceInstance service) async {
 
   service.on('recorder.stop').listen((event) async {
     service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
-    recorder?.stop();
+    await recorder?.stop();
   });
 
   service.on('stop').listen((event) async {
     if (recorder?.status != RecorderServiceStatus.stop) {
-      recorder?.stop();
+      await recorder?.stop();
     }
     service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
     service.stopSelf();
@@ -175,18 +179,52 @@ Future onStart(ServiceInstance service) async {
   });
 }
 
-class BackgroundService {
+abstract interface class IBackgroundRecorderRunner {
+  Future<void> ensureRunning();
+  Future<void> startRecorder({
+    required Function(Uint8List bytes) onByteReceived,
+    Function()? onRecording,
+    Function()? onStop,
+    Function()? onInitializing,
+  });
+  Future<void> stopRecorder();
+}
+
+class _SerializedCaptureOperations {
+  Future<void> _tail = Future<void>.value();
+
+  Future<T> run<T>(Future<T> Function() operation) {
+    final completer = Completer<T>();
+    final previous = _tail;
+    _tail = () async {
+      try {
+        await previous;
+        completer.complete(await operation());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    }();
+    return completer.future;
+  }
+}
+
+class BackgroundService implements IBackgroundRecorderRunner {
+  BackgroundService({this.recorderStopTimeout = const Duration(seconds: 3)});
+
   late FlutterBackgroundService _service;
   BackgroundServiceStatus? _status;
   StreamSubscription? _recordAudioByteStream;
   StreamSubscription? _recordStateStream;
   Completer<void>? _recorderStopped;
+  bool _initialized = false;
+  final Duration recorderStopTimeout;
 
   BackgroundServiceStatus? get status => _status;
 
   Future<void> init() async {
     _service = FlutterBackgroundService();
     _status = BackgroundServiceStatus.initiated;
+    _initialized = true;
 
     await _service.configure(
       iosConfiguration: IosConfiguration(
@@ -206,6 +244,7 @@ class BackgroundService {
     _status = BackgroundServiceStatus.initiated;
   }
 
+  @override
   Future<void> ensureRunning() async {
     await init();
     await start();
@@ -235,6 +274,7 @@ class BackgroundService {
     instance.stopSelf();
   }
 
+  @override
   Future<void> startRecorder({
     required Function(Uint8List bytes) onByteReceived,
     Function()? onRecording,
@@ -268,13 +308,15 @@ class BackgroundService {
     _service.invoke("recorder.start");
   }
 
+  @override
   Future<void> stopRecorder() async {
+    if (!_initialized) return;
     await _recordAudioByteStream?.cancel();
     _recordAudioByteStream = null;
     _service.invoke("recorder.stop");
     final stopped = _recorderStopped;
     if (stopped != null && !stopped.isCompleted) {
-      await stopped.future.timeout(const Duration(seconds: 3), onTimeout: () {});
+      await stopped.future.timeout(recorderStopTimeout);
     }
     await _recordStateStream?.cancel();
     _recordStateStream = null;
@@ -296,12 +338,17 @@ abstract class IMicRecorderService {
     Function()? onInitializing,
   });
   Future<void> stop();
+  Future<void> stopForAccountTransition();
+  void resumeAfterAccountTransition();
 }
 
 class MicRecorderBackgroundService implements IMicRecorderService {
-  late BackgroundService _runner;
+  late IBackgroundRecorderRunner _runner;
+  final _operations = _SerializedCaptureOperations();
+  bool _transitionQuiesced = false;
+  int _generation = 0;
 
-  MicRecorderBackgroundService({required BackgroundService runner}) {
+  MicRecorderBackgroundService({required IBackgroundRecorderRunner runner}) {
     _runner = runner;
   }
 
@@ -311,22 +358,49 @@ class MicRecorderBackgroundService implements IMicRecorderService {
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
-  }) async {
-    await _runner.ensureRunning();
-
-    await _runner.startRecorder(
-      onByteReceived: onByteReceived,
-      onRecording: onRecording,
-      onStop: onStop,
-      onInitializing: onInitializing,
-    );
-
-    return;
+  }) {
+    final generation = _generation;
+    return _operations.run(() async {
+      if (_transitionQuiesced || generation != _generation) return;
+      await _runner.ensureRunning();
+      if (_transitionQuiesced || generation != _generation) {
+        await _runner.stopRecorder();
+        return;
+      }
+      await _runner.startRecorder(
+        onByteReceived: (bytes) {
+          if (!_transitionQuiesced && generation == _generation) onByteReceived(bytes);
+        },
+        onRecording: () {
+          if (!_transitionQuiesced && generation == _generation) onRecording?.call();
+        },
+        onStop: () {
+          if (generation == _generation) onStop?.call();
+        },
+        onInitializing: () {
+          if (!_transitionQuiesced && generation == _generation) onInitializing?.call();
+        },
+      );
+      if (_transitionQuiesced || generation != _generation) await _runner.stopRecorder();
+    });
   }
 
   @override
-  Future<void> stop() async {
-    await _runner.stopRecorder();
+  Future<void> stop() {
+    _generation++;
+    return _operations.run(_runner.stopRecorder);
+  }
+
+  @override
+  Future<void> stopForAccountTransition() {
+    _transitionQuiesced = true;
+    _generation++;
+    return _operations.run(_runner.stopRecorder);
+  }
+
+  @override
+  void resumeAfterAccountTransition() {
+    _transitionQuiesced = false;
   }
 }
 
@@ -340,6 +414,9 @@ class MicRecorderService implements IMicRecorderService {
   Function(Uint8List bytes)? _onByteReceived;
   Function? _onRecording;
   Function? _onStop;
+  final _operations = _SerializedCaptureOperations();
+  bool _transitionQuiesced = false;
+  int _generation = 0;
 
   bool _isInBG = false;
 
@@ -356,7 +433,27 @@ class MicRecorderService implements IMicRecorderService {
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
+  }) {
+    final generation = _generation;
+    return _operations.run(
+      () => _start(
+        onByteReceived: onByteReceived,
+        onRecording: onRecording,
+        onStop: onStop,
+        onInitializing: onInitializing,
+        generation: generation,
+      ),
+    );
+  }
+
+  Future<void> _start({
+    required Function(Uint8List bytes) onByteReceived,
+    Function()? onRecording,
+    Function()? onStop,
+    Function()? onInitializing,
+    required int generation,
   }) async {
+    if (_transitionQuiesced || generation != _generation) return;
     if (_status == RecorderServiceStatus.recording) {
       throw Exception("Recorder is recording, please stop it before start new recording.");
     }
@@ -376,6 +473,10 @@ class MicRecorderService implements IMicRecorderService {
 
     // new record
     await _recorder.openRecorder(isBGService: _isInBG);
+    if (_transitionQuiesced || generation != _generation) {
+      await _stopNative();
+      return;
+    }
     _controller = StreamController<Uint8List>();
 
     await _recorder.startRecorder(
@@ -385,9 +486,13 @@ class MicRecorderService implements IMicRecorderService {
       sampleRate: 16000,
       bufferSize: 8192,
     );
+    if (_transitionQuiesced || generation != _generation) {
+      await _stopNative();
+      return;
+    }
     _audioSubscription = _controller!.stream.listen((buffer) {
       Uint8List audioBytes = buffer;
-      if (_onByteReceived != null) {
+      if (!_transitionQuiesced && generation == _generation && _onByteReceived != null) {
         _onByteReceived!(audioBytes);
       }
     });
@@ -397,7 +502,24 @@ class MicRecorderService implements IMicRecorderService {
   }
 
   @override
-  Future<void> stop() async {
+  Future<void> stop() {
+    _generation++;
+    return _operations.run(_stopNative);
+  }
+
+  @override
+  Future<void> stopForAccountTransition() {
+    _transitionQuiesced = true;
+    _generation++;
+    return _operations.run(_stopNative);
+  }
+
+  @override
+  void resumeAfterAccountTransition() {
+    _transitionQuiesced = false;
+  }
+
+  Future<void> _stopNative() async {
     final onStop = _onStop;
     _onByteReceived = null;
     if (_status == RecorderServiceStatus.recording || _status == RecorderServiceStatus.initialising) {
@@ -439,13 +561,23 @@ abstract class ISystemAudioRecorderService {
   });
   Future<void> stop();
   Future<void> stopAndClearCallbacks();
+  Future<void> stopForAccountTransition();
+  void resumeAfterAccountTransition();
   void setOnRecordingStartedFromNub(Function() callback);
   void setIsRecordingPausedCallback(bool Function() callback);
   // TODO: Add status property
 }
 
 class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
-  static const MethodChannel _channel = MethodChannel('screenCapturePlatform');
+  DesktopSystemAudioRecorderService({MethodChannel? channel})
+      : _channel = channel ?? const MethodChannel('screenCapturePlatform') {
+    _channel.setMethodCallHandler(_handleMethodCall);
+  }
+
+  final MethodChannel _channel;
+  final _operations = _SerializedCaptureOperations();
+  bool _transitionQuiesced = false;
+  int _generation = 0;
   Function(Uint8List bytes)? _onByteReceived;
   Function(Map<String, dynamic> format)? _onFormatReceived;
   Function()? _onRecording;
@@ -473,11 +605,8 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
   // To keep track of recording state from Dart's perspective
   bool _isRecording = false;
 
-  DesktopSystemAudioRecorderService() {
-    _channel.setMethodCallHandler(_handleMethodCall);
-  }
-
   Future<dynamic> _handleMethodCall(MethodCall call) async {
+    if (_transitionQuiesced && call.method != 'isRecordingPaused') return;
     switch (call.method) {
       case 'audioFrame':
         if (_onByteReceived != null && call.arguments is Uint8List) {
@@ -653,9 +782,51 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
     Function()? onMicrophoneDeviceChanged,
     Function(String deviceName, double micLevel, double systemAudioLevel)? onMicrophoneStatus,
     Function()? onStoppedAutomatically,
+  }) {
+    final generation = _generation;
+    return _operations.run(
+      () => _start(
+        onByteReceived: onByteReceived,
+        onFormatReceived: onFormatReceived,
+        onRecording: onRecording,
+        onStop: onStop,
+        onError: onError,
+        onSystemWillSleep: onSystemWillSleep,
+        onSystemDidWake: onSystemDidWake,
+        onScreenDidLock: onScreenDidLock,
+        onScreenDidUnlock: onScreenDidUnlock,
+        onDisplaySetupInvalid: onDisplaySetupInvalid,
+        onMicrophoneDeviceChanged: onMicrophoneDeviceChanged,
+        onMicrophoneStatus: onMicrophoneStatus,
+        onStoppedAutomatically: onStoppedAutomatically,
+        generation: generation,
+      ),
+    );
+  }
+
+  Future<void> _start({
+    required Function(Uint8List bytes) onByteReceived,
+    required Function(Map<String, dynamic> format) onFormatReceived,
+    Function()? onRecording,
+    Function()? onStop,
+    Function(String error)? onError,
+    Function(bool wasRecording)? onSystemWillSleep,
+    Function(bool nativeIsRecording)? onSystemDidWake,
+    Function(bool wasRecording)? onScreenDidLock,
+    Function()? onScreenDidUnlock,
+    Function(String reason)? onDisplaySetupInvalid,
+    Function()? onMicrophoneDeviceChanged,
+    Function(String deviceName, double micLevel, double systemAudioLevel)? onMicrophoneStatus,
+    Function()? onStoppedAutomatically,
+    required int generation,
   }) async {
+    if (_transitionQuiesced || generation != _generation) return;
     try {
       final nativeIsRecording = await _channel.invokeMethod('isRecording') ?? false;
+      if (_transitionQuiesced || generation != _generation) {
+        if (nativeIsRecording) await _channel.invokeMethod('stop');
+        return;
+      }
 
       if (nativeIsRecording && _isRecording) {
         onError?.call("Already recording");
@@ -685,6 +856,8 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
       Logger.debug("[SystemAudio] State check error: $e");
     }
 
+    if (_transitionQuiesced || generation != _generation) return;
+
     if (_isRecording) {
       onError?.call("Already recording");
       return;
@@ -706,6 +879,10 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
 
     try {
       await _channel.invokeMethod('start');
+      if (_transitionQuiesced || generation != _generation) {
+        await _stopAndClearCallbacksNative();
+        return;
+      }
       _isRecording = true;
       _onRecording?.call();
     } catch (e) {
@@ -727,7 +904,12 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
   }
 
   @override
-  Future<void> stop() async {
+  Future<void> stop() {
+    _generation++;
+    return _operations.run(_stopNative);
+  }
+
+  Future<void> _stopNative() async {
     try {
       await _channel.invokeMethod('stop');
     } catch (e) {
@@ -741,13 +923,35 @@ class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
   /// Stop recording and immediately clear callbacks to prevent them from being
   /// called when the native stop completes
   @override
-  Future<void> stopAndClearCallbacks() async {
+  Future<void> stopAndClearCallbacks() {
+    _generation++;
+    _isRecording = false;
+    _clearCallbacks();
+    return _operations.run(_stopAndClearCallbacksNative);
+  }
+
+  Future<void> _stopAndClearCallbacksNative({bool failClosed = false}) async {
     _isRecording = false;
     _clearCallbacks();
     try {
       await _channel.invokeMethod('stop');
     } catch (e) {
       Logger.debug('DesktopSystemAudioRecorderService: Error stopping: $e');
+      if (failClosed) rethrow;
     }
+  }
+
+  @override
+  Future<void> stopForAccountTransition() {
+    _transitionQuiesced = true;
+    _generation++;
+    _isRecording = false;
+    _clearCallbacks();
+    return _operations.run(() => _stopAndClearCallbacksNative(failClosed: true));
+  }
+
+  @override
+  void resumeAfterAccountTransition() {
+    _transitionQuiesced = false;
   }
 }

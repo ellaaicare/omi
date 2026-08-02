@@ -124,6 +124,7 @@ class CaptureProvider extends ChangeNotifier
 
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
+  Future<void>? _micStartFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
@@ -677,7 +678,7 @@ class CaptureProvider extends ChangeNotifier
       // Keep late frames bound to the capture-start authority. Unknown/stale
       // frames are retained for quarantine and never inherit the next account.
       if (!_isCaptureCurrent(generation, captureAuthority)) {
-        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: null);
+        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
         return;
       }
 
@@ -1030,7 +1031,19 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  streamRecording() async {
+  Future<void> streamRecording() {
+    final activeStart = _micStartFuture;
+    if (activeStart != null) return activeStart;
+
+    late final Future<void> trackedStart;
+    trackedStart = _streamRecording().whenComplete(() {
+      if (identical(_micStartFuture, trackedStart)) _micStartFuture = null;
+    });
+    _micStartFuture = trackedStart;
+    return trackedStart;
+  }
+
+  Future<void> _streamRecording() async {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     final generation = _captureGeneration;
     final captureAuthority = WalOwnerAuthority.active();
@@ -1052,11 +1065,11 @@ class CaptureProvider extends ChangeNotifier
         _socket?.send(bytes);
       }
     }, onRecording: () {
-      updateRecordingState(RecordingState.record);
+      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.record);
     }, onStop: () {
-      updateRecordingState(RecordingState.stop);
+      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
     }, onInitializing: () {
-      updateRecordingState(RecordingState.initialising);
+      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
     });
   }
 
@@ -1069,6 +1082,8 @@ class CaptureProvider extends ChangeNotifier
 
   Future<void> stopForAccountTransition() async {
     _captureGeneration++;
+    final micStart = _micStartFuture;
+    final systemAudioStart = _systemAudioStartFuture;
     _voiceCommandTimeoutTimer?.cancel();
     _voiceCommandTimeoutTimer = null;
     _reconnectTimer?.cancel();
@@ -1079,17 +1094,22 @@ class CaptureProvider extends ChangeNotifier
     _recordingTimer = null;
     _systemAudioCacheTimer?.cancel();
     _systemAudioCacheTimer = null;
-    _systemAudioCaptureAuthority = null;
     _commandBytes = [];
     _voiceCommandSession = null;
     _systemAudioBuffer.clear();
     await _closeBleStream(stopCamera: false);
     if (ServiceManager.isInitialized) {
-      await ServiceManager.instance().mic.stop();
+      final stops = <Future<void>>[ServiceManager.instance().mic.stop()];
       if (PlatformService.isDesktop) {
-        await ServiceManager.instance().systemAudio.stopAndClearCallbacks();
+        stops.add(ServiceManager.instance().systemAudio.stopAndClearCallbacks());
       }
+      await Future.wait([
+        if (micStart != null) micStart,
+        if (systemAudioStart != null) systemAudioStart.then<void>((_) {}),
+        ...stops,
+      ]);
     }
+    _systemAudioCaptureAuthority = null;
     await _socket?.stop(reason: 'account transition');
     reset();
     updateRecordingState(RecordingState.stop);
@@ -1180,70 +1200,86 @@ class CaptureProvider extends ChangeNotifier
     if (!_isCaptureCurrent(generation, captureAuthority)) return;
 
     await ServiceManager.instance().systemAudio.start(
-          onFormatReceived: (Map<String, dynamic> format) async {
-            // This callback is for information only, no action needed.
-          },
-          onByteReceived: (bytes) {
-            if (_isCaptureCurrent(generation, captureAuthority)) _processSystemAudioByteReceived(bytes);
-          },
-          onRecording: () {
-            updateRecordingState(RecordingState.systemAudioRecord);
-            _startRecordingTimer();
-            Logger.debug('System audio recording started successfully.');
-          },
-          onStop: () {
-            if (_isPaused) {
-              updateRecordingState(RecordingState.pause);
-            } else {
-              updateRecordingState(RecordingState.stop);
-            }
-            _socket?.stop(reason: 'system audio stream ended from native');
-          },
-          onError: (error) {
-            Logger.debug('System audio capture error: $error');
-            AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.captureRecordingError(error) ??
-                'An error occurred during recording: $error');
-            updateRecordingState(RecordingState.stop);
-          },
-          onSystemWillSleep: (wasRecording) {
-            Logger.debug('System will sleep - was recording: $wasRecording');
-          },
-          onSystemDidWake: (nativeIsRecording) async {
-            Logger.debug('[SystemWake] Native recording: $nativeIsRecording, Flutter state: $recordingState');
+      onFormatReceived: (Map<String, dynamic> format) async {
+        // This callback is for information only, no action needed.
+      },
+      onByteReceived: (bytes) {
+        if (_isCaptureCurrent(generation, captureAuthority)) _processSystemAudioByteReceived(bytes);
+      },
+      onRecording: () {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        updateRecordingState(RecordingState.systemAudioRecord);
+        _startRecordingTimer();
+        Logger.debug('System audio recording started successfully.');
+      },
+      onStop: () {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        if (_isPaused) {
+          updateRecordingState(RecordingState.pause);
+        } else {
+          updateRecordingState(RecordingState.stop);
+        }
+        _socket?.stop(reason: 'system audio stream ended from native');
+      },
+      onError: (error) {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        Logger.debug('System audio capture error: $error');
+        AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.captureRecordingError(error) ??
+            'An error occurred during recording: $error');
+        updateRecordingState(RecordingState.stop);
+      },
+      onSystemWillSleep: (wasRecording) {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        Logger.debug('System will sleep - was recording: $wasRecording');
+      },
+      onSystemDidWake: (nativeIsRecording) async {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        Logger.debug('[SystemWake] Native recording: $nativeIsRecording, Flutter state: $recordingState');
 
-            if (!nativeIsRecording && recordingState == RecordingState.systemAudioRecord) {
-              // Native stopped, sync Flutter state
-              updateRecordingState(RecordingState.stop);
+        if (!nativeIsRecording && recordingState == RecordingState.systemAudioRecord) {
+          // Native stopped, sync Flutter state
+          updateRecordingState(RecordingState.stop);
 
-              // Auto-resume based on session flag (was recording before sleep?)
-              if (_shouldAutoResumeAfterWake) {
-                Logger.debug('[SystemWake] Auto-resuming recording (was recording before sleep)...');
-                await Future.delayed(const Duration(seconds: 2));
-                await streamSystemAudioRecording();
-              } else {
-                Logger.debug('[SystemWake] Not auto-resuming (user manually stopped)');
-              }
-            }
-          },
-          onScreenDidLock: (wasRecording) {
-            Logger.debug('Screen locked - was recording: $wasRecording');
-          },
-          onScreenDidUnlock: () {
-            Logger.debug('Screen unlocked');
-          },
-          onDisplaySetupInvalid: (reason) {
-            Logger.debug('Display setup invalid: $reason');
-            if (recordingState == RecordingState.systemAudioRecord) {
-              updateRecordingState(RecordingState.stop);
-              AppSnackbar.showSnackbarError(
-                  MyApp.navigatorKey.currentContext?.l10n.captureRecordingStoppedDisplayIssue(reason) ??
-                      'Recording stopped: $reason. You may need to reconnect external displays or restart recording.');
-            }
-          },
-          onMicrophoneDeviceChanged: _onMicrophoneDeviceChanged,
-          onMicrophoneStatus: _onMicrophoneStatus,
-          onStoppedAutomatically: _handleRecordingStoppedAutomatically,
-        );
+          // Auto-resume based on session flag (was recording before sleep?)
+          if (_shouldAutoResumeAfterWake) {
+            Logger.debug('[SystemWake] Auto-resuming recording (was recording before sleep)...');
+            await Future.delayed(const Duration(seconds: 2));
+            await streamSystemAudioRecording();
+          } else {
+            Logger.debug('[SystemWake] Not auto-resuming (user manually stopped)');
+          }
+        }
+      },
+      onScreenDidLock: (wasRecording) {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        Logger.debug('Screen locked - was recording: $wasRecording');
+      },
+      onScreenDidUnlock: () {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        Logger.debug('Screen unlocked');
+      },
+      onDisplaySetupInvalid: (reason) {
+        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        Logger.debug('Display setup invalid: $reason');
+        if (recordingState == RecordingState.systemAudioRecord) {
+          updateRecordingState(RecordingState.stop);
+          AppSnackbar.showSnackbarError(
+              MyApp.navigatorKey.currentContext?.l10n.captureRecordingStoppedDisplayIssue(reason) ??
+                  'Recording stopped: $reason. You may need to reconnect external displays or restart recording.');
+        }
+      },
+      onMicrophoneDeviceChanged: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) _onMicrophoneDeviceChanged();
+      },
+      onMicrophoneStatus: (deviceName, micLevel, systemAudioLevel) {
+        if (_isCaptureCurrent(generation, captureAuthority)) {
+          _onMicrophoneStatus(deviceName, micLevel, systemAudioLevel);
+        }
+      },
+      onStoppedAutomatically: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) _handleRecordingStoppedAutomatically();
+      },
+    );
   }
 
   Future<bool> _checkAndRequestSystemAudioPermissions() async {

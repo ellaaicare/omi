@@ -64,13 +64,13 @@ abstract class IDeviceServiceSubsciption {
 }
 
 class DeviceService implements IDeviceService {
+  DeviceService({List<DeviceDiscoverer>? discoverers})
+      : _discoverers = discoverers ?? [BluetoothDeviceDiscoverer(), AppleWatchDiscoverer()];
+
   DeviceServiceStatus _status = DeviceServiceStatus.init;
   List<BtDevice> _devices = [];
 
-  final List<DeviceDiscoverer> _discoverers = [
-    BluetoothDeviceDiscoverer(),
-    AppleWatchDiscoverer(),
-  ];
+  final List<DeviceDiscoverer> _discoverers;
 
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
@@ -191,9 +191,7 @@ class DeviceService implements IDeviceService {
     onStatusChanged(_status);
 
     // Stop all discoverers to prevent resource leaks and battery drain
-    for (final discoverer in _discoverers) {
-      discoverer.stop();
-    }
+    await Future.wait(_discoverers.map((discoverer) => discoverer.stop()));
 
     await disconnectDevice();
 

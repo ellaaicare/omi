@@ -7,6 +7,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/other/string_utils.dart';
 
 Future<List<ServerMessage>> getMessagesServer({
@@ -104,6 +105,7 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   String? appId,
   List<String>? filesId,
   String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) return;
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
@@ -117,6 +119,7 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
     url: url,
     body: jsonEncode({'text': text, 'file_ids': filesId}),
     expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   )) {
     var messageChunk = parseMessageChunk(line, messageId);
     if (messageChunk != null) {
@@ -210,6 +213,7 @@ Future<List<MessageFile>?> uploadFilesServer(
   List<File> files, {
   String? appId,
   String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw StateError('AI consent is required before file upload');
@@ -224,6 +228,7 @@ Future<List<MessageFile>?> uploadFilesServer(
       url: url,
       files: files,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
     );
 
     if (response.statusCode == 200) {

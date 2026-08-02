@@ -12,6 +12,7 @@ import 'package:omi/env/env.dart';
 import 'package:omi/models/subscription.dart';
 import 'package:omi/models/user_usage.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 Future<bool> updateUserGeolocation({required Geolocation geolocation}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) return false;
@@ -211,13 +212,18 @@ Future<bool> getPrivateCloudSyncEnabled() async {
   return false;
 }
 
-Future<Person?> createPerson(String name, {String? expectedAuthenticatedUid}) async {
+Future<Person?> createPerson(
+  String name, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people',
     headers: {},
     method: 'POST',
     body: jsonEncode({'name': name}),
     expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return null;
   Logger.debug('createPerson response: ${response.body}');
@@ -263,26 +269,37 @@ Future<List<Person>> getAllPeople({bool includeSpeechSamples = true}) async {
   return [];
 }
 
-Future<bool> updatePersonName(String personId, String newName, {String? expectedAuthenticatedUid}) async {
+Future<bool> updatePersonName(
+  String personId,
+  String newName, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId/name?value=$newName',
     headers: {},
     method: 'PATCH',
     body: '',
     expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('updatePersonName response: ${response.body}');
   return response.statusCode == 200;
 }
 
-Future<bool> deletePerson(String personId, {String? expectedAuthenticatedUid}) async {
+Future<bool> deletePerson(
+  String personId, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId',
     headers: {},
     method: 'DELETE',
     body: '',
     expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('deletePerson response: ${response.body}');
@@ -293,6 +310,7 @@ Future<bool> deletePersonSpeechSample(
   String personId,
   int sampleIndex, {
   String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId/speech-samples/$sampleIndex',
@@ -300,6 +318,7 @@ Future<bool> deletePersonSpeechSample(
     method: 'DELETE',
     body: '',
     expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('deletePersonSpeechSample response: ${response.body}');

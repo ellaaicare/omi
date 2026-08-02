@@ -43,14 +43,25 @@ typedef AttachmentFilePicker = Future<List<File>> Function(int remainingSlots);
 typedef MessageFileUploader = Future<List<MessageFile>?> Function(
   List<File> files,
   String? appId,
-  String expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier exactAuthority,
 );
 typedef AskAiStreamSender = Stream<ServerMessageChunk> Function(
   String message,
   List<String>? fileIds,
-  String expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier exactAuthority,
 );
 typedef AskAiResponseSink = FutureOr<void> Function(Map<String, dynamic> chunk);
+typedef AiConsentEnsurer = Future<bool> Function();
+
+class MessageProtectedOperation {
+  MessageProtectedOperation._(this._lease, this.generation, this._currentCheck);
+
+  final EllaAccountCommitLease _lease;
+  final int generation;
+  final bool Function() _currentCheck;
+
+  bool get isCurrent => _currentCheck();
+}
 
 class MessageProvider extends ChangeNotifier {
   static late MethodChannel _askAIChannel;
@@ -65,19 +76,20 @@ class MessageProvider extends ChangeNotifier {
     MessageFileUploader? fileUploader,
     AskAiStreamSender? askAiStreamSender,
     AskAiResponseSink? askAiResponseSink,
+    AiConsentEnsurer? aiConsentEnsurer,
   })  : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps,
-        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.operationEntry,
         _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
         _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
         _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile,
         _filePicker = filePicker,
         _fileUploader = fileUploader ??
-            ((files, appId, expectedUid) =>
-                uploadFilesServer(files, appId: appId, expectedAuthenticatedUid: expectedUid)),
+            ((files, appId, authority) => uploadFilesServer(files, appId: appId, exactAuthority: authority)),
         _askAiStreamSender = askAiStreamSender ??
-            ((message, fileIds, expectedUid) =>
-                sendMessageStreamServer(message, filesId: fileIds, expectedAuthenticatedUid: expectedUid)),
-        _askAiResponseSink = askAiResponseSink {
+            ((message, fileIds, authority) =>
+                sendMessageStreamServer(message, filesId: fileIds, exactAuthority: authority)),
+        _askAiResponseSink = askAiResponseSink,
+        _aiConsentEnsurer = aiConsentEnsurer {
     if (PlatformService.isDesktop) {
       _askAIChannel = const MethodChannel('com.omi/ask_ai');
       _askAIChannel.setMethodCallHandler(_handleAskAIMethodCall);
@@ -93,6 +105,7 @@ class MessageProvider extends ChangeNotifier {
   final MessageFileUploader _fileUploader;
   final AskAiStreamSender _askAiStreamSender;
   final AskAiResponseSink? _askAiResponseSink;
+  final AiConsentEnsurer? _aiConsentEnsurer;
   int _operationGeneration = 0;
 
   static Future<List<App>> _retrieveInstalledChatApps() async {
@@ -127,6 +140,8 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<bool> _ensureAiConsent() async {
+    final ensure = _aiConsentEnsurer;
+    if (ensure != null) return ensure();
     if (SharedPreferencesUtil().aiConsentAccepted) return true;
     final context = MyApp.navigatorKey.currentContext;
     return context != null && await AiConsentCoordinator.ensure(context);
@@ -155,9 +170,27 @@ class MessageProvider extends ChangeNotifier {
   EllaAccountCommitLease? _beginAccountCommit() =>
       EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
 
-  Future<EllaAccountCommitLease?> _beginProtectedOperation() async {
-    if (!await _ensureAiConsent()) return null;
-    return _beginAccountCommit();
+  Future<bool> _authorizeProtectedOperation(EllaAccountCommitLease lease, int generation) async =>
+      await _ensureAiConsent() && _canCommit(lease, generation);
+
+  Future<void> runProtectedOperationAtEntry(Future<void> Function(MessageProtectedOperation operation) action) {
+    final lease = _beginAccountCommit();
+    if (lease == null) return Future<void>.value();
+    final generation = _operationGeneration;
+    final operation = MessageProtectedOperation._(lease, generation, () => _canCommit(lease, generation));
+    return _runProtectedOperation(operation, action);
+  }
+
+  Future<void> _runProtectedOperation(
+    MessageProtectedOperation operation,
+    Future<void> Function(MessageProtectedOperation operation) action,
+  ) async {
+    try {
+      if (!await _authorizeProtectedOperation(operation._lease, operation.generation)) return;
+      await action(operation);
+    } finally {
+      operation._lease.close();
+    }
   }
 
   bool _canCommit(EllaAccountCommitLease lease, int generation) =>
@@ -225,43 +258,49 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
 
-    final lease = await _beginProtectedOperation();
+    final lease = _beginAccountCommit();
     if (lease == null) return;
     final generation = _operationGeneration;
 
     try {
-      List<File> filesToAdd = [];
-      List<String> typesToAdd = [];
-
-      for (var file in files) {
-        String ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
-        if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext)) {
-          typesToAdd.add('image');
-        } else {
-          typesToAdd.add('file');
-        }
-        filesToAdd.add(file);
-      }
-
-      if (filesToAdd.isNotEmpty && _canCommit(lease, generation)) {
-        selectedFiles.addAll(filesToAdd);
-        selectedFileTypes.addAll(typesToAdd);
-        try {
-          await _uploadFilesWithLease(filesToAdd, appProvider?.selectedChatAppId, lease, generation);
-        } catch (e) {
-          if (!_canCommit(lease, generation)) return;
-          Logger.debug('Failed to upload files: $e');
-          if (selectedFiles.length >= filesToAdd.length) {
-            selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
-            selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
-          }
-          AppSnackbar.showSnackbarError('File upload failed. Please try again.');
-        }
-        if (_canCommit(lease, generation)) notifyListeners();
-      }
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
+      await _addFilesWithLease(files, lease, generation);
     } finally {
       lease.close();
     }
+  }
+
+  Future<void> addFilesWithinOperation(List<File> files, MessageProtectedOperation operation) async {
+    if (!operation.isCurrent || selectedFiles.length + files.length > 4) return;
+    await _addFilesWithLease(files, operation._lease, operation.generation);
+  }
+
+  Future<void> _addFilesWithLease(List<File> files, EllaAccountCommitLease lease, int generation) async {
+    final filesToAdd = <File>[];
+    final typesToAdd = <String>[];
+    for (final file in files) {
+      final ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
+      typesToAdd.add(
+        ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext) ? 'image' : 'file',
+      );
+      filesToAdd.add(file);
+    }
+
+    if (filesToAdd.isEmpty || !_canCommit(lease, generation)) return;
+    selectedFiles.addAll(filesToAdd);
+    selectedFileTypes.addAll(typesToAdd);
+    try {
+      await _uploadFilesWithLease(filesToAdd, appProvider?.selectedChatAppId, lease, generation);
+    } catch (e) {
+      if (!_canCommit(lease, generation)) return;
+      Logger.debug('Failed to upload files: $e');
+      if (selectedFiles.length >= filesToAdd.length) {
+        selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
+        selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
+      }
+      AppSnackbar.showSnackbarError('File upload failed. Please try again.');
+    }
+    if (_canCommit(lease, generation)) notifyListeners();
   }
 
   bool isFileUploading(String id) {
@@ -300,10 +339,11 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
 
-    final lease = await _beginProtectedOperation();
+    final lease = _beginAccountCommit();
     if (lease == null) return;
     final generation = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
       var res = await ImagePicker().pickImage(source: ImageSource.camera);
       if (res != null && _canCommit(lease, generation)) {
         final file = File(res.path);
@@ -339,10 +379,11 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
 
-    final lease = await _beginProtectedOperation();
+    final lease = _beginAccountCommit();
     if (lease == null) return;
     final generation = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
       List<File> files = [];
 
       if (PlatformService.isDesktop) {
@@ -432,10 +473,11 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
 
-    final lease = await _beginProtectedOperation();
+    final lease = _beginAccountCommit();
     if (lease == null) return;
     final generation = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
       List<File> files;
       if (_filePicker != null) {
         files = await _filePicker!(4 - selectedFiles.length);
@@ -501,10 +543,11 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
-    final lease = await _beginProtectedOperation();
+    final lease = _beginAccountCommit();
     if (lease == null) return null;
     final generation = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return null;
       return await _uploadFilesWithLease(files, appId, lease, generation);
     } finally {
       lease.close();
@@ -522,7 +565,7 @@ class MessageProvider extends ChangeNotifier {
     setMultiUploadingFileStatus(paths, true);
     try {
       if (!_canCommit(lease, generation)) return null;
-      final result = await _fileUploader(files, appId, lease.authority.uid);
+      final result = await _fileUploader(files, appId, lease);
       if (!_canCommit(lease, generation)) return null;
       if (result != null) {
         uploadedFiles.addAll(result);
@@ -722,11 +765,11 @@ class MessageProvider extends ChangeNotifier {
     Function? onFirstChunkRecived,
     BleAudioCodec? codec,
   }) async {
-    if (!await _ensureAiConsent()) return;
     final lease = _beginAccountCommit();
     if (lease == null) return;
     final operationGeneration = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, operationGeneration)) return;
       var file = await _voiceTempFileSaver(
         audioBytes,
         DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
@@ -829,11 +872,11 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future sendMessageStreamToServer(String text) async {
-    if (!await _ensureAiConsent()) return;
     final lease = _beginAccountCommit();
     if (lease == null) return;
     final operationGeneration = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, operationGeneration)) return;
       if (SharedPreferencesUtil().demoMode) {
         if (!_canCommit(lease, operationGeneration)) return;
         messages = DemoFixtures.chatMessages();
@@ -953,13 +996,19 @@ class MessageProvider extends ChangeNotifier {
     return appProvider?.apps.firstWhereOrNull((p) => p.id == appId);
   }
 
-  Future<void> _emitAskAiChunk(Map<String, dynamic> chunk) async {
+  Future<void> _emitAskAiChunk(
+    Map<String, dynamic> chunk,
+    EllaAccountCommitLease lease,
+    int generation,
+  ) async {
+    if (!_canCommit(lease, generation)) return;
     final sink = _askAiResponseSink;
     if (sink != null) {
       await sink(chunk);
     } else {
       await _askAIChannel.invokeMethod('aiResponseChunk', chunk);
     }
+    if (!_canCommit(lease, generation)) return;
   }
 
   @visibleForTesting
@@ -975,11 +1024,12 @@ class MessageProvider extends ChangeNotifier {
         final message = args['message'] as String;
         final filePath = args['filePath'] as String?;
 
-        final lease = await _beginProtectedOperation();
+        final lease = _beginAccountCommit();
         if (lease == null) return;
         final generation = _operationGeneration;
 
         try {
+          if (!await _authorizeProtectedOperation(lease, generation)) return;
           List<String>? fileIds;
           if (filePath != null && filePath.isNotEmpty) {
             final file = File(filePath);
@@ -992,13 +1042,13 @@ class MessageProvider extends ChangeNotifier {
               await _emitAskAiChunk({
                 'type': 'error',
                 'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.',
-              });
+              }, lease, generation);
               return;
             }
           }
 
           if (!_canCommit(lease, generation)) return;
-          await for (var chunk in _askAiStreamSender(message, fileIds, lease.authority.uid)) {
+          await for (var chunk in _askAiStreamSender(message, fileIds, lease)) {
             if (!_canCommit(lease, generation)) return;
             final chunkMap = {
               'type': chunk.type.toString().split('.').last,
@@ -1008,7 +1058,7 @@ class MessageProvider extends ChangeNotifier {
             if (chunk.type == MessageChunkType.done && chunk.message != null) {
               chunkMap['text'] = chunk.message!.text;
             }
-            await _emitAskAiChunk(chunkMap);
+            await _emitAskAiChunk(chunkMap, lease, generation);
           }
         } catch (e) {
           if (!_canCommit(lease, generation)) return;
@@ -1018,7 +1068,7 @@ class MessageProvider extends ChangeNotifier {
             'text': failedChunk.text,
             'messageId': failedChunk.messageId,
           };
-          await _emitAskAiChunk(chunkMap);
+          await _emitAskAiChunk(chunkMap, lease, generation);
         } finally {
           lease.close();
         }

@@ -126,12 +126,67 @@ class LocalWalSyncImpl implements LocalWalSync {
     _chunkingTimer?.cancel();
     _flushingTimer?.cancel();
 
-    await _chunk();
+    await _drainForStop();
     await _flush();
 
     _frames = [];
     _frameSynced = [];
     _frameOwners = [];
+  }
+
+  Future<void> _drainForStop() async {
+    await _waitForInitialization();
+    if (_frames.isEmpty) return;
+
+    final device = _deviceId ?? 'omi';
+    var groupStart = 0;
+    var timerStart = DateTime.now().millisecondsSinceEpoch ~/ 1000 - (_frames.length / _framesPerSecond).ceil();
+    while (groupStart < _frames.length) {
+      final owner = _frameOwners[groupStart];
+      var groupEnd = groupStart + 1;
+      while (groupEnd < _frames.length && _ownersMatch(_frameOwners[groupEnd], owner)) {
+        groupEnd++;
+      }
+
+      while (
+          _wals.any((wal) => wal.timerStart == timerStart && wal.device == device && _ownersMatch(wal.owner, owner))) {
+        timerStart--;
+      }
+      final frames = _frames.sublist(groupStart, groupEnd).map(List<int>.from).toList();
+      var syncedOffset = 0;
+      for (var index = groupStart; index < groupEnd && _frameSynced[index]; index++) {
+        syncedOffset++;
+      }
+      final frameCount = groupEnd - groupStart;
+      _wals.add(
+        Wal(
+          codec: _codec,
+          timerStart: timerStart,
+          data: frames,
+          storage: WalStorage.mem,
+          status: WalStatus.quarantined,
+          device: device,
+          deviceModel: _deviceModel ?? 'Omi',
+          seconds: (frameCount / _framesPerSecond).ceil(),
+          totalFrames: frameCount,
+          syncedFrameOffset: syncedOffset,
+          owner: owner,
+          quarantineReason: owner == null ? 'capture_without_owner' : 'account_transition_final_drain',
+        ),
+      );
+      listener.onWalUpdated();
+      timerStart++;
+      groupStart = groupEnd;
+    }
+
+    _frames.clear();
+    _frameSynced.clear();
+    _frameOwners.clear();
+  }
+
+  bool _ownersMatch(WalOwner? left, WalOwner? right) {
+    if (left == null || right == null) return left == null && right == null;
+    return left.matches(right);
   }
 
   @override

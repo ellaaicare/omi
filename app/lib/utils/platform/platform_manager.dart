@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -36,10 +37,17 @@ class PlatformManager {
     await IntercomManager.instance.initIntercom();
   }
 
+  @visibleForTesting
+  static void initializeForTesting() {
+    _instance._packageInfo =
+        PackageInfo(appName: 'Omi Test', packageName: 'com.omi.test', version: '0', buildNumber: '0');
+    _instance._deviceIdHash = 'test-device';
+  }
+
   Future<String> _getDeviceIdHash() async {
     // Check if already stored
-    String? storedHash = SharedPreferencesUtil().deviceIdHash;
-    if (storedHash != null && storedHash.isNotEmpty) {
+    final storedHash = SharedPreferencesUtil().deviceIdHash;
+    if (storedHash.isNotEmpty) {
       return storedHash;
     }
 
