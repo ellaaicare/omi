@@ -120,6 +120,12 @@ jobs:
       - name: Run Guardian data-only production boundary tests
         working-directory: .
         run: |
+          python3 -m pip install --disable-pip-version-check \
+            pytest==8.4.2 \
+            fastapi==0.112.0 \
+            firebase-admin==6.5.0 \
+            httpx==0.28.0 \
+            python-multipart==0.0.9
           python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
           python3 -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth'
