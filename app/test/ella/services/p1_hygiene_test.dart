@@ -49,9 +49,11 @@ void main() {
 
   test('public builds reject inherited Omi surfaces', () {
     expect(allowsInheritedOmiSurface(isPublicBuild: true), isFalse);
+    expect(allowsUnverifiedEllaSurface(isPublicBuild: true), isFalse);
   });
 
   test('non-public builds retain inherited Omi surfaces', () {
     expect(allowsInheritedOmiSurface(isPublicBuild: false), isTrue);
+    expect(allowsUnverifiedEllaSurface(isPublicBuild: false), isTrue);
   });
 }

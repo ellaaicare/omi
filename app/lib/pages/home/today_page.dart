@@ -18,6 +18,7 @@ import 'package:omi/ella/pages/ella_daily_note_page.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/pages/capture/connect.dart';
@@ -74,8 +75,10 @@ class TodayPageState extends State<TodayPage> {
   @override
   void initState() {
     super.initState();
-    _loadDailySummary();
-    _loadWhisperState();
+    if (allowsUnverifiedEllaSurface()) {
+      _loadDailySummary();
+      _loadWhisperState();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       unawaited(context.read<ConversationProvider>().ensureFreshConversations());
@@ -192,6 +195,7 @@ class TodayPageState extends State<TodayPage> {
     );
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1);
+    final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
 
     return SafeArea(
       bottom: false,
@@ -200,8 +204,8 @@ class TodayPageState extends State<TodayPage> {
         backgroundColor: EllaColors.card,
         onRefresh: () async {
           await Future.wait([
-            _loadDailySummary(),
-            _loadWhisperState(),
+            if (showUnverifiedSurfaces) _loadDailySummary(),
+            if (showUnverifiedSurfaces) _loadWhisperState(),
             context.read<ActionItemsProvider>().fetchActionItems(),
             context.read<ConversationProvider>().getInitialConversations(),
           ]);
@@ -239,29 +243,32 @@ class TodayPageState extends State<TodayPage> {
                     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage())),
               ),
             ],
-            const SizedBox(height: EllaSizes.cardGap),
-            _DailyNoteCard(
-              loading: _isLoading,
-              text: _noteText,
-              isToday: _dailySummary?.date == DateFormat('yyyy-MM-dd').format(now),
-              isReading: _isReading,
-              enlarged: scale >= 1.45,
-              hasConversations: visibleConversations.isNotEmpty,
-              onTap: _openDailyNote,
-              onReadAloud: _toggleReadAloud,
-            ),
-            const SizedBox(height: EllaSizes.cardGap),
-            _WhisperPill(
-              enabled: _whispersOn,
-              live: isLive,
-              updating: _updatingWhispers,
-              onChanged: _setWhispers,
-              onOpenLive: () => _openLiveView(capture, conversations),
-            ),
-            _SeeWhispersLink(
-              onTap: () =>
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
-            ),
+            if (showUnverifiedSurfaces) ...[
+              const SizedBox(height: EllaSizes.cardGap),
+              _DailyNoteCard(
+                loading: _isLoading,
+                text: _noteText,
+                isToday: _dailySummary?.date == DateFormat('yyyy-MM-dd').format(now),
+                isReading: _isReading,
+                enlarged: scale >= 1.45,
+                hasConversations: visibleConversations.isNotEmpty,
+                onTap: _openDailyNote,
+                onReadAloud: _toggleReadAloud,
+              ),
+              const SizedBox(height: EllaSizes.cardGap),
+              _WhisperPill(
+                enabled: _whispersOn,
+                live: isLive,
+                updating: _updatingWhispers,
+                onChanged: _setWhispers,
+                onOpenLive: () => _openLiveView(capture, conversations),
+              ),
+              _SeeWhispersLink(
+                onTap: () => Navigator.of(
+                  context,
+                ).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+              ),
+            ],
             const SizedBox(height: EllaSizes.cardGap),
             if (memoriesLoading)
               const _RecentMemoriesLoading()

@@ -256,7 +256,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      _initiateApps();
+      if (allowsInheritedOmiSurface()) _initiateApps();
 
       // ForegroundUtil.requestPermissions();
       if (!PlatformService.isDesktop) {
@@ -407,7 +407,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     _listenToMessagesFromNotification();
     if (allowsInheritedOmiSurface()) _listenToFreemiumThreshold();
-    _checkForAnnouncements();
+    if (allowsInheritedOmiSurface()) _checkForAnnouncements();
 
     super.initState();
 

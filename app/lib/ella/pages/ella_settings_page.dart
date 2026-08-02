@@ -66,11 +66,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _loadData() async {
     try {
-      if (SharedPreferencesUtil().publicMode) {
-        final caregivers = await caregiver_api.getCaregivers();
-        if (mounted) setState(() => _caregivers = caregivers);
-        return;
-      }
+      if (!allowsUnverifiedEllaSurface()) return;
       final results = await Future.wait([
         caregiver_api.getCaregivers(),
         caregiver_api.getEmergencyContactId(),
@@ -217,6 +213,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   @override
   Widget build(BuildContext context) {
     final publicMode = context.watch<DeveloperModeProvider>().publicMode;
+    final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
@@ -289,18 +286,20 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
             ],
 
-            // CARE TEAM section
-            _buildSectionHeader(context.l10n.ellaCareTeamSection),
-            EllaSettingsRow(
-              icon: Icons.people,
-              title: context.l10n.ellaFamilyCaregivers,
-              subtitle: _caregiverCountSubtitle(),
-              onTap: () async {
-                await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaCareTeamPage()));
-                _loadData();
-              },
-            ),
-            if (!publicMode) ...[
+            if (showUnverifiedSurfaces) ...[
+              // CARE TEAM section
+              _buildSectionHeader(context.l10n.ellaCareTeamSection),
+              EllaSettingsRow(
+                icon: Icons.people,
+                title: context.l10n.ellaFamilyCaregivers,
+                subtitle: _caregiverCountSubtitle(),
+                onTap: () async {
+                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaCareTeamPage()));
+                  _loadData();
+                },
+              ),
+            ],
+            if (showUnverifiedSurfaces && !publicMode) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
                 icon: Icons.emergency,
@@ -340,15 +339,17 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                   : context.l10n.aiConsentNotAllowedStatus,
               onTap: _openListeningConsent,
             ),
-            const SizedBox(height: 8),
-            EllaSettingsRow(
-              icon: Icons.record_voice_over_rounded,
-              title: 'What Ella has said',
-              subtitle: 'Helpful things Ella has said and why',
-              onTap: () {
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
-              },
-            ),
+            if (showUnverifiedSurfaces) ...[
+              const SizedBox(height: 8),
+              EllaSettingsRow(
+                icon: Icons.record_voice_over_rounded,
+                title: 'What Ella has said',
+                subtitle: 'Helpful things Ella has said and why',
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
+                },
+              ),
+            ],
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.schedule,
