@@ -24,14 +24,17 @@ from ella.services.ai_consent import (
 from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.provisioning import (
     DEFAULT_TARGET_SCHEMA_VERSION,
+    HermesProvisionClient,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
     any_provisioning_enabled,
     cloud_provisioning_enabled,
     effective_target_schema_version,
+    provisioning_enabled,
     public_receipt,
     retained_compatibility_receipt,
+    self_hosted_provisioning_enabled,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
 from utils.other import endpoints as auth
@@ -129,6 +132,11 @@ async def ensure_onboarding(
         if receipt:
             return receipt
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
+    if not cloud_provisioning_enabled(uid) and (self_hosted_provisioning_enabled(uid) or provisioning_enabled(uid)):
+        try:
+            HermesProvisionClient.resolve_authority()
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     identity = _verified_identity(uid, payload)
     coordinator = await _coordinator()
     try:

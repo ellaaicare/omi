@@ -19,6 +19,7 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
@@ -58,6 +59,7 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
@@ -143,6 +145,7 @@ jobs:
           ella/services/provisioning.py
           ella/services/runtime_resolver.py
           ella/services/hermes_cloud_policy.py
+          ella/utils/provision_authority.py
           scripts/synthetic_invite_admin.py
           scripts/pilot_invite_admin.py
 
@@ -161,7 +164,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 137
+          test "$collected" -eq 138
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -175,6 +178,7 @@ jobs:
           )"
           required_ids=(
             "tests/unit/test_invitation_redemption.py::test_redeem_rejects_unverified_firebase_email_before_authority_or_database"
+            "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
             "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
             "tests/unit/test_pilot_invite_admin.py::test_operator_examples_never_embed_plaintext_email_or_legacy_email_argument"

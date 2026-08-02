@@ -25,8 +25,9 @@ Environment variables:
     ELLA_POSTGRES_USER       (default: postgres)
     ELLA_POSTGRES_PASSWORD   (default: postgres)
     ELLA_POSTGRES_DB         (default: ella_ai)
-    ELLA_HERMES_PROVISION_API_URL   (default: http://100.76.138.56:8210)
+    ELLA_HERMES_PROVISION_API_URL   (required; exact reviewed endpoint)
     ELLA_HERMES_PROVISION_API_TOKEN (required)
+    ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF (required env: secret reference)
     IDENTITY_SYNC_STATE_FILE (default: ~/.ella-identity-sync-state.json)
 """
 
@@ -46,7 +47,7 @@ try:
 except ImportError:  # pragma: no cover - the synchronous helper remains stdlib-only
     httpx = None
 
-from ella.utils.provision_authority import ProvisionAuthorityError, hermes_provision_authority
+from ella.utils.provision_authority import ProvisionAuthority, ProvisionAuthorityError, hermes_provision_authority
 
 logger = logging.getLogger("ella.identity_sync")
 
@@ -62,6 +63,56 @@ STATE_FILE = Path(os.getenv("IDENTITY_SYNC_STATE_FILE", os.path.expanduser("~/.e
 
 
 # --- Sync-on-Write API (stdlib only — no external deps) ---
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+_IDENTITY_SYNC_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _identity_payload(omi_uid: str, phone: str = None, email: str = None) -> dict:
+    payload = {"omiUid": omi_uid}
+    if phone:
+        payload["phone"] = phone
+    if email:
+        payload["email"] = email
+    return payload
+
+
+def _sync_user_identity_with_authority(
+    omi_uid: str,
+    *,
+    phone: str = None,
+    email: str = None,
+    authority: ProvisionAuthority,
+) -> dict:
+    payload = _identity_payload(omi_uid, phone=phone, email=email)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {authority.token}",
+    }
+    url = f"{authority.base_url}/identity-sync"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+
+    try:
+        with _IDENTITY_SYNC_OPENER.open(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            logger.info("identity_sync_succeeded")
+            return result
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            logger.debug("identity_sync_not_provisioned")
+            return {"status": "skipped", "reason": "not provisioned"}
+        logger.warning("identity_sync_http_error")
+        return {"status": "error", "error": "identity_sync_http_error"}
+    except (urllib.error.URLError, OSError):
+        logger.warning("identity_sync_unavailable")
+        return {"status": "error", "error": "identity_sync_unavailable"}
 
 
 def sync_user_identity(omi_uid: str, phone: str = None, email: str = None) -> dict:
@@ -87,45 +138,12 @@ def sync_user_identity(omi_uid: str, phone: str = None, email: str = None) -> di
     if not phone and not email:
         return {"status": "skipped", "reason": "no phone or email"}
 
-    payload = {"omiUid": omi_uid}
-    if phone:
-        payload["phone"] = phone
-    if email:
-        payload["email"] = email
-
     try:
         authority = hermes_provision_authority()
     except ProvisionAuthorityError as exc:
-        logger.error("Hermes identity authority is unavailable for uid=%s: %s", omi_uid, exc.code)
+        logger.error(exc.code)
         return {"status": "error", "error": exc.code}
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {authority.token}",
-    }
-    url = f"{authority.base_url}/identity-sync"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            logger.info(f"Identity synced for {omi_uid}: {result.get('changed', 'unknown')}")
-            return result
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8")
-        except Exception:
-            pass
-        if e.code == 404:
-            logger.debug(f"Identity sync skipped for {omi_uid}: not provisioned yet")
-            return {"status": "skipped", "reason": "not provisioned"}
-        logger.warning(f"Identity sync failed for {omi_uid}: HTTP {e.code} {body}")
-        return {"status": "error", "error": f"HTTP {e.code}: {body}"}
-    except (urllib.error.URLError, OSError) as e:
-        logger.warning(f"Identity sync failed for {omi_uid}: {e}")
-        return {"status": "error", "error": str(e)}
+    return _sync_user_identity_with_authority(omi_uid, phone=phone, email=email, authority=authority)
 
 
 def sync_user_identity_fire_and_forget(omi_uid: str, phone: str = None, email: str = None) -> None:
@@ -137,9 +155,15 @@ def sync_user_identity_fire_and_forget(omi_uid: str, phone: str = None, email: s
     if not omi_uid or (not phone and not email):
         return
 
+    try:
+        authority = hermes_provision_authority()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
+
     def _do_sync():
         try:
-            sync_user_identity(omi_uid, phone=phone, email=email)
+            _sync_user_identity_with_authority(omi_uid, phone=phone, email=email, authority=authority)
         except Exception:
             pass  # Never propagate
 
@@ -155,18 +179,13 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
     if not omi_uid or (not phone and not email):
         return {"status": "skipped", "reason": "no data"}
 
-    payload = {"omiUid": omi_uid}
-    if phone:
-        payload["phone"] = phone
-    if email:
-        payload["email"] = email
-
     try:
         authority = hermes_provision_authority()
     except ProvisionAuthorityError as exc:
-        logger.error("Hermes identity authority is unavailable for uid=%s: %s", omi_uid, exc.code)
+        logger.error(exc.code)
         return {"status": "error", "error": exc.code}
 
+    payload = _identity_payload(omi_uid, phone=phone, email=email)
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {authority.token}",
@@ -175,7 +194,15 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
 
     if httpx is None:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: sync_user_identity(omi_uid, phone=phone, email=email))
+        return await loop.run_in_executor(
+            None,
+            lambda: _sync_user_identity_with_authority(
+                omi_uid,
+                phone=phone,
+                email=email,
+                authority=authority,
+            ),
+        )
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -184,11 +211,11 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
                 return {"status": "skipped", "reason": "not provisioned"}
             resp.raise_for_status()
             result = resp.json()
-            logger.info(f"Identity synced for {omi_uid}: {result.get('changed', 'unknown')}")
+            logger.info("identity_sync_succeeded")
             return result
-    except Exception as e:
-        logger.warning(f"Async identity sync failed for {omi_uid}: {e}")
-        return {"status": "error", "error": str(e)}
+    except Exception:
+        logger.warning("identity_sync_unavailable")
+        return {"status": "error", "error": "identity_sync_unavailable"}
 
 
 # --- Daily Reconciliation (Safety Net) ---
@@ -264,7 +291,7 @@ def _get_changed_users(last_check: str) -> list:
     except ImportError:
         pass
 
-    logger.error("No PostgreSQL driver available (install psycopg2 or pg8000)")
+    logger.error("identity_reconcile_database_driver_unavailable")
     return []
 
 
@@ -274,22 +301,28 @@ def reconcile():
     Designed to run once daily as a safety net. Primary sync is sync-on-write
     via dashboard routes and auto_provision.py.
     """
+    try:
+        authority = hermes_provision_authority()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
+
     state = _load_state()
     last_check = state.get("last_check", "2020-01-01T00:00:00Z")
 
-    logger.info(f"Reconciliation: checking users updated since {last_check}")
+    logger.info("identity_reconcile_started")
 
     try:
         changed_users = _get_changed_users(last_check)
-    except Exception as e:
-        logger.error(f"Reconciliation DB query failed: {e}")
+    except Exception:
+        logger.error("identity_reconcile_database_unavailable")
         return
 
     if not changed_users:
-        logger.info("Reconciliation: no user changes detected")
+        logger.info("identity_reconcile_no_changes")
         return
 
-    logger.info(f"Reconciliation: found {len(changed_users)} changed user(s)")
+    logger.info("identity_reconcile_changes_detected")
 
     synced = 0
     errors = 0
@@ -317,7 +350,12 @@ def reconcile():
         if not email and not phone:
             continue
 
-        result = sync_user_identity(omi_uid, phone=phone, email=email)
+        result = _sync_user_identity_with_authority(
+            omi_uid,
+            phone=phone,
+            email=email,
+            authority=authority,
+        )
         if result.get("status") in ("ok", "skipped"):
             synced += 1
         else:
@@ -338,7 +376,7 @@ def reconcile():
     state["last_errors"] = errors
     _save_state(state)
 
-    logger.info(f"Reconciliation complete: {synced} synced, {errors} errors, watermark={latest_updated_at}")
+    logger.info("identity_reconcile_completed")
 
 
 # --- CLI ---

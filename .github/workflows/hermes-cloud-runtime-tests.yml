@@ -474,12 +474,16 @@ jobs:
               tests/unit/test_ella_plato_mcp.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 42
+          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 200
           required_authority_split_ids=(
             "tests/unit/test_ella_provision_authority_split.py::test_new_user_auto_provision_posts_only_to_hermes_authority"
-            "tests/unit/test_ella_provision_authority_split.py::test_new_user_auto_provision_rejects_cross_slot_token_before_http"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_url_swap]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_token_swap]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_posts_only_to_accepted_exact_authority"
+            "tests/unit/test_ella_provision_authority_split.py::test_auto_provision_entrypoint_rejects_before_database_or_http[missing_url]"
             "tests/unit/test_ella_provision_authority_split.py::test_sync_identity_posts_only_to_hermes_authority"
             "tests/unit/test_ella_provision_authority_split.py::test_async_identity_sync_posts_only_to_hermes_authority"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_reject_before_http_database_state_or_thread[metadata_destination-reconcile]"
             "tests/unit/test_ella_provision_authority_split.py::test_retained_history_consumers_remain_on_legacy_authority_pair"
             "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_search_uses_retained_authority_pair"
             "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_authority_conflict_fails_before_http"

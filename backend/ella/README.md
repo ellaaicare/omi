@@ -262,6 +262,8 @@ print('Adapters:', list(get_all_adapters().keys()))
 New-user Hermes provisioning is disabled by default and has two separate rollout controls:
 
 - `ELLA_HERMES_PROVISIONING_ENABLED` allows authenticated, idempotent `/v1/ella/onboarding/ensure` jobs to call the Hermes-only 8210 provisioner.
+- `ELLA_HERMES_PROVISION_API_URL` and `ELLA_HERMES_PROVISION_API_TOKEN` are both mandatory. The URL must be the canonical approved Mini endpoint or an exact endpoint recorded in `ELLA_HERMES_PROVISION_API_REVIEWED_ALLOWLIST`.
+- `ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF` must reference a root-only server secret containing the reviewed SHA-256 binding of that canonical URL/token pair. Provisioning fails before identity, job, database, or HTTP side effects when any coordinate drifts.
 - `ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS` bounds the cold-start request to 30-300 seconds and defaults to 180 seconds.
 - `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, voice, and `/v4/listen` require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never create/fall back to OpenClaw or a shared Plato profile.
 - `ELLA_ISOLATED_VOICE_ROUTING_ENABLED` is a separate default-off gate. The voice proxy and OMI backend use a short-lived, Firebase-subject-bound JWT plus the independent `ELLA_VOICE_PROXY_SERVICE_TOKEN` for context/search/tool calls; isolated failures do not fall back to OpenClaw. Keep this gate off until the coordinated proxy/OMI/8210 deployment and two-UID canary pass.

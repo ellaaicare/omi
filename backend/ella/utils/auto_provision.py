@@ -17,7 +17,7 @@ from typing import Optional
 import asyncpg
 import httpx
 
-from ella.utils.provision_authority import ProvisionAuthorityError, hermes_provision_authority
+from ella.utils.provision_authority import ProvisionAuthority, ProvisionAuthorityError, hermes_provision_authority
 
 logger = logging.getLogger("ella.auto_provision")
 
@@ -105,8 +105,8 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
             "status": row["status"],
             "user_id": str(row["user_id"]) if row["user_id"] else None,
         }
-    except Exception as e:
-        logger.error(f"Error checking agent cluster for uid={uid}: {e}")
+    except Exception:
+        logger.error("agent_cluster_lookup_failed")
         return None
 
 
@@ -127,6 +127,12 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             - cluster: dict (if success=True)
     """
     try:
+        try:
+            authority = hermes_provision_authority()
+        except ProvisionAuthorityError as exc:
+            logger.error(exc.code)
+            return {"success": False, "error": exc.code}
+
         # 1. Fetch user record from Postgres
         pool = await _get_pool()
         row = await pool.fetchrow(
@@ -138,10 +144,12 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         )
 
         if not row:
-            logger.warning(f"User {uid} not found in DB, falling back to minimal provision")
+            logger.warning("auto_provision_identity_missing")
             # Fall back to minimal provision (email/phone may not be available)
             return await _provision_with_payload(
-                uid, {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name}
+                uid,
+                {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name},
+                authority=authority,
             )
 
         # 2. Extract identity data
@@ -154,7 +162,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         medications = row["medications"] or []
 
         if not email and not phone:
-            logger.warning(f"No email or phone for uid={uid}, provisioning with label only")
+            logger.warning("auto_provision_contact_missing")
 
         # 3. Build full provision payload
         user_id = _slugify_user_id(user_name, uid)
@@ -177,7 +185,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             payload["medications"] = medications if isinstance(medications, list) else [medications]
 
         # 4. Call provision API
-        result = await _provision_with_payload(uid, payload)
+        result = await _provision_with_payload(uid, payload, authority=authority)
 
         # 5. Write phone back to users.identities if present and provision succeeded
         if result.get("success") and phone:
@@ -190,55 +198,56 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
                     json.dumps({"phone": phone}),
                     uid,
                 )
-            except Exception as e:
-                logger.warning(f"Failed to write phone to identities for uid={uid}: {e}")
+            except Exception:
+                logger.warning("auto_provision_identity_write_failed")
 
         return result
 
-    except Exception as e:
-        error_msg = f"Auto-provision error: {str(e)}"
-        logger.error(f"Auto-provision error for uid={uid}: {e}")
-        return {"success": False, "error": error_msg}
+    except Exception:
+        logger.error("auto_provision_internal_error")
+        return {"success": False, "error": "auto_provision_internal_error"}
 
 
-async def _provision_with_payload(uid: str, payload: dict) -> dict:
+async def _provision_with_payload(
+    uid: str,
+    payload: dict,
+    *,
+    authority: Optional[ProvisionAuthority] = None,
+) -> dict:
     """Send a provision request with the given payload.
 
     Args:
-        uid: Firebase UID (for logging)
+        uid: Firebase UID (retained for caller compatibility)
         payload: Full provision payload dict
 
     Returns:
         dict with success/error/cluster keys
     """
+    del uid
     try:
-        authority = hermes_provision_authority()
-        headers = {"Authorization": f"Bearer {authority.token}"}
+        resolved_authority = authority or hermes_provision_authority()
+        headers = {"Authorization": f"Bearer {resolved_authority.token}"}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{authority.base_url}/provision",
+                f"{resolved_authority.base_url}/provision",
                 headers=headers,
                 json=payload,
             )
 
             if response.status_code == 200:
                 data = response.json()
-                logger.info(f"Successfully provisioned uid={uid} as userId={payload.get('userId')}")
+                logger.info("auto_provision_succeeded")
                 return {"success": True, "cluster": data}
-            else:
-                error_msg = f"Provision API returned {response.status_code}: {response.text}"
-                logger.warning(f"Auto-provision failed for uid={uid}: {error_msg}")
-                return {"success": False, "error": error_msg}
+            logger.warning("auto_provision_request_rejected")
+            return {"success": False, "error": "auto_provision_request_rejected"}
 
     except ProvisionAuthorityError as exc:
-        logger.error("Hermes provision authority is unavailable for uid=%s: %s", uid, exc.code)
+        logger.error(exc.code)
         return {"success": False, "error": exc.code}
     except httpx.TimeoutException:
-        error_msg = "Provision API timeout"
-        logger.error(f"Auto-provision timeout for uid={uid}")
-        return {"success": False, "error": error_msg}
-    except Exception as e:
-        error_msg = f"Provision API error: {str(e)}"
-        logger.error(f"Auto-provision error for uid={uid}: {e}")
-        return {"success": False, "error": error_msg}
+        logger.error("auto_provision_timeout")
+        return {"success": False, "error": "auto_provision_timeout"}
+    except Exception:
+        logger.error("auto_provision_unavailable")
+        return {"success": False, "error": "auto_provision_unavailable"}

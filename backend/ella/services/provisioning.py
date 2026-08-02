@@ -49,6 +49,7 @@ from ella.services.hermes_cloud_policy import (
 )
 from ella.services.hermes_cloud_staged_attestation import StagedAttestationVerifier
 from ella.services.runtime_errors import ProvisioningError
+from ella.utils.provision_authority import ProvisionAuthority, ProvisionAuthorityError, hermes_provision_authority
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
 CLOUD_TARGET_SCHEMA_VERSION = "hermes-cloud-user-v1"
@@ -294,15 +295,15 @@ def validate_internal_gateway_url(value: str) -> str:
 
 
 class HermesProvisionClient:
-    def __init__(self, *, base_url: Optional[str] = None, token: Optional[str] = None):
-        self.base_url = (base_url or os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")).rstrip(
-            "/"
-        )
-        self.token = token if token is not None else os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
+    @staticmethod
+    def resolve_authority() -> ProvisionAuthority:
+        try:
+            return hermes_provision_authority()
+        except ProvisionAuthorityError as exc:
+            raise ProvisioningError(exc.code, retryable=False) from exc
 
     async def provision(self, identity: VerifiedIdentity, target_schema_version: str) -> dict[str, Any]:
-        if not self.token:
-            raise ProvisioningError("provision_service_credential_unavailable", retryable=True)
+        authority = self.resolve_authority()
         payload = {
             "userId": identity.uid,
             "omiUid": identity.uid,
@@ -316,8 +317,8 @@ class HermesProvisionClient:
         try:
             async with httpx.AsyncClient(timeout=provision_timeout_seconds()) as client:
                 response = await client.post(
-                    f"{self.base_url}/provision",
-                    headers={"Authorization": f"Bearer {self.token}"},
+                    f"{authority.base_url}/provision",
+                    headers={"Authorization": f"Bearer {authority.token}"},
                     json=payload,
                 )
         except httpx.TimeoutException as exc:
@@ -467,6 +468,12 @@ class ProvisioningCoordinator:
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
         cloud_required = cloud_provisioning_enabled(identity.uid)
         self_hosted_required = self_hosted_provisioning_enabled(identity.uid) and not cloud_required
+        if (
+            not cloud_required
+            and (self_hosted_required or provisioning_enabled(identity.uid))
+            and isinstance(self.client, HermesProvisionClient)
+        ):
+            self.client.resolve_authority()
         try:
             await self.repository.assert_schema_ready()
             if cloud_required:
@@ -582,6 +589,8 @@ class ProvisioningCoordinator:
         if cloud_provisioning_enabled(identity.uid):
             await self._process_cloud_claimed_job(job=job, identity=identity)
             return
+        if isinstance(self.client, HermesProvisionClient):
+            self.client.resolve_authority()
         try:
             self_hosted_required = self_hosted_provisioning_enabled(identity.uid)
             if self_hosted_required:

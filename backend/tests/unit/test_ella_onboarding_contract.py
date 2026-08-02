@@ -7,6 +7,18 @@ from pydantic import ValidationError
 
 from ella.routers import onboarding
 from ella.services.provisioning import ProvisioningError
+from ella.utils.provision_authority import APPROVED_HERMES_PROVISION_URL, _authority_binding_value
+
+
+def _configure_hermes_authority(monkeypatch):
+    token = "onboarding-hermes-test-token"
+    binding_env = "ELLA_TEST_ONBOARDING_AUTHORITY_BINDING"
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://legacy-authority:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "onboarding-legacy-test-token")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", APPROVED_HERMES_PROVISION_URL)
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", token)
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF", f"env:{binding_env}")
+    monkeypatch.setenv(binding_env, _authority_binding_value(APPROVED_HERMES_PROVISION_URL, token))
 
 
 def test_ensure_contract_forbids_caller_supplied_identity():
@@ -50,6 +62,7 @@ def test_verified_identity_requires_firebase_email(monkeypatch):
 
 
 def test_ensure_schedules_only_authenticated_subject(monkeypatch):
+    _configure_hermes_authority(monkeypatch)
     captured = {}
 
     class FakeCoordinator:
@@ -247,6 +260,7 @@ def test_disabled_endpoint_does_not_claim_future_schema_for_retained_account(mon
 
 
 def test_uid_allowlist_canaries_onboarding_without_global_cutover(monkeypatch):
+    _configure_hermes_authority(monkeypatch)
     captured = {}
 
     class FakeCoordinator:
@@ -294,6 +308,8 @@ def test_uid_allowlist_canaries_onboarding_without_global_cutover(monkeypatch):
 
 
 def test_schema_not_ready_returns_retryable_service_unavailable(monkeypatch):
+    _configure_hermes_authority(monkeypatch)
+
     class FakeCoordinator:
         async def ensure_job(self, **_kwargs):
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True)
@@ -325,3 +341,34 @@ def test_schema_not_ready_returns_retryable_service_unavailable(monkeypatch):
 
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "provisioning_schema_not_ready"}
+
+
+def test_authority_rejection_precedes_identity_and_repository_side_effects(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.delenv("ELLA_HERMES_PROVISION_API_URL", raising=False)
+    side_effects = []
+
+    def forbidden_identity(_uid):
+        side_effects.append("identity")
+        raise AssertionError("authority rejection must precede identity lookup")
+
+    async def forbidden_coordinator():
+        side_effects.append("repository")
+        raise AssertionError("authority rejection must precede repository creation")
+
+    monkeypatch.setattr(onboarding.auth, "get_user", forbidden_identity)
+    monkeypatch.setattr(onboarding, "_coordinator", forbidden_coordinator)
+
+    with pytest.raises(onboarding.HTTPException) as error:
+        asyncio.run(
+            onboarding.ensure_onboarding(
+                onboarding.OnboardingEnsureRequest(),
+                BackgroundTasks(),
+                Response(),
+                uid="boundary-user-secret",
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "hermes_provision_authority_incomplete"}
+    assert side_effects == []
