@@ -22,6 +22,8 @@ USER_MUTATION_RE = re.compile(
 )
 
 EXPECTED_WRITERS = {
+    ("database/account_deletion.py", "finalize_account_deletion"),
+    ("database/account_deletion.py", "quarantine_account_for_deletion"),
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "claim_cloud_pool_binding"),
@@ -64,6 +66,8 @@ PROOF_GATED_HELPERS = {
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 EXPECTED_GLOBAL_USER_WRITERS = {
+    ("database/account_deletion.py", "finalize_account_deletion"),
+    ("database/account_deletion.py", "quarantine_account_for_deletion"),
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
@@ -76,6 +80,14 @@ NON_AUTHORITY_USER_WRITERS = {
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
 REAL_POSTGRES_WRITER_COVERAGE = {
+    ("database/account_deletion.py", "finalize_account_deletion"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries",
+    ),
+    ("database/account_deletion.py", "quarantine_account_for_deletion"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write",
+    ),
     ("database/ella_provisioning.py", "activate_runtime_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"runtime_activate"',

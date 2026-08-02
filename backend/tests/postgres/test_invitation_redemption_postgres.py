@@ -11,6 +11,7 @@ import asyncpg
 import pytest
 
 from database import (
+    account_deletion,
     authority_advisory_lock,
     invitation_operator,
     invitations,
@@ -23,6 +24,7 @@ from database.ella_provisioning import (
 )
 from database.runtime_targets import RuntimeTargetLineage, SELF_HOSTED_RUNTIME_MODEL
 from ella.services import ai_consent
+from ella.services import account_deletion as account_deletion_service
 from ella.services import consent_authority, invitation_authority
 from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
@@ -102,6 +104,8 @@ CREATE TABLE users (
     identities JSONB NOT NULL DEFAULT '{}'::jsonb,
     settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    conditions TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    medications TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -153,6 +157,13 @@ CREATE TABLE ella_runtime_bindings (
 
 CREATE UNIQUE INDEX ella_runtime_bindings_user_role_provider_key
     ON ella_runtime_bindings(user_id, role, provider);
+
+CREATE TABLE agent_clusters (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    agents JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'ACTIVE'
+);
 """
 
 
@@ -3884,5 +3895,300 @@ def test_kill_switch_after_invite_blocks_claim_and_preserves_pool(monkeypatch):
             "claim_job_id": None,
             "claim_token": None,
         }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+async def _prepare_deletion_account(
+    pool: asyncpg.Pool,
+    *,
+    uid: str,
+    email: str,
+    code: str,
+    activate_runtime: bool,
+) -> tuple[str, str]:
+    issued = await pilot_invite_admin._issue_invitation(
+        code=code,
+        code_file_existed=False,
+        code_file_ref_hmac="7" * 64,
+        kind="ordinary",
+        allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        environment="account-deletion-postgres-test",
+        config=CONFIG,
+    )
+    await _redeem_self_hosted(uid, email, code)
+    if activate_runtime:
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        await repository.stage_runtime_binding(
+            uid=uid,
+            binding=_local_runtime_binding(uid),
+        )
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+        async with pool.acquire() as connection:
+            user_id = await connection.fetchval(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                uid,
+            )
+            await connection.execute(
+                """
+                INSERT INTO agent_clusters (user_id, agents, status)
+                VALUES ($1, '{"agentId":"content-free"}'::jsonb, 'ACTIVE')
+                """,
+                user_id,
+            )
+    return str(issued["receipt_id"]), uid
+
+
+def test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        invitation_id, uid = await _prepare_deletion_account(
+            pool,
+            uid="account-delete-complete",
+            email="account-delete-complete@example.test",
+            code="CDEF-6789",
+            activate_runtime=True,
+        )
+
+        first = await account_deletion.quarantine_account_for_deletion(uid)
+        second = await account_deletion.quarantine_account_for_deletion(uid)
+
+        assert first.capacity_released is True
+        assert first.authority_quarantined is True
+        assert first.external_cleanup_required == (
+            "hermes_profile",
+            "honcho_tenancy",
+            "runtime_registry",
+        )
+        assert second.capacity_released is True
+        assert second.counts["invitations"] == 0
+        assert second.counts["capacity_reservations"] == 0
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as pending:
+            await account_deletion.finalize_account_deletion(uid)
+        assert pending.value.code == "account_deletion_external_cleanup_incomplete"
+
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT invitation.state AS invitation_state,
+                       reservation.state AS capacity_state,
+                       entitlement.status AS entitlement_status,
+                       app_user.status AS user_status,
+                       app_user.email,
+                       binding.status AS binding_status,
+                       binding.active,
+                       cluster.status AS cluster_status,
+                       cluster.agents
+                FROM ella_invitations invitation
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.invitation_id = invitation.id
+                JOIN users app_user ON app_user.id = redemption.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = app_user.id AND binding.provider = 'hermes'
+                JOIN agent_clusters cluster ON cluster.user_id = app_user.id
+                WHERE invitation.id = $1::uuid
+                """,
+                invitation_id,
+            )
+            target_states = await connection.fetch(
+                """
+                SELECT status
+                FROM ella_runtime_targets
+                WHERE invitation_target_id IN (
+                    SELECT invitation_target_id
+                    FROM ella_invitation_redemptions
+                    WHERE invitation_id = $1::uuid
+                )
+                """,
+                invitation_id,
+            )
+        row_data = dict(row)
+        deleted_email = row_data.pop("email")
+        assert row_data == {
+            "invitation_state": "revoked",
+            "capacity_state": "released",
+            "entitlement_status": "revoked",
+            "user_status": "DELETION_PENDING",
+            "binding_status": "disabled",
+            "active": False,
+            "cluster_status": "INACTIVE",
+            "agents": "{}",
+        }
+        assert deleted_email.startswith("deleted+")
+        assert deleted_email.endswith("@invalid.ella")
+        assert deleted_email != "account-delete-complete@example.test"
+        assert {target["status"] for target in target_states} == {"revoked"}
+
+        # A trusted operator can remove only the already-quarantined external
+        # binding after independently proving the profile/tenancy are absent.
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    DELETE FROM ella_runtime_targets
+                    WHERE account_user_id = (
+                        SELECT id FROM users WHERE omi_uid = $1
+                    )
+                    """,
+                    uid,
+                )
+                await connection.execute(
+                    """
+                    DELETE FROM ella_runtime_bindings
+                    WHERE user_id = (
+                        SELECT id FROM users WHERE omi_uid = $1
+                    ) AND provider = 'hermes'
+                    """,
+                    uid,
+                )
+        after_external_cleanup = await account_deletion.quarantine_account_for_deletion(uid)
+        assert after_external_cleanup.external_cleanup_required == ()
+        assert await account_deletion.finalize_account_deletion(uid) is True
+        assert await account_deletion.finalize_account_deletion(uid) is False
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT status FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == "DELETED"
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        invitation_id, uid = await _prepare_deletion_account(
+            pool,
+            uid="account-delete-rollback",
+            email="account-delete-rollback@example.test",
+            code="DEFG-789A",
+            activate_runtime=True,
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                CREATE FUNCTION fail_account_deletion_user_update()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF NEW.status = 'DELETION_PENDING' THEN
+                        RAISE EXCEPTION 'synthetic account deletion failure';
+                    END IF;
+                    RETURN NEW;
+                END
+                $$
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER fail_account_deletion_user_update
+                BEFORE UPDATE ON users
+                FOR EACH ROW EXECUTE FUNCTION fail_account_deletion_user_update()
+                """
+            )
+
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as failed:
+            await account_deletion.quarantine_account_for_deletion(uid)
+        assert failed.value.code == "account_deletion_authority_unavailable"
+
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT invitation.state AS invitation_state,
+                       reservation.state AS capacity_state,
+                       entitlement.status AS entitlement_status,
+                       app_user.status AS user_status,
+                       binding.status AS binding_status,
+                       binding.active
+                FROM ella_invitations invitation
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.invitation_id = invitation.id
+                JOIN users app_user ON app_user.id = redemption.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = app_user.id AND binding.provider = 'hermes'
+                WHERE invitation.id = $1::uuid
+                """,
+                invitation_id,
+            )
+        assert dict(state) == {
+            "invitation_state": "redeemed",
+            "capacity_state": "consumed",
+            "entitlement_status": "active",
+            "user_status": "ACTIVE",
+            "binding_status": "active",
+            "active": True,
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_service_handles_partial_provision_and_repeat_without_operator():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        _invitation_id, uid = await _prepare_deletion_account(
+            pool,
+            uid="account-delete-partial",
+            email="account-delete-partial@example.test",
+            code="EFGH-89AB",
+            activate_runtime=False,
+        )
+        side_effects = []
+        for _attempt in range(2):
+            result = await account_deletion_service.execute_account_deletion(
+                uid,
+                delete_firestore=lambda exact_uid: side_effects.append(("firestore", exact_uid)),
+                delete_firebase=lambda exact_uid: side_effects.append(("firebase", exact_uid)),
+            )
+            assert result.status_code == 200
+            assert result.body["status"] == "ok"
+            assert result.body["deletion_receipt"]["status"] == "completed"
+
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT app_user.status AS user_status,
+                       invitation.state AS invitation_state,
+                       reservation.state AS capacity_state,
+                       entitlement.status AS entitlement_status
+                FROM users app_user
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.user_id = app_user.id
+                JOIN ella_invitations invitation
+                  ON invitation.id = redemption.invitation_id
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                WHERE app_user.omi_uid = $1
+                """,
+                uid,
+            )
+        assert dict(state) == {
+            "user_status": "DELETED",
+            "invitation_state": "revoked",
+            "capacity_state": "released",
+            "entitlement_status": "revoked",
+        }
+        assert side_effects == [
+            ("firestore", uid),
+            ("firebase", uid),
+            ("firestore", uid),
+            ("firebase", uid),
+        ]
 
     asyncio.run(_run_with_database(scenario))

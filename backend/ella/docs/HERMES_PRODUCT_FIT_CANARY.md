@@ -141,6 +141,10 @@ python scripts/hermes_product_fit_canary.py cleanup \
 Cleanup refuses UID drift, a missing or non-protected receipt, or any receipt
 that does not attest all flags, selectors, and workflows are off. The bearer
 token stays in-process; output is a content-free receipt containing only the UID
-hash, removed-row count, and cleanup facts. Invitation revocation/classification cleanup and
-unclaimed pool cleanup remain in their existing reviewed operator CLIs when
-those artifacts still exist.
+hash, removed-row count, and cleanup facts. The account route revokes ordinary
+invitation authority and releases its pilot-capacity reservation in the same
+PostgreSQL transaction. A `202 deletion_pending` receipt is expected when a
+provisioned self-hosted Hermes profile, Honcho tenancy, or runtime registry
+entry still needs reviewed operator cleanup; it is a resumable typed state, not
+deletion completion. The operator must prove those exact quarantined artifacts
+absent before removing their disabled binding and retrying this command.

@@ -301,10 +301,17 @@ receipt subcollection; callers cannot submit or select another UID.
   idempotent; reuse with different metadata fails with `409`.
 - `GET /v1/users/ai-consent/receipts/{receipt_id}` verifies a receipt only
   within the authenticated user's path.
-- Account/data deletion remains `DELETE /v1/users/delete-account`; deletion
-  also removes the user's consent receipt subcollection and returns a
-  non-identifying synchronous completion receipt with request ID and server
-  completion time.
+- Account/data deletion remains `DELETE /v1/users/delete-account`. The route
+  first atomically quarantines PostgreSQL consent, entitlement, target,
+  binding, and OMI identity authority and releases any ordinary invitation
+  capacity. Firestore cleanup is recursive and retry-safe. A fully completed
+  deletion returns a non-identifying receipt; `202 deletion_pending` names only
+  the remaining artifact classes when cleanup must resume. The self-hosted
+  `:8210` authority currently has no authenticated deprovision operation, so a
+  provisioned Hermes profile/Honcho tenancy/registry entry remains disabled and
+  requires an operator until that authority can issue a trusted deletion
+  receipt. Firebase Auth is retained while deletion is pending so the same
+  authenticated caller can retry.
 
 Exact-policy grants are required at the Ella chat stream, Hermes onboarding
 ensure, voice-session issuance, necklace/web transcription sockets, direct TTS,

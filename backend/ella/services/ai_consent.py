@@ -204,15 +204,37 @@ ACCOUNT_DELETION_CONTRACT = {
 
 def build_account_deletion_receipt(
     *,
+    status: str = "completed",
+    remaining: tuple[str, ...] = (),
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-) -> dict[str, str]:
-    """Return a non-identifying receipt for a completed synchronous deletion."""
-    return {
-        "request_id": f"aidel_{secrets.token_hex(16)}",
-        "status": "completed",
-        "scope": ACCOUNT_DELETION_CONTRACT["scope"],
-        "server_completed_at": now().astimezone(timezone.utc).isoformat(),
+) -> dict[str, Any]:
+    """Return a non-identifying receipt for deletion progress."""
+    if status not in {"completed", "pending"}:
+        raise ValueError("account_deletion_receipt_status_invalid")
+    allowed_remaining = {
+        "firebase_identity",
+        "firestore_data",
+        "hermes_profile",
+        "honcho_tenancy",
+        "runtime_registry",
     }
+    if any(item not in allowed_remaining for item in remaining):
+        raise ValueError("account_deletion_receipt_remaining_invalid")
+    timestamp = now().astimezone(timezone.utc).isoformat()
+    receipt: dict[str, Any] = {
+        "request_id": f"aidel_{secrets.token_hex(16)}",
+        "status": status,
+        "scope": ACCOUNT_DELETION_CONTRACT["scope"],
+    }
+    if status == "pending":
+        receipt["server_updated_at"] = timestamp
+        receipt["remaining"] = sorted(set(remaining))
+        receipt["operator_action_required"] = bool(
+            {"hermes_profile", "honcho_tenancy", "runtime_registry"} & set(remaining)
+        )
+    else:
+        receipt["server_completed_at"] = timestamp
+    return receipt
 
 
 class ConsentPolicyMismatch(ValueError):

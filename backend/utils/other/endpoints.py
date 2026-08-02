@@ -5,7 +5,7 @@ import time
 from fastapi import Header, HTTPException
 from fastapi import Request
 from firebase_admin import auth
-from firebase_admin.auth import InvalidIdTokenError
+from firebase_admin.auth import InvalidIdTokenError, UserNotFoundError
 
 
 def get_user(uid: str):
@@ -157,5 +157,16 @@ def timeit(func):
 
 
 def delete_account(uid: str):
-    auth.delete_user(uid)
-    return {"message": "User deleted"}
+    try:
+        auth.delete_user(uid)
+        return {"status": "deleted"}
+    except UserNotFoundError:
+        return {"status": "already_deleted"}
+    except Exception:
+        # A lost delete acknowledgement is outcome-ambiguous. Confirm absence
+        # before treating it as success; otherwise preserve the retryable error.
+        try:
+            auth.get_user(uid)
+        except UserNotFoundError:
+            return {"status": "already_deleted"}
+        raise
