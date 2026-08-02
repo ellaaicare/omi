@@ -25,8 +25,16 @@ from database.ella_provisioning import (
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
+    RuntimeTargetLineage,
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -41,6 +49,12 @@ from ella.services.hermes_cloud_policy import (
 )
 from ella.services.hermes_cloud_staged_attestation import StagedAttestationVerifier
 from ella.services.runtime_errors import ProvisioningError
+from ella.utils.provision_authority import (
+    ProvisionAuthority,
+    ProvisionAuthorityError,
+    ProvisionAuthoritySnapshot,
+    hermes_provision_authority,
+)
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
 CLOUD_TARGET_SCHEMA_VERSION = "hermes-cloud-user-v1"
@@ -94,8 +108,34 @@ def cloud_provisioning_enabled(uid: Optional[str] = None) -> bool:
     )
 
 
+def self_hosted_provisioning_enabled(uid: Optional[str] = None) -> bool:
+    del uid
+    return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false").strip().lower() in TRUE_VALUES
+
+
 def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
-    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid)
+    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
+
+
+def _self_hosted_invitation_matches(admission: Optional[dict[str, Any]]) -> bool:
+    if not admission:
+        return False
+    fallback_policy = admission.get("fallback_policy")
+    if isinstance(fallback_policy, str):
+        try:
+            fallback_policy = json.loads(fallback_policy)
+        except json.JSONDecodeError:
+            return False
+    return bool(
+        str(admission.get("consent_policy_version") or "") == CURRENT_POLICY_VERSION
+        and str(admission.get("consent_processor_set_hash") or "") == CURRENT_PROCESSOR_SET_HASH
+        and str(admission.get("consent_scope_version") or "") == CURRENT_SCOPE_VERSION
+        and str(admission.get("consent_scope_hash") or "") == CURRENT_SCOPE_HASH
+        and list(admission.get("provider_allowlist") or []) == [SELF_HOSTED_RUNTIME_PROVIDER]
+        and list(admission.get("model_allowlist") or []) == [SELF_HOSTED_RUNTIME_MODEL]
+        and list(admission.get("mode_allowlist") or []) == list(SELF_HOSTED_RUNTIME_TARGET_MODES)
+        and fallback_policy == {"enabled": False, "order": []}
+    )
 
 
 def effective_target_schema_version(uid: str, requested: str) -> str:
@@ -260,39 +300,69 @@ def validate_internal_gateway_url(value: str) -> str:
 
 
 class HermesProvisionClient:
-    def __init__(self, *, base_url: Optional[str] = None, token: Optional[str] = None):
-        self.base_url = (base_url or os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")).rstrip(
-            "/"
-        )
-        self.token = token if token is not None else os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
-
-    async def provision(self, identity: VerifiedIdentity, target_schema_version: str) -> dict[str, Any]:
-        if not self.token:
-            raise ProvisioningError("provision_service_credential_unavailable", retryable=True)
-        payload = {
-            "userId": identity.uid,
-            "omiUid": identity.uid,
-            "firebaseUid": identity.uid,
-            "email": identity.email,
-            "label": identity.name,
-            "timezone": identity.timezone,
-            "hermes_only": True,
-            "targetSchemaVersion": target_schema_version,
-        }
+    @staticmethod
+    def resolve_authority(expected_snapshot: ProvisionAuthoritySnapshot | None = None) -> ProvisionAuthority:
         try:
-            async with httpx.AsyncClient(timeout=provision_timeout_seconds()) as client:
+            return hermes_provision_authority(expected_snapshot)
+        except ProvisionAuthorityError as exc:
+            raise ProvisioningError(exc.code, retryable=False) from exc
+
+    @classmethod
+    def snapshot_authority(
+        cls,
+        expected_snapshot: ProvisionAuthoritySnapshot | None = None,
+    ) -> ProvisionAuthoritySnapshot:
+        return cls.resolve_authority(expected_snapshot).snapshot()
+
+    async def provision(
+        self,
+        identity: VerifiedIdentity,
+        target_schema_version: str,
+        *,
+        authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+    ) -> dict[str, Any]:
+        entry_snapshot = self.snapshot_authority(authority_snapshot)
+        send_snapshot: ProvisionAuthoritySnapshot | None = None
+        try:
+            async with httpx.AsyncClient(
+                timeout=provision_timeout_seconds(),
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                payload_authority = self.resolve_authority(entry_snapshot)
+                payload = {
+                    "userId": identity.uid,
+                    "omiUid": identity.uid,
+                    "firebaseUid": identity.uid,
+                    "email": identity.email,
+                    "label": identity.name,
+                    "timezone": identity.timezone,
+                    "hermes_only": True,
+                    "targetSchemaVersion": target_schema_version,
+                }
+                authority = self.resolve_authority(payload_authority.snapshot())
+                send_snapshot = authority.snapshot()
                 response = await client.post(
-                    f"{self.base_url}/provision",
-                    headers={"Authorization": f"Bearer {self.token}"},
+                    f"{authority.base_url}/provision",
+                    headers={"Authorization": f"Bearer {authority.token}"},
                     json=payload,
                 )
+                self.resolve_authority(send_snapshot)
         except httpx.TimeoutException as exc:
+            if send_snapshot is not None:
+                self.resolve_authority(send_snapshot)
             raise ProvisioningError("provision_service_timeout", retryable=True) from exc
         except httpx.HTTPError as exc:
+            if send_snapshot is not None:
+                self.resolve_authority(send_snapshot)
             raise ProvisioningError("provision_service_unavailable", retryable=True) from exc
 
         if response.status_code == 409:
             raise ProvisioningError("runtime_capacity", retryable=True)
+        if 300 <= response.status_code < 400:
+            raise ProvisioningError(
+                "provision_request_rejected", retryable=False, detail={"status": response.status_code}
+            )
         if response.status_code in {401, 403}:
             raise ProvisioningError("provision_service_auth_failed", retryable=False)
         if response.status_code >= 500:
@@ -423,6 +493,28 @@ class ProvisioningCoordinator:
         self.runtime_admission = runtime_admission
         self.staged_attestation_verifier = staged_attestation_verifier
 
+    def _authority_snapshot(
+        self,
+        expected_snapshot: ProvisionAuthoritySnapshot | None = None,
+    ) -> ProvisionAuthoritySnapshot | None:
+        if not isinstance(self.client, HermesProvisionClient):
+            return None
+        return self.client.snapshot_authority(expected_snapshot)
+
+    async def _repository_call(
+        self,
+        authority_snapshot: ProvisionAuthoritySnapshot | None,
+        operation: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if authority_snapshot is not None:
+            self.client.resolve_authority(authority_snapshot)
+        result = await operation(*args, **kwargs)
+        if authority_snapshot is not None:
+            self.client.resolve_authority(authority_snapshot)
+        return result
+
     async def ensure_job(
         self,
         *,
@@ -430,38 +522,75 @@ class ProvisioningCoordinator:
         target_schema_version: str,
         client_request_id: Optional[str],
         request_payload: dict[str, Any],
+        authority_snapshot: ProvisionAuthoritySnapshot | None = None,
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
         cloud_required = cloud_provisioning_enabled(identity.uid)
+        self_hosted_required = self_hosted_provisioning_enabled(identity.uid) and not cloud_required
+        if (
+            not cloud_required
+            and (self_hosted_required or provisioning_enabled(identity.uid))
+            and isinstance(self.client, HermesProvisionClient)
+        ):
+            authority_snapshot = self._authority_snapshot(authority_snapshot)
+        else:
+            authority_snapshot = None
         try:
-            await self.repository.assert_schema_ready()
+            await self._repository_call(authority_snapshot, self.repository.assert_schema_ready)
             if cloud_required:
                 await self.repository.assert_cloud_schema_ready()
+            elif self_hosted_required:
+                await self._repository_call(
+                    authority_snapshot,
+                    self.repository.assert_self_hosted_invite_schema_ready,
+                )
         except ProvisioningSchemaNotReadyError as exc:
             logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
 
-        await self.repository.ensure_user_identity(
+        invitation_admission = None
+        if self_hosted_required:
+            # Invitation mode is itself authoritative. Even an already active
+            # binding must still resolve through the exact current invitation,
+            # entitlement, consent epoch, and lineage chain.
+            invitation_admission = await self._repository_call(
+                authority_snapshot,
+                self.repository.get_self_hosted_invitation_admission,
+                identity.uid,
+            )
+            if not _self_hosted_invitation_matches(invitation_admission):
+                raise ProvisioningError("invitation_authority_required", retryable=False)
+
+        await self._repository_call(
+            authority_snapshot,
+            self.repository.ensure_user_identity,
             uid=identity.uid,
             email=identity.email,
             name=identity.name,
             timezone_name=identity.timezone,
         )
-        job = await self.repository.acquire_job(
+        request_payload_hash = stable_payload_hash(request_payload)
+        job = await self._repository_call(
+            authority_snapshot,
+            self.repository.acquire_job,
             uid=identity.uid,
             target_schema_version=target_schema_version,
             client_request_id=client_request_id,
-            request_payload_hash=stable_payload_hash(request_payload),
+            request_payload_hash=request_payload_hash,
         )
         try:
-            await self.repository.ensure_omi_user_document(
+            await self._repository_call(
+                authority_snapshot,
+                self.repository.ensure_omi_user_document,
                 uid=identity.uid,
                 email=identity.email,
                 name=identity.name,
                 timezone_name=identity.timezone,
             )
         except Exception:
-            logger.exception("OMI identity initialization failed for uid=%s", identity.uid)
-            job = await self.repository.update_job(
+            logger.error("OMI identity initialization failed")
+            job = await self._repository_call(
+                authority_snapshot,
+                self.repository.update_job,
                 job_id=str(job["id"]),
                 state="degraded",
                 stage="identity_ready",
@@ -480,7 +609,9 @@ class ProvisioningCoordinator:
                 memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
                 photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
             )
-            binding = await self.repository.resolve_active_runtime(
+            binding = await self._repository_call(
+                authority_snapshot,
+                self.repository.resolve_active_runtime,
                 identity.uid,
                 template_version=target_schema_version,
                 target_mode="hermes-cloud-chat",
@@ -489,18 +620,34 @@ class ProvisioningCoordinator:
                 model=CLOUD_RUNTIME_MODEL,
             )
         else:
-            binding = await self.repository.resolve_active_runtime(
+            binding = await self._repository_call(
+                authority_snapshot,
+                self.repository.resolve_active_runtime,
                 identity.uid,
                 template_version=target_schema_version,
+                target_mode="hermes-chat" if self_hosted_required else None,
                 required_provider="hermes",
+                authority_lineage=(
+                    RuntimeTargetLineage(
+                        policy_version=CURRENT_POLICY_VERSION,
+                        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+                        scope_version=CURRENT_SCOPE_VERSION,
+                        scope_hash=CURRENT_SCOPE_HASH,
+                    )
+                    if self_hosted_required
+                    else None
+                ),
+                model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
             )
         if binding:
             if cloud_required and str(binding.get("provider") or "").lower() != "hermes_cloud":
                 raise ProvisioningError("cloud_runtime_binding_conflict", retryable=False)
             if str(binding.get("user_status") or "") != "ACTIVE":
-                await self.repository.activate_user(identity.uid)
+                await self._repository_call(authority_snapshot, self.repository.activate_user, identity.uid)
             if job.get("state") != "ready":
-                job = await self.repository.update_job(
+                job = await self._repository_call(
+                    authority_snapshot,
+                    self.repository.update_job,
                     job_id=str(job["id"]),
                     state="ready",
                     stage="active",
@@ -508,8 +655,10 @@ class ProvisioningCoordinator:
                     receipt={"type": "active_binding_reconciled", "binding_revision": binding["revision"]},
                 )
             return job, binding, False
-        if not cloud_required and not provisioning_enabled(identity.uid):
-            job = await self.repository.update_job(
+        if not cloud_required and not provisioning_enabled(identity.uid) and not self_hosted_required:
+            job = await self._repository_call(
+                authority_snapshot,
+                self.repository.update_job,
                 job_id=str(job["id"]),
                 state="degraded",
                 stage="identity_ready",
@@ -517,22 +666,57 @@ class ProvisioningCoordinator:
                 error_code="provisioning_disabled",
             )
             return job, None, False
-        claimed = await self.repository.claim_job(str(job["id"]))
+        claimed = await self._repository_call(
+            authority_snapshot,
+            self.repository.claim_job,
+            str(job["id"]),
+        )
         return claimed or job, None, claimed is not None
 
-    async def process_claimed_job(self, *, job: dict[str, Any], identity: VerifiedIdentity) -> None:
+    async def process_claimed_job(
+        self,
+        *,
+        job: dict[str, Any],
+        identity: VerifiedIdentity,
+        authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+    ) -> None:
         if cloud_provisioning_enabled(identity.uid):
             await self._process_cloud_claimed_job(job=job, identity=identity)
             return
+        authority_snapshot = self._authority_snapshot(authority_snapshot)
         try:
-            result = await self.client.provision(identity, str(job["target_schema_version"]))
+            self_hosted_required = self_hosted_provisioning_enabled(identity.uid)
+            if self_hosted_required:
+                invitation_admission = await self._repository_call(
+                    authority_snapshot,
+                    self.repository.get_self_hosted_invitation_admission,
+                    identity.uid,
+                )
+                if not _self_hosted_invitation_matches(invitation_admission):
+                    raise ProvisioningError("invitation_authority_required", retryable=False)
+            if isinstance(self.client, HermesProvisionClient):
+                result = await self.client.provision(
+                    identity,
+                    str(job["target_schema_version"]),
+                    authority_snapshot=authority_snapshot,
+                )
+                self.client.resolve_authority(authority_snapshot)
+            else:
+                result = await self.client.provision(identity, str(job["target_schema_version"]))
             binding_data = extract_runtime_binding(
                 result,
                 identity.uid,
                 expected_template_version=str(job["target_schema_version"]),
             )
-            binding = await self.repository.stage_runtime_binding(uid=identity.uid, binding=binding_data)
-            await self.repository.update_job(
+            binding = await self._repository_call(
+                authority_snapshot,
+                self.repository.stage_runtime_binding,
+                uid=identity.uid,
+                binding=binding_data,
+            )
+            await self._repository_call(
+                authority_snapshot,
+                self.repository.update_job,
                 job_id=str(job["id"]),
                 state="provisioning",
                 stage="smoke_passed",
@@ -543,8 +727,27 @@ class ProvisioningCoordinator:
                     "binding_revision": binding["revision"],
                 },
             )
-            activated = await self.repository.activate_runtime_binding(uid=identity.uid, provider="hermes")
-            await self.repository.update_job(
+            activated = await self._repository_call(
+                authority_snapshot,
+                self.repository.activate_runtime_binding,
+                uid=identity.uid,
+                provider="hermes",
+                require_invitation_target=self_hosted_required,
+                authority_lineage=(
+                    RuntimeTargetLineage(
+                        policy_version=CURRENT_POLICY_VERSION,
+                        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+                        scope_version=CURRENT_SCOPE_VERSION,
+                        scope_hash=CURRENT_SCOPE_HASH,
+                    )
+                    if self_hosted_required
+                    else None
+                ),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+            await self._repository_call(
+                authority_snapshot,
+                self.repository.update_job,
                 job_id=str(job["id"]),
                 state="ready",
                 stage="active",
@@ -555,23 +758,54 @@ class ProvisioningCoordinator:
                 },
             )
         except ProvisioningError as exc:
-            await self.repository.update_job(
-                job_id=str(job["id"]),
-                state="degraded" if exc.retryable else "blocked",
-                stage="runtime_ready",
-                retryable=exc.retryable,
-                error_code=exc.code,
-                error_detail=exc.detail,
-            )
+            if exc.code == "hermes_provision_authority_drift":
+                return
+            try:
+                await self._repository_call(
+                    authority_snapshot,
+                    self.repository.update_job,
+                    job_id=str(job["id"]),
+                    state="degraded" if exc.retryable else "blocked",
+                    stage="runtime_ready",
+                    retryable=exc.retryable,
+                    error_code=exc.code,
+                    error_detail=exc.detail,
+                )
+            except ProvisioningError as authority_error:
+                if authority_error.code == "hermes_provision_authority_drift":
+                    return
+                raise
+        except RuntimePoolClaimError as exc:
+            try:
+                await self._repository_call(
+                    authority_snapshot,
+                    self.repository.update_job,
+                    job_id=str(job["id"]),
+                    state="blocked",
+                    stage="runtime_ready",
+                    retryable=False,
+                    error_code=exc.code,
+                )
+            except ProvisioningError as authority_error:
+                if authority_error.code == "hermes_provision_authority_drift":
+                    return
+                raise
         except Exception:
-            logger.exception("Unexpected Hermes provisioning failure for uid=%s", identity.uid)
-            await self.repository.update_job(
-                job_id=str(job["id"]),
-                state="degraded",
-                stage="runtime_ready",
-                retryable=True,
-                error_code="provisioning_internal_error",
-            )
+            logger.error("Unexpected Hermes provisioning failure")
+            try:
+                await self._repository_call(
+                    authority_snapshot,
+                    self.repository.update_job,
+                    job_id=str(job["id"]),
+                    state="degraded",
+                    stage="runtime_ready",
+                    retryable=True,
+                    error_code="provisioning_internal_error",
+                )
+            except ProvisioningError as authority_error:
+                if authority_error.code == "hermes_provision_authority_drift":
+                    return
+                raise
 
     async def _process_cloud_claimed_job(
         self,
@@ -776,7 +1010,7 @@ class ProvisioningCoordinator:
                     error_detail=getattr(exc, "detail", {}),
                 )
         except Exception:
-            logger.exception("Unexpected Hermes Cloud provisioning failure for uid=%s", identity.uid)
+            logger.error("Unexpected Hermes Cloud provisioning failure")
             if binding and claim_token:
                 await self._rollback_cloud_claim(
                     job=job,
@@ -831,7 +1065,7 @@ class ProvisioningCoordinator:
                 },
             )
         except Exception:
-            logger.exception("Cloud rollback start receipt failed for uid=%s; continuing quarantine", identity.uid)
+            logger.error("Cloud rollback start receipt failed; continuing quarantine")
             rollback_start_error = "cloud_rollback_start_receipt_failed"
         side_effects = await self.repository.get_cloud_side_effects(str(job["id"]))
         cleanup_receipt: dict[str, Any] = {
@@ -845,7 +1079,7 @@ class ProvisioningCoordinator:
             if side_effects and honcho_client is not None:
                 cleanup_receipt = await honcho_client.cleanup_profile(binding, side_effects)
         except Exception as exc:
-            logger.exception("Cloud claim cleanup failed for uid=%s", identity.uid)
+            logger.error("Cloud claim cleanup failed")
             cleanup_error = getattr(exc, "code", "cloud_claim_cleanup_failed")
 
         quarantine_error = ""
@@ -865,7 +1099,7 @@ class ProvisioningCoordinator:
             if not quarantined:
                 quarantine_error = "runtime_pool_quarantine_lost"
         except Exception:
-            logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
+            logger.error("Cloud runtime quarantine failed")
             quarantine_error = "runtime_pool_quarantine_failed"
 
         if cleanup_error or quarantine_error:

@@ -21,8 +21,15 @@ from database.runtime_targets import (
     CLOUD_RUNTIME_PROVIDER,
     CLOUD_RUNTIME_TARGET_MODES,
     RuntimeTargetLineage,
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -38,6 +45,7 @@ from ella.services.provisioning import (
     cloud_provisioning_enabled,
     resolve_gateway_credential,
     rollout_enabled,
+    self_hosted_provisioning_enabled,
     validate_internal_gateway_url,
 )
 
@@ -52,7 +60,26 @@ def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
 
 def runtime_authority_enabled(uid: Optional[str] = None) -> bool:
     """Return whether this user must resolve through persisted runtime authority."""
-    return runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid)
+    return runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
+
+
+def _current_self_hosted_lineage() -> RuntimeTargetLineage:
+    return RuntimeTargetLineage(
+        policy_version=CURRENT_POLICY_VERSION,
+        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+    ).validate()
+
+
+def _self_hosted_target_mode(target_mode: Optional[str]) -> str:
+    translated = {
+        "hermes-cloud-chat": "hermes-chat",
+        "hermes-cloud-voice": "hermes-voice",
+    }.get(str(target_mode or ""), str(target_mode or ""))
+    if translated not in SELF_HOSTED_RUNTIME_TARGET_MODES:
+        raise ProvisioningError("self_hosted_runtime_target_mode_required", retryable=False)
+    return translated
 
 
 @dataclass(frozen=True)
@@ -102,21 +129,42 @@ class CloudRuntimeAuthorityIdentity:
     digest: str
 
 
-def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
-    if runtime.provider != CLOUD_RUNTIME_PROVIDER:
-        raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
-    if (
-        runtime.runtime_target_mode not in CLOUD_RUNTIME_TARGET_MODES
-        or not runtime.runtime_target_id
-        or not runtime.runtime_target_updated_at
-        or not runtime.target_endpoint_ref
-        or not runtime.target_credential_ref
-        or runtime.target_entitlement_revision < 1
-        or not runtime.consent_authority_epoch
+def runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
+    """Hash the exact binding/target/owner authority used across awaited work."""
+    invitation_self_hosted = runtime.provider == SELF_HOSTED_RUNTIME_PROVIDER and bool(runtime.runtime_target_id)
+    if runtime.provider == CLOUD_RUNTIME_PROVIDER:
+        target_complete = bool(
+            runtime.runtime_target_mode in CLOUD_RUNTIME_TARGET_MODES
+            and runtime.runtime_target_id
+            and runtime.runtime_target_updated_at
+            and runtime.target_endpoint_ref
+            and runtime.target_credential_ref
+            and runtime.target_entitlement_revision >= 1
+            and runtime.consent_authority_epoch
+        )
+        missing_code = "hermes_cloud_runtime_target_identity_missing"
+    elif invitation_self_hosted:
+        target_complete = bool(
+            runtime.runtime_target_mode in SELF_HOSTED_RUNTIME_TARGET_MODES
+            and runtime.runtime_target_updated_at
+            and runtime.target_entitlement_revision >= 1
+            and runtime.consent_authority_epoch
+            and not runtime.target_endpoint_ref
+            and not runtime.target_credential_ref
+        )
+        missing_code = "self_hosted_runtime_target_identity_missing"
+    elif runtime.provider == SELF_HOSTED_RUNTIME_PROVIDER:
+        target_complete = bool(runtime.binding_id and runtime.revision >= 1)
+        missing_code = "hermes_runtime_binding_identity_missing"
+    else:
+        raise ProvisioningError("invalid_runtime_provider", retryable=False)
+    if not target_complete or (
+        runtime.provider != CLOUD_RUNTIME_PROVIDER and (not runtime.account_user_id or not runtime.profile_user_id)
     ):
-        raise ProvisioningError("hermes_cloud_runtime_target_identity_missing", retryable=False)
+        raise ProvisioningError(missing_code, retryable=False)
     material = {
         "uid": runtime.uid,
+        "provider": runtime.provider,
         "binding_id": runtime.binding_id,
         "binding_revision": runtime.revision,
         "runtime_instance_id": runtime.runtime_instance_id,
@@ -127,6 +175,8 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
         "target_credential_ref": runtime.target_credential_ref,
         "target_entitlement_revision": runtime.target_entitlement_revision,
         "consent_authority_epoch": runtime.consent_authority_epoch,
+        "account_user_id": runtime.account_user_id,
+        "profile_user_id": runtime.profile_user_id,
         "endpoint_sha256": hashlib.sha256(runtime.gateway_url.encode("utf-8")).hexdigest(),
         "credential_sha256": hashlib.sha256(runtime.gateway_token.encode("utf-8")).hexdigest(),
         "profile_class": runtime.profile_class,
@@ -150,9 +200,15 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
     ).hexdigest()
     return CloudRuntimeAuthorityIdentity(
         uid=runtime.uid,
-        target_mode=runtime.runtime_target_mode,
+        target_mode=runtime.runtime_target_mode or "retained",
         digest=digest,
     )
+
+
+def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
+    if runtime.provider != CLOUD_RUNTIME_PROVIDER:
+        raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+    return runtime_authority_identity(runtime)
 
 
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
@@ -279,9 +335,33 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             raise ProvisioningError("gateway_port_mismatch", retryable=False)
         gateway_token = resolve_gateway_credential(binding.get("credential_ref"))
         runtime_instance_id = ""
-        expected_model = str(binding.get("agent_id") or "")
+        invitation_scoped = bool(binding.get("runtime_target_id"))
+        if invitation_scoped:
+            if profile_name == "plato-eval":
+                raise ProvisioningError("invitation_runtime_profile_forbidden", retryable=False)
+            if str(binding.get("runtime_target_mode") or "") not in SELF_HOSTED_RUNTIME_TARGET_MODES:
+                raise ProvisioningError("self_hosted_runtime_target_mode_missing", retryable=False)
+            current_lineage = _current_self_hosted_lineage()
+            stored_lineage = RuntimeTargetLineage(
+                policy_version=str(binding.get("target_policy_version") or ""),
+                processor_set_hash=str(binding.get("target_processor_set_hash") or ""),
+                scope_version=str(binding.get("target_scope_version") or ""),
+                scope_hash=str(binding.get("target_scope_hash") or ""),
+            ).validate()
+            if stored_lineage != current_lineage:
+                raise ProvisioningError("self_hosted_runtime_target_lineage_stale", retryable=False)
+            try:
+                consent_authority_epoch = str(UUID(str(binding.get("consent_authority_epoch") or "").strip()))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ProvisioningError(
+                    "self_hosted_runtime_consent_authority_epoch_invalid",
+                    retryable=False,
+                ) from exc
+            expected_model = SELF_HOSTED_RUNTIME_MODEL
+        else:
+            expected_model = str(binding.get("agent_id") or "")
+            consent_authority_epoch = ""
         model_context_window_tokens = 0
-        consent_authority_epoch = ""
 
     honcho_workspace = str(binding.get("honcho_workspace") or "")
     observed_peer = str(binding.get("observed_peer") or "")
@@ -296,7 +376,9 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     # row (account_user_id/profile_user_id), not the OMI auth uid (omi_uid).
     account_user_id = str(binding.get("account_user_id") or "").strip()
     profile_user_id = str(binding.get("profile_user_id") or "").strip()
-    if provider == "hermes_cloud" and (not account_user_id or not profile_user_id):
+    if (provider == "hermes_cloud" or bool(binding.get("runtime_target_id"))) and (
+        not account_user_id or not profile_user_id
+    ):
         raise ProvisioningError(
             "hermes_cloud_owner_coordinates_missing",
             retryable=False,
@@ -348,10 +430,11 @@ async def resolve_isolated_runtime(
     repository: Optional[EllaProvisioningRepository] = None,
     target_mode: Optional[str] = None,
 ) -> Optional[IsolatedRuntime]:
-    """Resolve persisted cloud authority first; retained bindings stay flag-gated."""
+    """Resolve the one authoritative persisted runtime; never fall through modes."""
     cloud_required = cloud_provisioning_enabled(uid)
+    self_hosted_required = self_hosted_provisioning_enabled(uid) and not cloud_required
     retained_required = runtime_bindings_enabled(uid)
-    if not cloud_required and not retained_required:
+    if not cloud_required and not self_hosted_required and not retained_required:
         return None
     repository = repository or await EllaProvisioningRepository.create()
     try:
@@ -374,6 +457,15 @@ async def resolve_isolated_runtime(
                 required_provider=CLOUD_RUNTIME_PROVIDER,
                 authority_lineage=authority.lineage,
                 model=CLOUD_RUNTIME_MODEL,
+            )
+        elif self_hosted_required:
+            self_hosted_mode = _self_hosted_target_mode(target_mode)
+            binding = await repository.resolve_active_runtime(
+                uid,
+                target_mode=self_hosted_mode,
+                required_provider=SELF_HOSTED_RUNTIME_PROVIDER,
+                authority_lineage=_current_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
             )
         else:
             binding = await repository.resolve_active_runtime(
@@ -400,6 +492,8 @@ async def resolve_isolated_runtime(
             )
     if cloud_required:
         raise ProvisioningError("hermes_cloud_not_provisioned", retryable=True)
+    if self_hosted_required:
+        raise ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False)
     if retained_required:
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
     return None

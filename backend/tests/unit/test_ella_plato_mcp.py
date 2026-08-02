@@ -35,6 +35,10 @@ def _load_module(monkeypatch):
     _install_stubs()
     monkeypatch.setenv("ELLA_PLATO_MCP_TOKEN", "test-token")
     monkeypatch.setenv("ELLA_PLATO_MCP_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "legacy-test-token")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-test-token")
     sys.modules.pop("ella.routers.plato_mcp", None)
     module = importlib.import_module("ella.routers.plato_mcp")
     module._rate_limits.clear()
@@ -70,6 +74,64 @@ def test_plato_mcp_rejects_missing_and_invalid_token(monkeypatch):
         json=_rpc("ping"),
     )
     assert invalid.status_code == 401
+
+
+def test_plato_workspace_search_uses_retained_authority_pair(monkeypatch):
+    module = _load_module(monkeypatch)
+    monkeypatch.setenv("ELLA_PLATO_UID", "retained-uid")
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "legacy-test-token")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-test-token")
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"results": []}
+
+    class AsyncClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured.update(url=url, headers=headers, payload=json)
+            return Response()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", AsyncClient)
+
+    assert asyncio.run(module._fetch_workspace_search("memory", 3)) == []
+    assert captured["url"] == "http://100.76.138.56:8200/workspace/ella-omi-retained-uid/search"
+    assert captured["headers"] == {"Authorization": "Bearer legacy-test-token"}
+
+
+def test_plato_workspace_authority_conflict_fails_before_http(monkeypatch):
+    module = _load_module(monkeypatch)
+    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+    monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "shared-test-token")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "shared-test-token")
+
+    class ForbiddenAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("authority conflict must fail before HTTP")
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", ForbiddenAsyncClient)
+
+    try:
+        asyncio.run(module._fetch_workspace_search("memory", 3))
+    except module.ToolExecutionError as exc:
+        assert exc.message == "provision_authority_pair_conflict"
+    else:
+        raise AssertionError("authority conflict was not rejected")
 
 
 def test_plato_mcp_lists_default_safe_tools(monkeypatch):

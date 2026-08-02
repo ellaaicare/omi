@@ -3,9 +3,20 @@ import uuid
 
 import pytest
 
+from database.runtime_targets import (
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
+)
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+)
+from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
 )
 from ella.services.provisioning import (
     ProvisioningCoordinator,
@@ -64,8 +75,28 @@ def _runtime_receipt(profile_name="omi-user-a"):
     }
 
 
+def _self_hosted_admission():
+    return {
+        "consent_policy_version": CURRENT_POLICY_VERSION,
+        "consent_processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
+        "consent_scope_version": CURRENT_SCOPE_VERSION,
+        "consent_scope_hash": CURRENT_SCOPE_HASH,
+        "provider_allowlist": [SELF_HOSTED_RUNTIME_PROVIDER],
+        "model_allowlist": [SELF_HOSTED_RUNTIME_MODEL],
+        "mode_allowlist": list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+        "fallback_policy": {"enabled": False, "order": []},
+    }
+
+
 class FakeRepository:
-    def __init__(self, *, binding=None, omi_identity_error=None, schema_error=None):
+    def __init__(
+        self,
+        *,
+        binding=None,
+        omi_identity_error=None,
+        schema_error=None,
+        self_hosted_admission=None,
+    ):
         self.job = _job()
         self.binding = binding
         self.omi_identity_error = omi_identity_error
@@ -75,6 +106,9 @@ class FakeRepository:
         self.omi_identity_calls = []
         self.user_active = False
         self.schema_checks = 0
+        self.self_hosted_schema_checks = 0
+        self.self_hosted_admission = self_hosted_admission
+        self.job_calls = []
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -86,7 +120,14 @@ class FakeRepository:
         return {"omi_uid": kwargs["uid"]}
 
     async def acquire_job(self, **kwargs):
+        self.job_calls.append(kwargs)
         return dict(self.job)
+
+    async def assert_self_hosted_invite_schema_ready(self):
+        self.self_hosted_schema_checks += 1
+
+    async def get_self_hosted_invitation_admission(self, _uid):
+        return self.self_hosted_admission
 
     async def ensure_omi_user_document(self, **kwargs):
         if self.omi_identity_error:
@@ -118,7 +159,16 @@ class FakeRepository:
         self.staged = dict(binding, omi_uid=uid, revision=1, active=False)
         return self.staged
 
-    async def activate_runtime_binding(self, *, uid, provider):
+    async def activate_runtime_binding(
+        self,
+        *,
+        uid,
+        provider,
+        require_invitation_target=False,
+        authority_lineage=None,
+        model=SELF_HOSTED_RUNTIME_MODEL,
+    ):
+        del require_invitation_target, authority_lineage, model
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
         return self.binding
@@ -304,6 +354,66 @@ def test_schema_preflight_runs_before_identity_mutation():
     assert error.value.retryable is True
     assert repository.schema_checks == 1
     assert repository.identity_calls == []
+
+
+def test_self_hosted_invitation_admission_precedes_identity_and_job_writes(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    identity = VerifiedIdentity("uninvited-user", "user@example.test", "User", "UTC")
+    repository = FakeRepository(self_hosted_admission=None)
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
+
+    with pytest.raises(ProvisioningError, match="invitation_authority_required"):
+        asyncio.run(
+            coordinator.ensure_job(
+                identity=identity,
+                target_schema_version="hermes-user-v1",
+                client_request_id="request-uninvited",
+                request_payload={"client": "ios"},
+            )
+        )
+
+    assert repository.self_hosted_schema_checks == 1
+    assert repository.identity_calls == []
+    assert repository.job_calls == []
+
+    repository.self_hosted_admission = _self_hosted_admission()
+    job, binding, claimed = asyncio.run(
+        coordinator.ensure_job(
+            identity=identity,
+            target_schema_version="hermes-user-v1",
+            client_request_id="request-invited",
+            request_payload={"client": "ios"},
+        )
+    )
+    assert binding is None
+    assert claimed is True
+    assert job["state"] == "provisioning"
+    assert len(repository.identity_calls) == 1
+    assert len(repository.job_calls) == 1
+
+
+def test_self_hosted_authority_drift_blocks_before_provider_call(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    repository = FakeRepository(self_hosted_admission=_self_hosted_admission())
+    client = FakeProvisionClient(_runtime_receipt())
+    coordinator = ProvisioningCoordinator(repository, client)
+    identity = VerifiedIdentity("invited-user", "user@example.test", "User", "UTC")
+    job, _, claimed = asyncio.run(
+        coordinator.ensure_job(
+            identity=identity,
+            target_schema_version="hermes-user-v1",
+            client_request_id="request-invited",
+            request_payload={"client": "ios"},
+        )
+    )
+    assert claimed is True
+
+    repository.self_hosted_admission = None
+    asyncio.run(coordinator.process_claimed_job(job=job, identity=identity))
+
+    assert client.calls == []
+    assert repository.job["state"] == "blocked"
+    assert repository.job["error_code"] == "invitation_authority_required"
 
 
 def test_public_receipt_does_not_expose_runtime_secrets():

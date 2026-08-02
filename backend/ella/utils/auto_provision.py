@@ -5,7 +5,7 @@ When a user connects via /v4/listen websocket and has no agent cluster,
 this module automatically provisions one via the Ella provision API.
 
 Also handles identity sync — writing phone/email back to the users table
-after provisioning so OpenClaw identity links stay up to date.
+after provisioning so isolated Hermes identity links stay up to date.
 """
 
 import json
@@ -17,13 +17,16 @@ from typing import Optional
 import asyncpg
 import httpx
 
+from ella.utils.provision_authority import (
+    ProvisionAuthorityError,
+    ProvisionAuthoritySnapshot,
+    hermes_provision_authority,
+)
+
 logger = logging.getLogger("ella.auto_provision")
 
 # Database connection pool (shared pattern from resolve.py)
 _pool: Optional[asyncpg.Pool] = None
-
-PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 
 
 def _slugify_user_id(name: str, uid: str) -> str:
@@ -106,8 +109,8 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
             "status": row["status"],
             "user_id": str(row["user_id"]) if row["user_id"] else None,
         }
-    except Exception as e:
-        logger.error(f"Error checking agent cluster for uid={uid}: {e}")
+    except Exception:
+        logger.error("agent_cluster_lookup_failed")
         return None
 
 
@@ -128,6 +131,12 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             - cluster: dict (if success=True)
     """
     try:
+        try:
+            authority_snapshot = hermes_provision_authority().snapshot()
+        except ProvisionAuthorityError as exc:
+            logger.error(exc.code)
+            return {"success": False, "error": exc.code}
+
         # 1. Fetch user record from Postgres
         pool = await _get_pool()
         row = await pool.fetchrow(
@@ -139,9 +148,13 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         )
 
         if not row:
-            logger.warning(f"User {uid} not found in DB, falling back to minimal provision")
+            logger.warning("auto_provision_identity_missing")
             # Fall back to minimal provision (email/phone may not be available)
-            return await _provision_with_payload(uid, {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name})
+            return await _provision_with_payload(
+                uid,
+                {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name},
+                authority_snapshot=authority_snapshot,
+            )
 
         # 2. Extract identity data
         email = row["email"]
@@ -153,7 +166,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         medications = row["medications"] or []
 
         if not email and not phone:
-            logger.warning(f"No email or phone for uid={uid}, provisioning with label only")
+            logger.warning("auto_provision_contact_missing")
 
         # 3. Build full provision payload
         user_id = _slugify_user_id(user_name, uid)
@@ -176,11 +189,12 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             payload["medications"] = medications if isinstance(medications, list) else [medications]
 
         # 4. Call provision API
-        result = await _provision_with_payload(uid, payload)
+        result = await _provision_with_payload(uid, payload, authority_snapshot=authority_snapshot)
 
         # 5. Write phone back to users.identities if present and provision succeeded
         if result.get("success") and phone:
             try:
+                hermes_provision_authority(authority_snapshot)
                 await pool.execute(
                     """
                     UPDATE users SET identities = COALESCE(identities, '{}'::jsonb) || $1::jsonb
@@ -189,53 +203,70 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
                     json.dumps({"phone": phone}),
                     uid,
                 )
-            except Exception as e:
-                logger.warning(f"Failed to write phone to identities for uid={uid}: {e}")
+                hermes_provision_authority(authority_snapshot)
+            except ProvisionAuthorityError as exc:
+                logger.error(exc.code)
+                return {"success": False, "error": exc.code}
+            except Exception:
+                logger.warning("auto_provision_identity_write_failed")
 
         return result
 
-    except Exception as e:
-        error_msg = f"Auto-provision error: {str(e)}"
-        logger.error(f"Auto-provision error for uid={uid}: {e}")
-        return {"success": False, "error": error_msg}
+    except Exception:
+        logger.error("auto_provision_internal_error")
+        return {"success": False, "error": "auto_provision_internal_error"}
 
 
-async def _provision_with_payload(uid: str, payload: dict) -> dict:
+async def _provision_with_payload(
+    uid: str,
+    payload: dict,
+    *,
+    authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+) -> dict:
     """Send a provision request with the given payload.
 
     Args:
-        uid: Firebase UID (for logging)
+        uid: Firebase UID (retained for caller compatibility)
         payload: Full provision payload dict
 
     Returns:
         dict with success/error/cluster keys
     """
+    del uid
+    send_snapshot: ProvisionAuthoritySnapshot | None = None
     try:
-        headers = {}
-        if PROVISION_API_TOKEN:
-            headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        entry_snapshot = hermes_provision_authority(authority_snapshot).snapshot()
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, trust_env=False) as client:
+            payload_authority = hermes_provision_authority(entry_snapshot)
+            request_payload = dict(payload)
+            resolved_authority = hermes_provision_authority(payload_authority.snapshot())
+            send_snapshot = resolved_authority.snapshot()
             response = await client.post(
-                f"{PROVISION_API_URL}/provision",
-                headers=headers,
-                json=payload,
+                f"{resolved_authority.base_url}/provision",
+                headers={"Authorization": f"Bearer {resolved_authority.token}"},
+                json=request_payload,
             )
+            hermes_provision_authority(send_snapshot)
 
             if response.status_code == 200:
                 data = response.json()
-                logger.info(f"Successfully provisioned uid={uid} as userId={payload.get('userId')}")
+                logger.info("auto_provision_succeeded")
                 return {"success": True, "cluster": data}
-            else:
-                error_msg = f"Provision API returned {response.status_code}: {response.text}"
-                logger.warning(f"Auto-provision failed for uid={uid}: {error_msg}")
-                return {"success": False, "error": error_msg}
+            logger.warning("auto_provision_request_rejected")
+            return {"success": False, "error": "auto_provision_request_rejected"}
 
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return {"success": False, "error": exc.code}
     except httpx.TimeoutException:
-        error_msg = "Provision API timeout"
-        logger.error(f"Auto-provision timeout for uid={uid}")
-        return {"success": False, "error": error_msg}
-    except Exception as e:
-        error_msg = f"Provision API error: {str(e)}"
-        logger.error(f"Auto-provision error for uid={uid}: {e}")
-        return {"success": False, "error": error_msg}
+        if send_snapshot is not None:
+            try:
+                hermes_provision_authority(send_snapshot)
+            except ProvisionAuthorityError as exc:
+                logger.error(exc.code)
+                return {"success": False, "error": exc.code}
+        logger.error("auto_provision_timeout")
+        return {"success": False, "error": "auto_provision_timeout"}
+    except Exception:
+        logger.error("auto_provision_unavailable")
+        return {"success": False, "error": "auto_provision_unavailable"}

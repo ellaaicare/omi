@@ -23,6 +23,7 @@ on:
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/observer.py"
+      - "backend/ella/routers/plato_mcp.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
@@ -46,11 +47,17 @@ on:
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/voice_honcho.py"
+      - "backend/ella/utils/auto_provision.py"
+      - "backend/ella/utils/identity_sync.py"
+      - "backend/ella/utils/provision_authority.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
+      - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
+      - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
@@ -86,7 +93,11 @@ on:
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
+      - "backend/tests/unit/test_ella_plato_mcp.py"
+      - "backend/tests/unit/test_ella_provision_authority_split.py"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_pilot_invite_admin.py"
+      - "backend/tests/unit/test_ella_onboarding_contract.py"
       - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
@@ -113,6 +124,7 @@ on:
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/observer.py"
+      - "backend/ella/routers/plato_mcp.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
@@ -136,11 +148,17 @@ on:
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/voice_honcho.py"
+      - "backend/ella/utils/auto_provision.py"
+      - "backend/ella/utils/identity_sync.py"
+      - "backend/ella/utils/provision_authority.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
+      - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
+      - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
@@ -176,7 +194,11 @@ on:
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
+      - "backend/tests/unit/test_ella_plato_mcp.py"
+      - "backend/tests/unit/test_ella_provision_authority_split.py"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_pilot_invite_admin.py"
+      - "backend/tests/unit/test_ella_onboarding_contract.py"
       - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
@@ -254,6 +276,7 @@ jobs:
           ella/routers/invites.py
           ella/routers/onboarding.py
           ella/routers/observer.py
+          ella/routers/plato_mcp.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
           ella/services/hermes_broker_client.py
@@ -275,9 +298,13 @@ jobs:
           ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
           ella/services/voice_honcho.py
+          ella/utils/auto_provision.py
+          ella/utils/identity_sync.py
+          ella/utils/provision_authority.py
           scripts/hermes_cloud_pool_admin.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_product_fit_canary.py
+          scripts/pilot_invite_admin.py
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
           utils/ella/postprocess.py
@@ -293,7 +320,8 @@ jobs:
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/ai_consent.py ella/routers/chat.py
           ella/routers/guardian.py ella/routers/invites.py
-          ella/routers/onboarding.py ella/services/hermes_cloud_policy.py
+          ella/routers/onboarding.py ella/routers/plato_mcp.py
+          ella/services/hermes_cloud_policy.py
           ella/services/hermes_broker_client.py
           ella/services/hermes_broker_prototype.py
           ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
@@ -303,7 +331,9 @@ jobs:
           ella/services/memory_reinterpretation.py
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
-          ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
+          ella/services/summary_recovery.py
+          ella/utils/auto_provision.py ella/utils/identity_sync.py
+          ella/utils/provision_authority.py utils/ella/scanner_keyterms.py
           scripts/voice_canary_admin.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
@@ -314,6 +344,10 @@ jobs:
           tests/unit/test_ella_guardian_delivery.py
           tests/unit/test_ella_listen_runtime_gate.py
           tests/unit/test_ella_observer.py tests/unit/test_invitation_redemption.py
+          tests/unit/test_ella_plato_mcp.py
+          tests/unit/test_ella_provision_authority_split.py
+          tests/unit/test_pilot_invite_admin.py
+          tests/unit/test_ella_onboarding_contract.py
           tests/unit/test_ella_provisioning_service.py
           tests/unit/test_hermes_cloud_openapi.py
           tests/unit/test_hermes_cloud_enrichment.py
@@ -376,6 +410,13 @@ jobs:
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_cleanup_recovers_from_partial_cleanup_idempotently"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_show_and_cleanup_accept_expected_post_enrichment_state_only"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
+            "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry"
+            "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_provider"
+            "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_authority_denials_precede_provider_setup[invitation_runtime_fallback_enabled]"
+            "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
+            "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
+            "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
           collected_ids="$(
@@ -383,7 +424,9 @@ jobs:
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_ella_runtime_route_isolation.py \
-              tests/postgres/test_hermes_cloud_pool_postgres.py |
+              tests/unit/test_voice_proxy_auth.py \
+              tests/postgres/test_hermes_cloud_pool_postgres.py \
+              tests/postgres/test_invitation_redemption_postgres.py |
               sed '/^$/d'
           )"
           for required_id in "${required_ids[@]}"; do
@@ -393,7 +436,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -ge 431
+          test "$collected" -eq 490
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -425,6 +468,48 @@ jobs:
 
       - name: Run exact reviewed boundary collections
         run: |
+          authority_split_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_ella_provision_authority_split.py \
+              tests/unit/test_ella_plato_mcp.py |
+              sed '/^$/d'
+          )"
+          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 443
+          required_authority_split_ids=(
+            "tests/unit/test_ella_provision_authority_split.py::test_new_user_auto_provision_posts_only_to_hermes_authority"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_url_swap]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_token_swap]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_posts_only_to_accepted_exact_authority"
+            "tests/unit/test_ella_provision_authority_split.py::test_auto_provision_entrypoint_rejects_before_database_or_http[missing_url]"
+            "tests/unit/test_ella_provision_authority_split.py::test_sync_identity_posts_only_to_hermes_authority"
+            "tests/unit/test_ella_provision_authority_split.py::test_async_identity_sync_posts_only_to_hermes_authority"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_reject_before_http_database_state_or_thread[metadata_destination-reconcile]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_revalidates_after_client_entry_before_send[url]"
+            "tests/unit/test_ella_provision_authority_split.py::test_real_claimed_worker_stops_after_inflight_http_authority_drift[token]"
+            "tests/unit/test_ella_provision_authority_split.py::test_claimed_worker_rechecks_before_every_post_http_mutation[activate_runtime_binding-1-forbidden2-binding_reference]"
+            "tests/unit/test_ella_provision_authority_split.py::test_auto_provision_stops_database_write_after_inflight_http_drift[destination_policy]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_detects_inflight_http_drift_before_later_effects[binding_secret-async]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport[url-sync]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport[token-async_httpx]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport[binding_secret-async_fallback]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport[binding_reference-fire_and_forget]"
+            "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport[destination_policy-reconcile]"
+            "tests/unit/test_ella_provision_authority_split.py::test_fire_and_forget_rechecks_after_thread_construction_before_execution[token]"
+            "tests/unit/test_ella_provision_authority_split.py::test_reconciliation_stops_batch_and_state_after_first_inflight_drift[url]"
+            "tests/unit/test_ella_provision_authority_split.py::test_hostnames_fail_closed_before_multiple_answer_or_rebinding_dns"
+            "tests/unit/test_ella_provision_authority_split.py::test_legacy_mapped_ipv6_socket_equivalence_collides"
+            "tests/unit/test_ella_provision_authority_split.py::test_http_transports_disable_redirects_proxies_and_environment_drift"
+            "tests/unit/test_ella_provision_authority_split.py::test_retained_history_consumers_remain_on_legacy_authority_pair"
+            "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_search_uses_retained_authority_pair"
+            "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_authority_conflict_fails_before_http"
+          )
+          for required_id in "${required_authority_split_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$authority_split_ids"
+          done
+          pytest \
+            tests/unit/test_ella_provision_authority_split.py \
+            tests/unit/test_ella_plato_mcp.py \
+            -v
           test "$(
             pytest --collect-only -q \
               tests/unit/test_authority_advisory_lock.py \
@@ -447,7 +532,7 @@ jobs:
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 18
           pytest tests/unit/test_ella_observer.py -v
-          test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 18
+          test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 19
           pytest tests/unit/test_invitation_redemption.py -v
           test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 28
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v

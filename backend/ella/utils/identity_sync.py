@@ -3,7 +3,7 @@
 Identity Sync — Sync-on-write helpers + daily reconciliation safety net.
 
 PRIMARY SYNC happens at write-time:
-    - Dashboard API routes call syncIdentityToOpenClaw() (TypeScript)
+    - Dashboard API routes call the corresponding Hermes identity sync
     - auto_provision.py sends full identity data during provisioning
     - OMI backend can call sync_user_identity() after user profile changes
 
@@ -25,11 +25,13 @@ Environment variables:
     ELLA_POSTGRES_USER       (default: postgres)
     ELLA_POSTGRES_PASSWORD   (default: postgres)
     ELLA_POSTGRES_DB         (default: ella_ai)
-    ELLA_PROVISION_API_URL   (default: http://100.76.138.56:8200)
-    ELLA_PROVISION_API_TOKEN (default: empty)
+    ELLA_HERMES_PROVISION_API_URL   (required; exact reviewed endpoint)
+    ELLA_HERMES_PROVISION_API_TOKEN (required)
+    ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF (required env: secret reference)
     IDENTITY_SYNC_STATE_FILE (default: ~/.ella-identity-sync-state.json)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -40,12 +42,20 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import httpx
+except ImportError:  # pragma: no cover - the synchronous helper remains stdlib-only
+    httpx = None
+
+from ella.utils.provision_authority import (
+    ProvisionAuthorityError,
+    ProvisionAuthoritySnapshot,
+    hermes_provision_authority,
+)
+
 logger = logging.getLogger("ella.identity_sync")
 
 # --- Configuration ---
-
-PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 
 POSTGRES_HOST = os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1")
 POSTGRES_PORT = int(os.getenv("ELLA_POSTGRES_PORT", "5433"))
@@ -53,16 +63,91 @@ POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("ELLA_POSTGRES_PASSWORD", "postgres")
 POSTGRES_DB = os.getenv("ELLA_POSTGRES_DB", "ella_ai")
 
-STATE_FILE = Path(os.getenv(
-    "IDENTITY_SYNC_STATE_FILE",
-    os.path.expanduser("~/.ella-identity-sync-state.json")
-))
+STATE_FILE = Path(os.getenv("IDENTITY_SYNC_STATE_FILE", os.path.expanduser("~/.ella-identity-sync-state.json")))
 
 
 # --- Sync-on-Write API (stdlib only — no external deps) ---
 
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+_IDENTITY_SYNC_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
+
+
+def _identity_payload(omi_uid: str, phone: str = None, email: str = None) -> dict:
+    payload = {"omiUid": omi_uid}
+    if phone:
+        payload["phone"] = phone
+    if email:
+        payload["email"] = email
+    return payload
+
+
+def _sync_user_identity_with_authority(
+    omi_uid: str,
+    *,
+    phone: str = None,
+    email: str = None,
+    authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+) -> dict:
+    send_snapshot: ProvisionAuthoritySnapshot | None = None
+    try:
+        payload_authority = hermes_provision_authority(authority_snapshot)
+        payload = _identity_payload(omi_uid, phone=phone, email=email)
+        authority = hermes_provision_authority(payload_authority.snapshot())
+        send_snapshot = authority.snapshot()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return {"status": "error", "error": exc.code}
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {authority.token}",
+    }
+    url = f"{authority.base_url}/identity-sync"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+
+    try:
+        hermes_provision_authority(send_snapshot)
+        with _IDENTITY_SYNC_OPENER.open(req, timeout=15) as resp:
+            response_body = resp.read()
+        hermes_provision_authority(send_snapshot)
+        result = json.loads(response_body.decode("utf-8"))
+        logger.info("identity_sync_succeeded")
+        return result
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return {"status": "error", "error": exc.code}
+    except urllib.error.HTTPError as exc:
+        if send_snapshot is not None:
+            try:
+                hermes_provision_authority(send_snapshot)
+            except ProvisionAuthorityError as authority_error:
+                logger.error(authority_error.code)
+                return {"status": "error", "error": authority_error.code}
+        if exc.code == 404:
+            logger.debug("identity_sync_not_provisioned")
+            return {"status": "skipped", "reason": "not provisioned"}
+        logger.warning("identity_sync_http_error")
+        return {"status": "error", "error": "identity_sync_http_error"}
+    except (urllib.error.URLError, OSError):
+        if send_snapshot is not None:
+            try:
+                hermes_provision_authority(send_snapshot)
+            except ProvisionAuthorityError as authority_error:
+                logger.error(authority_error.code)
+                return {"status": "error", "error": authority_error.code}
+        logger.warning("identity_sync_unavailable")
+        return {"status": "error", "error": "identity_sync_unavailable"}
+
+
 def sync_user_identity(omi_uid: str, phone: str = None, email: str = None) -> dict:
-    """Sync a user's identity data to OpenClaw via Provision API.
+    """Sync a user's identity data to the isolated Hermes provision authority.
 
     Calls POST /identity-sync with the given phone/email. Merges with
     existing identity links (doesn't replace).
@@ -84,39 +169,17 @@ def sync_user_identity(omi_uid: str, phone: str = None, email: str = None) -> di
     if not phone and not email:
         return {"status": "skipped", "reason": "no phone or email"}
 
-    payload = {"omiUid": omi_uid}
-    if phone:
-        payload["phone"] = phone
-    if email:
-        payload["email"] = email
-
-    headers = {"Content-Type": "application/json"}
-    if PROVISION_API_TOKEN:
-        headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
-
-    url = f"{PROVISION_API_URL}/identity-sync"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            logger.info(f"Identity synced for {omi_uid}: {result.get('changed', 'unknown')}")
-            return result
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8")
-        except Exception:
-            pass
-        if e.code == 404:
-            logger.debug(f"Identity sync skipped for {omi_uid}: not provisioned yet")
-            return {"status": "skipped", "reason": "not provisioned"}
-        logger.warning(f"Identity sync failed for {omi_uid}: HTTP {e.code} {body}")
-        return {"status": "error", "error": f"HTTP {e.code}: {body}"}
-    except (urllib.error.URLError, OSError) as e:
-        logger.warning(f"Identity sync failed for {omi_uid}: {e}")
-        return {"status": "error", "error": str(e)}
+        authority_snapshot = hermes_provision_authority().snapshot()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return {"status": "error", "error": exc.code}
+    return _sync_user_identity_with_authority(
+        omi_uid,
+        phone=phone,
+        email=email,
+        authority_snapshot=authority_snapshot,
+    )
 
 
 def sync_user_identity_fire_and_forget(omi_uid: str, phone: str = None, email: str = None) -> None:
@@ -128,13 +191,34 @@ def sync_user_identity_fire_and_forget(omi_uid: str, phone: str = None, email: s
     if not omi_uid or (not phone and not email):
         return
 
+    try:
+        authority_snapshot = hermes_provision_authority().snapshot()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
+
     def _do_sync():
         try:
-            sync_user_identity(omi_uid, phone=phone, email=email)
+            _sync_user_identity_with_authority(
+                omi_uid,
+                phone=phone,
+                email=email,
+                authority_snapshot=authority_snapshot,
+            )
         except Exception:
             pass  # Never propagate
 
+    try:
+        hermes_provision_authority(authority_snapshot)
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
     t = threading.Thread(target=_do_sync, daemon=True)
+    try:
+        hermes_provision_authority(authority_snapshot)
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
     t.start()
 
 
@@ -146,41 +230,66 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
     if not omi_uid or (not phone and not email):
         return {"status": "skipped", "reason": "no data"}
 
-    payload = {"omiUid": omi_uid}
-    if phone:
-        payload["phone"] = phone
-    if email:
-        payload["email"] = email
-
-    headers = {"Content-Type": "application/json"}
-    if PROVISION_API_TOKEN:
-        headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
-
-    url = f"{PROVISION_API_URL}/identity-sync"
-
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        authority_snapshot = hermes_provision_authority().snapshot()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return {"status": "error", "error": exc.code}
+
+    if httpx is None:
+        try:
+            hermes_provision_authority(authority_snapshot)
+        except ProvisionAuthorityError as exc:
+            logger.error(exc.code)
+            return {"status": "error", "error": exc.code}
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: _sync_user_identity_with_authority(
+                omi_uid,
+                phone=phone,
+                email=email,
+                authority_snapshot=authority_snapshot,
+            ),
+        )
+
+    send_snapshot: ProvisionAuthoritySnapshot | None = None
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, trust_env=False) as client:
+            payload_authority = hermes_provision_authority(authority_snapshot)
+            payload = _identity_payload(omi_uid, phone=phone, email=email)
+            authority = hermes_provision_authority(payload_authority.snapshot())
+            send_snapshot = authority.snapshot()
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {authority.token}",
+            }
+            url = f"{authority.base_url}/identity-sync"
+            hermes_provision_authority(send_snapshot)
             resp = await client.post(url, headers=headers, json=payload)
+            hermes_provision_authority(send_snapshot)
             if resp.status_code == 404:
                 return {"status": "skipped", "reason": "not provisioned"}
             resp.raise_for_status()
             result = resp.json()
-            logger.info(f"Identity synced for {omi_uid}: {result.get('changed', 'unknown')}")
+            logger.info("identity_sync_succeeded")
             return result
-    except ImportError:
-        # No httpx — fall back to sync in thread
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: sync_user_identity(omi_uid, phone=phone, email=email)
-        )
-    except Exception as e:
-        logger.warning(f"Async identity sync failed for {omi_uid}: {e}")
-        return {"status": "error", "error": str(e)}
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return {"status": "error", "error": exc.code}
+    except Exception:
+        if send_snapshot is not None:
+            try:
+                hermes_provision_authority(send_snapshot)
+            except ProvisionAuthorityError as exc:
+                logger.error(exc.code)
+                return {"status": "error", "error": exc.code}
+        logger.warning("identity_sync_unavailable")
+        return {"status": "error", "error": "identity_sync_unavailable"}
 
 
 # --- Daily Reconciliation (Safety Net) ---
+
 
 def _load_state() -> dict:
     if not STATE_FILE.exists():
@@ -215,9 +324,12 @@ def _get_changed_users(last_check: str) -> list:
     try:
         import psycopg2
         import psycopg2.extras
+
         conn = psycopg2.connect(
-            host=POSTGRES_HOST, port=POSTGRES_PORT,
-            user=POSTGRES_USER, password=POSTGRES_PASSWORD,
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
             dbname=POSTGRES_DB,
         )
         try:
@@ -231,9 +343,12 @@ def _get_changed_users(last_check: str) -> list:
 
     try:
         import pg8000
+
         conn = pg8000.connect(
-            host=POSTGRES_HOST, port=POSTGRES_PORT,
-            user=POSTGRES_USER, password=POSTGRES_PASSWORD,
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
             database=POSTGRES_DB,
         )
         try:
@@ -246,7 +361,7 @@ def _get_changed_users(last_check: str) -> list:
     except ImportError:
         pass
 
-    logger.error("No PostgreSQL driver available (install psycopg2 or pg8000)")
+    logger.error("identity_reconcile_database_driver_unavailable")
     return []
 
 
@@ -256,22 +371,38 @@ def reconcile():
     Designed to run once daily as a safety net. Primary sync is sync-on-write
     via dashboard routes and auto_provision.py.
     """
+    try:
+        authority_snapshot = hermes_provision_authority().snapshot()
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
+
     state = _load_state()
+    try:
+        hermes_provision_authority(authority_snapshot)
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
     last_check = state.get("last_check", "2020-01-01T00:00:00Z")
 
-    logger.info(f"Reconciliation: checking users updated since {last_check}")
+    logger.info("identity_reconcile_started")
 
     try:
+        hermes_provision_authority(authority_snapshot)
         changed_users = _get_changed_users(last_check)
-    except Exception as e:
-        logger.error(f"Reconciliation DB query failed: {e}")
+        hermes_provision_authority(authority_snapshot)
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
+    except Exception:
+        logger.error("identity_reconcile_database_unavailable")
         return
 
     if not changed_users:
-        logger.info("Reconciliation: no user changes detected")
+        logger.info("identity_reconcile_no_changes")
         return
 
-    logger.info(f"Reconciliation: found {len(changed_users)} changed user(s)")
+    logger.info("identity_reconcile_changes_detected")
 
     synced = 0
     errors = 0
@@ -299,7 +430,14 @@ def reconcile():
         if not email and not phone:
             continue
 
-        result = sync_user_identity(omi_uid, phone=phone, email=email)
+        result = _sync_user_identity_with_authority(
+            omi_uid,
+            phone=phone,
+            email=email,
+            authority_snapshot=authority_snapshot,
+        )
+        if str(result.get("error") or "").startswith(("hermes_provision_authority", "provision_authority")):
+            return
         if result.get("status") in ("ok", "skipped"):
             synced += 1
         else:
@@ -318,9 +456,15 @@ def reconcile():
     state["last_run"] = datetime.now(timezone.utc).isoformat()
     state["last_synced"] = synced
     state["last_errors"] = errors
-    _save_state(state)
+    try:
+        hermes_provision_authority(authority_snapshot)
+        _save_state(state)
+        hermes_provision_authority(authority_snapshot)
+    except ProvisionAuthorityError as exc:
+        logger.error(exc.code)
+        return
 
-    logger.info(f"Reconciliation complete: {synced} synced, {errors} errors, watermark={latest_updated_at}")
+    logger.info("identity_reconcile_completed")
 
 
 # --- CLI ---

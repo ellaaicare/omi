@@ -5,26 +5,37 @@ on:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/invites.py"
+      - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/provisioning.py"
+      - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
+      - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_pilot_invite_admin.py"
+      - "backend/tests/unit/test_authority_writer_guard.py"
+      - "backend/tests/unit/test_ella_onboarding_contract.py"
+      - "backend/tests/unit/test_ella_provisioning_service.py"
       - "backend/tests/unit/test_synthetic_invite_admin.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
@@ -34,26 +45,37 @@ on:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/invites.py"
+      - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/provisioning.py"
+      - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
+      - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_pilot_invite_admin.py"
+      - "backend/tests/unit/test_authority_writer_guard.py"
+      - "backend/tests/unit/test_ella_onboarding_contract.py"
+      - "backend/tests/unit/test_ella_provisioning_service.py"
       - "backend/tests/unit/test_synthetic_invite_admin.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
@@ -109,17 +131,23 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
+          database/ella_provisioning.py
           database/invitation_operator.py
           database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py
           database/voice_canary.py
           ella/routers/invites.py
+          ella/routers/onboarding.py
           ella/routers/ai_consent.py
           ella/services/consent_authority.py
           ella/services/invitation_authority.py
+          ella/services/provisioning.py
+          ella/services/runtime_resolver.py
           ella/services/hermes_cloud_policy.py
+          ella/utils/provision_authority.py
           scripts/synthetic_invite_admin.py
+          scripts/pilot_invite_admin.py
 
       - name: Run unit and PostgreSQL security tests
         run: |
@@ -127,16 +155,59 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_synthetic_invite_admin.py \
+              tests/unit/test_pilot_invite_admin.py \
+              tests/unit/test_authority_writer_guard.py \
               tests/unit/test_voice_canary.py \
+              tests/unit/test_ella_onboarding_contract.py \
+              tests/unit/test_ella_provisioning_service.py \
               tests/postgres/test_invitation_redemption_postgres.py \
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 59
+          test "$collected" -eq 139
+          collected_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_invitation_redemption.py \
+              tests/unit/test_pilot_invite_admin.py \
+              tests/unit/test_authority_writer_guard.py \
+              tests/unit/test_ella_onboarding_contract.py \
+              tests/unit/test_ella_provisioning_service.py \
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
+              sed '/^$/d'
+          )"
+          required_ids=(
+            "tests/unit/test_invitation_redemption.py::test_redeem_rejects_unverified_firebase_email_before_authority_or_database"
+            "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
+            "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
+            "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
+            "tests/unit/test_pilot_invite_admin.py::test_operator_examples_never_embed_plaintext_email_or_legacy_email_argument"
+            "tests/unit/test_ella_onboarding_contract.py::test_onboarding_ensure_requires_current_ai_consent_dependency"
+            "tests/unit/test_ella_provisioning_service.py::test_self_hosted_invitation_admission_precedes_identity_and_job_writes"
+            "tests/unit/test_ella_provisioning_service.py::test_self_hosted_authority_drift_blocks_before_provider_call"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review_is_separate"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicate_or_orphan"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
+          )
+          for required_id in "${required_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$collected_ids"
+          done
           pytest \
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_synthetic_invite_admin.py \
+            tests/unit/test_pilot_invite_admin.py \
+            tests/unit/test_authority_writer_guard.py \
             tests/unit/test_voice_canary.py \
+            tests/unit/test_ella_onboarding_contract.py \
+            tests/unit/test_ella_provisioning_service.py \
             tests/postgres/test_invitation_redemption_postgres.py \
             tests/postgres/test_runtime_migration_atomicity_postgres.py \
-            -v
+            -v | tee /tmp/invite-redemption-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/invite-redemption-pytest.log
