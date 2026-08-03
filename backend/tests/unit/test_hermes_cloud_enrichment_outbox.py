@@ -353,7 +353,12 @@ def test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_ret
 
     fence_reference.data = {
         "state": content_write_fence.ACTIVE,
-        "writers": {"current-writer": now},
+        "writers": {
+            "current-writer": {
+                "expires_at": now,
+                "owner": content_write_fence._current_process_owner().to_storage(),
+            }
+        },
     }
     admitted = Reference({**_job(), "status": "pending"})
     admitted_transaction = Transaction()

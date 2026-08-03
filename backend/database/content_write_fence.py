@@ -16,7 +16,7 @@ import uuid
 
 from google.cloud import firestore
 
-from database import authority_advisory_lock, voice_canary
+from database import authority_advisory_lock, content_writer_owner, voice_canary
 
 FENCE_COLLECTION = "_ella_account_deletion_fences"
 ACTIVE = "ACTIVE"
@@ -37,6 +37,32 @@ _detached_writer: ContextVar["DetachedContentWriter | None"] = ContextVar(
 )
 
 
+@dataclass(frozen=True)
+class WriterRegistration:
+    expires_at: datetime
+    owner: content_writer_owner.ProcessOwner | None
+
+    def to_storage(self) -> Any:
+        if self.owner is None:
+            return self.expires_at
+        return {
+            "expires_at": self.expires_at,
+            "owner": self.owner.to_storage(),
+        }
+
+
+@dataclass(frozen=True)
+class WriterRecovery:
+    owner: content_writer_owner.ProcessOwner
+    recovered_at: datetime
+
+    def to_storage(self) -> dict[str, Any]:
+        return {
+            "owner": self.owner.to_storage(),
+            "recovered_at": self.recovered_at,
+        }
+
+
 class ContentWriteFenceError(RuntimeError):
     """A content mutation could not safely cross the deletion fence."""
 
@@ -48,6 +74,7 @@ class ContentWriteFenceError(RuntimeError):
 def configure_firestore_db(db: Any) -> None:
     """Inject the production Firestore client without import-time credentials."""
     global _firestore_db
+    _current_process_owner()
     _firestore_db = db
 
 
@@ -133,7 +160,12 @@ def transaction_content_writer_current(
     """Check one durable writer token inside another Firestore transaction."""
     data = _snapshot_data(_fence_reference(firestore_db, uid).get(transaction=transaction))
     allowed_states = {ACTIVE, DRAINING} if allow_draining else {ACTIVE}
-    return data.get("state", ACTIVE) in allowed_states and writer_token in _registered_writers(data)
+    registration = _registered_writers(data).get(writer_token)
+    return (
+        data.get("state", ACTIVE) in allowed_states
+        and registration is not None
+        and registration.owner == _current_process_owner()
+    )
 
 
 def _snapshot_data(snapshot: Any) -> dict[str, Any]:
@@ -142,7 +174,14 @@ def _snapshot_data(snapshot: Any) -> dict[str, Any]:
     return dict(snapshot.to_dict() or {})
 
 
-def _registered_writers(data: dict[str, Any]) -> dict[str, datetime]:
+def _current_process_owner() -> content_writer_owner.ProcessOwner:
+    try:
+        return content_writer_owner.current_process_owner()
+    except content_writer_owner.ProcessOwnerError as exc:
+        raise ContentWriteFenceError(exc.code) from exc
+
+
+def _registered_writers(data: dict[str, Any]) -> dict[str, WriterRegistration]:
     """Return every unreleased writer; timestamps never prove absence.
 
     A process crash or missed heartbeat must leave deletion pending. Expiry is
@@ -159,17 +198,63 @@ def _registered_writers(data: dict[str, Any]) -> dict[str, datetime]:
         return {}
     if not isinstance(writers, dict):
         raise ContentWriteFenceError("account_content_fence_corrupt")
-    registered: dict[str, datetime] = {}
-    for token, expires_at in writers.items():
-        if not isinstance(token, str) or not token or not isinstance(expires_at, datetime):
+    registered: dict[str, WriterRegistration] = {}
+    for token, value in writers.items():
+        if not isinstance(token, str) or not token:
             raise ContentWriteFenceError("account_content_fence_corrupt")
-        registered[token] = expires_at
+        if isinstance(value, datetime):
+            registered[token] = WriterRegistration(expires_at=value, owner=None)
+            continue
+        if not isinstance(value, dict) or set(value) != {"expires_at", "owner"}:
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        expires_at = value["expires_at"]
+        if not isinstance(expires_at, datetime):
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        try:
+            owner = content_writer_owner.ProcessOwner.from_storage(value["owner"])
+        except content_writer_owner.ProcessOwnerError as exc:
+            raise ContentWriteFenceError(exc.code) from exc
+        registered[token] = WriterRegistration(expires_at=expires_at, owner=owner)
     return registered
+
+
+def _registered_recoveries(data: dict[str, Any]) -> dict[str, WriterRecovery]:
+    recoveries = data.get("writer_recoveries")
+    if recoveries is None:
+        return {}
+    if not isinstance(recoveries, dict):
+        raise ContentWriteFenceError("account_content_fence_corrupt")
+    registered: dict[str, WriterRecovery] = {}
+    for token_hash, value in recoveries.items():
+        if (
+            not isinstance(token_hash, str)
+            or len(token_hash) != 64
+            or not all(character in "0123456789abcdef" for character in token_hash)
+            or not isinstance(value, dict)
+        ):
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        if set(value) != {"owner", "recovered_at"} or not isinstance(value["recovered_at"], datetime):
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        try:
+            owner = content_writer_owner.ProcessOwner.from_storage(value["owner"])
+        except content_writer_owner.ProcessOwnerError as exc:
+            raise ContentWriteFenceError(exc.code) from exc
+        registered[token_hash] = WriterRecovery(owner=owner, recovered_at=value["recovered_at"])
+    return registered
+
+
+def _writers_to_storage(writers: dict[str, WriterRegistration]) -> dict[str, Any]:
+    return {token: registration.to_storage() for token, registration in writers.items()}
+
+
+def _recoveries_to_storage(recoveries: dict[str, WriterRecovery]) -> dict[str, Any]:
+    return {token: recovery.to_storage() for token, recovery in recoveries.items()}
 
 
 def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int) -> None:
     reference = _fence_reference(db, uid)
     now = datetime.now(timezone.utc)
+    owner = _current_process_owner()
 
     @firestore.transactional
     def acquire(transaction: Any) -> None:
@@ -177,12 +262,21 @@ def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int)
         if data.get("state", ACTIVE) != ACTIVE:
             raise ContentWriteFenceError("account_write_forbidden")
         writers = _registered_writers(data)
-        writers[token] = now + timedelta(seconds=lease_seconds)
+        recoveries = _registered_recoveries(data)
+        existing = writers.get(token)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if (existing is not None and existing.owner != owner) or token_hash in recoveries:
+            raise ContentWriteFenceError("account_writer_owner_mismatch")
+        writers[token] = WriterRegistration(
+            expires_at=now + timedelta(seconds=lease_seconds),
+            owner=owner,
+        )
         transaction.set(
             reference,
             {
                 "state": ACTIVE,
-                "writers": writers,
+                "writers": _writers_to_storage(writers),
+                "writer_recoveries": _recoveries_to_storage(recoveries),
                 "updated_at": now,
             },
         )
@@ -192,12 +286,14 @@ def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int)
 
 def _assert_firestore_writer_current(db: Any, uid: str, token: str) -> None:
     reference = _fence_reference(db, uid)
+    owner = _current_process_owner()
 
     @firestore.transactional
     def assert_current(transaction: Any) -> None:
         data = _snapshot_data(reference.get(transaction=transaction))
         writers = _registered_writers(data)
-        if token not in writers or data.get("state", ACTIVE) not in {ACTIVE, DRAINING}:
+        registration = writers.get(token)
+        if registration is None or registration.owner != owner or data.get("state", ACTIVE) not in {ACTIVE, DRAINING}:
             raise ContentWriteFenceError("account_write_forbidden")
 
     assert_current(db.transaction())
@@ -206,15 +302,22 @@ def _assert_firestore_writer_current(db: Any, uid: str, token: str) -> None:
 def _release_firestore_writer(db: Any, uid: str, token: str) -> None:
     reference = _fence_reference(db, uid)
     now = datetime.now(timezone.utc)
+    owner = _current_process_owner()
 
     @firestore.transactional
     def release(transaction: Any) -> None:
         snapshot = reference.get(transaction=transaction)
         data = _snapshot_data(snapshot)
         writers = _registered_writers(data)
-        writers.pop(token, None)
+        registration = writers.get(token)
+        if registration is None:
+            return
+        if registration.owner != owner:
+            raise ContentWriteFenceError("account_writer_owner_mismatch")
+        writers.pop(token)
+        recoveries = _registered_recoveries(data)
         state = data.get("state", ACTIVE)
-        if state == ACTIVE and not writers:
+        if state == ACTIVE and not writers and not recoveries:
             if getattr(snapshot, "exists", False):
                 transaction.delete(reference)
             return
@@ -222,7 +325,8 @@ def _release_firestore_writer(db: Any, uid: str, token: str) -> None:
             reference,
             {
                 "state": state,
-                "writers": writers,
+                "writers": _writers_to_storage(writers),
+                "writer_recoveries": _recoveries_to_storage(recoveries),
                 "updated_at": now,
             },
         )
@@ -241,12 +345,14 @@ def _advance_firestore_tombstone(db: Any, uid: str) -> bool:
         if data.get("state") == TOMBSTONED:
             return True
         writers = _registered_writers(data)
+        recoveries = _registered_recoveries(data)
         state = DRAINING if writers else TOMBSTONED
         transaction.set(
             reference,
             {
                 "state": state,
-                "writers": writers,
+                "writers": _writers_to_storage(writers),
+                "writer_recoveries": _recoveries_to_storage(recoveries),
                 "deletion_requested_at": data.get("deletion_requested_at") or now,
                 "tombstoned_at": now if state == TOMBSTONED else None,
                 "updated_at": now,

@@ -1,14 +1,19 @@
 import ast
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import timedelta
+import json
+import multiprocessing
 import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 import types
 import threading
+import uuid
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.testclient import TestClient
@@ -42,7 +47,7 @@ summary_stub.generate_stock_conversation_summary = lambda *args, **kwargs: None
 sys.modules.setdefault("utils.conversations.generic_summary", summary_stub)
 
 from database import account_deletion as account_deletion_db
-from database import content_write_fence
+from database import content_write_fence, content_write_recovery, content_writer_owner
 from database.memory_reinterpretations import InMemoryMemoryReinterpretationRepository
 from ella.routers import canonical_events
 from ella.routers.canonical_events import (
@@ -56,6 +61,7 @@ from ella.services import memory_reinterpretation as reinterpretation_service
 from ella.services import proposal_ingest
 from ella.services.hermes_cloud_enrichment_outbox import DeliveryResult, HermesCloudEnrichmentOutboxWorker
 from ella.services.memory_reinterpretation import ApplyResult, MemoryReinterpretationWorker, ReinterpretationPlan
+from scripts import content_writer_recovery as recovery_cli
 
 UID = "startup-worker-delete-user"
 OTHER_UID = "startup-worker-retained-user"
@@ -101,9 +107,9 @@ class _Transaction:
 
 
 class _Firestore:
-    def __init__(self):
-        self.documents = {}
-        self.lock = threading.RLock()
+    def __init__(self, *, documents=None, lock=None):
+        self.documents = {} if documents is None else documents
+        self.lock = threading.RLock() if lock is None else lock
 
     def collection(self, name):
         return _Collection(self, name)
@@ -118,6 +124,65 @@ def _transactional(function):
             return function(transaction, *args, **kwargs)
 
     return run
+
+
+def _hold_process_writer(firestore, uid, token, ready, release):
+    content_write_fence.firestore.transactional = _transactional
+    content_write_fence.configure_firestore_db(firestore)
+    content_write_fence._acquire_firestore_writer(firestore, uid, token, 3)
+
+    def hold_work():
+        ready.set()
+        release.wait(30)
+
+    worker = threading.Thread(target=hold_work, name="real-orphan-writer-thread")
+    worker.start()
+    worker.join()
+
+
+def _run_unprivileged_recovery(subject_hash, token_hash):
+    if os.geteuid() == 0:
+        os.setuid(65534)
+    result = recovery_cli.main(
+        ["--subject-hash", subject_hash, "--token-hash", token_hash],
+        firestore_db=object(),
+    )
+    os._exit(result)
+
+
+def _shared_firestore(context):
+    manager = context.Manager()
+    return manager, _Firestore(documents=manager.dict(), lock=manager.RLock())
+
+
+def _start_real_writer(context, firestore, *, uid, token):
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_process_writer,
+        args=(firestore, uid, token, ready, release),
+    )
+    process.start()
+    assert ready.wait(5)
+    return process, release
+
+
+def _writer_record(firestore, uid, token):
+    state = content_write_fence._snapshot_data(content_write_fence._fence_reference(firestore, uid).get())
+    return state["writers"][token]
+
+
+def _invoke_recovery(monkeypatch, firestore, *, uid, token):
+    monkeypatch.setattr(recovery_cli.os, "geteuid", lambda: 0)
+    return recovery_cli.main(
+        [
+            "--subject-hash",
+            content_write_recovery.hash_selector(uid),
+            "--token-hash",
+            content_write_recovery.hash_selector(token),
+        ],
+        firestore_db=firestore,
+    )
 
 
 def _state():
@@ -734,9 +799,26 @@ async def _cancel_two_coalesced_stops(service):
     return shared_shutdown
 
 
-def test_process_restart_retains_orphan_token_until_exact_terminal_proof_recovery(monkeypatch, deletion_fence):
-    token = "terminated-process-writer-token"
-    content_write_fence._acquire_firestore_writer(deletion_fence, UID, token, 1)
+def test_process_restart_uses_root_cli_and_real_kernel_terminal_proof_before_firebase_last(
+    monkeypatch,
+    deletion_fence,
+    capsys,
+):
+    del deletion_fence
+    context = multiprocessing.get_context("fork")
+    manager, firestore = _shared_firestore(context)
+    token = "real-child-process-writer-token"
+    same_uid_token = "retained-same-uid-writer-token"
+    other_token = "retained-other-uid-writer-token"
+    process, release = _start_real_writer(context, firestore, uid=UID, token=token)
+    del release
+    content_write_fence.configure_firestore_db(firestore)
+    content_write_fence._acquire_firestore_writer(firestore, UID, same_uid_token, 3)
+    content_write_fence._acquire_firestore_writer(firestore, OTHER_UID, other_token, 3)
+    child_record = _writer_record(firestore, UID, token)
+    owner = content_writer_owner.ProcessOwner.from_storage(child_record["owner"])
+    assert owner.pid == process.pid
+    assert owner.generation != content_writer_owner.current_process_owner().generation
     order = []
 
     async def purge_memory(_uid):
@@ -754,25 +836,202 @@ def test_process_restart_retains_orphan_token_until_exact_terminal_proof_recover
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             first_process = await client.delete("/v1/users/delete-account")
             assert first_process.status_code == 202
-            state = content_write_fence._snapshot_data(content_write_fence._fence_reference(deletion_fence, UID).get())
+            state = content_write_fence._snapshot_data(content_write_fence._fence_reference(firestore, UID).get())
             assert state["state"] == content_write_fence.DRAINING
             assert token in state["writers"]
 
-            # A new process sees the same durable blocker. Neither restart nor
-            # lease expiry is absence proof, so the retry remains resumable.
             restarted_process = await client.delete("/v1/users/delete-account")
             assert restarted_process.status_code == 202
             assert order == []
 
-            old_process_terminal = True  # supplied by the process supervisor
-            assert old_process_terminal
-            content_write_fence._release_firestore_writer(deletion_fence, UID, token)
+            assert _invoke_recovery(monkeypatch, firestore, uid=UID, token=token) == 2
+            refused = json.loads(capsys.readouterr().out)
+            assert refused == {
+                "action": "content_writer_recovery",
+                "content_free": True,
+                "reason": "account_writer_recovery_owner_live",
+                "result": "refused",
+            }
+            still_pending = await client.delete("/v1/users/delete-account")
+            assert still_pending.status_code == 202
+            assert order == []
 
+            process.terminate()
+            process.join(5)
+            assert not process.is_alive()
+            assert _invoke_recovery(monkeypatch, firestore, uid=UID, token=token) == 0
+            recovered = json.loads(capsys.readouterr().out)
+            assert recovered["result"] == "recovered"
+            assert recovered["proof_kind"] == "kernel_process_absent"
+            assert recovered["content_free"] is True
+            assert UID not in json.dumps(recovered)
+            assert token not in json.dumps(recovered)
+            recovered_state = content_write_fence._snapshot_data(
+                content_write_fence._fence_reference(firestore, UID).get()
+            )
+            assert token not in recovered_state["writers"]
+            assert same_uid_token in recovered_state["writers"]
+
+            content_write_fence._release_firestore_writer(firestore, UID, same_uid_token)
             converged = await client.delete("/v1/users/delete-account")
             assert converged.status_code == 200
+            assert _invoke_recovery(monkeypatch, firestore, uid=UID, token=token) == 0
+            assert json.loads(capsys.readouterr().out)["result"] == "already_recovered"
 
-    asyncio.run(scenario())
-    assert order == ["purge", "firebase"]
+    try:
+        asyncio.run(scenario())
+        assert order == ["purge", "firebase"]
+        retained = content_write_fence._snapshot_data(content_write_fence._fence_reference(firestore, OTHER_UID).get())
+        assert other_token in retained["writers"]
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("host", "account_writer_recovery_host_mismatch"),
+        ("boot", "account_writer_recovery_boot_mismatch"),
+        ("namespace", "account_writer_recovery_pid_namespace_mismatch"),
+        ("start", "account_writer_recovery_pid_reused"),
+    ],
+)
+def test_recovery_surface_rejects_other_boundary_and_pid_reuse(
+    monkeypatch,
+    deletion_fence,
+    capsys,
+    mutation,
+    expected_reason,
+):
+    token = f"boundary-{mutation}-token"
+    content_write_fence._acquire_firestore_writer(deletion_fence, UID, token, 3)
+    reference = content_write_fence._fence_reference(deletion_fence, UID)
+    state = content_write_fence._snapshot_data(reference.get())
+    owner = content_writer_owner.ProcessOwner.from_storage(state["writers"][token]["owner"])
+    replacement = {
+        "host": replace(owner, host_id="f" * 64),
+        "boot": replace(owner, boot_id=f"other-{owner.boot_id}"),
+        "namespace": replace(owner, pid_namespace=f"other-{owner.pid_namespace}"),
+        "start": replace(owner, start_id=f"other-{owner.start_id}"),
+    }[mutation]
+    state["writers"][token]["owner"] = replacement.to_storage()
+    deletion_fence.documents[reference.key] = state
+
+    assert _invoke_recovery(monkeypatch, deletion_fence, uid=UID, token=token) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == expected_reason
+    assert token in content_write_fence._snapshot_data(reference.get())["writers"]
+
+
+def test_recovery_surface_rejects_stale_cross_uid_ownerless_and_actual_unprivileged_invocation(
+    monkeypatch,
+    deletion_fence,
+    capsys,
+):
+    token = "selector-control-token"
+    content_write_fence._acquire_firestore_writer(deletion_fence, UID, token, 3)
+    assert _invoke_recovery(monkeypatch, deletion_fence, uid=UID, token="stale-token") == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "account_writer_recovery_stale_token"
+    assert _invoke_recovery(monkeypatch, deletion_fence, uid=OTHER_UID, token=token) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "account_writer_recovery_stale_token"
+
+    reference = content_write_fence._fence_reference(deletion_fence, UID)
+    state = content_write_fence._snapshot_data(reference.get())
+    state["writers"][token] = state["writers"][token]["expires_at"]
+    deletion_fence.documents[reference.key] = state
+    assert _invoke_recovery(monkeypatch, deletion_fence, uid=UID, token=token) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "account_writer_recovery_owner_unknown"
+
+    monkeypatch.setattr(recovery_cli.os, "geteuid", recovery_cli.os.getuid)
+    context = multiprocessing.get_context("fork")
+    process = context.Process(
+        target=_run_unprivileged_recovery,
+        args=(content_write_recovery.hash_selector(UID), content_write_recovery.hash_selector(token)),
+    )
+    process.start()
+    process.join(5)
+    assert process.exitcode == 77
+
+
+def test_recovery_surface_rejects_cross_generation_replacement_after_real_terminal_proof(
+    monkeypatch,
+    deletion_fence,
+    capsys,
+):
+    del deletion_fence
+    context = multiprocessing.get_context("fork")
+    manager, firestore = _shared_firestore(context)
+    token = "cross-generation-cas-token"
+    process, release = _start_real_writer(context, firestore, uid=UID, token=token)
+    del release
+    process.terminate()
+    process.join(5)
+    assert not process.is_alive()
+    reference = content_write_fence._fence_reference(firestore, UID)
+    replaced_generation = uuid.uuid4().hex
+
+    def replace_before_compare_and_set(function):
+        def run(transaction, *args, **kwargs):
+            with transaction.database.lock:
+                state = content_write_fence._snapshot_data(reference.get())
+                state["writers"][token]["owner"]["generation"] = replaced_generation
+                transaction.database.documents[reference.key] = state
+                return function(transaction, *args, **kwargs)
+
+        return run
+
+    monkeypatch.setattr(content_write_recovery.firestore, "transactional", replace_before_compare_and_set)
+    try:
+        assert _invoke_recovery(monkeypatch, firestore, uid=UID, token=token) == 2
+        assert json.loads(capsys.readouterr().out)["reason"] == "account_writer_recovery_record_replaced"
+        assert _writer_record(firestore, UID, token)["owner"]["generation"] == replaced_generation
+    finally:
+        manager.shutdown()
+
+
+def test_concurrent_recovery_surface_is_exact_and_idempotent(monkeypatch, deletion_fence):
+    del deletion_fence
+    context = multiprocessing.get_context("fork")
+    manager, firestore = _shared_firestore(context)
+    token = "concurrent-recovery-token"
+    process, release = _start_real_writer(context, firestore, uid=UID, token=token)
+    del release
+    process.terminate()
+    process.join(5)
+    assert not process.is_alive()
+    monkeypatch.setattr(recovery_cli.os, "geteuid", lambda: 0)
+    receipts = []
+    receipt_lock = threading.Lock()
+
+    def collect(payload):
+        with receipt_lock:
+            receipts.append(payload)
+
+    monkeypatch.setattr(recovery_cli, "_print_receipt", collect)
+
+    def recover():
+        return recovery_cli.main(
+            [
+                "--subject-hash",
+                content_write_recovery.hash_selector(UID),
+                "--token-hash",
+                content_write_recovery.hash_selector(token),
+            ],
+            firestore_db=firestore,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: recover(), range(2)))
+        assert results == [0, 0]
+        assert {receipt["result"] for receipt in receipts} == {"recovered", "already_recovered"}
+        state = content_write_fence._snapshot_data(content_write_fence._fence_reference(firestore, UID).get())
+        assert token not in state["writers"]
+        assert content_write_recovery.hash_selector(token) in state["writer_recoveries"]
+    finally:
+        manager.shutdown()
 
 
 @pytest.mark.parametrize("terminal", ["success", "error", "timeout"])

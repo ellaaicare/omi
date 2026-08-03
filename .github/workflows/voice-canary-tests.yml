@@ -4,10 +4,17 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_writer_owner.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/voice.py"
       - "backend/migrations/008_create_voice_canary_controls.sql"
       - "backend/scripts/voice_canary_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
+      - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
       - "backend/tests/postgres/test_voice_canary_postgres.py"
       - "backend/tests/unit/test_voice_canary.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
@@ -16,10 +23,17 @@ on:
   push:
     branches: [main]
     paths:
+      - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_writer_owner.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/voice.py"
       - "backend/migrations/008_create_voice_canary_controls.sql"
       - "backend/scripts/voice_canary_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
+      - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
       - "backend/tests/postgres/test_voice_canary_postgres.py"
       - "backend/tests/unit/test_voice_canary.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
@@ -72,9 +86,35 @@ jobs:
           "websockets==12.0"
 
       - name: Run voice canary unit and PostgreSQL failure-path tests
-        run: >-
-          pytest
-          tests/unit/test_voice_canary.py
-          tests/unit/test_voice_proxy_auth.py
-          tests/postgres/test_voice_canary_postgres.py
-          -v
+        run: |
+          collected="$(
+            pytest --collect-only -q \
+              tests/unit/test_voice_canary.py \
+              tests/unit/test_voice_proxy_auth.py \
+              tests/postgres/test_voice_canary_postgres.py |
+              grep -c '::'
+          )"
+          test "$collected" -eq 55
+          collected_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_voice_canary.py \
+              tests/unit/test_voice_proxy_auth.py \
+              tests/postgres/test_voice_canary_postgres.py |
+              sed '/^$/d'
+          )"
+          required_ids=(
+            "tests/unit/test_voice_canary.py::test_entitled_session_has_bounded_jwt_and_quota_contract"
+            "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
+            "tests/postgres/test_voice_canary_postgres.py::test_cost_reservation_is_atomic_at_hard_boundary_and_settles"
+            "tests/postgres/test_voice_canary_postgres.py::test_cost_reservation_rejects_revocation_between_accept_and_reserve"
+          )
+          test "${#required_ids[@]}" -eq 4
+          for required_id in "${required_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$collected_ids"
+          done
+          pytest \
+            tests/unit/test_voice_canary.py \
+            tests/unit/test_voice_proxy_auth.py \
+            tests/postgres/test_voice_canary_postgres.py \
+            -v | tee /tmp/voice-canary-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/voice-canary-pytest.log

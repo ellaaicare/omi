@@ -7,6 +7,8 @@ on:
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
       - "backend/database/memory_reinterpretations.py"
       - "backend/routers/action_items.py"
@@ -61,12 +63,15 @@ on:
       - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
       - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -83,6 +88,8 @@ on:
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
       - "backend/database/memory_reinterpretations.py"
       - "backend/routers/action_items.py"
@@ -137,12 +144,15 @@ on:
       - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
       - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -213,6 +223,8 @@ jobs:
           database/account_deletion.py
           database/authority_advisory_lock.py
           database/content_write_fence.py
+          database/content_write_recovery.py
+          database/content_writer_owner.py
           database/firestore_account_deletion.py
           database/memory_reinterpretations.py
           routers/action_items.py
@@ -259,12 +271,15 @@ jobs:
           scripts/ella_memory_e2e_smoke.py
           scripts/synthetic_invite_admin.py
           scripts/pilot_invite_admin.py
+          scripts/content_writer_recovery.py
 
       - name: Validate exact changed Python formatting
         run: >-
           black --check --line-length 120 --skip-string-normalization
           database/account_deletion.py
           database/content_write_fence.py
+          database/content_write_recovery.py
+          database/content_writer_owner.py
           database/memory_reinterpretations.py
           ella/routers/canonical_events.py
           ella/services/account_deletion.py
@@ -279,6 +294,7 @@ jobs:
           tests/unit/test_trace_deletion_finality.py
           tests/unit/test_hermes_cloud_enrichment_outbox.py
           tests/postgres/test_invitation_redemption_postgres.py
+          scripts/content_writer_recovery.py
 
       - name: Run unit and PostgreSQL security tests
         run: |
@@ -288,6 +304,7 @@ jobs:
               tests/unit/test_account_deletion.py \
               tests/unit/test_content_write_fence.py \
               tests/unit/test_durable_worker_deletion_finality.py \
+              tests/unit/test_hermes_cloud_enrichment_outbox.py \
               tests/unit/test_trace_deletion_finality.py \
               tests/unit/test_synthetic_invite_admin.py \
               tests/unit/test_pilot_invite_admin.py \
@@ -299,13 +316,14 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 198
+          test "$collected" -eq 215
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_account_deletion.py \
               tests/unit/test_content_write_fence.py \
               tests/unit/test_durable_worker_deletion_finality.py \
+              tests/unit/test_hermes_cloud_enrichment_outbox.py \
               tests/unit/test_trace_deletion_finality.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
@@ -345,7 +363,15 @@ jobs:
             "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_mounted_canonical_route_writes_after_tombstone"
             "tests/unit/test_durable_worker_deletion_finality.py::test_mounted_canonical_auth_drain_exact_purge_firebase_last_and_retry"
             "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_two_stops_release_enrichment_writer_before_thread_terminal"
-            "tests/unit/test_durable_worker_deletion_finality.py::test_process_restart_retains_orphan_token_until_exact_terminal_proof_recovery"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_process_restart_uses_root_cli_and_real_kernel_terminal_proof_before_firebase_last"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[host-account_writer_recovery_host_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[boot-account_writer_recovery_boot_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[namespace-account_writer_recovery_pid_namespace_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[start-account_writer_recovery_pid_reused]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_stale_cross_uid_ownerless_and_actual_unprivileged_invocation"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_cross_generation_replacement_after_real_terminal_proof"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_recovery_surface_is_exact_and_idempotent"
+            "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_retry"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[timeout]"
@@ -386,7 +412,7 @@ jobs:
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_prerequisite_failure_is_atomic[017_add_provider_attempt_deletion_fence.sql-leaked_relations4]"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
-          test "${#required_ids[@]}" -eq 69
+          test "${#required_ids[@]}" -eq 77
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
           done
@@ -395,6 +421,7 @@ jobs:
             tests/unit/test_account_deletion.py \
             tests/unit/test_content_write_fence.py \
             tests/unit/test_durable_worker_deletion_finality.py \
+            tests/unit/test_hermes_cloud_enrichment_outbox.py \
             tests/unit/test_trace_deletion_finality.py \
             tests/unit/test_synthetic_invite_admin.py \
             tests/unit/test_pilot_invite_admin.py \
