@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from fastapi import Depends, Response
 import pytest
 from database import account_deletion as account_deletion_db
-from database.firestore_account_deletion import delete_firestore_user_data
+from database import firestore_account_deletion
+from database.firestore_account_deletion import FirestoreAccountDeletionIncomplete, delete_firestore_user_data
 from ella.services import account_deletion as account_deletion_service
 from firebase_admin.auth import UserNotFoundError
 from utils.other import endpoints as auth_endpoints
@@ -53,6 +54,13 @@ class _Snapshot:
     def __init__(self, reference):
         self.reference = reference
 
+    @property
+    def id(self):
+        return self.reference.name
+
+    def to_dict(self):
+        return dict(self.reference.data)
+
 
 class _Document:
     def __init__(self, name, *, exists=True, children=None, data=None):
@@ -63,7 +71,17 @@ class _Document:
         self.data = dict(data or {})
 
     def get(self):
-        return type("DocumentState", (), {"exists": self.exists and not self.deleted})()
+        return type(
+            "DocumentState",
+            (),
+            {
+                "exists": self.exists and not self.deleted,
+                "to_dict": lambda _self: dict(self.data),
+            },
+        )()
+
+    def to_dict(self):
+        return dict(self.data)
 
     def collections(self):
         return list(self._children)
@@ -72,20 +90,39 @@ class _Document:
         self.deleted = True
 
 
-class _Collection:
-    def __init__(self, documents=None):
+class _Query:
+    def __init__(self, documents=None, *, limit=None):
         self.documents = list(documents or ())
+        self._limit = limit
 
-    def limit(self, _batch_size):
-        return self
+    def limit(self, batch_size):
+        return _Query(self.documents, limit=batch_size)
 
     def where(self, *, filter):
-        return _Collection(
-            [document for document in self.documents if document.data.get(filter.field_path) == filter.value]
+        return _Query(
+            [document for document in self.documents if document.data.get(filter.field_path) == filter.value],
+            limit=self._limit,
         )
 
     def stream(self):
-        return [_Snapshot(document) for document in self.documents if not document.deleted]
+        documents = [document for document in self.documents if document.exists and not document.deleted]
+        if self._limit is not None:
+            documents = documents[: self._limit]
+        return [_Snapshot(document) for document in documents]
+
+
+class _Collection(_Query):
+    def __init__(self, name, documents=None):
+        super().__init__(documents)
+        self.id = name
+
+    def document(self, document_id):
+        for document in self.documents:
+            if document.name == document_id:
+                return document
+        document = _Document(document_id, exists=False)
+        self.documents.append(document)
+        return document
 
 
 class _Batch:
@@ -100,31 +137,56 @@ class _Batch:
         if self.database.fail_next_commit:
             self.database.fail_next_commit = False
             raise RuntimeError("synthetic_firestore_failure")
+        self.database.committed_batch_sizes.append(len(self.references))
         for reference in self.references:
             reference.delete()
 
 
 class _Firestore:
-    def __init__(self, user_document, *, import_jobs=None, enrichment_jobs=None):
-        self.user_document = user_document
-        self.import_jobs = _Collection(import_jobs)
-        self.enrichment_jobs = _Collection(enrichment_jobs)
+    def __init__(self, user_document, *, collections=None, collection_groups=None):
+        self._collections = {name: _Collection(name, documents) for name, documents in (collections or {}).items()}
+        self._collections["users"] = _Collection("users", [user_document])
+        self._collection_groups = {
+            name: _Collection(name, documents) for name, documents in (collection_groups or {}).items()
+        }
         self.fail_next_commit = False
+        self.committed_batch_sizes = []
 
     def collection(self, name):
-        if name == "users":
-            return self
-        if name == "import_jobs":
-            return self.import_jobs
-        if name == "ella_hermes_cloud_enrichment_outbox":
-            return self.enrichment_jobs
-        raise AssertionError(name)
+        if name not in self._collections:
+            self._collections[name] = _Collection(name)
+        return self._collections[name]
 
-    def document(self, _uid):
-        return self.user_document
+    def collection_group(self, name):
+        if name not in self._collection_groups:
+            self._collection_groups[name] = _Collection(name)
+        return self._collection_groups[name]
+
+    def collections(self):
+        return list(self._collections.values())
 
     def batch(self):
         return _Batch(self)
+
+
+class _CacheAuthority:
+    def __init__(self, *, developer=(), mcp=(), retain=False):
+        self.developer = set(developer)
+        self.mcp = set(mcp)
+        self.retain = retain
+        self.calls = []
+
+    def invalidate_cached_dev_api_key(self, hashed_key):
+        self.calls.append(("developer", hashed_key))
+        if not self.retain:
+            self.developer.discard(hashed_key)
+        return hashed_key not in self.developer
+
+    def invalidate_cached_mcp_api_key(self, hashed_key):
+        self.calls.append(("mcp", hashed_key))
+        if not self.retain:
+            self.mcp.discard(hashed_key)
+        return hashed_key not in self.mcp
 
 
 def _state(*, external=()):
@@ -173,10 +235,10 @@ def test_authenticated_route_delegates_to_the_resumable_deletion_service():
 
 def test_firestore_delete_is_idempotent_and_resumes_after_partial_failure():
     nested_document = _Document("nested")
-    child_document = _Document("child", children=[_Collection([nested_document])])
+    child_document = _Document("child", children=[_Collection("nested-items", [nested_document])])
     root_document = _Document(
-        "user",
-        children=[_Collection([]), _Collection([child_document])],
+        "synthetic-user",
+        children=[_Collection("empty"), _Collection("children", [child_document])],
     )
     firestore = _Firestore(root_document)
     firestore.fail_next_commit = True
@@ -199,28 +261,182 @@ def test_firestore_delete_is_idempotent_and_resumes_after_partial_failure():
     assert replay["documents_deleted"] == 0
 
 
-def test_firestore_delete_removes_only_owned_top_level_jobs_and_retries():
-    owned_job = _Document("owned-job", data={"uid": "synthetic-user"})
-    other_job = _Document("other-job", data={"uid": "other-user"})
-    owned_enrichment = _Document("owned-enrichment", data={"uid": "synthetic-user"})
-    other_enrichment = _Document("other-enrichment", data={"uid": "other-user"})
-    root_document = _Document("user")
+def test_firestore_inventory_snapshot_covers_every_repository_owned_root():
+    assert tuple(
+        (owned.name, owned.owner_field, owned.api_key_cache)
+        for owned in firestore_account_deletion.OWNED_TOP_LEVEL_COLLECTIONS
+    ) == (
+        ("analytics", "uid", None),
+        ("dev_api_keys", "user_id", "developer"),
+        ("mcp_api_keys", "user_id", "mcp"),
+        ("tasks", "user_uid", None),
+        ("import_jobs", "uid", None),
+        ("ella_hermes_cloud_enrichment_outbox", "uid", None),
+        ("plugins_data", "uid", None),
+        ("mcp_identity_grants", "profile_uid", None),
+    )
+    assert tuple((owned.name, owned.owner_field) for owned in firestore_account_deletion.OWNED_COLLECTION_GROUPS) == (
+        ("reviews", "uid"),
+        ("usage_history", "uid"),
+    )
+    assert firestore_account_deletion.DIRECT_UID_DOCUMENT_COLLECTIONS == ("testers",)
+
+
+def test_production_firestore_cleanup_removes_seeded_inventory_and_retains_other_uid():
+    uid = "synthetic-user"
+    other_uid = "other-user"
+    ownership = {
+        "analytics": ("uid", None),
+        "dev_api_keys": ("user_id", "dev-owned-hash"),
+        "mcp_api_keys": ("user_id", "mcp-owned-hash"),
+        "tasks": ("user_uid", None),
+        "import_jobs": ("uid", None),
+        "ella_hermes_cloud_enrichment_outbox": ("uid", None),
+        "plugins_data": ("uid", None),
+        "mcp_identity_grants": ("profile_uid", None),
+    }
+    documents = {}
+    owned_documents = []
+    other_documents = []
+    for collection_name, (owner_field, hashed_key) in ownership.items():
+        owned_data = {owner_field: uid}
+        other_data = {owner_field: other_uid}
+        if hashed_key:
+            owned_data["hashed_key"] = hashed_key
+            other_data["hashed_key"] = f"other-{hashed_key}"
+        owned = _Document(f"owned-{collection_name}", data=owned_data)
+        other = _Document(f"other-{collection_name}", data=other_data)
+        documents[collection_name] = [owned, other]
+        owned_documents.append(owned)
+        other_documents.append(other)
+
+    tester_owned = _Document(uid, data={"uid": uid})
+    tester_other = _Document(other_uid, data={"uid": other_uid})
+    documents["testers"] = [tester_owned, tester_other]
+    owned_review = _Document("owned-review", data={"uid": uid})
+    other_review = _Document("other-review", data={"uid": other_uid})
+    owned_usage = _Document("owned-usage", data={"uid": uid})
+    other_usage = _Document("other-usage", data={"uid": other_uid})
+    nested = _Document("nested")
+    child = _Document("child", children=[_Collection("nested", [nested])])
+    root_document = _Document(uid, children=[_Collection("children", [child])])
+    cache = _CacheAuthority(
+        developer=("dev-owned-hash", "other-dev-owned-hash"),
+        mcp=("mcp-owned-hash", "other-mcp-owned-hash"),
+    )
     firestore = _Firestore(
         root_document,
-        import_jobs=[owned_job, other_job],
-        enrichment_jobs=[owned_enrichment, other_enrichment],
+        collections=documents,
+        collection_groups={
+            "reviews": [owned_review, other_review],
+            "usage_history": [owned_usage, other_usage],
+        },
     )
 
-    result = delete_firestore_user_data(firestore, "synthetic-user")
-    replay = delete_firestore_user_data(firestore, "synthetic-user")
+    result = delete_firestore_user_data(firestore, uid, batch_size=2, cache_authority=cache)
+    replay = delete_firestore_user_data(firestore, uid, batch_size=2, cache_authority=cache)
 
-    assert result["documents_deleted"] == 3
+    assert result["documents_deleted"] == 14
     assert replay["documents_deleted"] == 0
-    assert owned_job.deleted is True
-    assert other_job.deleted is False
-    assert owned_enrichment.deleted is True
-    assert other_enrichment.deleted is False
+    assert all(document.deleted for document in owned_documents)
+    assert all(not document.deleted for document in other_documents)
+    assert tester_owned.deleted is True
+    assert tester_other.deleted is False
+    assert owned_review.deleted is True
+    assert other_review.deleted is False
+    assert owned_usage.deleted is True
+    assert other_usage.deleted is False
+    assert child.deleted is True
+    assert nested.deleted is True
     assert root_document.deleted is True
+    assert cache.developer == {"other-dev-owned-hash"}
+    assert cache.mcp == {"other-mcp-owned-hash"}
+    assert cache.calls == [
+        ("developer", "dev-owned-hash"),
+        ("developer", "dev-owned-hash"),
+        ("mcp", "mcp-owned-hash"),
+        ("mcp", "mcp-owned-hash"),
+    ]
+
+
+def test_firestore_owned_collection_purge_is_bounded_across_multiple_batches():
+    uid = "synthetic-user"
+    tasks = [_Document(f"task-{index}", data={"user_uid": uid}) for index in range(5)]
+    firestore = _Firestore(_Document(uid), collections={"tasks": tasks})
+
+    result = delete_firestore_user_data(
+        firestore,
+        uid,
+        batch_size=2,
+        cache_authority=_CacheAuthority(),
+    )
+
+    assert result["documents_deleted"] == 6
+    assert firestore.committed_batch_sizes == [2, 2, 1]
+    assert all(task.deleted for task in tasks)
+
+
+@pytest.mark.parametrize("omitted_collection", ["analytics", "tasks"])
+def test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted(monkeypatch, omitted_collection):
+    uid = "synthetic-user"
+    owner_field = "uid" if omitted_collection == "analytics" else "user_uid"
+    retained = _Document("retained", data={owner_field: uid})
+    root_document = _Document(uid)
+    monkeypatch.setattr(
+        firestore_account_deletion,
+        "OWNED_TOP_LEVEL_COLLECTIONS",
+        tuple(
+            owned
+            for owned in firestore_account_deletion.OWNED_TOP_LEVEL_COLLECTIONS
+            if owned.name != omitted_collection
+        ),
+    )
+    firestore = _Firestore(root_document, collections={omitted_collection: [retained]})
+
+    with pytest.raises(
+        FirestoreAccountDeletionIncomplete,
+        match="account_deletion_firestore_inventory_incomplete",
+    ):
+        delete_firestore_user_data(firestore, uid, cache_authority=_CacheAuthority())
+
+    assert retained.deleted is False
+
+
+def test_firestore_gate_positive_control_detects_new_uid_linked_top_level_collection():
+    uid = "synthetic-user"
+    retained = _Document("retained", data={"uid": uid})
+    other = _Document("other", data={"uid": "other-user"})
+    firestore = _Firestore(
+        _Document(uid),
+        collections={"new_uid_linked_collection": [retained, other]},
+    )
+
+    with pytest.raises(
+        FirestoreAccountDeletionIncomplete,
+        match="account_deletion_firestore_inventory_incomplete",
+    ):
+        delete_firestore_user_data(firestore, uid, cache_authority=_CacheAuthority())
+
+    assert retained.deleted is False
+    assert other.deleted is False
+
+
+def test_firestore_api_key_cache_failure_preserves_resumable_key_record():
+    uid = "synthetic-user"
+    key = _Document("owned-key", data={"user_id": uid, "hashed_key": "owned-hash"})
+    firestore = _Firestore(_Document(uid), collections={"dev_api_keys": [key]})
+
+    with pytest.raises(
+        FirestoreAccountDeletionIncomplete,
+        match="account_deletion_api_key_cache_retained",
+    ):
+        delete_firestore_user_data(
+            firestore,
+            uid,
+            cache_authority=_CacheAuthority(developer=("owned-hash",), retain=True),
+        )
+
+    assert key.deleted is False
 
 
 def test_deletion_service_returns_typed_pending_and_preserves_auth_retry(monkeypatch):

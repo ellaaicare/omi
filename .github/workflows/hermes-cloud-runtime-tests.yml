@@ -12,6 +12,7 @@ on:
       - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
       - "backend/database/memory_reinterpretations.py"
       - "backend/routers/action_items.py"
       - "backend/routers/apps.py"
@@ -153,6 +154,7 @@ on:
       - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
       - "backend/database/memory_reinterpretations.py"
       - "backend/routers/action_items.py"
       - "backend/routers/apps.py"
@@ -350,6 +352,7 @@ jobs:
           database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/firestore_account_deletion.py
+          database/redis_db.py
           database/memory_reinterpretations.py
           routers/action_items.py
           routers/apps.py
@@ -437,6 +440,7 @@ jobs:
           database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/firestore_account_deletion.py
+          database/redis_db.py
           database/memory_reinterpretations.py
           routers/action_items.py
           routers/apps.py routers/integration.py
@@ -615,7 +619,13 @@ jobs:
             "tests/unit/test_account_deletion.py::test_deletion_service_never_reports_success_when_routing_trace_purge_is_unavailable"
             "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
             "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
-            "tests/unit/test_account_deletion.py::test_firestore_delete_removes_only_owned_top_level_jobs_and_retries"
+            "tests/unit/test_account_deletion.py::test_firestore_inventory_snapshot_covers_every_repository_owned_root"
+            "tests/unit/test_account_deletion.py::test_production_firestore_cleanup_removes_seeded_inventory_and_retains_other_uid"
+            "tests/unit/test_account_deletion.py::test_firestore_owned_collection_purge_is_bounded_across_multiple_batches"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[analytics]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[tasks]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_positive_control_detects_new_uid_linked_top_level_collection"
+            "tests/unit/test_account_deletion.py::test_firestore_api_key_cache_failure_preserves_resumable_key_record"
             "tests/unit/test_account_deletion.py::test_deletion_service_retains_firebase_when_memory_work_purge_is_unavailable"
             "tests/unit/test_account_deletion.py::test_canonical_ledger_purge_is_resumable_and_precedes_firebase_last"
             "tests/unit/test_content_write_fence.py::test_expired_registration_never_proves_a_live_writer_absent"
@@ -681,10 +691,12 @@ jobs:
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_tombstone_trigger_allows_only_monotonic_terminal_proof"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_direct_writer_cannot_cross_finalization_count_read"
             "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
-          test "${#required_ids[@]}" -eq 76
+          test "${#required_ids[@]}" -eq 84
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_account_deletion.py \
@@ -708,7 +720,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 574
+          test "$collected" -eq 582
           pytest \
             tests/unit/test_account_deletion.py \
             tests/unit/test_content_write_fence.py \

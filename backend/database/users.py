@@ -4,6 +4,7 @@ from typing import Optional
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter, transactional
 
+from database import redis_db
 from ._client import db, document_id_from_seed
 from .firestore_account_deletion import delete_firestore_user_data
 from models.users import Subscription, PlanLimits, PlanType, SubscriptionStatus
@@ -410,7 +411,7 @@ def update_person_speech_samples_version(uid: str, person_id: str, version: int)
 
 def delete_user_data(uid: str):
     """Idempotently remove a user's complete Firestore document tree."""
-    return delete_firestore_user_data(db, uid)
+    return delete_firestore_user_data(db, uid, cache_authority=redis_db)
 
 
 # **************************************
@@ -1026,18 +1027,14 @@ def set_user_conversation_lifecycle_preferences(
     update_data = {}
 
     if update_enabled:
-        update_data[
-            'conversation_lifecycle_preferences.conversation_max_duration_enabled'
-        ] = (
+        update_data['conversation_lifecycle_preferences.conversation_max_duration_enabled'] = (
             conversation_max_duration_enabled
             if conversation_max_duration_enabled is not None
             else firestore.DELETE_FIELD
         )
 
     if update_seconds:
-        update_data[
-            'conversation_lifecycle_preferences.conversation_max_duration_seconds'
-        ] = (
+        update_data['conversation_lifecycle_preferences.conversation_max_duration_seconds'] = (
             conversation_max_duration_seconds
             if conversation_max_duration_seconds is not None
             else firestore.DELETE_FIELD

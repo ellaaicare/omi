@@ -157,10 +157,74 @@ BEGIN
 END
 $$;
 
+-- Provider-attempt cleanup is the one post-tombstone authority mutation that
+-- must remain possible. Serialize on the owner row so direct SQL cannot insert
+-- an unproven attempt across the final external-count read, and admit only the
+-- exact forward proof transition once deletion has started.
+CREATE OR REPLACE FUNCTION ella_fence_provider_attempt_tombstone_write()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    old_owner_status TEXT;
+    new_owner_status TEXT;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT status INTO new_owner_status
+        FROM users
+        WHERE id = NEW.user_id
+        FOR SHARE;
+        IF new_owner_status IS NULL
+           OR new_owner_status IN ('DELETION_PENDING', 'DELETED') THEN
+            RAISE EXCEPTION 'authority_write_user_not_active' USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    SELECT status INTO old_owner_status
+    FROM users
+    WHERE id = OLD.user_id
+    FOR SHARE;
+    IF NEW.user_id = OLD.user_id THEN
+        new_owner_status := old_owner_status;
+    ELSE
+        SELECT status INTO new_owner_status
+        FROM users
+        WHERE id = NEW.user_id
+        FOR SHARE;
+    END IF;
+
+    IF old_owner_status IS NULL OR new_owner_status IS NULL THEN
+        RAISE EXCEPTION 'authority_write_user_not_active' USING ERRCODE = '55000';
+    END IF;
+    IF old_owner_status NOT IN ('DELETION_PENDING', 'DELETED') THEN
+        IF new_owner_status IN ('DELETION_PENDING', 'DELETED') THEN
+            RAISE EXCEPTION 'authority_write_user_not_active' USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF OLD.proof_state <> 'unproven'
+       OR NEW.proof_state NOT IN ('deprovisioned', 'absence_proven')
+       OR OLD.proved_at IS NOT NULL
+       OR NEW.proved_at IS NULL
+       OR NEW.updated_at < OLD.updated_at
+       OR (to_jsonb(NEW) - 'proof_state' - 'proved_at' - 'updated_at')
+          IS DISTINCT FROM
+          (to_jsonb(OLD) - 'proof_state' - 'proved_at' - 'updated_at') THEN
+        RAISE EXCEPTION 'authority_write_user_not_active' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
 DROP TRIGGER IF EXISTS ella_users_tombstone_write_fence ON users;
 CREATE TRIGGER ella_users_tombstone_write_fence
 BEFORE UPDATE ON users
 FOR EACH ROW EXECUTE FUNCTION ella_fence_user_tombstone_transition();
+
+DROP TRIGGER IF EXISTS ella_provider_attempt_tombstone_write_fence ON ella_provider_attempts;
+CREATE TRIGGER ella_provider_attempt_tombstone_write_fence
+BEFORE INSERT OR UPDATE ON ella_provider_attempts
+FOR EACH ROW EXECUTE FUNCTION ella_fence_provider_attempt_tombstone_write();
 
 DO $$
 DECLARE

@@ -4530,6 +4530,299 @@ def test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_c
     asyncio.run(_run_with_database(scenario))
 
 
+def test_provider_attempt_tombstone_trigger_allows_only_monotonic_terminal_proof():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        async with pool.acquire() as connection:
+            await _ensure_users(
+                connection,
+                ("provider-trigger-active", "provider-trigger-pending", "provider-trigger-deleted", "other-owner"),
+            )
+
+            async def seed_attempt(uid: str, suffix: str) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+                user_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+                job_id = await connection.fetchval(
+                    """
+                    INSERT INTO ella_provisioning_jobs (user_id, target_schema_version)
+                    VALUES ($1, $2) RETURNING id
+                    """,
+                    user_id,
+                    f"provider-trigger-{suffix}",
+                )
+                attempt_id = await connection.fetchval(
+                    """
+                    INSERT INTO ella_provider_attempts (
+                        user_id, provisioning_job_id, provider, operation,
+                        idempotency_key, correlation_ref
+                    ) VALUES ($1, $2, 'hermes', 'provision', $3, $4)
+                    RETURNING id
+                    """,
+                    user_id,
+                    job_id,
+                    uuid.uuid4(),
+                    f"ella-ext-{uuid.uuid4().hex[:16]}",
+                )
+                return user_id, job_id, attempt_id
+
+            active_user_id, _active_job_id, active_attempt_id = await seed_attempt(
+                "provider-trigger-active",
+                "active",
+            )
+            await connection.execute(
+                "UPDATE ella_provider_attempts SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                active_attempt_id,
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT proof_state FROM ella_provider_attempts WHERE id = $1",
+                    active_attempt_id,
+                )
+                == "unproven"
+            )
+
+            pending_user_id, pending_job_id, pending_attempt_id = await seed_attempt(
+                "provider-trigger-pending",
+                "pending",
+            )
+            _pending_user_id_2, _pending_job_id_2, pending_cleanup_id = await seed_attempt(
+                "provider-trigger-pending",
+                "pending-cleanup",
+            )
+            deleted_user_id, deleted_job_id, deleted_attempt_id = await seed_attempt(
+                "provider-trigger-deleted",
+                "deleted",
+            )
+            other_owner_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = 'other-owner'")
+            await connection.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                pending_user_id,
+            )
+            await connection.execute(
+                "UPDATE users SET status = 'DELETED' WHERE id = $1",
+                deleted_user_id,
+            )
+
+            trigger_name = await connection.fetchval(
+                """
+                SELECT tgname
+                FROM pg_trigger
+                WHERE tgrelid = 'ella_provider_attempts'::regclass
+                  AND NOT tgisinternal
+                """
+            )
+            assert trigger_name == "ella_provider_attempt_tombstone_write_fence"
+
+            for user_id, job_id in (
+                (pending_user_id, pending_job_id),
+                (deleted_user_id, deleted_job_id),
+            ):
+                with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                    await connection.execute(
+                        """
+                        INSERT INTO ella_provider_attempts (
+                            user_id, provisioning_job_id, provider, operation,
+                            idempotency_key, correlation_ref
+                        ) VALUES ($1, $2, 'hermes', 'provision', $3, $4)
+                        """,
+                        user_id,
+                        job_id,
+                        uuid.uuid4(),
+                        f"ella-ext-{uuid.uuid4().hex[:16]}",
+                    )
+
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET updated_at = updated_at WHERE id = $1",
+                    pending_attempt_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET user_id = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    other_owner_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET idempotency_key = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    uuid.uuid4(),
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET correlation_ref = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    f"ella-ext-{uuid.uuid4().hex[:16]}",
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET id = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    uuid.uuid4(),
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET provisioning_job_id = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    _pending_job_id_2,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET provider = 'other' WHERE id = $1",
+                    pending_attempt_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET operation = 'other' WHERE id = $1",
+                    pending_attempt_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET content_free = false WHERE id = $1",
+                    pending_attempt_id,
+                )
+
+            await connection.execute(
+                """
+                UPDATE ella_provider_attempts
+                SET proof_state = 'absence_proven',
+                    proved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                pending_cleanup_id,
+            )
+            await connection.execute(
+                """
+                UPDATE ella_provider_attempts
+                SET proof_state = 'deprovisioned',
+                    proved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                deleted_attempt_id,
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_provider_attempts WHERE proof_state = 'unproven' AND user_id = $1",
+                    deleted_user_id,
+                )
+                == 0
+            )
+
+            for attempt_id in (pending_cleanup_id, deleted_attempt_id):
+                with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                    await connection.execute(
+                        """
+                        UPDATE ella_provider_attempts
+                        SET proof_state = 'unproven', proved_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                        """,
+                        attempt_id,
+                    )
+                with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                    await connection.execute(
+                        """
+                        UPDATE ella_provider_attempts
+                        SET proof_state = CASE
+                                WHEN proof_state = 'deprovisioned' THEN 'absence_proven'
+                                ELSE 'deprovisioned'
+                            END,
+                            proved_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                        """,
+                        attempt_id,
+                    )
+
+            assert active_user_id != pending_user_id != deleted_user_id
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_provider_attempt_direct_writer_cannot_cross_finalization_count_read():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "provider-attempt-finalize-race"
+        async with pool.acquire() as connection:
+            await _ensure_users(connection, (uid,))
+            user_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            job_id = await connection.fetchval(
+                """
+                INSERT INTO ella_provisioning_jobs (user_id, target_schema_version)
+                VALUES ($1, 'provider-attempt-finalize-race') RETURNING id
+                """,
+                user_id,
+            )
+            await connection.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                user_id,
+            )
+            await connection.execute("CREATE SEQUENCE provider_attempt_finalize_probe")
+            await connection.execute(
+                """
+                CREATE FUNCTION delay_provider_attempt_finalization() RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.status = 'DELETED' AND OLD.status = 'DELETION_PENDING' THEN
+                        PERFORM nextval('provider_attempt_finalize_probe');
+                        PERFORM pg_sleep(0.5);
+                    END IF;
+                    RETURN NEW;
+                END
+                $$ LANGUAGE plpgsql
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER delay_provider_attempt_finalization
+                BEFORE UPDATE ON users
+                FOR EACH ROW EXECUTE FUNCTION delay_provider_attempt_finalization()
+                """
+            )
+
+        async def direct_insert() -> None:
+            async with pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO ella_provider_attempts (
+                        user_id, provisioning_job_id, provider, operation,
+                        idempotency_key, correlation_ref
+                    ) VALUES ($1, $2, 'hermes', 'provision', $3, $4)
+                    """,
+                    user_id,
+                    job_id,
+                    uuid.uuid4(),
+                    f"ella-ext-{uuid.uuid4().hex[:16]}",
+                )
+
+        finalization = asyncio.create_task(account_deletion.finalize_account_deletion(uid))
+        for _attempt in range(200):
+            async with pool.acquire() as connection:
+                count_read_completed = await connection.fetchval(
+                    "SELECT is_called FROM provider_attempt_finalize_probe"
+                )
+            if count_read_completed:
+                break
+            await asyncio.sleep(0.01)
+        assert count_read_completed is True
+        racing_insert = asyncio.create_task(direct_insert())
+        assert await finalization is True
+        with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+            await racing_insert
+
+        with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+            await direct_insert()
+        async with pool.acquire() as connection:
+            assert await connection.fetchval("SELECT status FROM users WHERE id = $1", user_id) == "DELETED"
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_provider_attempts WHERE user_id = $1",
+                    user_id,
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately():
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "account-delete-writer-fence"

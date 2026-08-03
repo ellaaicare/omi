@@ -11,6 +11,7 @@ on:
       - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
       - "backend/database/memory_reinterpretations.py"
       - "backend/routers/action_items.py"
       - "backend/routers/apps.py"
@@ -96,6 +97,7 @@ on:
       - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
       - "backend/database/memory_reinterpretations.py"
       - "backend/routers/action_items.py"
       - "backend/routers/apps.py"
@@ -235,6 +237,7 @@ jobs:
           database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/firestore_account_deletion.py
+          database/redis_db.py
           database/memory_reinterpretations.py
           routers/action_items.py
           routers/apps.py
@@ -289,6 +292,8 @@ jobs:
         run: >-
           black --check --line-length 120 --skip-string-normalization
           database/account_deletion.py
+          database/firestore_account_deletion.py
+          database/redis_db.py
           database/content_write_fence.py
           database/content_write_recovery.py
           database/content_write_recovery_authority.py
@@ -332,7 +337,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 222
+          test "$collected" -eq 230
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -365,7 +370,13 @@ jobs:
             "tests/unit/test_account_deletion.py::test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes"
             "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
             "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
-            "tests/unit/test_account_deletion.py::test_firestore_delete_removes_only_owned_top_level_jobs_and_retries"
+            "tests/unit/test_account_deletion.py::test_firestore_inventory_snapshot_covers_every_repository_owned_root"
+            "tests/unit/test_account_deletion.py::test_production_firestore_cleanup_removes_seeded_inventory_and_retains_other_uid"
+            "tests/unit/test_account_deletion.py::test_firestore_owned_collection_purge_is_bounded_across_multiple_batches"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[analytics]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[tasks]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_positive_control_detects_new_uid_linked_top_level_collection"
+            "tests/unit/test_account_deletion.py::test_firestore_api_key_cache_failure_preserves_resumable_key_record"
             "tests/unit/test_content_write_fence.py::test_expired_registration_never_proves_a_live_writer_absent"
             "tests/unit/test_content_write_fence.py::test_detached_writer_transfers_child_registration_before_parent_release"
             "tests/unit/test_content_write_fence.py::test_mounted_limitless_worker_transfers_fence_until_actual_upsert_finishes"
@@ -431,11 +442,13 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_service_handles_partial_provision_and_repeat_without_operator"
             "tests/postgres/test_invitation_redemption_postgres.py::test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_tombstone_trigger_allows_only_monotonic_terminal_proof"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_direct_writer_cannot_cross_finalization_count_read"
             "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_prerequisite_failure_is_atomic[017_add_provider_attempt_deletion_fence.sql-leaked_relations4]"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
-          test "${#required_ids[@]}" -eq 84
+          test "${#required_ids[@]}" -eq 92
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
           done

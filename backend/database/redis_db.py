@@ -540,23 +540,34 @@ def get_user_data_protection_level(uid: str) -> Optional[str]:
 # ******************************************************
 
 
+def _mcp_api_key_cache_key(hashed_key: str) -> str:
+    return f'mcp_api_key:{hashed_key}'
+
+
 @try_catch_decorator
 def cache_mcp_api_key(hashed_key: str, user_id: str, ttl: int = 3600):
     """Caches the user_id for a given hashed MCP API key."""
-    r.set(f'mcp_api_key:{hashed_key}', user_id, ex=ttl)
+    r.set(_mcp_api_key_cache_key(hashed_key), user_id, ex=ttl)
 
 
 @try_catch_decorator
 def get_cached_mcp_api_key_user_id(hashed_key: str) -> Optional[str]:
     """Retrieves the user_id for a given hashed MCP API key from cache."""
-    user_id = r.get(f'mcp_api_key:{hashed_key}')
+    user_id = r.get(_mcp_api_key_cache_key(hashed_key))
     return user_id.decode() if user_id else None
 
 
 @try_catch_decorator
 def delete_cached_mcp_api_key(hashed_key: str):
     """Deletes a cached MCP API key."""
-    r.delete(f'mcp_api_key:{hashed_key}')
+    r.delete(_mcp_api_key_cache_key(hashed_key))
+
+
+def invalidate_cached_mcp_api_key(hashed_key: str) -> bool:
+    """Delete and prove absence of one exact MCP API-key cache entry."""
+    cache_key = _mcp_api_key_cache_key(hashed_key)
+    r.delete(cache_key)
+    return not bool(r.exists(cache_key))
 
 
 # ******************************************************
@@ -564,16 +575,20 @@ def delete_cached_mcp_api_key(hashed_key: str):
 # ******************************************************
 
 
+def _dev_api_key_cache_key(hashed_key: str) -> str:
+    return f'dev_api_key:{hashed_key}'
+
+
 def cache_dev_api_key(hashed_key: str, user_id: str, scopes: Optional[List[str]] = None, ttl: int = 3600):
     """Caches the user_id and scopes for a given hashed Developer API key."""
     cache_data = {"user_id": user_id, "scopes": scopes}
-    r.set(f'dev_api_key:{hashed_key}', json.dumps(cache_data), ex=ttl)
+    r.set(_dev_api_key_cache_key(hashed_key), json.dumps(cache_data), ex=ttl)
 
 
 @try_catch_decorator
 def get_cached_dev_api_key_user_id(hashed_key: str) -> Optional[str]:
     """Retrieves the user_id for a given hashed Developer API key from cache."""
-    cached = r.get(f'dev_api_key:{hashed_key}')
+    cached = r.get(_dev_api_key_cache_key(hashed_key))
     if not cached:
         return None
     data = json.loads(cached.decode())
@@ -583,7 +598,7 @@ def get_cached_dev_api_key_user_id(hashed_key: str) -> Optional[str]:
 @try_catch_decorator
 def get_cached_dev_api_key_data(hashed_key: str) -> Optional[dict]:
     """Retrieves the user_id and scopes for a given hashed Developer API key from cache."""
-    cached = r.get(f'dev_api_key:{hashed_key}')
+    cached = r.get(_dev_api_key_cache_key(hashed_key))
     if not cached:
         return None
     return json.loads(cached.decode())
@@ -592,7 +607,14 @@ def get_cached_dev_api_key_data(hashed_key: str) -> Optional[dict]:
 @try_catch_decorator
 def delete_cached_dev_api_key(hashed_key: str):
     """Deletes a cached Developer API key."""
-    r.delete(f'dev_api_key:{hashed_key}')
+    r.delete(_dev_api_key_cache_key(hashed_key))
+
+
+def invalidate_cached_dev_api_key(hashed_key: str) -> bool:
+    """Delete and prove absence of one exact developer API-key cache entry."""
+    cache_key = _dev_api_key_cache_key(hashed_key)
+    r.delete(cache_key)
+    return not bool(r.exists(cache_key))
 
 
 # ******************************************************
