@@ -86,6 +86,13 @@ async def execute_account_deletion(
         )
 
     try:
+        await account_deletion_db.purge_routing_traces(uid)
+    except account_deletion_db.AccountDeletionUnavailable:
+        remaining.add("routing_traces")
+    else:
+        remaining.discard("routing_traces")
+
+    try:
         await run_in_threadpool(delete_firestore, uid)
     except Exception:
         remaining.add("firestore_data")

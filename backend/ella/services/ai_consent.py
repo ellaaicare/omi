@@ -217,6 +217,7 @@ def build_account_deletion_receipt(
         "firestore_data",
         "hermes_profile",
         "honcho_tenancy",
+        "routing_traces",
         "runtime_registry",
     }
     if any(item not in allowed_remaining for item in remaining):

@@ -60,6 +60,7 @@ on:
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
+      - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
@@ -128,6 +129,7 @@ on:
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
+      - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
@@ -243,6 +245,7 @@ jobs:
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_account_deletion.py \
               tests/unit/test_content_write_fence.py \
+              tests/unit/test_trace_deletion_finality.py \
               tests/unit/test_synthetic_invite_admin.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
@@ -253,12 +256,13 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 171
+          test "$collected" -eq 177
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_account_deletion.py \
               tests/unit/test_content_write_fence.py \
+              tests/unit/test_trace_deletion_finality.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
               tests/unit/test_ella_onboarding_contract.py \
@@ -274,6 +278,7 @@ jobs:
             "tests/unit/test_account_deletion.py::test_deletion_service_returns_typed_pending_and_preserves_auth_retry"
             "tests/unit/test_account_deletion.py::test_deletion_service_completes_missing_external_profile_and_is_repeatable"
             "tests/unit/test_account_deletion.py::test_deletion_service_converts_firestore_and_firebase_failures_to_resumable_state"
+            "tests/unit/test_account_deletion.py::test_deletion_service_never_reports_success_when_routing_trace_purge_is_unavailable"
             "tests/unit/test_account_deletion.py::test_firebase_delete_lost_ack_converges_only_after_authoritative_absence"
             "tests/unit/test_account_deletion.py::test_production_route_uses_legacy_resumable_deletion_when_ella_authority_is_explicitly_disabled"
             "tests/unit/test_account_deletion.py::test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable"
@@ -289,6 +294,10 @@ jobs:
             "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[entitlement]"
             "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact"
             "tests/unit/test_content_write_fence.py::test_request_fence_covers_streamed_commit_after_route_returns"
+            "tests/unit/test_trace_deletion_finality.py::test_trace_probe_positive_control_reproduces_old_mounted_escape"
+            "tests/unit/test_trace_deletion_finality.py::test_mounted_trace_persistence_is_drained_purged_and_tombstoned"
+            "tests/unit/test_trace_deletion_finality.py::test_trace_reads_require_exact_authenticated_subject"
+            "tests/unit/test_trace_deletion_finality.py::test_concurrent_trace_requests_release_request_lifetimes_before_bounded_pool_progress"
             "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
             "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
@@ -306,6 +315,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_routing_trace_purge_is_exact_repeatable_and_retains_other_users"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_service_handles_partial_provision_and_repeat_without_operator"
             "tests/postgres/test_invitation_redemption_postgres.py::test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges"
@@ -320,6 +330,7 @@ jobs:
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_account_deletion.py \
             tests/unit/test_content_write_fence.py \
+            tests/unit/test_trace_deletion_finality.py \
             tests/unit/test_synthetic_invite_admin.py \
             tests/unit/test_pilot_invite_admin.py \
             tests/unit/test_authority_writer_guard.py \

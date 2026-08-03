@@ -379,6 +379,17 @@ def assert_detached_content_writer_current(uid: str) -> None:
     writer.assert_current()
 
 
+def assert_content_writer_admitted(uid: str) -> None:
+    """Require a live request or detached registration for a UID-linked write."""
+    registry = _request_fence_registry.get()
+    if registry is not None and uid in registry:
+        return
+    writer = _detached_writer.get()
+    if writer is None or writer.uid != uid:
+        raise ContentWriteFenceError("account_content_fence_unavailable")
+    writer.assert_current()
+
+
 def start_content_writer_thread(
     uid: str,
     target: Callable[..., Any],

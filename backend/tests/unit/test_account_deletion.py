@@ -18,10 +18,18 @@ def _successful_content_fence(monkeypatch):
     async def tombstone(_uid):
         return True
 
+    async def purge_routing_traces(_uid):
+        return 0
+
     monkeypatch.setattr(
         account_deletion_service.content_write_fence,
         "tombstone_content_writes",
         tombstone,
+    )
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_routing_traces",
+        purge_routing_traces,
     )
 
 
@@ -323,6 +331,35 @@ def test_deletion_service_converts_firestore_and_firebase_failures_to_resumable_
     )
     assert retry.status_code == 200
     assert retry_calls == ["firestore", "firebase"]
+
+
+def test_deletion_service_never_reports_success_when_routing_trace_purge_is_unavailable(monkeypatch):
+    calls = []
+
+    async def quarantine(_uid):
+        return _state()
+
+    async def unavailable(_uid):
+        raise account_deletion_db.AccountDeletionUnavailable("account_deletion_routing_traces_unavailable")
+
+    async def forbidden_finalize(_uid):
+        raise AssertionError("trace absence must precede finalization")
+
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "quarantine_account_for_deletion", quarantine)
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "purge_routing_traces", unavailable)
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "finalize_account_deletion", forbidden_finalize)
+
+    result = asyncio.run(
+        account_deletion_service.execute_account_deletion(
+            "synthetic-user",
+            delete_firestore=lambda uid: calls.append(("firestore", uid)),
+            delete_firebase=lambda uid: calls.append(("firebase", uid)),
+        )
+    )
+
+    assert result.status_code == 202
+    assert result.body["deletion_receipt"]["remaining"] == ["routing_traces"]
+    assert calls == [("firestore", "synthetic-user")]
 
 
 def test_firebase_delete_lost_ack_converges_only_after_authoritative_absence(monkeypatch):

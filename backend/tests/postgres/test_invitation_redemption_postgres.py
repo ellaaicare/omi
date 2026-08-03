@@ -4082,6 +4082,49 @@ def test_account_deletion_atomically_quarantines_authority_releases_capacity_and
     asyncio.run(_run_with_database(scenario))
 
 
+def test_account_deletion_routing_trace_purge_is_exact_repeatable_and_retains_other_users():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                CREATE TABLE routing_traces (
+                    trace_id TEXT PRIMARY KEY,
+                    uid TEXT,
+                    notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    client_headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    resolved_session_key TEXT,
+                    error TEXT
+                )
+                """
+            )
+            await connection.executemany(
+                """
+                INSERT INTO routing_traces (
+                    trace_id, uid, notes, client_headers, resolved_session_key, error
+                ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+                """,
+                [
+                    ("owned-1", "routing-delete-user", '["sensitive-1"]', '{"Secret":"one"}', "session-1", "error-1"),
+                    ("owned-2", "routing-delete-user", '["sensitive-2"]', '{"Secret":"two"}', "session-2", "error-2"),
+                    ("retained", "routing-retained-user", '["retained"]', '{}', None, None),
+                ],
+            )
+
+        assert await account_deletion.purge_routing_traces("routing-delete-user") == 2
+        assert await account_deletion.purge_routing_traces("routing-delete-user") == 0
+        async with pool.acquire() as connection:
+            rows = await connection.fetch("SELECT trace_id, uid, notes FROM routing_traces ORDER BY trace_id")
+        assert [dict(row) for row in rows] == [
+            {
+                "trace_id": "retained",
+                "uid": "routing-retained-user",
+                "notes": '["retained"]',
+            }
+        ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write():
     async def scenario(pool: asyncpg.Pool) -> None:
         invitation_id, uid = await _prepare_deletion_account(

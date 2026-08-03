@@ -123,6 +123,15 @@ def fence_environment(monkeypatch):
     monkeypatch.setattr(content_write_fence.firestore, "transactional", _transactional)
     monkeypatch.setenv("ELLA_CONTENT_WRITE_FENCE_LEASE_SECONDS", "3")
     monkeypatch.setenv("ELLA_CONTENT_WRITE_FENCE_DRAIN_SECONDS", "3")
+
+    async def purge_routing_traces(_uid):
+        return 0
+
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_routing_traces",
+        purge_routing_traces,
+    )
     yield database
     content_write_fence.configure_firestore_db(previous_database)
 
@@ -775,6 +784,7 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
 
     raw_mutation_dependencies = []
     protected_mutations = []
+    mutation_routes = []
     for directory in (backend / "routers", backend / "ella" / "routers"):
         for path in sorted(directory.glob("*.py")):
             source = path.read_text(encoding="utf-8")
@@ -793,6 +803,7 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
                     continue
                 function_source = ast.get_source_segment(source, node) or ""
                 key = f"{path.relative_to(backend)}:{node.name}"
+                mutation_routes.append(key)
                 if (
                     "Depends(auth.get_writable_user_uid)" in function_source
                     or "Depends(auth_endpoints.get_writable_user_uid)" in function_source
@@ -807,9 +818,22 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
 
     exact_protected = sorted(set(protected_mutations))
     exact_inventory_hash = hashlib.sha256("\n".join(exact_protected).encode("utf-8")).hexdigest()
-    assert len(exact_protected) == 132
-    assert exact_inventory_hash == "43b8dc6f802264329ddca1d2d893fd1d8bcc78f3f677c505a8c5720e5d1ca3cc"
+    assert len(exact_protected) == 133
+    assert exact_inventory_hash == "34e4792e5e7e04cf26e50e3af31d6abf4936e8f49637adcb151b457ca0bd3a36"
     assert raw_mutation_dependencies == []
+    assert "ella/routers/trace.py:ingest_client_trace" in protected_mutations
+
+    exact_mutations = sorted(set(mutation_routes))
+    exact_mutation_hash = hashlib.sha256("\n".join(exact_mutations).encode("utf-8")).hexdigest()
+    assert len(exact_mutations) == 229
+    assert exact_mutation_hash == "aec1004c1c066d2c3fa31cb18ec978811f9c33a88df1cf16a2d3f406f489c2d5"
+    mutations_without_writable_authority = sorted(set(exact_mutations) - set(exact_protected))
+    unauthenticated_inventory_hash = hashlib.sha256(
+        "\n".join(mutations_without_writable_authority).encode("utf-8")
+    ).hexdigest()
+    assert len(mutations_without_writable_authority) == 96
+    assert unauthenticated_inventory_hash == "a002a673c6ea5c5f04a7a558ccfce9f466feafde568899bc8b3ebe8be6cabd8d"
+    assert "ella/routers/trace.py:ingest_client_trace" not in mutations_without_writable_authority
     assert "routers/announcements.py:dismiss_announcement_endpoint" in protected_mutations
     assert "routers/transcribe.py:listen_handler" in protected_mutations
     transcribe_source = (backend / "routers" / "transcribe.py").read_text(encoding="utf-8")
@@ -840,6 +864,7 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
     transferred_threads = set()
     direct_thread_routes = set()
     detached_task_routes = set()
+    raw_task_functions = set()
     for directory in (backend / "routers", backend / "ella" / "routers"):
         for path in sorted(directory.glob("*.py")):
             source = path.read_text(encoding="utf-8")
@@ -855,6 +880,8 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
                 }
                 if "safe_create_task" in calls:
                     detached_task_routes.add(key)
+                if "create_task" in calls:
+                    raw_task_functions.add(key)
                 methods = {
                     decorator.func.attr
                     for decorator in node.decorator_list
@@ -875,6 +902,19 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
         "routers/pusher.py:_websocket_util_trigger",
         "routers/pusher.py:receive_tasks",
     }
+    assert raw_task_functions == {
+        "ella/routers/chat.py:_stream_level_4_openclaw",
+        "ella/routers/voice.py:get_voice_context",
+        "ella/routers/voice.py:heartbeat_voice_canary_session",
+        "routers/pusher.py:_websocket_util_trigger",
+        "routers/transcribe.py:_create_speech_profile_loader_task",
+        "routers/transcribe.py:_send_message_event",
+        "routers/transcribe.py:_stream_handler",
+        "routers/transcribe.py:flush_stt_buffer",
+        "routers/transcribe.py:receive_data",
+        "routers/transcribe.py:speaker_identification_task",
+    }
+    assert "ella/routers/trace.py:record_trace" not in raw_task_functions
     sync_source = (backend / "routers" / "sync.py").read_text(encoding="utf-8")
     assert "[t.join() for t in threads" in sync_source
     assert "await content_write_fence.start_content_writer_task(" in transcribe_source

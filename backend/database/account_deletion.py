@@ -246,6 +246,23 @@ async def quarantine_account_for_deletion(uid: str) -> AccountDeletionState:
         raise AccountDeletionUnavailable("account_deletion_authority_unavailable") from exc
 
 
+async def purge_routing_traces(uid: str) -> int:
+    """Delete all durable UID-linked routing telemetry after writers drain."""
+    try:
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                if not await connection.fetchval("SELECT to_regclass('routing_traces') IS NOT NULL"):
+                    return 0
+                result = await connection.execute(
+                    "DELETE FROM routing_traces WHERE uid = $1",
+                    uid,
+                )
+                return _affected(result)
+    except Exception as exc:
+        raise AccountDeletionUnavailable("account_deletion_routing_traces_unavailable") from exc
+
+
 async def finalize_account_deletion(uid: str) -> bool:
     """Mark a quarantined identity complete only after external state is absent."""
     try:
