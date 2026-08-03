@@ -361,6 +361,45 @@ def test_retained_firebase_subject_is_fenced_from_authenticated_content_writes(m
     else:
         raise AssertionError("tombstoned Firebase subject must not regain content write authority")
 
+    monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", "localhost:9999")
+    monkeypatch.setenv("GCLOUD_PROJECT", "omi-ci")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "omi-ci")
+
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    from routers import announcements
+
+    calls = []
+
+    async def tombstoned_subject():
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "account_write_forbidden", "retryable": False},
+        )
+
+    monkeypatch.setattr(
+        announcements,
+        "get_announcement_by_id",
+        lambda _announcement_id: calls.append("lookup"),
+    )
+    monkeypatch.setattr(
+        announcements,
+        "dismiss_announcement",
+        lambda *_args, **_kwargs: calls.append("firestore"),
+    )
+    app = FastAPI()
+    app.include_router(announcements.router)
+    app.dependency_overrides[auth_endpoints.get_writable_user_uid] = tombstoned_subject
+
+    response = TestClient(app).post(
+        "/v1/announcements/synthetic-announcement/dismiss",
+        json={"cta_clicked": False},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "account_write_forbidden"
+    assert calls == []
+
 
 def test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes(monkeypatch):
     async def forbidden_pool():
