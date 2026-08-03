@@ -580,10 +580,22 @@ jobs:
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
           pytest tests/unit/test_ella_guardian_delivery.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | grep -c '::')" -eq 8
-          pytest \
-            tests/unit/test_ella_escalations_router_auth.py::test_load_context_uses_canonical_phone_number_for_user_imessage \
-            -v
+          escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"
+          required_escalation_auth_ids=(
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_reaches_load_context_for_explicit_uid"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_requires_uid_before_load_context"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_uid_uses_authenticated_uid_when_uid_omitted"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_uid_rejects_cross_user_read"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_context"
+            "tests/unit/test_ella_escalations_router_auth.py::test_load_context_uses_canonical_phone_number_for_user_imessage"
+            "tests/unit/test_ella_escalations_router_auth.py::test_load_context_allows_identities_phone_override"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_markdown_internal_key_reaches_same_auth_and_context"
+          )
+          for required_id in "${required_escalation_auth_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$escalation_auth_ids"
+          done
+          test "$(grep -c '::' <<<"$escalation_auth_ids")" -eq 8
+          pytest tests/unit/test_ella_escalations_router_auth.py -v
           reviewed_route_ids="$(pytest --collect-only -q tests/unit/test_ella_reviewed_route_integration.py | sed '/^$/d')"
           required_reviewed_route_ids=(
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing"
