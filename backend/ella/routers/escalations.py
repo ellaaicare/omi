@@ -63,9 +63,13 @@ async def _get_pool() -> asyncpg.Pool:
     return _pool
 
 
-def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
+def _has_valid_service_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> bool:
     provided = x_escalation_key or x_guardian_key or key
-    if provided != ESCALATION_WEBHOOK_KEY:
+    return bool(ESCALATION_WEBHOOK_KEY.strip()) and provided == ESCALATION_WEBHOOK_KEY
+
+
+def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
+    if not _has_valid_service_key(x_guardian_key, x_escalation_key, key):
         raise HTTPException(status_code=403, detail="Invalid escalation key")
 
 
@@ -77,8 +81,7 @@ def _resolve_policy_view_uid(
     key: Optional[str],
 ) -> str:
     """Resolve the policy-view UID for either app auth or internal callers."""
-    provided_key = x_escalation_key or x_guardian_key or key
-    if provided_key == ESCALATION_WEBHOOK_KEY:
+    if _has_valid_service_key(x_guardian_key, x_escalation_key, key):
         if not uid:
             raise HTTPException(status_code=400, detail="uid is required for internal policy lookup")
         return uid

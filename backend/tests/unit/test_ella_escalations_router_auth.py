@@ -5,7 +5,8 @@ import types
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, Connection=object, create_pool=None))
 firebase_admin = types.ModuleType("firebase_admin")
@@ -21,17 +22,25 @@ sys.modules.setdefault("firebase_admin", firebase_admin)
 sys.modules.setdefault("firebase_admin.auth", firebase_auth)
 
 _ROUTER_PATH = Path(__file__).resolve().parents[2] / "ella" / "routers" / "escalations.py"
-_SPEC = importlib.util.spec_from_file_location("ella_escalations_under_test", _ROUTER_PATH)
-escalations = importlib.util.module_from_spec(_SPEC)
-assert _SPEC and _SPEC.loader
-_SPEC.loader.exec_module(escalations)
+
+
+def _load_escalations_module(module_name):
+    spec = importlib.util.spec_from_file_location(module_name, _ROUTER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+escalations = _load_escalations_module("ella_escalations_under_test")
 
 _TEST_ESCALATION_WEBHOOK_KEY = "test-only-escalation-authority-key"
 
 
-@pytest.fixture(autouse=True)
-def _configure_test_escalation_webhook_key(monkeypatch):
+@pytest.fixture
+def configured_escalation_key(monkeypatch):
     monkeypatch.setattr(escalations, "ESCALATION_WEBHOOK_KEY", _TEST_ESCALATION_WEBHOOK_KEY)
+    return _TEST_ESCALATION_WEBHOOK_KEY
 
 
 def _policy_context(uid):
@@ -55,7 +64,7 @@ def _policy_context(uid):
     )
 
 
-def test_policy_view_internal_key_reaches_load_context_for_explicit_uid(monkeypatch):
+def test_policy_view_internal_key_reaches_load_context_for_explicit_uid(monkeypatch, configured_escalation_key):
     loaded_uids = []
 
     async def fake_load_context(uid):
@@ -79,7 +88,7 @@ def test_policy_view_internal_key_reaches_load_context_for_explicit_uid(monkeypa
     assert response["uid"] == "uid-1"
 
 
-def test_policy_view_internal_key_requires_uid_before_load_context(monkeypatch):
+def test_policy_view_internal_key_requires_uid_before_load_context(monkeypatch, configured_escalation_key):
     async def fail_load_context(_uid):
         raise AssertionError("_load_context must not run without an explicit service-authority UID")
 
@@ -129,7 +138,9 @@ def test_policy_view_uid_rejects_cross_user_read(monkeypatch):
     assert exc.value.status_code == 403
 
 
-def test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_context(monkeypatch):
+def test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_context(
+    monkeypatch, configured_escalation_key
+):
     async def fail_load_context(_uid):
         raise AssertionError("_load_context must not run for denied authority")
 
@@ -234,7 +245,7 @@ def test_load_context_allows_identities_phone_override(monkeypatch):
     assert user.user_phone == "+15550000099"
 
 
-def test_policy_markdown_internal_key_reaches_same_auth_and_context(monkeypatch):
+def test_policy_markdown_internal_key_reaches_same_auth_and_context(monkeypatch, configured_escalation_key):
     loaded_uids = []
 
     async def fake_load_context(uid):
@@ -260,3 +271,74 @@ def test_policy_markdown_internal_key_reaches_same_auth_and_context(monkeypatch)
     assert "- guardian_mode: `memory_support`" in body
     assert "`direct_user_request`" in body
     assert "`critical_safety`" in body
+
+
+def test_evaluate_internal_key_reaches_load_context_for_explicit_uid(monkeypatch, configured_escalation_key):
+    loaded_uids = []
+
+    async def fake_load_context(uid):
+        loaded_uids.append(uid)
+        return _policy_context(uid)
+
+    async def fake_log_decision(_uid, _decision):
+        return None
+
+    monkeypatch.setattr(escalations, "_load_context", fake_load_context)
+    monkeypatch.setattr(escalations, "_log_decision", fake_log_decision)
+
+    response = asyncio.run(
+        escalations.evaluate_escalation(
+            escalations.EscalationEvaluateRequest(uid="uid-1"),
+            x_guardian_key=None,
+            x_escalation_key=_TEST_ESCALATION_WEBHOOK_KEY,
+            key=None,
+        )
+    )
+
+    assert loaded_uids == ["uid-1"]
+    assert response["ok"] is True
+    assert response["trace_id"] == "uid-1"
+
+
+def test_production_default_raw_empty_legacy_key_denies_all_authority_paths_before_context(monkeypatch):
+    monkeypatch.delenv("ELLA_ESCALATION_WEBHOOK_KEY", raising=False)
+    monkeypatch.delenv("GUARDIAN_WEBHOOK_KEY", raising=False)
+    production_escalations = _load_escalations_module("ella_escalations_production_default_under_test")
+    assert production_escalations.ESCALATION_WEBHOOK_KEY == ""
+
+    async def fail_load_context(_uid):
+        raise AssertionError("_load_context must not run for an unconfigured service authority")
+
+    monkeypatch.setattr(production_escalations, "_load_context", fail_load_context)
+    app = FastAPI()
+    app.include_router(production_escalations.router)
+
+    with TestClient(app) as client:
+        policy_response = client.get(
+            "/v1/ella/escalations/policy",
+            params={"uid": "uid-1"},
+            headers={"X-Key": ""},
+        )
+        markdown_response = client.get(
+            "/v1/ella/escalations/policy.md",
+            params={"uid": "uid-1"},
+            headers={"X-Key": ""},
+        )
+        evaluate_response = client.post(
+            "/v1/ella/escalations/evaluate",
+            headers={"X-Key": ""},
+            json={"uid": "uid-1"},
+        )
+
+    assert policy_response.status_code == 401
+    assert markdown_response.status_code == 401
+    assert evaluate_response.status_code == 403
+
+    with pytest.raises(HTTPException) as exc:
+        production_escalations._verify_key(None, None, "")
+    assert exc.value.status_code == 403
+
+    monkeypatch.setattr(production_escalations, "ESCALATION_WEBHOOK_KEY", " \t")
+    with pytest.raises(HTTPException) as exc:
+        production_escalations._verify_key(None, None, " \t")
+    assert exc.value.status_code == 403
