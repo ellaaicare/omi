@@ -8,6 +8,7 @@ on:
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
       - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
       - "backend/database/memory_reinterpretations.py"
@@ -71,6 +72,9 @@ on:
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
       - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
       - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
@@ -89,6 +93,7 @@ on:
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
       - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
       - "backend/database/memory_reinterpretations.py"
@@ -152,6 +157,9 @@ on:
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
       - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
       - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
@@ -224,6 +232,7 @@ jobs:
           database/authority_advisory_lock.py
           database/content_write_fence.py
           database/content_write_recovery.py
+          database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/firestore_account_deletion.py
           database/memory_reinterpretations.py
@@ -272,6 +281,9 @@ jobs:
           scripts/synthetic_invite_admin.py
           scripts/pilot_invite_admin.py
           scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
 
       - name: Validate exact changed Python formatting
         run: >-
@@ -279,6 +291,7 @@ jobs:
           database/account_deletion.py
           database/content_write_fence.py
           database/content_write_recovery.py
+          database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/memory_reinterpretations.py
           ella/routers/canonical_events.py
@@ -295,6 +308,9 @@ jobs:
           tests/unit/test_hermes_cloud_enrichment_outbox.py
           tests/postgres/test_invitation_redemption_postgres.py
           scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
 
       - name: Run unit and PostgreSQL security tests
         run: |
@@ -316,7 +332,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 215
+          test "$collected" -eq 222
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -371,6 +387,13 @@ jobs:
             "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_stale_cross_uid_ownerless_and_actual_unprivileged_invocation"
             "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_cross_generation_replacement_after_real_terminal_proof"
             "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_recovery_surface_is_exact_and_idempotent"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_different_token_compaction_keeps_only_latest_retry_authority"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_receipt_is_strictly_bounded_across_five_thousand_cycles_and_deletion_converges"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stale_receipt_or_hash_collision_never_releases_a_different_writer"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_pinned_recovery_authority_ignores_hostile_ambient_project_and_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_rejects_emulator_mismatch_and_symlink_before_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_wrong_receipt_or_credential_project_loads_no_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_production_recovery_modules_refuse_darwin_before_firestore_calls"
             "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_retry"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
@@ -412,7 +435,7 @@ jobs:
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_prerequisite_failure_is_atomic[017_add_provider_attempt_deletion_fence.sql-leaked_relations4]"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
-          test "${#required_ids[@]}" -eq 77
+          test "${#required_ids[@]}" -eq 84
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
           done

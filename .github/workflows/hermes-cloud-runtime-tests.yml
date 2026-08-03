@@ -9,6 +9,7 @@ on:
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
       - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
       - "backend/database/memory_reinterpretations.py"
@@ -117,6 +118,9 @@ on:
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
       - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_conversation_processing_failures.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
@@ -146,6 +150,7 @@ on:
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
       - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
       - "backend/database/content_writer_owner.py"
       - "backend/database/firestore_account_deletion.py"
       - "backend/database/memory_reinterpretations.py"
@@ -254,6 +259,9 @@ on:
       - "backend/tests/unit/test_account_deletion.py"
       - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
       - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_conversation_processing_failures.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
@@ -339,6 +347,7 @@ jobs:
           database/authority_advisory_lock.py
           database/content_write_fence.py
           database/content_write_recovery.py
+          database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/firestore_account_deletion.py
           database/memory_reinterpretations.py
@@ -410,6 +419,9 @@ jobs:
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
           scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
           utils/ella/postprocess.py
           utils/ella/canonical_omi.py
           utils/ella/scanner_keyterms.py
@@ -422,6 +434,7 @@ jobs:
           database/authority_advisory_lock.py
           database/content_write_fence.py
           database/content_write_recovery.py
+          database/content_write_recovery_authority.py
           database/content_writer_owner.py
           database/firestore_account_deletion.py
           database/memory_reinterpretations.py
@@ -461,6 +474,9 @@ jobs:
           scripts/ella_memory_e2e_smoke.py
           scripts/voice_canary_admin.py
           scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_authority_advisory_lock.py
@@ -496,6 +512,62 @@ jobs:
           tests/postgres/test_runtime_migration_atomicity_postgres.py
           &&
           python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
+
+      - name: Prove container root refuses before imports or writes
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/source:ro" python:3.12-slim sh -ceu '
+            mkdir -p /opt/omi-recovery /tmp/hostile/database /tmp/recovery-cwd
+            cp -a /source /opt/omi-recovery/backend
+            chown -R 0:0 /opt/omi-recovery
+            chmod -R go-w /opt/omi-recovery
+            printf "%s\n" "from pathlib import Path" "Path(\"/tmp/hostile-marker\").write_text(\"loaded\")" > /tmp/hostile/database/__init__.py
+            ln -s /tmp/credential-target /tmp/recovery-cwd/google-credentials.json
+            set +e
+            cd /tmp/recovery-cwd
+            env \
+              PYTHONPATH=/tmp/hostile \
+              SERVICE_ACCOUNT_JSON="{\"private_key\":\"fake-control\"}" \
+              FIRESTORE_EMULATOR_HOST=127.0.0.1:65530 \
+              GCLOUD_PROJECT=wrong-project \
+              GOOGLE_CLOUD_PROJECT=wrong-project \
+              /usr/local/bin/python -I \
+              /opt/omi-recovery/backend/scripts/content_writer_recovery.py \
+              --subject-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+              --token-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            status=$?
+            set -e
+            test "$status" -eq 77
+            test ! -e /tmp/credential-target
+            test ! -e /tmp/hostile-marker
+            test "$(find /tmp/recovery-cwd -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+          '
+          docker run --rm --privileged --pid=host -v "$PWD:/source:ro" python:3.12-slim sh -ceu '
+            mkdir -p /opt/omi-recovery /tmp/hostile/database /tmp/recovery-cwd
+            cp -a /source /opt/omi-recovery/backend
+            chown -R 0:0 /opt/omi-recovery
+            chmod -R go-w /opt/omi-recovery
+            printf "%s\n" "from pathlib import Path" "Path(\"/tmp/hostile-marker\").write_text(\"loaded\")" > /tmp/hostile/database/__init__.py
+            ln -s /tmp/credential-target /tmp/recovery-cwd/google-credentials.json
+            set +e
+            cd /tmp/recovery-cwd
+            env \
+              PYTHONPATH=/tmp/hostile \
+              SERVICE_ACCOUNT_JSON="{\"private_key\":\"fake-control\"}" \
+              FIRESTORE_EMULATOR_HOST=127.0.0.1:65530 \
+              GCLOUD_PROJECT=wrong-project \
+              GOOGLE_CLOUD_PROJECT=wrong-project \
+              /usr/local/bin/python -I \
+              /opt/omi-recovery/backend/scripts/content_writer_recovery.py \
+              --subject-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+              --token-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            status=$?
+            set -e
+            test "$status" -eq 77
+            test ! -e /tmp/credential-target
+            test ! -e /tmp/hostile-marker
+            test "$(find /tmp/recovery-cwd -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+          '
 
       - name: Run Hermes Cloud and isolation failure-path tests
         run: |
@@ -567,6 +639,13 @@ jobs:
             "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_stale_cross_uid_ownerless_and_actual_unprivileged_invocation"
             "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_cross_generation_replacement_after_real_terminal_proof"
             "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_recovery_surface_is_exact_and_idempotent"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_different_token_compaction_keeps_only_latest_retry_authority"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_receipt_is_strictly_bounded_across_five_thousand_cycles_and_deletion_converges"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stale_receipt_or_hash_collision_never_releases_a_different_writer"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_pinned_recovery_authority_ignores_hostile_ambient_project_and_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_rejects_emulator_mismatch_and_symlink_before_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_wrong_receipt_or_credential_project_loads_no_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_production_recovery_modules_refuse_darwin_before_firestore_calls"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[timeout]"
@@ -605,7 +684,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
-          test "${#required_ids[@]}" -eq 69
+          test "${#required_ids[@]}" -eq 76
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_account_deletion.py \
@@ -629,7 +708,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 567
+          test "$collected" -eq 574
           pytest \
             tests/unit/test_account_deletion.py \
             tests/unit/test_content_write_fence.py \

@@ -10,14 +10,12 @@ import json
 import os
 from pathlib import Path
 import platform
-import socket
-import subprocess
 import threading
 from typing import Any
 import uuid
 
 OWNER_SCHEMA_VERSION = 1
-SUPPORTED_RECOVERY_SYSTEMS = {"Linux", "Darwin"}
+SUPPORTED_RECOVERY_SYSTEMS = {"Linux"}
 LINUX_CAP_SYS_ADMIN = 21
 LINUX_NS_GET_PARENT = 0xB702
 _owner_lock = threading.Lock()
@@ -147,36 +145,10 @@ def _linux_boundary() -> ProcessBoundary:
     )
 
 
-def _darwin_boundary() -> ProcessBoundary:
-    try:
-        completed = subprocess.run(
-            ["sysctl", "-n", "kern.boottime"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ProcessOwnerError("account_writer_boot_unknown") from exc
-    boot_id = completed.stdout.strip()
-    hostname = socket.gethostname().strip()
-    if not boot_id or not hostname:
-        raise ProcessOwnerError("account_writer_host_unknown")
-    return ProcessBoundary(
-        system="Darwin",
-        host_id=hashlib.sha256(hostname.encode("utf-8")).hexdigest(),
-        boot_id=boot_id,
-        pid_namespace="darwin-host-process-table",
-    )
-
-
 def current_process_boundary() -> ProcessBoundary:
-    system = platform.system()
-    if system == "Linux":
-        return _linux_boundary()
-    if system == "Darwin":
-        return _darwin_boundary()
-    raise ProcessOwnerError("account_writer_os_boundary_unsupported")
+    if platform.system() != "Linux":
+        raise ProcessOwnerError("account_writer_os_boundary_unsupported")
+    return _linux_boundary()
 
 
 def _linux_process_snapshot(pid: int) -> ProcessSnapshot | None:
@@ -271,40 +243,10 @@ def linux_supervisor_process_snapshot(pid_namespace: str, namespace_pid: int) ->
     return None, namespace_seen
 
 
-def _darwin_ps_value(pid: int, field: str) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["ps", "-o", f"{field}=", "-p", str(pid)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ProcessOwnerError("account_writer_process_state_unknown") from exc
-    if completed.returncode != 0:
-        return None
-    value = completed.stdout.strip()
-    return value or None
-
-
-def _darwin_process_snapshot(pid: int) -> ProcessSnapshot | None:
-    first_start = _darwin_ps_value(pid, "lstart")
-    if first_start is None:
-        return None
-    state = _darwin_ps_value(pid, "state")
-    second_start = _darwin_ps_value(pid, "lstart")
-    if state is None or second_start is None or first_start != second_start:
-        raise ProcessOwnerError("account_writer_process_state_unknown")
-    return ProcessSnapshot(start_id=f"darwin-ps-start:{first_start}", state=state[:1])
-
-
 def process_snapshot(system: str, pid: int) -> ProcessSnapshot | None:
-    if system == "Linux":
-        return _linux_process_snapshot(pid)
-    if system == "Darwin":
-        return _darwin_process_snapshot(pid)
-    raise ProcessOwnerError("account_writer_os_boundary_unsupported")
+    if system != "Linux" or platform.system() != "Linux":
+        raise ProcessOwnerError("account_writer_os_boundary_unsupported")
+    return _linux_process_snapshot(pid)
 
 
 def current_process_owner() -> ProcessOwner:

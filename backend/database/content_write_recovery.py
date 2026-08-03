@@ -6,10 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import platform
 import re
-from typing import Any
-
-from google.cloud import firestore
+from typing import Any, Callable
 
 from database import content_write_fence, content_writer_owner
 
@@ -134,22 +133,26 @@ def recover_orphaned_writer(
     *,
     subject_hash: str,
     token_hash: str,
+    transactional: Callable[[Callable[..., Any]], Callable[..., Any]],
 ) -> ContentWriterRecoveryReceipt:
     """Recover one exact record after OS proof and a transactional owner CAS."""
+    if platform.system() != "Linux":
+        raise ContentWriterRecoveryError("account_writer_recovery_system_unsupported")
     subject_hash = _validate_selector(subject_hash, code="account_writer_recovery_subject_selector_invalid")
     token_hash = _validate_selector(token_hash, code="account_writer_recovery_token_selector_invalid")
     reference = _reference(db, subject_hash)
     try:
         initial = content_write_fence._snapshot_data(reference.get())
         writers = content_write_fence._registered_writers(initial)
-        recoveries = content_write_fence._registered_recoveries(initial)
+        recovery = content_write_fence._registered_recovery(initial)
     except content_write_fence.ContentWriteFenceError as exc:
         raise ContentWriterRecoveryError(exc.code) from exc
 
     token = _matching_token(writers, token_hash)
+    if token is not None and recovery is not None and hmac.compare_digest(recovery.token_hash, token_hash):
+        raise ContentWriterRecoveryError("account_writer_recovery_selector_ambiguous")
     if token is None:
-        recovery = recoveries.get(token_hash)
-        if recovery is None:
+        if recovery is None or not hmac.compare_digest(recovery.token_hash, token_hash):
             raise ContentWriterRecoveryError("account_writer_recovery_stale_token")
         return _receipt(
             subject_hash=subject_hash,
@@ -164,33 +167,38 @@ def recover_orphaned_writer(
     proof = prove_recorded_owner_terminal(registration.owner)
     now = datetime.now(timezone.utc)
 
-    @firestore.transactional
+    @transactional
     def compare_and_set(transaction: Any) -> str:
         try:
             snapshot = reference.get(transaction=transaction)
             data = content_write_fence._snapshot_data(snapshot)
             current_writers = content_write_fence._registered_writers(data)
-            current_recoveries = content_write_fence._registered_recoveries(data)
+            current_recovery = content_write_fence._registered_recovery(data)
         except content_write_fence.ContentWriteFenceError as exc:
             raise ContentWriterRecoveryError(exc.code) from exc
         current = current_writers.get(token)
         if current is None:
-            recovered = current_recoveries.get(token_hash)
-            if recovered is not None and recovered.owner == proof.owner:
+            if (
+                current_recovery is not None
+                and hmac.compare_digest(current_recovery.token_hash, token_hash)
+                and current_recovery.owner == proof.owner
+            ):
                 return "already_recovered"
             raise ContentWriterRecoveryError("account_writer_recovery_record_replaced")
         if current.owner != proof.owner:
             raise ContentWriterRecoveryError("account_writer_recovery_record_replaced")
         current_writers.pop(token)
-        current_recoveries[token_hash] = content_write_fence.WriterRecovery(
+        current_recovery = content_write_fence.WriterRecovery(
+            token_hash=token_hash,
             owner=proof.owner,
             recovered_at=now,
         )
         updated = dict(data)
+        updated.pop("writer_recoveries", None)
         updated.update(
             {
                 "writers": content_write_fence._writers_to_storage(current_writers),
-                "writer_recoveries": content_write_fence._recoveries_to_storage(current_recoveries),
+                "writer_recovery": current_recovery.to_storage(),
                 "updated_at": now,
             }
         )

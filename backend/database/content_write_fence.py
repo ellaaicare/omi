@@ -53,11 +53,13 @@ class WriterRegistration:
 
 @dataclass(frozen=True)
 class WriterRecovery:
+    token_hash: str
     owner: content_writer_owner.ProcessOwner
     recovered_at: datetime
 
     def to_storage(self) -> dict[str, Any]:
         return {
+            "token_hash": self.token_hash,
             "owner": self.owner.to_storage(),
             "recovered_at": self.recovered_at,
         }
@@ -218,37 +220,52 @@ def _registered_writers(data: dict[str, Any]) -> dict[str, WriterRegistration]:
     return registered
 
 
-def _registered_recoveries(data: dict[str, Any]) -> dict[str, WriterRecovery]:
-    recoveries = data.get("writer_recoveries")
-    if recoveries is None:
-        return {}
-    if not isinstance(recoveries, dict):
+def _registered_recovery(data: dict[str, Any]) -> WriterRecovery | None:
+    """Return the one bounded idempotency receipt for the latest recovery.
+
+    Recovery history is intentionally not retained. One exact token/owner
+    receipt is sufficient to converge concurrent retries of the transaction
+    that removed that token. An absent or different receipt never authorizes
+    recovery and ordinary ACTIVE cleanup or tombstoning removes it.
+    """
+    if "writer_recovery" in data and "writer_recoveries" in data:
         raise ContentWriteFenceError("account_content_fence_corrupt")
-    registered: dict[str, WriterRecovery] = {}
-    for token_hash, value in recoveries.items():
+    legacy = data.get("writer_recoveries")
+    values = legacy.items() if isinstance(legacy, dict) else ((None, data.get("writer_recovery")),)
+    if legacy is not None and not isinstance(legacy, dict):
+        raise ContentWriteFenceError("account_content_fence_corrupt")
+    registered: list[WriterRecovery] = []
+    for legacy_token_hash, value in values:
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        expected = (
+            {"owner", "recovered_at"} if legacy_token_hash is not None else {"token_hash", "owner", "recovered_at"}
+        )
+        if set(value) != expected:
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        token_hash = legacy_token_hash if legacy_token_hash is not None else value["token_hash"]
         if (
             not isinstance(token_hash, str)
             or len(token_hash) != 64
             or not all(character in "0123456789abcdef" for character in token_hash)
-            or not isinstance(value, dict)
+            or not isinstance(value["recovered_at"], datetime)
         ):
-            raise ContentWriteFenceError("account_content_fence_corrupt")
-        if set(value) != {"owner", "recovered_at"} or not isinstance(value["recovered_at"], datetime):
             raise ContentWriteFenceError("account_content_fence_corrupt")
         try:
             owner = content_writer_owner.ProcessOwner.from_storage(value["owner"])
         except content_writer_owner.ProcessOwnerError as exc:
             raise ContentWriteFenceError(exc.code) from exc
-        registered[token_hash] = WriterRecovery(owner=owner, recovered_at=value["recovered_at"])
-    return registered
+        registered.append(WriterRecovery(token_hash=token_hash, owner=owner, recovered_at=value["recovered_at"]))
+    try:
+        return max(registered, key=lambda recovery: (recovery.recovered_at, recovery.token_hash), default=None)
+    except TypeError as exc:
+        raise ContentWriteFenceError("account_content_fence_corrupt") from exc
 
 
 def _writers_to_storage(writers: dict[str, WriterRegistration]) -> dict[str, Any]:
     return {token: registration.to_storage() for token, registration in writers.items()}
-
-
-def _recoveries_to_storage(recoveries: dict[str, WriterRecovery]) -> dict[str, Any]:
-    return {token: recovery.to_storage() for token, recovery in recoveries.items()}
 
 
 def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int) -> None:
@@ -262,10 +279,12 @@ def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int)
         if data.get("state", ACTIVE) != ACTIVE:
             raise ContentWriteFenceError("account_write_forbidden")
         writers = _registered_writers(data)
-        recoveries = _registered_recoveries(data)
+        recovery = _registered_recovery(data)
         existing = writers.get(token)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        if (existing is not None and existing.owner != owner) or token_hash in recoveries:
+        if (existing is not None and existing.owner != owner) or (
+            recovery is not None and recovery.token_hash == token_hash
+        ):
             raise ContentWriteFenceError("account_writer_owner_mismatch")
         writers[token] = WriterRegistration(
             expires_at=now + timedelta(seconds=lease_seconds),
@@ -276,7 +295,7 @@ def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int)
             {
                 "state": ACTIVE,
                 "writers": _writers_to_storage(writers),
-                "writer_recoveries": _recoveries_to_storage(recoveries),
+                "writer_recovery": recovery.to_storage() if recovery is not None else None,
                 "updated_at": now,
             },
         )
@@ -315,9 +334,9 @@ def _release_firestore_writer(db: Any, uid: str, token: str) -> None:
         if registration.owner != owner:
             raise ContentWriteFenceError("account_writer_owner_mismatch")
         writers.pop(token)
-        recoveries = _registered_recoveries(data)
+        recovery = _registered_recovery(data)
         state = data.get("state", ACTIVE)
-        if state == ACTIVE and not writers and not recoveries:
+        if state == ACTIVE and not writers:
             if getattr(snapshot, "exists", False):
                 transaction.delete(reference)
             return
@@ -326,7 +345,7 @@ def _release_firestore_writer(db: Any, uid: str, token: str) -> None:
             {
                 "state": state,
                 "writers": _writers_to_storage(writers),
-                "writer_recoveries": _recoveries_to_storage(recoveries),
+                "writer_recovery": recovery.to_storage() if recovery is not None else None,
                 "updated_at": now,
             },
         )
@@ -342,22 +361,26 @@ def _advance_firestore_tombstone(db: Any, uid: str) -> bool:
     @firestore.transactional
     def advance(transaction: Any) -> bool:
         data = _snapshot_data(reference.get(transaction=transaction))
+        recovery = _registered_recovery(data)
         if data.get("state") == TOMBSTONED:
+            if recovery is not None or "writer_recoveries" in data or "writer_recovery" in data:
+                cleaned = dict(data)
+                cleaned.pop("writer_recovery", None)
+                cleaned.pop("writer_recoveries", None)
+                transaction.set(reference, cleaned)
             return True
         writers = _registered_writers(data)
-        recoveries = _registered_recoveries(data)
         state = DRAINING if writers else TOMBSTONED
-        transaction.set(
-            reference,
-            {
-                "state": state,
-                "writers": _writers_to_storage(writers),
-                "writer_recoveries": _recoveries_to_storage(recoveries),
-                "deletion_requested_at": data.get("deletion_requested_at") or now,
-                "tombstoned_at": now if state == TOMBSTONED else None,
-                "updated_at": now,
-            },
-        )
+        updated = {
+            "state": state,
+            "writers": _writers_to_storage(writers),
+            "deletion_requested_at": data.get("deletion_requested_at") or now,
+            "tombstoned_at": now if state == TOMBSTONED else None,
+            "updated_at": now,
+        }
+        if state == DRAINING and recovery is not None:
+            updated["writer_recovery"] = recovery.to_storage()
+        transaction.set(reference, updated)
         return state == TOMBSTONED
 
     return bool(advance(db.transaction()))
