@@ -114,6 +114,7 @@ async def _run_with_database(scenario):
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_provider_attempt_deletion_fence.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         await scenario(pool)
@@ -657,21 +658,23 @@ async def _prepare_writer_case(
                     """
                     INSERT INTO users (
                         email, name, status, profile_class
-                    ) VALUES ($1, 'Synthetic Before', 'PENDING', 'synthetic')
+                    ) VALUES ($1, 'Synthetic Before', 'ACTIVE', 'synthetic')
                     RETURNING id
                     """,
                     email,
                 )
             else:
+                initial_status = "ACTIVE" if name == "identity_update" else "PENDING"
                 user_id = await conn.fetchval(
                     """
                     INSERT INTO users (
                         omi_uid, email, name, status, profile_class
-                    ) VALUES ($1, $2, 'Synthetic Before', 'PENDING', 'synthetic')
+                    ) VALUES ($1, $2, 'Synthetic Before', $3, 'synthetic')
                     RETURNING id
                     """,
                     uid,
                     email,
+                    initial_status,
                 )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
         if name == "identity_bind":

@@ -384,7 +384,7 @@ def test_retry_claim_rejects_a_different_request_while_processing():
 def _conversation_api_client():
     app = FastAPI()
     app.include_router(conversations_router.router)
-    app.dependency_overrides[conversations_router.auth.get_current_user_uid] = lambda: "authenticated-user"
+    app.dependency_overrides[conversations_router.auth.get_writable_user_uid] = lambda: "authenticated-user"
     return app, TestClient(app)
 
 

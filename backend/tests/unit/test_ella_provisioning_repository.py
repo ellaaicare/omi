@@ -115,6 +115,12 @@ class _LookupPool:
         self.calls.append((query, args))
         return "INSERT 0 1"
 
+    async def fetchval(self, query, *args):
+        self.calls.append((query, args))
+        if "SELECT status FROM users" in query:
+            return "ACTIVE"
+        raise AssertionError(query)
+
     def acquire(self):
         return _AsyncContext(self)
 
@@ -257,6 +263,12 @@ class _CloudClaimConnection:
                 "claim_token": args[3],
                 "status": "claiming",
             }
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *_args):
+        self.queries.append(query)
+        if "SELECT status FROM users" in query:
+            return "ACTIVE"
         raise AssertionError(query)
 
 
@@ -428,6 +440,11 @@ class _ExpiredFinalizeConnection:
                 "omi_uid": args[0],
             }
         raise AssertionError("expired claim must not publish")
+
+    async def fetchval(self, query, *_args):
+        if "SELECT status FROM users" in query:
+            return "ACTIVE"
+        raise AssertionError(query)
 
 
 def test_cloud_pool_finalize_rechecks_lease_before_publish(monkeypatch):

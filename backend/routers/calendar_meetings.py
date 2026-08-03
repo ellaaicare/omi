@@ -36,7 +36,7 @@ class StoreMeetingResponse(BaseModel):
 @router.post('/v1/calendar/meetings', response_model=StoreMeetingResponse, tags=['calendar'])
 def store_calendar_meeting(
     request: StoreMeetingRequest,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Store or update a calendar meeting in Firestore.
@@ -80,7 +80,7 @@ def store_calendar_meeting(
 @router.get('/v1/calendar/meetings/{meeting_id}', response_model=CalendarMeetingContext, tags=['calendar'])
 def get_calendar_meeting(
     meeting_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Get a calendar meeting by its Firestore document ID"""
     meeting = calendar_db.get_meeting(uid, meeting_id)
@@ -93,7 +93,7 @@ def get_calendar_meeting(
 
 @router.get('/v1/calendar/meetings', response_model=List[CalendarMeetingContext], tags=['calendar'])
 def list_calendar_meetings(
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     limit: int = 50,

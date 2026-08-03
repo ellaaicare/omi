@@ -193,7 +193,7 @@ async def resolve_endpoint(
     uid: Optional[str] = Query(None, description="Firebase UID (omiUid)"),
     email: Optional[str] = Query(None, description="User email"),
     phone: Optional[str] = Query(None, description="User phone (E.164)"),
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Resolve a user identifier to active agent routing info.
 
@@ -316,7 +316,7 @@ async def proxy_chat_history(
     agent_id: str,
     limit: int = 50,
     session_key: Optional[str] = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Proxy chat history requests to the Provision API on Mac Mini.
 

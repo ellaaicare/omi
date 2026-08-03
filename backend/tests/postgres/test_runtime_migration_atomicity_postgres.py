@@ -130,6 +130,10 @@ async def _assert_failure_rolls_back(filename: str, leaked_relations: tuple[str,
             "015_add_invitation_allowed_email_hash.sql",
             ("ella_runtime_targets_invitation_target_key",),
         ),
+        (
+            "017_add_provider_attempt_deletion_fence.sql",
+            ("ella_provider_attempts",),
+        ),
     ],
 )
 def test_migration_prerequisite_failure_is_atomic(filename, leaked_relations):

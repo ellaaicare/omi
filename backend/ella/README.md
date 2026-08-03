@@ -248,6 +248,7 @@ print('Adapters:', list(get_all_adapters().keys()))
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ELLA_ENABLED` | `true` | Master switch for all Ella features |
+| `ELLA_POSTGRES_AUTHORITY_ENABLED` | follows `ELLA_ENABLED` | Explicit account-deletion authority boundary. Set `false` only when Ella PostgreSQL persistence/schema is intentionally absent; enabled database failures remain fail-closed. |
 | `ELLA_N8N_BASE_URL` | `https://n8n.ella-ai-care.com` | n8n webhook base URL |
 | `ELLA_SUMMARY_ENABLED` | `true` | Use n8n for summary generation |
 | `ELLA_MEMORY_ENABLED` | `true` | Use n8n for memory extraction |
@@ -312,6 +313,12 @@ receipt subcollection; callers cannot submit or select another UID.
   requires an operator until that authority can issue a trusted deletion
   receipt. Firebase Auth is retained while deletion is pending so the same
   authenticated caller can retry.
+
+The deletion proof schema in this release applies in executable order
+`011 -> 012 -> 013 -> 014 -> 015 -> 017_add_provider_attempt_deletion_fence.sql`.
+Migration `016_create_today_cards.sql` is reserved by open `ellaaicare/omi#360`, is not part
+of account deletion, and is not modified here. On a fresh database containing
+both changes, apply `016` before `017`; `017` has no dependency on `016`.
 
 Exact-policy grants are required at the Ella chat stream, Hermes onboarding
 ensure, voice-session issuance, necklace/web transcription sockets, direct TTS,

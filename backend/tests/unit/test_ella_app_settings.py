@@ -83,7 +83,7 @@ def _load_router(monkeypatch, stored_voice=None):
 
     app = FastAPI()
     app.include_router(module.router)
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "uid-1"
+    app.dependency_overrides[auth.get_writable_user_uid] = lambda: "uid-1"
     return TestClient(app), state
 
 

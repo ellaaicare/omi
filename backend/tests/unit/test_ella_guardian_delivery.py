@@ -546,7 +546,7 @@ def test_guardian_alerts_endpoint_excludes_ack_only_rows_but_keeps_real_wake_wor
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.auth.get_writable_user_uid] = lambda: "auth-uid"
 
     response = TestClient(app).get("/v1/ella/guardian-alerts?limit=50")
 
@@ -579,7 +579,7 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.auth.get_writable_user_uid] = lambda: "auth-uid"
     client = TestClient(app)
 
     response = client.get("/v1/ella/guardian-alerts?limit=50&uid=other-user")

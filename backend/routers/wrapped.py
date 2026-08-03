@@ -45,7 +45,7 @@ def _run_wrapped_generation(uid: str, year: int):
 
 
 @router.get('/v1/wrapped/{year}', response_model=WrappedStatusResponse, tags=['wrapped'])
-def get_wrapped_status(year: int, uid: str = Depends(auth.get_current_user_uid)):
+def get_wrapped_status(year: int, uid: str = Depends(auth.get_writable_user_uid)):
     """
     Get the status and result of wrapped generation for a given year.
 
@@ -77,7 +77,7 @@ def get_wrapped_status(year: int, uid: str = Depends(auth.get_current_user_uid))
 
 
 @router.post('/v1/wrapped/{year}/generate', response_model=GenerateWrappedResponse, tags=['wrapped'])
-def generate_wrapped(year: int, uid: str = Depends(auth.get_current_user_uid)):
+def generate_wrapped(year: int, uid: str = Depends(auth.get_writable_user_uid)):
     """
     Start wrapped generation for a given year.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any, Callable
 
 from fastapi import HTTPException
@@ -18,6 +19,18 @@ class AccountDeletionResponse:
     body: dict[str, Any]
 
 
+def ella_authority_persistence_enabled() -> bool:
+    """Return the explicit deletion-authority boundary without probing schema.
+
+    A missing/invalid enabled configuration remains enabled so database
+    failures cannot silently downgrade deletion to the legacy destructive path.
+    """
+    configured = os.getenv("ELLA_POSTGRES_AUTHORITY_ENABLED")
+    if configured is not None:
+        return configured.strip().lower() != "false"
+    return os.getenv("ELLA_ENABLED", "true").strip().lower() != "false"
+
+
 async def execute_account_deletion(
     uid: str,
     *,
@@ -25,13 +38,24 @@ async def execute_account_deletion(
     delete_firebase: Callable[[str], Any],
 ) -> AccountDeletionResponse:
     """Advance every safe deletion stage once and return typed progress."""
-    try:
-        state = await account_deletion_db.quarantine_account_for_deletion(uid)
-    except account_deletion_db.AccountDeletionUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": exc.code, "retryable": True},
-        ) from exc
+    authority_enabled = ella_authority_persistence_enabled()
+    if authority_enabled:
+        try:
+            state = await account_deletion_db.quarantine_account_for_deletion(uid)
+        except account_deletion_db.AccountDeletionUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": exc.code, "retryable": True},
+            ) from exc
+    else:
+        state = account_deletion_db.AccountDeletionState(
+            user_found=False,
+            capacity_released=False,
+            authority_quarantined=False,
+            external_cleanup_required=(),
+            external_cleanup_references=(),
+            counts={},
+        )
 
     remaining = set(state.external_cleanup_required)
     try:
@@ -39,7 +63,7 @@ async def execute_account_deletion(
     except Exception:
         remaining.add("firestore_data")
 
-    if not remaining:
+    if authority_enabled and not remaining:
         try:
             await account_deletion_db.finalize_account_deletion(uid)
         except account_deletion_db.AccountDeletionUnavailable as exc:
@@ -70,6 +94,7 @@ async def execute_account_deletion(
                 "deletion_receipt": build_account_deletion_receipt(
                     status="pending",
                     remaining=ordered_remaining,
+                    external_cleanup_references=state.external_cleanup_references,
                 ),
             },
         )

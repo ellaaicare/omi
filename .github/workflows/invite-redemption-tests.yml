@@ -34,6 +34,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -82,6 +83,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -187,7 +189,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 148
+          test "$collected" -eq 155
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -208,6 +210,10 @@ jobs:
             "tests/unit/test_account_deletion.py::test_deletion_service_completes_missing_external_profile_and_is_repeatable"
             "tests/unit/test_account_deletion.py::test_deletion_service_converts_firestore_and_firebase_failures_to_resumable_state"
             "tests/unit/test_account_deletion.py::test_firebase_delete_lost_ack_converges_only_after_authoritative_absence"
+            "tests/unit/test_account_deletion.py::test_production_route_uses_legacy_resumable_deletion_when_ella_authority_is_explicitly_disabled"
+            "tests/unit/test_account_deletion.py::test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable"
+            "tests/unit/test_account_deletion.py::test_retained_firebase_subject_is_fenced_from_authenticated_content_writes"
+            "tests/unit/test_account_deletion.py::test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes"
             "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
             "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
@@ -227,6 +233,9 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_service_handles_partial_provision_and_repeat_without_operator"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_prerequisite_failure_is_atomic[017_add_provider_attempt_deletion_fence.sql-leaked_relations4]"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
           for required_id in "${required_ids[@]}"; do

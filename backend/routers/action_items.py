@@ -69,7 +69,7 @@ def _get_valid_action_item(uid: str, action_item_id: str) -> dict:
 
 
 @router.post("/v1/action-items", response_model=ActionItemResponse, tags=['action-items'])
-def create_action_item(request: CreateActionItemRequest, uid: str = Depends(auth.get_current_user_uid)):
+def create_action_item(request: CreateActionItemRequest, uid: str = Depends(auth.get_writable_user_uid)):
     """Create a new action item."""
     action_item_data = {
         'description': request.description,
@@ -111,7 +111,7 @@ def get_action_items(
     end_date: Optional[datetime] = Query(None, description="Filter by creation end date (inclusive)"),
     due_start_date: Optional[datetime] = Query(None, description="Filter by due start date (inclusive)"),
     due_end_date: Optional[datetime] = Query(None, description="Filter by due end date (inclusive)"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Get action items for the current user."""
     action_items = action_items_db.get_action_items(
@@ -152,7 +152,7 @@ def get_action_items(
 
 
 @router.get("/v1/action-items/{action_item_id}", response_model=ActionItemResponse, tags=['action-items'])
-def get_action_item(action_item_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_action_item(action_item_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get a specific action item by ID."""
     action_item = _get_valid_action_item(uid, action_item_id)
 
@@ -164,7 +164,7 @@ def get_action_item(action_item_id: str, uid: str = Depends(auth.get_current_use
 
 @router.patch("/v1/action-items/{action_item_id}", response_model=ActionItemResponse, tags=['action-items'])
 def update_action_item(
-    action_item_id: str, request: UpdateActionItemRequest, uid: str = Depends(auth.get_current_user_uid)
+    action_item_id: str, request: UpdateActionItemRequest, uid: str = Depends(auth.get_writable_user_uid)
 ):
     """Update an action item."""
     # Check if action item exists
@@ -221,7 +221,7 @@ def update_action_item(
 def toggle_action_item_completion(
     action_item_id: str,
     completed: bool = Query(description="Whether to mark as completed or not"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Mark an action item as completed or uncompleted."""
     # Check if action item exists
@@ -240,7 +240,7 @@ def toggle_action_item_completion(
 
 
 @router.delete("/v1/action-items/{action_item_id}", status_code=204, tags=['action-items'])
-def delete_action_item(action_item_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def delete_action_item(action_item_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Delete an action item."""
     _get_valid_action_item(uid, action_item_id)
     success = action_items_db.delete_action_item(uid, action_item_id)
@@ -259,7 +259,7 @@ def delete_action_item(action_item_id: str, uid: str = Depends(auth.get_current_
 
 
 @router.get("/v1/conversations/{conversation_id}/action-items", tags=['action-items'])
-def get_conversation_action_items(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_conversation_action_items(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get all action items for a specific conversation."""
     action_items = action_items_db.get_action_items_by_conversation(uid, conversation_id)
     response_items = [ActionItemResponse(**item) for item in action_items]
@@ -268,7 +268,7 @@ def get_conversation_action_items(conversation_id: str, uid: str = Depends(auth.
 
 
 @router.delete("/v1/conversations/{conversation_id}/action-items", status_code=204, tags=['action-items'])
-def delete_conversation_action_items(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def delete_conversation_action_items(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Delete all action items for a specific conversation."""
     deleted_count = action_items_db.delete_action_items_for_conversation(uid, conversation_id)
 
@@ -282,7 +282,7 @@ def delete_conversation_action_items(conversation_id: str, uid: str = Depends(au
 
 @router.post("/v1/action-items/batch", tags=['action-items'])
 def create_action_items_batch(
-    action_items: List[CreateActionItemRequest], uid: str = Depends(auth.get_current_user_uid)
+    action_items: List[CreateActionItemRequest], uid: str = Depends(auth.get_writable_user_uid)
 ):
     """Create multiple action items in a batch."""
     if not action_items:

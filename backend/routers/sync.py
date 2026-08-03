@@ -131,7 +131,7 @@ def _precache_audio_file(uid: str, conversation_id: str, audio_file: dict, fill_
 @router.post("/v1/sync/audio/{conversation_id}/precache", tags=['v1'])
 def precache_conversation_audio_endpoint(
     conversation_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Warm the audio cache for a conversation.
@@ -167,7 +167,7 @@ def precache_conversation_audio_endpoint(
 @router.get("/v1/sync/audio/{conversation_id}/urls", tags=['v1'])
 def get_audio_signed_urls_endpoint(
     conversation_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Get signed URLs for all audio files in a conversation.
@@ -271,7 +271,7 @@ def download_audio_file_endpoint(
     audio_file_id: str,
     request: Request,
     format: str = Query(default="wav", regex="^(wav|pcm)$"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Download audio file from private cloud sync in the specified format.

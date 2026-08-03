@@ -64,7 +64,7 @@ class ProcessConversationRequest(BaseModel):
     dependencies=[Depends(require_current_ai_consent)],
 )
 def process_in_progress_conversation(
-    request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
+    request: ProcessConversationRequest = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     conversation = retrieve_in_progress_conversation(uid)
     if not conversation:
@@ -102,7 +102,7 @@ def reprocess_conversation(
     conversation_id: str,
     language_code: Optional[str] = None,
     app_id: Optional[str] = None,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Whenever a user wants to reprocess a conversation, or wants to force process a discarded one
@@ -136,7 +136,7 @@ def get_conversations(
     end_date: Optional[datetime] = Query(None, description="Filter by end date (inclusive)"),
     folder_id: Optional[str] = Query(None, description="Filter by folder ID"),
     starred: Optional[bool] = Query(None, description="Filter by starred status"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     print('get_conversations', uid, limit, offset, statuses, folder_id, starred)
     # force convos statuses to processing, completed on the empty filter
@@ -166,13 +166,13 @@ def get_conversations(
 
 
 @router.get("/v1/conversations/{conversation_id}", response_model=Conversation, tags=['conversations'])
-def get_conversation_by_id(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_conversation_by_id(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     print('get_conversation_by_id', uid, conversation_id)
     return _get_valid_conversation_by_id(uid, conversation_id)
 
 
 @router.patch("/v1/conversations/{conversation_id}/title", tags=['conversations'])
-def patch_conversation_title(conversation_id: str, title: str, uid: str = Depends(auth.get_current_user_uid)):
+def patch_conversation_title(conversation_id: str, title: str, uid: str = Depends(auth.get_writable_user_uid)):
     _get_valid_conversation_by_id(uid, conversation_id)
     conversations_db.update_conversation_title(uid, conversation_id, title)
     return {'status': 'Ok'}
@@ -181,7 +181,7 @@ def patch_conversation_title(conversation_id: str, title: str, uid: str = Depend
 @router.get(
     "/v1/conversations/{conversation_id}/photos", response_model=List[ConversationPhoto], tags=['conversations']
 )
-def get_conversation_photos(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_conversation_photos(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     _get_valid_conversation_by_id(uid, conversation_id)
     return conversations_db.get_conversation_photos(uid, conversation_id)
 
@@ -191,13 +191,13 @@ def get_conversation_photos(conversation_id: str, uid: str = Depends(auth.get_cu
     response_model=dict[str, List[TranscriptSegment]],
     tags=['conversations'],
 )
-def get_conversation_transcripts_by_models(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_conversation_transcripts_by_models(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     _get_valid_conversation_by_id(uid, conversation_id)
     return conversations_db.get_conversation_transcripts_by_model(uid, conversation_id)
 
 
 @router.delete("/v1/conversations/{conversation_id}", status_code=204, tags=['conversations'])
-def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     print('delete_conversation', conversation_id, uid)
     conversations_db.delete_conversation(uid, conversation_id)
     delete_vector(uid, conversation_id)
@@ -205,14 +205,14 @@ def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_curren
 
 
 @router.get("/v1/conversations/{conversation_id}/recording", response_model=dict, tags=['conversations'])
-def conversation_has_audio_recording(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def conversation_has_audio_recording(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     _get_valid_conversation_by_id(uid, conversation_id)
     return {'has_recording': get_conversation_recording_if_exists(uid, conversation_id) is not None}
 
 
 @router.patch("/v1/conversations/{conversation_id}/events", response_model=dict, tags=['conversations'])
 def set_conversation_events_state(
-    conversation_id: str, data: SetConversationEventsStateRequest, uid: str = Depends(auth.get_current_user_uid)
+    conversation_id: str, data: SetConversationEventsStateRequest, uid: str = Depends(auth.get_writable_user_uid)
 ):
     conversation = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation)
@@ -228,7 +228,7 @@ def set_conversation_events_state(
 
 @router.patch("/v1/conversations/{conversation_id}/action-items", response_model=dict, tags=['conversations'])
 def set_action_item_status(
-    data: SetConversationActionItemsStateRequest, conversation_id: str, uid=Depends(auth.get_current_user_uid)
+    data: SetConversationActionItemsStateRequest, conversation_id: str, uid=Depends(auth.get_writable_user_uid)
 ):
     conversation = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation)
@@ -289,7 +289,7 @@ def set_action_item_status(
     "/v1/conversations/{conversation_id}/action-items/{action_item_idx}", response_model=dict, tags=['conversations']
 )
 def update_action_item_description(
-    conversation_id: str, data: UpdateActionItemDescriptionRequest, uid=Depends(auth.get_current_user_uid)
+    conversation_id: str, data: UpdateActionItemDescriptionRequest, uid=Depends(auth.get_writable_user_uid)
 ):
     conversation = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation)
@@ -321,7 +321,7 @@ def update_action_item_description(
 
 
 @router.delete("/v1/conversations/{conversation_id}/action-items", response_model=dict, tags=['conversations'])
-def delete_action_item(data: DeleteActionItemRequest, conversation_id: str, uid=Depends(auth.get_current_user_uid)):
+def delete_action_item(data: DeleteActionItemRequest, conversation_id: str, uid=Depends(auth.get_writable_user_uid)):
     conversation = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation)
     action_items = conversation.structured.action_items
@@ -352,7 +352,7 @@ def set_assignee_conversation_segment(
     assign_type: str,
     value: Optional[str] = None,
     use_for_speech_training: bool = True,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Another complex endpoint.
@@ -427,7 +427,7 @@ def set_assignee_conversation_segment(
     assign_type: str,
     value: Optional[str] = None,
     use_for_speech_training: bool = True,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Another complex endpoint.
@@ -513,7 +513,7 @@ def assign_segments_bulk(
     conversation_id: str,
     data: BulkAssignSegmentsRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     conversation = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation)
@@ -560,7 +560,7 @@ def assign_segments_bulk(
 
 @router.patch('/v1/conversations/{conversation_id}/visibility', tags=['conversations'])
 def set_conversation_visibility(
-    conversation_id: str, value: ConversationVisibility, uid: str = Depends(auth.get_current_user_uid)
+    conversation_id: str, value: ConversationVisibility, uid: str = Depends(auth.get_writable_user_uid)
 ):
     print('update_conversation_visibility', conversation_id, value, uid)
     _get_valid_conversation_by_id(uid, conversation_id)
@@ -576,7 +576,7 @@ def set_conversation_visibility(
 
 
 @router.patch('/v1/conversations/{conversation_id}/starred', tags=['conversations'])
-def set_conversation_starred(conversation_id: str, starred: bool, uid: str = Depends(auth.get_current_user_uid)):
+def set_conversation_starred(conversation_id: str, starred: bool, uid: str = Depends(auth.get_writable_user_uid)):
     print('update_conversation_starred', conversation_id, starred, uid)
     _get_valid_conversation_by_id(uid, conversation_id)
     conversations_db.set_conversation_starred(uid, conversation_id, starred)
@@ -626,7 +626,7 @@ def get_public_conversations(offset: int = 0, limit: int = 1000):
 
 
 @router.post("/v1/conversations/search", response_model=dict, tags=['conversations'])
-def search_conversations_endpoint(search_request: SearchRequest, uid: str = Depends(auth.get_current_user_uid)):
+def search_conversations_endpoint(search_request: SearchRequest, uid: str = Depends(auth.get_writable_user_uid)):
     # Convert ISO datetime strings to Unix timestamps if provided
     start_timestamp = None
     end_timestamp = None
@@ -649,7 +649,7 @@ def search_conversations_endpoint(search_request: SearchRequest, uid: str = Depe
 
 
 @router.get("/v1/conversations/{conversation_id}/suggested-apps", response_model=dict, tags=['conversations'])
-def get_conversation_suggested_apps(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_conversation_suggested_apps(conversation_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     from utils.apps import get_available_apps, get_available_app_by_id_with_reviews
     from models.app import App
 
@@ -688,7 +688,7 @@ def get_conversation_suggested_apps(conversation_id: str, uid: str = Depends(aut
     tags=['conversations'],
     dependencies=[Depends(require_current_ai_consent)],
 )
-def test_prompt(conversation_id: str, request: TestPromptRequest, uid: str = Depends(auth.get_current_user_uid)):
+def test_prompt(conversation_id: str, request: TestPromptRequest, uid: str = Depends(auth.get_writable_user_uid)):
     conversation_data = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation_data)
 
@@ -717,7 +717,7 @@ def test_prompt(conversation_id: str, request: TestPromptRequest, uid: str = Dep
 async def merge_conversations(
     request: MergeConversationsRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Merge multiple conversations into a new conversation (async).

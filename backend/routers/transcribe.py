@@ -2627,6 +2627,7 @@ async def web_listen_handler(
     # Authenticate via first message
     try:
         uid = auth.get_current_user_uid_from_ws_message(first_message)
+        await auth.assert_authenticated_user_writable(uid)
     except ValueError as e:
         await websocket.close(code=1008, reason=str(e))
         return

@@ -101,7 +101,7 @@ def _retry_conversation(status="processing", request_id="84eb13fa-31d9-40ba-a742
 def _retry_api_client():
     app = FastAPI()
     app.include_router(corrections.router)
-    app.dependency_overrides[corrections.auth.get_current_user_uid] = lambda: "authenticated-user"
+    app.dependency_overrides[corrections.auth.get_writable_user_uid] = lambda: "authenticated-user"
     return app, TestClient(app)
 
 

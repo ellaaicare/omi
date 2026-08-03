@@ -1216,7 +1216,7 @@ async def create_voice_session(
 @entitlement_router.get("/v1/entitlement")
 @router.get("/entitlement")
 async def get_voice_entitlement(
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Return the stable frontend contract without exposing operator notes."""
     contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)

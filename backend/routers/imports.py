@@ -29,7 +29,7 @@ TEMP_DIR = '_temp'
 async def import_limitless_data(
     file: UploadFile = File(...),
     language: str = 'en',
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Start a Limitless data import from a ZIP file export.
@@ -82,7 +82,7 @@ async def import_limitless_data(
     tags=['import'],
 )
 async def get_import_jobs(
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
     limit: int = 50,
 ):
     """
@@ -114,7 +114,7 @@ async def get_import_jobs(
 )
 async def get_import_job_status(
     job_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Get the status of a specific import job.
@@ -150,7 +150,7 @@ async def get_import_job_status(
     tags=['import'],
 )
 async def delete_limitless_conversations(
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Delete all conversations imported from Limitless.

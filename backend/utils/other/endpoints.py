@@ -2,10 +2,12 @@ import json
 import os
 import time
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 from fastapi import Request
 from firebase_admin import auth
 from firebase_admin.auth import InvalidIdTokenError, UserNotFoundError
+
+from database import voice_canary
 
 
 def get_user(uid: str):
@@ -46,8 +48,8 @@ def verify_token(token: str) -> str:
         raise InvalidIdTokenError(str(e))
 
 
-def get_current_user_uid(authorization: str = Header(None)):
-    """FastAPI dependency for HTTP endpoints with Authorization header."""
+def get_authenticated_user_uid(authorization: str = Header(None)) -> str:
+    """Verify the Firebase subject without consulting optional Ella storage."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header not found")
     elif len(str(authorization).split(' ')) != 2:
@@ -61,6 +63,43 @@ def get_current_user_uid(authorization: str = Header(None)):
     except InvalidIdTokenError as e:
         print(f"Error verifying Firebase ID token: {e}", flush=True)
         raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+
+def _ella_authority_persistence_enabled() -> bool:
+    configured = os.getenv("ELLA_POSTGRES_AUTHORITY_ENABLED")
+    if configured is not None:
+        return configured.strip().lower() != "false"
+    return os.getenv("ELLA_ENABLED", "true").strip().lower() != "false"
+
+
+async def assert_authenticated_user_writable(uid: str) -> str:
+    """Reject retained Firebase subjects once PostgreSQL is tombstoned."""
+    if not _ella_authority_persistence_enabled():
+        return uid
+    try:
+        pool = await voice_canary.get_pool()
+        status = await pool.fetchval("SELECT status FROM users WHERE omi_uid = $1", uid)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "account_authority_unavailable", "retryable": True},
+        ) from exc
+    if str(status or "") in {"DELETION_PENDING", "DELETED"}:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "account_write_forbidden", "retryable": False},
+        )
+    return uid
+
+
+def get_current_user_uid(authorization: str = Header(None)) -> str:
+    """Backward-compatible raw Firebase authentication dependency."""
+    return get_authenticated_user_uid(authorization)
+
+
+async def get_writable_user_uid(uid: str = Depends(get_current_user_uid)) -> str:
+    """Fence normal authenticated content access against deletion tombstones."""
+    return await assert_authenticated_user_writable(uid)
 
 
 def get_current_user_uid_from_ws_message(message: dict) -> str:

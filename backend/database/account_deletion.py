@@ -23,6 +23,7 @@ class AccountDeletionState:
     capacity_released: bool
     authority_quarantined: bool
     external_cleanup_required: tuple[str, ...]
+    external_cleanup_references: tuple[str, ...]
     counts: dict[str, int]
 
 
@@ -53,6 +54,7 @@ async def quarantine_account_for_deletion(uid: str) -> AccountDeletionState:
                         capacity_released=True,
                         authority_quarantined=True,
                         external_cleanup_required=(),
+                        external_cleanup_references=(),
                         counts={},
                     )
                 raise
@@ -160,6 +162,22 @@ async def quarantine_account_for_deletion(uid: str) -> AccountDeletionState:
                         user_id,
                     )
 
+                photon_result = await connection.execute(
+                    """
+                    UPDATE ella_photon_channel_bindings
+                    SET status = 'quarantined',
+                        quarantined_at = COALESCE(quarantined_at, CURRENT_TIMESTAMP),
+                        quarantine_reason = 'account_deletion_requested',
+                        sidecar_connection_key = NULL,
+                        sidecar_connected_at = NULL,
+                        oauth_expires_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                      AND status <> 'quarantined'
+                    """,
+                    user_id,
+                )
+
                 user_result = await connection.execute(
                     """
                     UPDATE users
@@ -188,24 +206,37 @@ async def quarantine_account_for_deletion(uid: str) -> AccountDeletionState:
                     """,
                     user_id,
                 )
+                attempt_rows = await connection.fetch(
+                    """
+                    SELECT correlation_ref
+                    FROM ella_provider_attempts
+                    WHERE user_id = $1
+                      AND proof_state = 'unproven'
+                    ORDER BY correlation_ref
+                    """,
+                    user_id,
+                )
                 external_cleanup_required: tuple[str, ...] = ()
-                if provider_rows:
+                if provider_rows or attempt_rows:
                     external_cleanup_required = (
                         "hermes_profile",
                         "honcho_tenancy",
                         "runtime_registry",
                     )
+                external_cleanup_references = tuple(str(row["correlation_ref"]) for row in attempt_rows)
 
                 return AccountDeletionState(
                     user_found=True,
                     capacity_released=True,
                     authority_quarantined=True,
                     external_cleanup_required=external_cleanup_required,
+                    external_cleanup_references=external_cleanup_references,
                     counts={
                         "consent_authorities": _affected(consent_result),
                         "invitations": _affected(invitation_result),
                         "capacity_reservations": _affected(capacity_result),
                         "agent_clusters": _affected(cluster_result),
+                        "photon_bindings": _affected(photon_result),
                         "users": _affected(user_result),
                     },
                 )
@@ -242,10 +273,15 @@ async def finalize_account_deletion(uid: str) -> bool:
                 )
                 external_count = await connection.fetchval(
                     """
-                    SELECT COUNT(*)
-                    FROM ella_runtime_bindings
-                    WHERE user_id = $1
-                      AND provider IN ('hermes', 'hermes_cloud')
+                    SELECT
+                        (SELECT COUNT(*)
+                         FROM ella_runtime_bindings
+                         WHERE user_id = $1
+                           AND provider IN ('hermes', 'hermes_cloud'))
+                      + (SELECT COUNT(*)
+                         FROM ella_provider_attempts
+                         WHERE user_id = $1
+                           AND proof_state = 'unproven')
                     """,
                     user_id,
                 )

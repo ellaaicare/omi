@@ -26,7 +26,7 @@ from database.runtime_targets import RuntimeTargetLineage, SELF_HOSTED_RUNTIME_M
 from ella.services import ai_consent
 from ella.services import account_deletion as account_deletion_service
 from ella.services import consent_authority, invitation_authority
-from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
+from ella.services.provisioning import HermesProvisionClient, ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
@@ -225,6 +225,7 @@ async def _run_with_database(
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_provider_attempt_deletion_fence.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(
@@ -4190,5 +4191,414 @@ def test_account_deletion_service_handles_partial_provision_and_repeat_without_o
             ("firestore", uid),
             ("firebase", uid),
         ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges(monkeypatch):
+    class LostAcknowledgementClient(HermesProvisionClient):
+        provider_created = False
+
+        @staticmethod
+        def resolve_authority(_expected_snapshot=None):
+            return None
+
+        @classmethod
+        def snapshot_authority(cls, _expected_snapshot=None):
+            return None
+
+        async def provision(self, _identity, _target_schema_version, **kwargs):
+            assert kwargs["idempotency_key"]
+            self.provider_created = True
+            raise ProvisioningError("provision_service_timeout", retryable=True)
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "account-delete-lost-provider-ack"
+        email = "account-delete-lost-provider-ack@example.test"
+        await _prepare_deletion_account(
+            pool,
+            uid=uid,
+            email=email,
+            code="FGHJ-9ABC",
+            activate_runtime=False,
+        )
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        async with pool.acquire() as connection:
+            job = dict(
+                await connection.fetchrow(
+                    """
+                    INSERT INTO ella_provisioning_jobs (user_id, target_schema_version, state, stage)
+                    SELECT id, 'hermes-user-v1', 'provisioning', 'profile_ready'
+                    FROM users WHERE omi_uid = $1
+                    RETURNING *
+                    """,
+                    uid,
+                )
+            )
+
+        monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+        monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+        client = LostAcknowledgementClient()
+        coordinator = ProvisioningCoordinator(EllaProvisioningRepository(pool), client=client)
+        await coordinator.process_claimed_job(
+            job=job,
+            identity=VerifiedIdentity(uid=uid, email=email, name="Synthetic", timezone="UTC"),
+        )
+        assert client.provider_created is True
+
+        async with pool.acquire() as connection:
+            marker = dict(
+                await connection.fetchrow(
+                    """
+                    SELECT proof_state, content_free, idempotency_key, correlation_ref
+                    FROM ella_provider_attempts
+                    WHERE provisioning_job_id = $1
+                    """,
+                    job["id"],
+                )
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_runtime_bindings WHERE user_id = (SELECT id FROM users WHERE omi_uid = $1)",
+                    uid,
+                )
+                == 0
+            )
+        assert marker["proof_state"] == "unproven"
+        assert marker["content_free"] is True
+        assert str(marker["idempotency_key"])
+        assert str(marker["correlation_ref"]).startswith("ella-ext-")
+
+        destructive_calls = []
+        for _attempt in range(2):
+            response = await account_deletion_service.execute_account_deletion(
+                uid,
+                delete_firestore=lambda exact_uid: destructive_calls.append(("firestore", exact_uid)),
+                delete_firebase=lambda exact_uid: destructive_calls.append(("firebase", exact_uid)),
+            )
+            assert response.status_code == 202
+            assert response.body["status"] == "deletion_pending"
+            assert response.body["deletion_receipt"]["external_cleanup_references"] == [marker["correlation_ref"]]
+            assert "firebase" not in {kind for kind, _uid in destructive_calls}
+
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_provider_attempts
+                SET proof_state = 'absence_proven',
+                    proved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE provisioning_job_id = $1
+                """,
+                job["id"],
+            )
+        completed = await account_deletion_service.execute_account_deletion(
+            uid,
+            delete_firestore=lambda exact_uid: destructive_calls.append(("firestore", exact_uid)),
+            delete_firebase=lambda exact_uid: destructive_calls.append(("firebase", exact_uid)),
+        )
+        assert completed.status_code == 200
+        assert destructive_calls[-1] == ("firebase", uid)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "account-delete-writer-fence"
+        email = "account-delete-writer-fence@example.test"
+        await _prepare_deletion_account(
+            pool,
+            uid=uid,
+            email=email,
+            code="GHJK-ABCD",
+            activate_runtime=True,
+        )
+        repository = EllaProvisioningRepository(pool)
+        async with pool.acquire() as connection:
+            user_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET active = false, status = 'disabled', updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND active = true
+                """,
+                user_id,
+            )
+            photon_runtime_binding_id = await connection.fetchval(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id, role, provider,
+                    profile_name, agent_id, runtime_instance_id, api_base_url_ref,
+                    api_key_ref, honcho_workspace, observed_peer, observer_peer,
+                    template_version, prompt_pack_version, prompt_artifact_receipt,
+                    model_policy_version, voice_policy_version, expected_model,
+                    health_state, status, active, runtime_target_mode,
+                    target_endpoint_ref, target_credential_ref
+                ) VALUES (
+                    $1, $1, $1, 'user', 'hermes_cloud', $2, 'hermes-cloud', $3,
+                    'env:ELLA_TEST_ENDPOINT', 'env:ELLA_TEST_KEY', $4, $5, $6,
+                    'template-v1', 'prompt-v1', $7::jsonb, 'model-v1', 'voice-v1',
+                    'gpt-5.6-terra', 'healthy', 'active', true,
+                    'hermes-cloud-photon', 'env:ELLA_TEST_ENDPOINT', 'env:ELLA_TEST_KEY'
+                ) RETURNING id
+                """,
+                user_id,
+                f"photon-{uid}",
+                f"runtime-{uid}",
+                f"photon-workspace-{uid}",
+                f"photon-observed-{uid}",
+                f"photon-observer-{uid}",
+                json.dumps(_prompt_receipt()),
+            )
+            photon_binding_id = await connection.fetchval(
+                """
+                INSERT INTO ella_photon_channel_bindings (
+                    runtime_binding_id, user_id, status, line_identity_key,
+                    contact_identity_key, policy_commit_sha, command_tier_version,
+                    daily_message_limit, daily_initiation_limit
+                ) VALUES ($1, $2, 'enabled', $3, $4, $5, 'tier-v1', 10, 2)
+                RETURNING id
+                """,
+                photon_runtime_binding_id,
+                user_id,
+                "1" * 64,
+                "2" * 64,
+                "a" * 40,
+            )
+            job_id = await connection.fetchval(
+                """
+                INSERT INTO ella_provisioning_jobs (user_id, target_schema_version)
+                VALUES ($1, 'queued-after-delete-v1') RETURNING id
+                """,
+                user_id,
+            )
+            claim_token = uuid.uuid4()
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET claim_job_id = $2, claim_token = $3
+                WHERE id = $1
+                """,
+                photon_runtime_binding_id,
+                job_id,
+                claim_token,
+            )
+            await connection.execute(
+                """
+                CREATE FUNCTION delay_account_deletion_tombstone() RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.status = 'DELETION_PENDING' THEN PERFORM pg_sleep(0.5); END IF;
+                    RETURN NEW;
+                END
+                $$ LANGUAGE plpgsql
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER delay_account_deletion_tombstone
+                BEFORE UPDATE ON users
+                FOR EACH ROW EXECUTE FUNCTION delay_account_deletion_tombstone()
+                """
+            )
+
+        positive = await repository.resolve_photon_channel_binding(
+            line_identity_key="1" * 64,
+            contact_identity_key="2" * 64,
+        )
+        assert positive and positive["omi_uid"] == uid
+
+        deletion = asyncio.create_task(account_deletion.quarantine_account_for_deletion(uid))
+        await asyncio.sleep(0.05)
+        queued_stage = asyncio.create_task(
+            repository.stage_runtime_binding(uid=uid, binding=_local_runtime_binding(uid))
+        )
+        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+        await _wait_for_operator_authority_waiter(pool, owner)
+        await deletion
+        with pytest.raises(authority_advisory_lock.AuthorityLockError) as blocked_stage:
+            await queued_stage
+        assert blocked_stage.value.code == "authority_write_user_not_active"
+
+        for _attempt in range(2):
+            assert (
+                await repository.resolve_photon_channel_binding(
+                    line_identity_key="1" * 64,
+                    contact_identity_key="2" * 64,
+                )
+                is None
+            )
+
+        with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+            await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.activate_user(uid)
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.update_job(
+                job_id=str(job_id),
+                state="ready",
+                stage="active",
+                retryable=False,
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.acquire_job(
+                uid=uid,
+                target_schema_version="post-delete-job-v1",
+                client_request_id=None,
+                request_payload_hash="0" * 64,
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.claim_job(str(job_id))
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.begin_provider_attempt(uid=uid, job_id=str(job_id))
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.record_cloud_side_effect(
+                uid=uid,
+                job_id=str(job_id),
+                claim_token=str(claim_token),
+                effect={"kind": "synthetic"},
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.record_cloud_rollback(
+                job_id=str(job_id),
+                state="blocked",
+                rollback_receipt={"content_free": True},
+                error_code="synthetic",
+                retryable=False,
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.record_photon_sidecar_preflight(
+                photon_binding_id=str(photon_binding_id),
+                connection_key="synthetic-connection",
+                oauth_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                receipt={"content_free": True},
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.ensure_user_identity(
+                uid=uid,
+                email=str(await pool.fetchval("SELECT email FROM users WHERE omi_uid = $1", uid)),
+                name="Resurrected",
+                timezone_name="UTC",
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await voice_canary.upsert_entitlement(
+                uid=uid,
+                plan="resurrected",
+                daily_limit_s=1,
+                monthly_limit_s=1,
+                max_session_s=1,
+                max_concurrent=1,
+                soft_limit_ratio=0.8,
+                provider_allowlist=["hermes"],
+                mode_allowlist=["hermes-chat"],
+                fallback_policy={"enabled": False, "order": []},
+                operator_note="synthetic",
+            )
+
+        async with pool.acquire() as connection:
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    """
+                    INSERT INTO ella_runtime_session_scopes (
+                        binding_id, user_id, role, channel, session_key
+                    ) VALUES ($1, $2, 'user', 'chat', $3)
+                    """,
+                    photon_runtime_binding_id,
+                    user_id,
+                    f"post-delete-{uid}",
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    """
+                    INSERT INTO ella_runtime_ingestion_receipts (
+                        binding_id, canonical_event_id, source_identity, provenance
+                    ) VALUES ($1, 'post-delete-event', 'post-delete-source', 'synthetic')
+                    """,
+                    photon_runtime_binding_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    """
+                    INSERT INTO ella_photon_message_receipts (
+                        photon_binding_id, inbound_provider_message_key,
+                        inbound_payload_sha256, consent_grant_epoch
+                    ) VALUES ($1, $2, $3, $4)
+                    """,
+                    photon_binding_id,
+                    "3" * 64,
+                    "4" * 64,
+                    "post-delete-grant-epoch",
+                )
+
+        class FirestoreDocument:
+            exists = False
+            writes = []
+
+            def get(self):
+                return self
+
+            def set(self, payload, *, merge):
+                self.writes.append((payload, merge))
+
+        class Firestore:
+            document_ref = FirestoreDocument()
+
+            def collection(self, _name):
+                return self
+
+            def document(self, _uid):
+                return self.document_ref
+
+        fenced_firestore_repository = EllaProvisioningRepository(pool, firestore_db=Firestore())
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await fenced_firestore_repository.ensure_omi_user_document(
+                uid=uid,
+                email=email,
+                name="Resurrected",
+                timezone_name="UTC",
+            )
+        assert FirestoreDocument.writes == []
+
+        async with pool.acquire() as connection:
+            state = dict(
+                await connection.fetchrow(
+                    """
+                        SELECT u.status, u.identities, entitlement.status AS entitlement_status,
+                               consent.decision AS consent_decision,
+                               photon.status AS photon_status, binding.active,
+                               job.state AS job_state,
+                               (SELECT array_agg(target_status ORDER BY target_status)
+                                FROM (
+                                    SELECT DISTINCT target.status AS target_status
+                                    FROM ella_runtime_targets target
+                                    WHERE target.account_user_id = u.id
+                                       OR target.profile_user_id = u.id
+                                ) statuses) AS target_statuses,
+                               (SELECT COUNT(*)
+                                FROM ella_runtime_bindings all_bindings
+                                WHERE all_bindings.user_id = u.id) AS binding_count
+                        FROM users u
+                        JOIN voice_entitlements entitlement ON entitlement.uid = u.omi_uid
+                        JOIN ella_managed_cloud_consent_authority consent ON consent.user_id = u.id
+                    JOIN ella_photon_channel_bindings photon ON photon.user_id = u.id
+                    JOIN ella_runtime_bindings binding ON binding.id = photon.runtime_binding_id
+                    JOIN ella_provisioning_jobs job ON job.id = $2
+                    WHERE u.id = $1
+                    """,
+                    user_id,
+                    job_id,
+                )
+            )
+        assert state == {
+            "status": "DELETION_PENDING",
+            "identities": "{}",
+            "entitlement_status": "revoked",
+            "consent_decision": "revoked",
+            "photon_status": "quarantined",
+            "active": False,
+            "job_state": "blocked",
+            "target_statuses": ["revoked"],
+            "binding_count": 2,
+        }
 
     asyncio.run(_run_with_database(scenario))

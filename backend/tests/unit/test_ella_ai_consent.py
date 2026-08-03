@@ -1003,7 +1003,7 @@ def test_policy_is_public_but_status_and_receipts_require_firebase_auth(monkeypa
     assert client.get("/v1/users/ai-consent").status_code == 401
     assert client.get("/v1/users/ai-consent/receipts/aicr_unknown").status_code == 401
 
-    app.dependency_overrides[consent.auth.get_current_user_uid] = lambda: "user-a"
+    app.dependency_overrides[consent.auth.get_writable_user_uid] = lambda: "user-a"
     status_response = client.get("/v1/users/ai-consent")
     assert status_response.status_code == 200
     assert status_response.json()["subject_uid"] == "user-a"
@@ -1014,7 +1014,7 @@ def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     app = FastAPI()
     app.include_router(ai_consent.router)
-    app.dependency_overrides[consent.auth.get_current_user_uid] = lambda: "user-a"
+    app.dependency_overrides[consent.auth.get_writable_user_uid] = lambda: "user-a"
     client = TestClient(app)
 
     response = client.post(

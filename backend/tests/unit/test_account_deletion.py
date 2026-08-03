@@ -1,7 +1,9 @@
 import asyncio
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
+from fastapi import Depends, Response
 from database import account_deletion as account_deletion_db
 from database.firestore_account_deletion import delete_firestore_user_data
 from ella.services import account_deletion as account_deletion_service
@@ -80,8 +82,28 @@ def _state(*, external=()):
         capacity_released=True,
         authority_quarantined=True,
         external_cleanup_required=tuple(external),
+        external_cleanup_references=(),
         counts={},
     )
+
+
+def _load_production_delete_route():
+    path = Path(__file__).resolve().parents[2] / "routers" / "users.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    route = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_account")
+    route.decorator_list = []
+    namespace = {
+        "Depends": Depends,
+        "Response": Response,
+        "auth": SimpleNamespace(
+            get_authenticated_user_uid=lambda: "unused",
+            delete_account=lambda _uid: None,
+        ),
+        "delete_user_data": lambda _uid: None,
+        "execute_account_deletion": account_deletion_service.execute_account_deletion,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[])), str(path), "exec"), namespace)
+    return namespace["delete_account"], namespace
 
 
 def test_authenticated_route_delegates_to_the_resumable_deletion_service():
@@ -256,3 +278,98 @@ def test_firebase_delete_lost_ack_converges_only_after_authoritative_absence(mon
     )
 
     assert auth_endpoints.delete_account("synthetic-user") == {"status": "already_deleted"}
+
+
+def test_production_route_uses_legacy_resumable_deletion_when_ella_authority_is_explicitly_disabled(monkeypatch):
+    calls = []
+    monkeypatch.setenv("ELLA_ENABLED", "false")
+    monkeypatch.setenv("ELLA_POSTGRES_AUTHORITY_ENABLED", "false")
+
+    async def forbidden_quarantine(_uid):
+        raise AssertionError("disabled Ella persistence must not be probed")
+
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "quarantine_account_for_deletion",
+        forbidden_quarantine,
+    )
+    route, namespace = _load_production_delete_route()
+    namespace["delete_user_data"] = lambda uid: calls.append(("firestore", uid))
+    namespace["auth"].delete_account = lambda uid: calls.append(("firebase", uid))
+    response = Response()
+    body = asyncio.run(route(response=response, uid="authenticated-user"))
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    assert calls == [("firestore", "authenticated-user"), ("firebase", "authenticated-user")]
+
+
+def test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable(monkeypatch):
+    calls = []
+    monkeypatch.setenv("ELLA_ENABLED", "true")
+    monkeypatch.setenv("ELLA_POSTGRES_AUTHORITY_ENABLED", "true")
+
+    async def unavailable(_uid):
+        raise account_deletion_db.AccountDeletionUnavailable("account_deletion_authority_unavailable")
+
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "quarantine_account_for_deletion",
+        unavailable,
+    )
+    route, namespace = _load_production_delete_route()
+    namespace["delete_user_data"] = lambda uid: calls.append(("firestore", uid))
+    namespace["auth"].delete_account = lambda uid: calls.append(("firebase", uid))
+    try:
+        asyncio.run(
+            route(
+                response=Response(),
+                uid="authenticated-user",
+            )
+        )
+    except Exception as exc:
+        assert exc.status_code == 503
+        assert exc.detail == {
+            "code": "account_deletion_authority_unavailable",
+            "retryable": True,
+        }
+    else:
+        raise AssertionError("enabled unavailable authority must fail closed")
+    assert calls == []
+
+
+def test_retained_firebase_subject_is_fenced_from_authenticated_content_writes(monkeypatch):
+    class Pool:
+        async def fetchval(self, _query, uid):
+            assert uid == "retained-firebase-subject"
+            return "DELETION_PENDING"
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setenv("ELLA_POSTGRES_AUTHORITY_ENABLED", "true")
+    monkeypatch.setattr(auth_endpoints.voice_canary, "get_pool", pool)
+
+    try:
+        asyncio.run(auth_endpoints.assert_authenticated_user_writable("retained-firebase-subject"))
+    except Exception as exc:
+        assert exc.status_code == 403
+        assert exc.detail == {
+            "code": "account_write_forbidden",
+            "retryable": False,
+        }
+    else:
+        raise AssertionError("tombstoned Firebase subject must not regain content write authority")
+
+
+def test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes(monkeypatch):
+    async def forbidden_pool():
+        raise AssertionError("explicitly disabled Ella authority must not be probed")
+
+    monkeypatch.setenv("ELLA_POSTGRES_AUTHORITY_ENABLED", "false")
+    monkeypatch.setattr(auth_endpoints.voice_canary, "get_pool", forbidden_pool)
+
+    assert (
+        asyncio.run(auth_endpoints.assert_authenticated_user_writable("legacy-firebase-subject"))
+        == "legacy-firebase-subject"
+    )

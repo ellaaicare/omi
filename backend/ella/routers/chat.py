@@ -1213,7 +1213,7 @@ async def ella_chat_history(
     uid: str = "",
     limit: int = 50,
     before: str = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Return recent chat/context messages for a user from canonical timeline.
 
