@@ -9,7 +9,8 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
+_MINIMAL_ASYNCPG_STUB = types.SimpleNamespace(Pool=object, create_pool=None)
+sys.modules.setdefault("asyncpg", _MINIMAL_ASYNCPG_STUB)
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -88,6 +89,12 @@ _ROUTER_SPEC = importlib.util.spec_from_file_location("ella_guardian_under_test"
 guardian = importlib.util.module_from_spec(_ROUTER_SPEC)
 assert _ROUTER_SPEC and _ROUTER_SPEC.loader
 _ROUTER_SPEC.loader.exec_module(guardian)
+
+
+def test_guardian_import_accepts_minimal_asyncpg_stub():
+    if sys.modules["asyncpg"] is _MINIMAL_ASYNCPG_STUB:
+        assert not hasattr(_MINIMAL_ASYNCPG_STUB, "Connection")
+    assert callable(guardian.auth.voice_canary.get_pool)
 
 
 class _FakePool:
