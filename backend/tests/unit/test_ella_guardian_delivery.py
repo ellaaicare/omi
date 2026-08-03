@@ -9,7 +9,9 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
+from utils.ella import exact_firebase_auth
+
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, Connection=object, create_pool=None))
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -748,3 +750,127 @@ def test_guardian_cloud_target_revoked_at_provider_boundary_blocks_send(monkeypa
     assert error.value.code == "runtime_admission_revoked"
     assert CloudClient.provider_posts == 0
     assert _FakeAsyncClient.posts == []
+
+
+class _GuardianRoutePool:
+    def __init__(self, mode=None):
+        self.mode = mode
+        self.fetchrow_calls = []
+        self.guardian_mode_updates = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "COUNT(*) FILTER" in query:
+            return {"pending": 0}
+        if "UPDATE guardian_queue" in query:
+            return {
+                "id": "queue-a",
+                "url": "https://audio.example/a.mp3",
+                "priority": "normal",
+                "message": "",
+                "trigger_type": "guardian",
+                "metadata": {"trace_id": "trace-a"},
+                "created_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+            }
+        return {"guardian_mode": self.mode}
+
+
+class _GuardianRepository:
+    def __init__(self, pool):
+        self.pool = pool
+
+    async def update_guardian_mode(self, uid, guardian_mode):
+        self.pool.guardian_mode_updates.append((uid, guardian_mode))
+        self.pool.mode = guardian_mode
+        return guardian_mode
+
+
+def _guardian_route_client(monkeypatch, pool):
+    monkeypatch.setattr(guardian, "_pool", pool)
+    monkeypatch.setattr(guardian, "EllaProvisioningRepository", _GuardianRepository)
+
+    def verify_token(token):
+        if token == "valid-a":
+            return {"uid": "uid-a"}
+        if token == "valid-b":
+            return {"uid": "uid-b"}
+        raise ValueError("expired or invalid")
+
+    monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
+    app = FastAPI()
+    app.include_router(guardian.router)
+    return TestClient(app)
+
+
+def test_guardian_next_audio_uses_authenticated_owner_only(monkeypatch):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+
+    accepted = client.get(
+        "/v1/ella/guardian/next-audio?uid=uid-a",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["id"] == "queue-a"
+    assert len(pool.fetchrow_calls) == 2
+    assert all(args == ("uid-a",) for _, args in pool.fetchrow_calls)
+
+
+def test_guardian_mode_read_and_write_use_authenticated_owner_only(monkeypatch):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+
+    read_response = client.get(
+        "/v1/ella/guardian/mode",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+    write_response = client.put(
+        "/v1/ella/guardian/mode",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"override": None, "features": ["ACTIVE_SUPPORT"]},
+    )
+
+    assert read_response.status_code == 200
+    assert read_response.json()["currentMode"] == "OFF"
+    assert write_response.status_code == 200
+    assert write_response.json()["currentMode"] == "ACTIVE_SUPPORT"
+    assert pool.fetchrow_calls[0][1] == ("uid-a",)
+    assert pool.guardian_mode_updates == [("uid-a", "ACTIVE_SUPPORT")]
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer expired", "Basic valid-a"])
+def test_guardian_mode_auth_denials_happen_before_database_work(monkeypatch, authorization):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    mode_read = client.get("/v1/ella/guardian/mode", headers=headers)
+    mode_write = client.put(
+        "/v1/ella/guardian/mode",
+        headers=headers,
+        json={"override": None, "features": ["ACTIVE_SUPPORT"]},
+    )
+
+    assert mode_read.status_code == 401
+    assert mode_write.status_code == 401
+    assert pool.fetchrow_calls == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status"),
+    [
+        ({}, 401),
+        ({"Authorization": "Bearer expired"}, 401),
+        ({"Authorization": "Basic valid-a"}, 401),
+        ({"Authorization": "Bearer valid-b"}, 403),
+    ],
+)
+def test_guardian_next_audio_auth_denials_happen_before_database_work(monkeypatch, headers, expected_status):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+
+    next_audio = client.get("/v1/ella/guardian/next-audio?uid=uid-a", headers=headers)
+
+    assert next_audio.status_code == expected_status
+    assert pool.fetchrow_calls == []

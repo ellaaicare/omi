@@ -3098,6 +3098,39 @@ class EllaProvisioningRepository:
         if result == "UPDATE 0":
             raise LookupError("user_not_found")
 
+    async def update_guardian_mode(self, uid: str, guardian_mode: Optional[str]) -> Optional[str]:
+        """Update one active user's Guardian preference under owner authority."""
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE users
+                    SET guardian_mode = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE omi_uid = $1
+                      AND status = 'ACTIVE'
+                    RETURNING guardian_mode
+                    """,
+                    uid,
+                    guardian_mode,
+                )
+        if row is None:
+            raise LookupError("active_user_not_found")
+        return row["guardian_mode"]
+
     async def has_active_retained_runtime(self, uid: str) -> bool:
         """Return whether an authenticated legacy user still has usable routing."""
         row = await self.pool.fetchrow(

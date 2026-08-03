@@ -37,6 +37,7 @@ CREATE TABLE users (
     identities JSONB NOT NULL DEFAULT '{}'::jsonb,
     settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    guardian_mode TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -627,7 +628,7 @@ async def _prepare_writer_case(
             expected_after=0,
         )
 
-    if name in {"identity_create", "identity_update", "identity_bind", "user_activate"}:
+    if name in {"identity_create", "identity_update", "identity_bind", "user_activate", "guardian_mode"}:
         email = f"{uid}@example.invalid"
         if name == "identity_create":
             owner = authority_advisory_lock.provisional_identity_owner(uid)
@@ -673,6 +674,11 @@ async def _prepare_writer_case(
                     uid,
                     email,
                 )
+                if name == "guardian_mode":
+                    await conn.execute(
+                        "UPDATE users SET status = 'ACTIVE' WHERE id = $1",
+                        user_id,
+                    )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
         if name == "identity_bind":
 
@@ -724,6 +730,22 @@ async def _prepare_writer_case(
                 snapshot=snapshot,
                 expected_before="Synthetic Before",
                 expected_after="Synthetic After",
+            )
+
+        if name == "guardian_mode":
+
+            async def guardian_mode_snapshot():
+                return await pool.fetchval(
+                    "SELECT guardian_mode FROM users WHERE id = $1",
+                    user_id,
+                )
+
+            return _WriterCase(
+                owner=owner,
+                writer=lambda: repository.update_guardian_mode(uid, "ACTIVE_SUPPORT"),
+                snapshot=guardian_mode_snapshot,
+                expected_before=None,
+                expected_after="ACTIVE_SUPPORT",
             )
 
         async def status_snapshot():
@@ -972,6 +994,7 @@ async def _prepare_writer_case(
         "identity_update",
         "identity_bind",
         "user_activate",
+        "guardian_mode",
         "runtime_stage",
         "runtime_activate",
         "cloud_claim",
@@ -1008,6 +1031,7 @@ def _authority_error_code(error: BaseException) -> str | None:
         "entitlement_status",
         "entitlement_delete",
         "user_activate",
+        "guardian_mode",
         "runtime_stage",
         "runtime_activate",
         "cloud_claim",

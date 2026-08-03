@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
 from database import app_settings as app_settings_db
+from database.ella_provisioning import EllaProvisioningRepository
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.hermes_cloud import HermesCloudClient
@@ -56,6 +57,7 @@ from utils.ella.canonical_context import (
     canonical_events_to_chat_turns,
     fetch_canonical_timeline,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.ella.time_context import build_time_context, local_time_fields
 from utils.other import endpoints as auth
 
@@ -400,6 +402,13 @@ class PlaybackEventRequest(BaseModel):
     device_uid: str = ""  # unique device ID from AVAudioSessionPortDescription
     duration_ms: int = 0  # estimated audio duration in ms
     metadata: Optional[dict] = None
+
+
+class GuardianModeUpdateRequest(BaseModel):
+    """Authenticated, user-scoped Whispers mode update."""
+
+    override: Optional[str] = None
+    features: list[str] = Field(default_factory=list)
 
 
 class PlaybackDebugEventRequest(BaseModel):
@@ -1261,11 +1270,75 @@ Rules:
 # ---------------------------------------------------------------------------
 
 
+_GUARDIAN_OVERRIDE_MODES = {"cyborg", "chatbot", "demo"}
+_GUARDIAN_FEATURE_MODES = {"active_support", "emergency_only", "memory_support", "maximum_awareness"}
+
+
+def _guardian_mode_response(guardian_mode: Optional[str]) -> dict[str, Any]:
+    normalized = _normalize_mode(guardian_mode)
+    current_mode = normalized.upper()
+    return {
+        "success": True,
+        "currentMode": current_mode,
+        "override": current_mode if normalized in _GUARDIAN_OVERRIDE_MODES else None,
+        "features": [current_mode] if normalized in _GUARDIAN_FEATURE_MODES else [],
+        "showDemo": False,
+    }
+
+
+def _requested_guardian_mode(req: GuardianModeUpdateRequest) -> Optional[str]:
+    normalized_override = _normalize_mode(req.override) if req.override else MODE_OFF
+    normalized_features = {_normalize_mode(value) for value in req.features if str(value).strip()}
+
+    if req.override:
+        if normalized_override not in _GUARDIAN_OVERRIDE_MODES:
+            raise HTTPException(status_code=422, detail="Unsupported Guardian override")
+        if normalized_features:
+            raise HTTPException(status_code=422, detail="Guardian override and features cannot be combined")
+        return normalized_override.upper()
+
+    if not normalized_features or normalized_features == {MODE_OFF}:
+        return None
+    if len(normalized_features) != 1 or not normalized_features.issubset(_GUARDIAN_FEATURE_MODES):
+        raise HTTPException(status_code=422, detail="Choose exactly one supported Guardian feature")
+    return next(iter(normalized_features)).upper()
+
+
+@router.get("/mode")
+async def get_guardian_mode(authenticated_uid: str = Depends(get_exact_firebase_uid)) -> dict[str, Any]:
+    """Read Whispers mode for the exact Firebase bearer subject."""
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER($1)",
+        authenticated_uid,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guardian user is not provisioned")
+    return _guardian_mode_response(row["guardian_mode"])
+
+
+@router.put("/mode")
+async def update_guardian_mode(
+    req: GuardianModeUpdateRequest,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+) -> dict[str, Any]:
+    """Update Whispers mode for the exact Firebase bearer subject."""
+    guardian_mode = _requested_guardian_mode(req)
+    pool = await _get_pool()
+    try:
+        updated_mode = await EllaProvisioningRepository(pool).update_guardian_mode(
+            authenticated_uid,
+            guardian_mode,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Guardian user is not provisioned")
+    return _guardian_mode_response(updated_mode)
+
+
 @router.get("/next-audio")
-async def next_audio(uid: str):
+async def next_audio(uid: str, authenticated_uid: str = Depends(get_exact_firebase_uid)):
     """Pop next audio clip from queue. Consolidates if pile-up detected."""
-    if not uid or uid == "unknown":
-        return {"url": None}
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Guardian")
 
     _start = time.time()
     pool = await _get_pool()

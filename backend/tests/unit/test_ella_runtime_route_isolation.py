@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 from dataclasses import replace
 from types import ModuleType
@@ -303,47 +304,42 @@ def test_isolated_history_fails_closed_without_binding(monkeypatch):
 
 
 def test_public_resolver_is_authenticated_and_redacts_internal_runtime(monkeypatch):
-    async def fake_resolve(uid):
-        assert uid == "user-a"
-        return {
-            "user": {"id": "1", "omiUid": uid, "name": "A"},
-            "routing": {
-                "agentId": "hermes",
-                "gatewayUrl": "http://100.76.138.56:8701",
-                "token": "secret",
-                "profileName": "omi-user-a",
-                "bindingRevision": 3,
-                "modelPolicyVersion": "frontier-v1",
-                "voicePolicyVersion": "ella-voice-v1",
-            },
-        }
+    class Pool:
+        async def fetchrow(self, _query, uid):
+            assert uid == "user-a"
+            return {
+                "omi_uid": uid,
+                "status": "active",
+                "agents": {
+                    "userAgentId": "hermes",
+                    "gatewayToken": "secret",
+                    "workspace": "/private/user-a",
+                },
+                "cluster_status": "ready",
+            }
 
-    monkeypatch.setattr(resolve, "runtime_bindings_enabled", lambda uid=None: True)
-    monkeypatch.setattr(resolve, "resolve_user_routing", fake_resolve)
+    monkeypatch.setattr(resolve, "_pool", Pool())
+    monkeypatch.setattr(resolve, "CHAT_PLATFORM", "hermes")
 
-    result = asyncio.run(resolve.resolve_endpoint(uid="user-a", email=None, phone=None, authenticated_uid="user-a"))
+    result = asyncio.run(resolve.resolve_endpoint(uid="user-a", authenticated_uid="user-a"))
 
-    assert result["routing"] == {
-        "agentId": "hermes",
-        "historyUrl": "/v1/ella/chat/history",
-        "platform": "hermes",
-        "bindingRevision": 3,
-        "modelPolicyVersion": "frontier-v1",
-        "voicePolicyVersion": "ella-voice-v1",
+    assert result == {
+        "user": {"omiUid": "user-a", "status": "active"},
+        "routing": {"available": True, "clusterStatus": "ready", "platform": "hermes"},
     }
     assert "secret" not in str(result)
     assert "gatewayUrl" not in result["routing"]
-    assert "profileName" not in result["routing"]
+    assert "workspace" not in result["routing"]
 
 
 def test_public_resolver_rejects_cross_user_and_email_lookup():
     with pytest.raises(HTTPException) as mismatch:
-        asyncio.run(resolve.resolve_endpoint(uid="user-b", email=None, phone=None, authenticated_uid="user-a"))
+        asyncio.run(resolve.resolve_endpoint(uid="user-b", authenticated_uid="user-a"))
     assert mismatch.value.status_code == 403
 
-    with pytest.raises(HTTPException) as unsupported:
-        asyncio.run(resolve.resolve_endpoint(uid=None, email="a@example.com", phone=None, authenticated_uid="user-a"))
-    assert unsupported.value.status_code == 400
+    parameters = inspect.signature(resolve.resolve_endpoint).parameters
+    assert "email" not in parameters
+    assert "phone" not in parameters
 
 
 def test_voice_session_rejects_cross_user_before_issuing_token():

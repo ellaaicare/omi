@@ -13,6 +13,7 @@ on:
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/users.py"
       - "backend/ella/__init__.py"
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
@@ -64,6 +65,7 @@ on:
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/exact_firebase_auth.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
@@ -91,6 +93,7 @@ on:
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_ella_reviewed_route_integration.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
       - "backend/tests/unit/test_ella_plato_mcp.py"
@@ -114,6 +117,7 @@ on:
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/users.py"
       - "backend/ella/__init__.py"
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
@@ -165,6 +169,7 @@ on:
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/exact_firebase_auth.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
@@ -192,6 +197,7 @@ on:
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_ella_reviewed_route_integration.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
       - "backend/tests/unit/test_ella_plato_mcp.py"
@@ -268,6 +274,7 @@ jobs:
           database/runtime_targets.py
           database/voice_canary.py
           routers/transcribe.py
+          routers/users.py
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
           ella/routers/ai_consent.py
@@ -277,6 +284,7 @@ jobs:
           ella/routers/onboarding.py
           ella/routers/observer.py
           ella/routers/plato_mcp.py
+          ella/routers/resolve.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
           ella/services/hermes_broker_client.py
@@ -308,7 +316,9 @@ jobs:
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
           utils/ella/postprocess.py
+          utils/ella/exact_firebase_auth.py
           utils/ella/scanner_keyterms.py
+          tests/unit/test_ella_reviewed_route_integration.py
 
       - name: Validate formatting and OpenAPI contract
         run: >-
@@ -317,10 +327,11 @@ jobs:
           database/ella_provisioning.py database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
+          routers/users.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/ai_consent.py ella/routers/chat.py
           ella/routers/guardian.py ella/routers/invites.py
-          ella/routers/onboarding.py ella/routers/plato_mcp.py
+          ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
           ella/services/hermes_cloud_policy.py
           ella/services/hermes_broker_client.py
           ella/services/hermes_broker_prototype.py
@@ -333,7 +344,8 @@ jobs:
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
           ella/utils/auto_provision.py ella/utils/identity_sync.py
-          ella/utils/provision_authority.py utils/ella/scanner_keyterms.py
+          ella/utils/provision_authority.py utils/ella/exact_firebase_auth.py
+          utils/ella/scanner_keyterms.py
           scripts/voice_canary_admin.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
@@ -342,6 +354,7 @@ jobs:
           tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_guardian_delivery.py
+          tests/unit/test_ella_reviewed_route_integration.py
           tests/unit/test_ella_listen_runtime_gate.py
           tests/unit/test_ella_observer.py tests/unit/test_invitation_redemption.py
           tests/unit/test_ella_plato_mcp.py
@@ -516,7 +529,7 @@ jobs:
               tests/unit/test_authority_writer_guard.py \
               tests/postgres/test_authority_advisory_lock_postgres.py |
               grep -c '::'
-          )" -eq 65
+          )" -eq 67
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
@@ -526,8 +539,19 @@ jobs:
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 18
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 27
           pytest tests/unit/test_ella_guardian_delivery.py -v
+          reviewed_route_ids="$(pytest --collect-only -q tests/unit/test_ella_reviewed_route_integration.py | sed '/^$/d')"
+          required_reviewed_route_ids=(
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_missing_workspace_fails_closed_without_global_fallback"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_declines_before_firestore_or_firebase_removal"
+          )
+          for required_id in "${required_reviewed_route_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$reviewed_route_ids"
+          done
+          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 3
+          pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 18
