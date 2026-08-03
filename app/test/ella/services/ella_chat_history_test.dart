@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -10,6 +11,8 @@ import 'package:omi/ella/services/ella_chat_service.dart';
 
 Map<String, String> _testDebugHeaders({required String routeSource}) => {'X-Ella-Route-Source': routeSource};
 String _testApiBaseUrl() => 'https://first-party.example/';
+String _productionHistoryResponse() =>
+    File('../backend/tests/fixtures/ella_chat_history_canonical_response_v1.json').readAsStringSync();
 
 void main() {
   setUp(() async {
@@ -17,39 +20,8 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  test('cold history fetch parses the canonical production response without resolver or UID input', () async {
+  test('production canonical history maps exact human and ai messages through the first-party endpoint', () async {
     final requestedUrls = <Uri>[];
-    final canonicalHistoryResponse = {
-      'messages': [
-        {
-          'id': 'm-newer',
-          'created_at': '2026-08-03T12:01:00Z',
-          'text': 'Ready when you are.',
-          'sender': 'ai',
-          'type': 'text',
-          'plugin_id': null,
-          'from_integration': false,
-          'memories': <Object>[],
-          'files': <Object>[],
-          'metadata': {'source': 'canonical_timeline'},
-        },
-        {
-          'id': 'm-older',
-          'created_at': '2026-08-03T12:00:00Z',
-          'text': 'Hello',
-          'sender': 'human',
-          'type': 'text',
-          'plugin_id': null,
-          'from_integration': false,
-          'memories': <Object>[],
-          'files': <Object>[],
-          'metadata': {'source': 'canonical_timeline'},
-        },
-      ],
-      'hasMore': false,
-      'source': 'canonical_timeline',
-      'fallback': false,
-    };
 
     final messages = await fetchEllaChatHistory(
       limit: 25,
@@ -60,7 +32,7 @@ void main() {
         expect(method, 'GET');
         expect(body, isEmpty);
         expect(headers['X-Ella-Route-Source'], 'chat-history');
-        return http.Response(jsonEncode(canonicalHistoryResponse), 200);
+        return http.Response(_productionHistoryResponse(), 200);
       },
     );
 
@@ -70,13 +42,15 @@ void main() {
     expect(requestedUrls.single.toString(), isNot(contains('/resolve')));
     expect(requestedUrls.single.toString(), isNot(contains('caller-selected-uid')));
     expect(messages, hasLength(2));
-    expect(messages.map((message) => message.id), ['m-older', 'm-newer']);
-    expect(messages.first.text, 'Hello');
-    expect(messages.first.sender, MessageSender.human);
-    expect(messages.first.askForNps, isFalse);
-    expect(messages.last.text, 'Ready when you are.');
-    expect(messages.last.sender, MessageSender.ai);
-    expect(messages.last.askForNps, isFalse);
+    expect(messages[0].id, 'canonical-user-turn');
+    expect(messages[0].text, 'Exact user history request.');
+    expect(messages[0].sender, MessageSender.human);
+    expect(messages[0].createdAt.toUtc(), DateTime.parse('2026-08-03T12:00:00Z'));
+    expect(messages[1].id, 'canonical-assistant-turn');
+    expect(messages[1].text, 'Exact assistant history response.');
+    expect(messages[1].sender, MessageSender.ai);
+    expect(messages[1].createdAt.toUtc(), DateTime.parse('2026-08-03T12:01:00Z'));
+    expect(messages.every((message) => !message.askForNps), isTrue);
   });
 
   test('history returns empty for authenticated empty history', () async {
@@ -94,18 +68,54 @@ void main() {
     expect(messages, isEmpty);
   });
 
-  test('history fails closed on authentication failure', () async {
-    var calls = 0;
+  test('malformed production entries fail safely without dropping valid siblings or accepting legacy aliases',
+      () async {
+    final payload = jsonDecode(_productionHistoryResponse()) as Map<String, dynamic>;
+    final canonicalMessages = payload['messages'] as List<dynamic>;
+    payload['messages'] = [
+      canonicalMessages[0],
+      'not-a-message',
+      {
+        'id': 'legacy-alias-message',
+        'role': 'user',
+        'content': 'Legacy aliases must not mask contract drift.',
+        'timestamp': '2026-08-03T12:00:30Z',
+      },
+      {
+        'id': 'malformed-production-message',
+        'created_at': 'not-a-timestamp',
+        'text': 'Malformed timestamp',
+        'sender': 'human',
+        'type': 'text',
+      },
+      canonicalMessages[1],
+    ];
+
     final messages = await fetchEllaChatHistory(
       debugHeadersBuilder: _testDebugHeaders,
       apiBaseUrlProvider: _testApiBaseUrl,
       apiCall: ({required url, required headers, required body, required method, timeout, retries}) async {
-        calls += 1;
-        return http.Response('{"detail":"invalid bearer"}', 401);
+        return http.Response(jsonEncode(payload), 200);
       },
     );
 
-    expect(calls, 1);
-    expect(messages, isEmpty);
+    expect(messages.map((message) => message.id), ['canonical-user-turn', 'canonical-assistant-turn']);
+  });
+
+  test('authentication and upstream failures remain empty rather than fabricating history', () async {
+    var calls = 0;
+    for (final status in [401, 502, 503]) {
+      final messages = await fetchEllaChatHistory(
+        debugHeadersBuilder: _testDebugHeaders,
+        apiBaseUrlProvider: _testApiBaseUrl,
+        apiCall: ({required url, required headers, required body, required method, timeout, retries}) async {
+          calls += 1;
+          return http.Response('{"detail":"unavailable"}', status);
+        },
+      );
+
+      expect(messages, isEmpty);
+    }
+    expect(calls, 3);
   });
 }

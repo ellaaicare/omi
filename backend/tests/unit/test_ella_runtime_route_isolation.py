@@ -349,6 +349,76 @@ def test_cloud_history_never_uses_openclaw_fallback(monkeypatch):
     }
 
 
+def test_legacy_history_unexpected_failure_logs_fixed_content_free_classification(monkeypatch, caplog):
+    class HostileHistoryError(RuntimeError):
+        def __init__(self):
+            super().__init__(
+                "endpoint=https://secret token=secret session=secret-session workspace=/secret/workspace "
+                "provider_payload=SECRET"
+            )
+            self.endpoint = "https://secret"
+            self.token = "secret"
+            self.session = "secret-session"
+            self.workspace = "/secret/workspace"
+            self.provider_payload = {"private": "SECRET"}
+
+    class HostileAsyncClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            raise HostileHistoryError()
+
+    async def authority_disabled(uid):
+        assert uid == "user-a"
+        return False
+
+    async def no_events(uid, *, limit, before=None):
+        assert uid == "user-a"
+        return []
+
+    async def owned_legacy_routing(uid):
+        assert uid == "user-a"
+        return {"routing": {"agentId": "ella-user-a", "workspace": "/legacy/user-a"}}
+
+    monkeypatch.setattr(chat, "runtime_authority_enabled", authority_disabled)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "resolve_user_routing", owned_legacy_routing)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", HostileAsyncClient)
+
+    with caplog.at_level("ERROR", logger=chat.__name__):
+        result = asyncio.run(chat.ella_chat_history("user-a", authenticated_uid="user-a"))
+
+    assert result == {
+        "messages": [],
+        "hasMore": False,
+        "source": "provision_openclaw_history_migration",
+        "fallback": True,
+    }
+    assert len(caplog.records) == 1
+    log_message = caplog.records[0].getMessage()
+    log_prefix = "[FLOW:HISTORY] code=ella_legacy_history_unavailable classification=unexpected latency="
+    assert log_message.startswith(log_prefix) and log_message.endswith("ms")
+    assert int(log_message.removeprefix(log_prefix).removesuffix("ms")) >= 0
+    assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)
+    serialized = f"{caplog.text} {result}"
+    for forbidden in (
+        "https://secret",
+        "token=secret",
+        "secret-session",
+        "/secret/workspace",
+        "provider_payload",
+        "SECRET",
+    ):
+        assert forbidden not in serialized
+
+
 def test_isolated_history_fails_closed_without_binding(monkeypatch):
     async def missing_runtime(uid, **kwargs):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)

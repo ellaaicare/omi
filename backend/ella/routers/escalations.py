@@ -125,7 +125,7 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         """
         SELECT id, omi_uid, guardian_mode, email, phone_number, identities
         FROM users
-        WHERE LOWER(omi_uid) = LOWER($1)
+        WHERE omi_uid = $1
         """,
         uid,
     )

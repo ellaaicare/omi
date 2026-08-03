@@ -10,6 +10,7 @@ on:
       - "app/ios/Tests/GuardianAuthenticatedTransportTests.swift"
       - "app/lib/ella/services/ella_chat_service.dart"
       - "app/test/ella/services/ella_chat_history_test.dart"
+      - "backend/tests/fixtures/ella_chat_history_canonical_response_v1.json"
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
@@ -102,6 +103,8 @@ on:
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_escalations_router_auth.py"
       - "backend/tests/unit/test_ella_reviewed_route_integration.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
@@ -124,6 +127,7 @@ on:
       - "app/ios/Tests/GuardianAuthenticatedTransportTests.swift"
       - "app/lib/ella/services/ella_chat_service.dart"
       - "app/test/ella/services/ella_chat_history_test.dart"
+      - "backend/tests/fixtures/ella_chat_history_canonical_response_v1.json"
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
@@ -216,6 +220,8 @@ on:
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_escalations_router_auth.py"
       - "backend/tests/unit/test_ella_reviewed_route_integration.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
@@ -376,6 +382,8 @@ jobs:
           tests/unit/test_authority_writer_guard.py
           tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
+          tests/unit/test_ella_canonical_context.py
+          tests/unit/test_ella_escalations_router_auth.py
           tests/unit/test_ella_guardian_delivery.py
           tests/unit/test_ella_reviewed_route_integration.py
           tests/unit/test_ella_runtime_route_isolation.py
@@ -449,6 +457,7 @@ jobs:
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_cleanup_recovers_from_partial_cleanup_idempotently"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_show_and_cleanup_accept_expected_post_enrichment_state_only"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
+            "tests/unit/test_ella_runtime_route_isolation.py::test_legacy_history_unexpected_failure_logs_fixed_content_free_classification"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_provider"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_authority_denials_precede_provider_setup[invitation_runtime_fallback_enabled]"
@@ -475,7 +484,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 491
+          test "$collected" -eq 492
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -557,7 +566,7 @@ jobs:
               sed '/^$/d'
           )"
           grep -Fqx \
-            "tests/postgres/test_authority_advisory_lock_postgres.py::test_guardian_alert_history_returns_only_exact_case_sensitive_firebase_subject" \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects" \
             <<<"$authority_lock_ids"
           test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 69
           pytest \
@@ -571,18 +580,24 @@ jobs:
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
           pytest tests/unit/test_ella_guardian_delivery.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | grep -c '::')" -eq 8
+          pytest \
+            tests/unit/test_ella_escalations_router_auth.py::test_load_context_uses_canonical_phone_number_for_user_imessage \
+            -v
           reviewed_route_ids="$(pytest --collect-only -q tests/unit/test_ella_reviewed_route_integration.py | sed '/^$/d')"
           required_reviewed_route_ids=(
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing"
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_retained_user_without_isolated_binding_fails_closed_without_global_fallback"
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_reports_ready_invitation_self_hosted_binding_without_legacy_workspace"
-            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_unexpected_runtime_failure_logs_only_fixed_content_free_code"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_unexpected_runtime_failure_logs_fixed_content_free_classification"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_expected_provisioning_failure_logs_fixed_content_free_classification"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_legacy_history_proxy_unexpected_failure_logs_no_runtime_material"
             "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_declines_before_firestore_or_firebase_removal"
           )
           for required_id in "${required_reviewed_route_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$reviewed_route_ids"
           done
-          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 5
+          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 7
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v

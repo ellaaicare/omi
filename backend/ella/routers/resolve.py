@@ -211,11 +211,11 @@ async def resolve_endpoint(
             EllaProvisioningRepository(pool),
             target_mode="hermes-cloud-chat",
         )
-    except ProvisioningError as exc:
-        logger.info("Ella resolve runtime unavailable for uid=%s code=%s", uid, exc.code)
+    except ProvisioningError:
+        logger.info("code=ella_resolve_runtime_unavailable classification=provisioning")
         runtime = None
     except Exception:
-        logger.error("Ella resolve runtime authority failed closed code=unexpected_runtime_authority_error")
+        logger.error("code=ella_resolve_runtime_authority_error classification=unexpected")
         runtime = None
 
     return {
@@ -269,6 +269,6 @@ async def proxy_chat_history(
             if resp.status_code != 200:
                 return JSONResponse(status_code=resp.status_code, content={"error": "upstream_error"})
             return resp.json()
-    except Exception as e:
-        logger.error(f"Chat history proxy error: {e}")
+    except Exception:
+        logger.error("code=ella_legacy_history_proxy_unavailable classification=unexpected")
         return JSONResponse(status_code=502, content={"error": "provision_unreachable"})

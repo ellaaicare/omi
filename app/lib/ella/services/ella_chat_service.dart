@@ -73,15 +73,19 @@ Future<List<ServerMessage>> fetchEllaChatHistory({
     final rawMessages = data['messages'] as List<dynamic>? ?? [];
 
     final result = <ServerMessage>[];
-    for (final m in rawMessages) {
-      final message = Map<String, dynamic>.from(m as Map);
-      final content = message['text'] as String? ?? '';
-      if (content.isEmpty) continue;
-      if (content.startsWith('[SYSTEM:')) {
-        continue; // Filter scanner notifications from chat UI
+    for (final rawMessage in rawMessages) {
+      if (rawMessage is! Map<String, dynamic>) continue;
+      try {
+        final message = ServerMessage.fromJson(rawMessage);
+        if (message.text.isEmpty || message.text.startsWith('[SYSTEM:')) {
+          continue; // Filter empty and scanner notification entries from chat UI.
+        }
+        message.askForNps = false;
+        result.add(message);
+      } catch (_) {
+        // A malformed history entry must not discard valid siblings.
+        continue;
       }
-      final parsed = ServerMessage.fromJson(message)..askForNps = false;
-      result.add(parsed);
     }
 
     // API returns newest first; reverse for chronological UI order

@@ -508,6 +508,8 @@ def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch
     assert alert["test"] is True
     assert alert["created_time"]["timezone"] == "America/Los_Angeles"
     assert pool.fetch_args[0] == ("uid-1", 50)
+    assert pool.fetch_query.count("WHERE uid = $1") == 3
+    assert "lower(uid)" not in pool.fetch_query.lower()
     assert "COALESCE(trigger_type, '') <> 'wake_word_ack'" in pool.fetch_query
     assert "COALESCE(metadata->>'ack_only', '') <> 'true'" in pool.fetch_query
 

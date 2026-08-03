@@ -14,6 +14,7 @@ from database import authority_advisory_lock, managed_cloud_consent, voice_canar
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
 from ella.routers import guardian
+from utils.ella import exact_firebase_auth
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -188,21 +189,22 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_guardian_alert_history_returns_only_exact_case_sensitive_firebase_subject():
+def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
         await pool.execute(
             """
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
-                url TEXT,
-                priority TEXT,
+                url TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL,
                 message TEXT,
                 trigger_type TEXT,
                 metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 consumed_at TIMESTAMPTZ
             );
+
             CREATE TABLE guardian_pipeline_events (
                 id BIGSERIAL PRIMARY KEY,
                 trace_id TEXT NOT NULL,
@@ -211,8 +213,9 @@ def test_guardian_alert_history_returns_only_exact_case_sensitive_firebase_subje
                 status TEXT NOT NULL,
                 latency_ms INTEGER,
                 metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
             CREATE TABLE guardian_delivery_log (
                 id BIGSERIAL PRIMARY KEY,
                 trace_id TEXT NOT NULL,
@@ -222,57 +225,115 @@ def test_guardian_alert_history_returns_only_exact_case_sensitive_firebase_subje
                 caregiver_id TEXT,
                 status TEXT NOT NULL,
                 error_message TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
             INSERT INTO users (omi_uid, timezone)
-            VALUES ('CaseUID', 'UTC'), ('caseuid', 'UTC');
-            INSERT INTO guardian_queue (id, uid, message, trigger_type, metadata)
-            VALUES
-                ('upper-private', 'CaseUID', 'Upper private alert', 'wake_word', '{"trace_id":"shared-trace"}'),
-                ('lower-private', 'caseuid', 'Lower private alert', 'wake_word', '{"trace_id":"shared-trace"}');
-            INSERT INTO guardian_pipeline_events (trace_id, uid, stage, status, metadata)
-            VALUES
-                ('shared-trace', 'CaseUID', 'upper-private-stage', 'success', '{}'::jsonb),
-                ('shared-trace', 'caseuid', 'lower-private-stage', 'success', '{}'::jsonb);
-            INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, status)
-            VALUES
-                ('shared-trace', 'CaseUID', 'upper-private-channel', 'user', 'sent'),
-                ('shared-trace', 'caseuid', 'lower-private-channel', 'user', 'sent');
+            VALUES ('CaseUID', 'UTC'), ('caseuid', 'America/Los_Angeles');
+
+            INSERT INTO guardian_queue (
+                id, uid, priority, message, trigger_type, metadata, created_at
+            ) VALUES
+                (
+                    'upper-private', 'CaseUID', 'urgent', 'UPPER_QUEUE_PRIVATE', 'safety',
+                    '{"trace_id":"owner-local-trace","private":"UPPER_QUEUE_METADATA"}',
+                    '2026-08-03T12:01:00Z'
+                ),
+                (
+                    'lower-private', 'caseuid', 'normal', 'LOWER_QUEUE_PRIVATE', 'safety',
+                    '{"trace_id":"owner-local-trace","private":"LOWER_QUEUE_METADATA"}',
+                    '2026-08-03T12:00:00Z'
+                );
+
+            INSERT INTO guardian_pipeline_events (
+                trace_id, uid, stage, status, metadata, created_at
+            ) VALUES
+                (
+                    'owner-local-trace', 'CaseUID', 'upper-private-event', 'success',
+                    '{"private":"UPPER_EVENT_PRIVATE"}', '2026-08-03T12:01:10Z'
+                ),
+                (
+                    'owner-local-trace', 'caseuid', 'lower-private-event', 'success',
+                    '{"private":"LOWER_EVENT_PRIVATE"}', '2026-08-03T12:00:10Z'
+                );
+
+            INSERT INTO guardian_delivery_log (
+                trace_id, uid, channel, target, status, error_message, created_at, updated_at
+            ) VALUES
+                (
+                    'owner-local-trace', 'CaseUID', 'email', 'upper-private-target', 'sent',
+                    'UPPER_DELIVERY_PRIVATE', '2026-08-03T12:01:20Z', '2026-08-03T12:01:20Z'
+                ),
+                (
+                    'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
+                    'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
+                );
             """
         )
 
-        authenticated_uid = {"value": "CaseUID"}
-        app = FastAPI()
-        app.include_router(guardian.alerts_router)
-        app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: authenticated_uid["value"]
+        before = {
+            table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("guardian_queue", "guardian_pipeline_events", "guardian_delivery_log")
+        }
+
+        def verify_token(token):
+            if token == "valid-lower":
+                return {"uid": "caseuid"}
+            if token == "valid-upper":
+                return {"uid": "CaseUID"}
+            raise ValueError("invalid bearer")
+
+        monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
         previous_pool = guardian._pool
         guardian._pool = pool
+        app = FastAPI()
+        app.include_router(guardian.alerts_router)
+        transport = httpx.ASGITransport(app=app)
         try:
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app),
-                base_url="http://testserver",
-            ) as client:
-                upper = await client.get("/v1/ella/guardian-alerts")
-                authenticated_uid["value"] = "caseuid"
-                lower = await client.get("/v1/ella/guardian-alerts")
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                lower_response = await client.get(
+                    "/v1/ella/guardian-alerts?limit=50&uid=CaseUID",
+                    headers={"Authorization": "Bearer valid-lower"},
+                )
+                upper_response = await client.get(
+                    "/v1/ella/guardian-alerts?limit=50",
+                    headers={"Authorization": "Bearer valid-upper"},
+                )
         finally:
             guardian._pool = previous_pool
 
-        assert upper.status_code == 200
-        assert lower.status_code == 200
-        assert upper.json()["uid"] == "CaseUID"
-        assert lower.json()["uid"] == "caseuid"
-        assert [alert["queue_item_id"] for alert in upper.json()["alerts"]] == ["upper-private"]
-        assert [alert["queue_item_id"] for alert in lower.json()["alerts"]] == ["lower-private"]
-        assert [event["stage"] for event in upper.json()["alerts"][0]["events"]] == ["upper-private-stage"]
-        assert [event["stage"] for event in lower.json()["alerts"][0]["events"]] == ["lower-private-stage"]
-        assert [delivery["channel"] for delivery in upper.json()["alerts"][0]["deliveries"]] == [
-            "upper-private-channel"
-        ]
-        assert [delivery["channel"] for delivery in lower.json()["alerts"][0]["deliveries"]] == [
-            "lower-private-channel"
-        ]
+        assert lower_response.status_code == 200
+        lower = lower_response.json()
+        assert lower["uid"] == "caseuid"
+        assert [alert["queue_item_id"] for alert in lower["alerts"]] == ["lower-private"]
+        assert [event["stage"] for event in lower["alerts"][0]["events"]] == ["lower-private-event"]
+        assert [delivery["target"] for delivery in lower["alerts"][0]["deliveries"]] == ["lower-private-target"]
+        lower_serialized = str(lower)
+        assert "LOWER_QUEUE_PRIVATE" in lower_serialized
+        for upper_private in (
+            "upper-private",
+            "UPPER_QUEUE_PRIVATE",
+            "UPPER_QUEUE_METADATA",
+            "upper-private-event",
+            "UPPER_EVENT_PRIVATE",
+            "upper-private-target",
+            "UPPER_DELIVERY_PRIVATE",
+        ):
+            assert upper_private not in lower_serialized
+
+        assert upper_response.status_code == 200
+        upper = upper_response.json()
+        assert upper["uid"] == "CaseUID"
+        assert [alert["queue_item_id"] for alert in upper["alerts"]] == ["upper-private"]
+        assert [event["stage"] for event in upper["alerts"][0]["events"]] == ["upper-private-event"]
+        assert [delivery["target"] for delivery in upper["alerts"][0]["deliveries"]] == ["upper-private-target"]
+
+        after = {
+            table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("guardian_queue", "guardian_pipeline_events", "guardian_delivery_log")
+        }
+        assert after == before
 
     asyncio.run(_run_with_database(scenario))
 

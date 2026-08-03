@@ -1334,7 +1334,10 @@ async def ella_chat_history(
         _elapsed = int((_time.time() - _start) * 1000)
         logger.error(f"[FLOW:HISTORY] uid={uid} timeout latency={_elapsed}ms")
         return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
-    except Exception as e:
+    except Exception:
         _elapsed = int((_time.time() - _start) * 1000)
-        logger.error(f"[FLOW:HISTORY] uid={uid} error={e} latency={_elapsed}ms")
+        logger.error(
+            "[FLOW:HISTORY] code=ella_legacy_history_unavailable classification=unexpected latency=%sms",
+            _elapsed,
+        )
         return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}

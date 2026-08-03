@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, Connection=object, create_pool=None))
 firebase_admin = types.ModuleType("firebase_admin")
 firebase_auth = types.ModuleType("firebase_admin.auth")
 
@@ -99,8 +99,10 @@ def test_policy_view_uid_requires_authorization_without_internal_key():
 class _FakePool:
     def __init__(self, user_row):
         self.user_row = user_row
+        self.fetchrow_queries = []
 
-    async def fetchrow(self, *_args):
+    async def fetchrow(self, query, *args):
+        self.fetchrow_queries.append((query, args))
         return self.user_row
 
     async def fetch(self, *_args):
@@ -108,19 +110,20 @@ class _FakePool:
 
 
 def test_load_context_uses_canonical_phone_number_for_user_imessage(monkeypatch):
+    pool = _FakePool(
+        {
+            "id": "user-1",
+            "omi_uid": "canonical-uid",
+            "guardian_mode": "off",
+            "email": "user@example.test",
+            "phone_number": "+15550000001",
+            "identities": {},
+        }
+    )
     monkeypatch.setattr(
         escalations,
         "_pool",
-        _FakePool(
-            {
-                "id": "user-1",
-                "omi_uid": "canonical-uid",
-                "guardian_mode": "off",
-                "email": "user@example.test",
-                "phone_number": "+15550000001",
-                "identities": {},
-            }
-        ),
+        pool,
     )
 
     user, caregivers = asyncio.run(escalations._load_context("canonical-uid"))
@@ -132,6 +135,9 @@ def test_load_context_uses_canonical_phone_number_for_user_imessage(monkeypatch)
         "enabled": True,
         "reason": "Phone number on file",
     }
+    assert pool.fetchrow_queries[0][1] == ("canonical-uid",)
+    assert "WHERE omi_uid = $1" in pool.fetchrow_queries[0][0]
+    assert "lower(omi_uid)" not in pool.fetchrow_queries[0][0].lower()
 
 
 def test_load_context_allows_identities_phone_override(monkeypatch):
