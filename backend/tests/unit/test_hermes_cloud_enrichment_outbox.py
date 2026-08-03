@@ -87,6 +87,7 @@ def _admitted_worker(monkeypatch):
         yield Writer()
 
     monkeypatch.setattr(content_write_fence, "detached_content_write_fence", admitted)
+    monkeypatch.setattr(content_write_fence, "assert_content_writer_admitted", lambda _uid: None)
 
 
 @pytest.mark.parametrize(

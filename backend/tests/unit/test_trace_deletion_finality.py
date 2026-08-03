@@ -238,6 +238,11 @@ def _fixed_app(monkeypatch, routing_pool, identity, order):
         order.append("purge_memory_reinterpretation")
         return 0
 
+    async def purge_canonical_event_ledger(uid):
+        assert uid == UID
+        order.append("purge_canonical_event_ledger")
+        return 0
+
     async def finalize(uid):
         assert uid == UID
         order.append("finalize")
@@ -254,6 +259,11 @@ def _fixed_app(monkeypatch, routing_pool, identity, order):
         account_deletion_service.account_deletion_db,
         "purge_memory_reinterpretation_work",
         purge_memory_reinterpretation_work,
+    )
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_canonical_event_ledger",
+        purge_canonical_event_ledger,
     )
     monkeypatch.setattr(account_deletion_service.account_deletion_db, "finalize_account_deletion", finalize)
 

@@ -175,7 +175,8 @@ class HermesCloudEnrichmentOutboxWorker:
             return False
         try:
             async with content_write_fence.detached_content_write_fence(uid) as writer:
-                job = await asyncio.to_thread(
+                job = await content_write_fence.run_admitted_threaded_mutation(
+                    uid,
                     self.repository.claim_next,
                     uid=uid,
                     writer_token=writer.token,
@@ -184,10 +185,11 @@ class HermesCloudEnrichmentOutboxWorker:
                 if not job:
                     return False
                 writer.assert_current()
-                result = await asyncio.to_thread(self.deliver, job)
+                result = await content_write_fence.run_admitted_threaded_mutation(uid, self.deliver, job)
                 writer.assert_current()
                 if result.ok:
-                    completed = await asyncio.to_thread(
+                    completed = await content_write_fence.run_admitted_threaded_mutation(
+                        uid,
                         self.repository.complete,
                         job_id=job["job_id"],
                         lease_token=job["lease_token"],
@@ -200,7 +202,8 @@ class HermesCloudEnrichmentOutboxWorker:
                     900,
                     self.retry_base_seconds * (2 ** min(int(job.get("attempt_count") or 1) - 1, 6)),
                 )
-                failed = await asyncio.to_thread(
+                failed = await content_write_fence.run_admitted_threaded_mutation(
+                    uid,
                     self.repository.fail,
                     job_id=job["job_id"],
                     lease_token=job["lease_token"],

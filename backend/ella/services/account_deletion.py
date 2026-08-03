@@ -100,6 +100,13 @@ async def execute_account_deletion(
         remaining.discard("memory_reinterpretation")
 
     try:
+        await account_deletion_db.purge_canonical_event_ledger(uid)
+    except account_deletion_db.AccountDeletionUnavailable:
+        remaining.add("canonical_event_ledger")
+    else:
+        remaining.discard("canonical_event_ledger")
+
+    try:
         await run_in_threadpool(delete_firestore, uid)
     except Exception:
         remaining.add("firestore_data")

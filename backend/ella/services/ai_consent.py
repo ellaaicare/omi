@@ -213,6 +213,7 @@ def build_account_deletion_receipt(
     if status not in {"completed", "pending"}:
         raise ValueError("account_deletion_receipt_status_invalid")
     allowed_remaining = {
+        "canonical_event_ledger",
         "firebase_identity",
         "firestore_data",
         "hermes_profile",

@@ -384,7 +384,8 @@ class PostgresMemoryReinterpretationRepository:
 
     async def next_due_uid(self) -> Optional[str]:
         pool = await self._pool()
-        uid = await pool.fetchval("""
+        uid = await pool.fetchval(
+            """
             SELECT uid
             FROM memory_reinterpretation_jobs
             WHERE (
@@ -397,7 +398,8 @@ class PostgresMemoryReinterpretationRepository:
                   )
             ORDER BY not_before ASC, created_at ASC
             LIMIT 1
-            """)
+            """
+        )
         return str(uid) if uid else None
 
     async def claim_due(
@@ -772,16 +774,20 @@ class PostgresMemoryReinterpretationRepository:
 
     async def metrics(self) -> dict[str, Any]:
         pool = await self._pool()
-        rows = await pool.fetch("""
+        rows = await pool.fetch(
+            """
             SELECT status, COUNT(*) AS count
             FROM memory_reinterpretation_jobs
             GROUP BY status
-            """)
-        oldest_due_seconds = await pool.fetchval("""
+            """
+        )
+        oldest_due_seconds = await pool.fetchval(
+            """
             SELECT EXTRACT(EPOCH FROM (NOW() - MIN(not_before)))
             FROM memory_reinterpretation_jobs
             WHERE status IN ('pending', 'retry') AND not_before <= NOW()
-            """)
+            """
+        )
         return {
             "jobs_by_status": {str(_row_value(row, "status")): int(_row_value(row, "count", 0) or 0) for row in rows},
             "oldest_due_seconds": float(oldest_due_seconds or 0),

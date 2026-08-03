@@ -416,6 +416,39 @@ def assert_content_writer_admitted(uid: str) -> None:
     writer.assert_current()
 
 
+async def finish_admitted_content_mutation(uid: str, awaitable: Awaitable[Any]) -> Any:
+    """Shield an admitted mutation and join it before propagating cancellation.
+
+    Cancellation is a request to stop waiting, not proof that an external
+    mutation stopped. The durable writer therefore remains owned until the
+    submitted operation has a known terminal outcome.
+    """
+    assert_content_writer_admitted(uid)
+    task = asyncio.create_task(awaitable)
+    try:
+        result = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            # The durable job/lease remains the resumable outcome. Shutdown
+            # cancellation is still propagated only after the mutation ended.
+            pass
+        raise
+    assert_content_writer_admitted(uid)
+    return result
+
+
+async def run_admitted_threaded_mutation(
+    subject_uid: str,
+    target: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run a synchronous mutation without orphaning its actual thread."""
+    return await finish_admitted_content_mutation(subject_uid, asyncio.to_thread(target, *args, **kwargs))
+
+
 def start_content_writer_thread(
     uid: str,
     target: Callable[..., Any],

@@ -331,7 +331,8 @@ async def _create_pending_proposal(
         "scopes": ["proposals:write"],
         "allowed_tools": ["memory_reinterpretation_propose"],
     }
-    result = await asyncio.to_thread(
+    result = await content_write_fence.run_admitted_threaded_mutation(
+        job["uid"],
         proposal_ingest.create_proposal,
         session_claims=claims,
         tool_name="memory_reinterpretation_propose",
@@ -562,12 +563,15 @@ class MemoryReinterpretationWorker:
                     )
                     await self._require_current_lease(job)
                     try:
-                        applied = await self.correction_writer(
-                            job=job,
-                            proposal=proposal,
-                            correction_id=correction_id,
-                            proposal_index=index,
-                            expected_version_id=expected_version_id,
+                        applied = await content_write_fence.finish_admitted_content_mutation(
+                            job["uid"],
+                            self.correction_writer(
+                                job=job,
+                                proposal=proposal,
+                                correction_id=correction_id,
+                                proposal_index=index,
+                                expected_version_id=expected_version_id,
+                            ),
                         )
                     except ConcurrentConversationSummaryChangeError:
                         await self._require_current_lease(job)
@@ -605,11 +609,14 @@ class MemoryReinterpretationWorker:
                         index,
                     )
                     await self._require_current_lease(job)
-                    proposal_id = await self.pending_proposal_writer(
-                        job=job,
-                        proposal=proposal,
-                        proposal_id=fallback_id,
-                        proposal_index=index,
+                    proposal_id = await content_write_fence.finish_admitted_content_mutation(
+                        job["uid"],
+                        self.pending_proposal_writer(
+                            job=job,
+                            proposal=proposal,
+                            proposal_id=fallback_id,
+                            proposal_index=index,
+                        ),
                     )
                     if proposal_id not in proposal_ids:
                         proposal_ids.append(proposal_id)

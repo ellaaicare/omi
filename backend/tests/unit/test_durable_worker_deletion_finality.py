@@ -10,9 +10,11 @@ from types import SimpleNamespace
 import types
 import threading
 
-from fastapi import Depends, FastAPI, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.testclient import TestClient
+import httpx
 import pytest
+import requests
 
 os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
 os.environ.setdefault("GCLOUD_PROJECT", "omi-ci")
@@ -33,6 +35,7 @@ sys.modules.setdefault("utils.other.storage", storage_stub)
 sys.modules.setdefault("websockets", types.ModuleType("websockets"))
 vector_stub = types.ModuleType("utils.conversations.vector")
 vector_stub.refresh_structured_summary_vector = lambda *args, **kwargs: None
+vector_stub.save_structured_vector = lambda *args, **kwargs: None
 sys.modules.setdefault("utils.conversations.vector", vector_stub)
 summary_stub = types.ModuleType("utils.conversations.generic_summary")
 summary_stub.generate_stock_conversation_summary = lambda *args, **kwargs: None
@@ -41,9 +44,16 @@ sys.modules.setdefault("utils.conversations.generic_summary", summary_stub)
 from database import account_deletion as account_deletion_db
 from database import content_write_fence
 from database.memory_reinterpretations import InMemoryMemoryReinterpretationRepository
+from ella.routers import canonical_events
+from ella.routers.canonical_events import (
+    CanonicalEventsBatch,
+    InMemoryCanonicalEventStore,
+    create_canonical_events_router,
+)
 from ella.services import account_deletion as account_deletion_service
 from ella.services import hermes_cloud_enrichment_outbox as enrichment_service
 from ella.services import memory_reinterpretation as reinterpretation_service
+from ella.services import proposal_ingest
 from ella.services.hermes_cloud_enrichment_outbox import DeliveryResult, HermesCloudEnrichmentOutboxWorker
 from ella.services.memory_reinterpretation import MemoryReinterpretationWorker, ReinterpretationPlan
 
@@ -168,6 +178,7 @@ def _deletion_app(
     delete_firestore,
     delete_firebase,
     purge_memory,
+    purge_canonical=None,
 ):
     monkeypatch.setenv("ELLA_POSTGRES_AUTHORITY_ENABLED", "true" if authority_enabled else "false")
 
@@ -183,6 +194,16 @@ def _deletion_app(
     monkeypatch.setattr(account_deletion_service.account_deletion_db, "finalize_account_deletion", finalize)
     monkeypatch.setattr(
         account_deletion_service.account_deletion_db, "purge_memory_reinterpretation_work", purge_memory
+    )
+    if purge_canonical is None:
+
+        async def purge_canonical(_uid):
+            return 0
+
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_canonical_event_ledger",
+        purge_canonical,
     )
     route, namespace = _load_production_delete_route()
     namespace["delete_user_data"] = delete_firestore
@@ -245,6 +266,149 @@ class _EnrichmentOutbox:
             for job_id in removed:
                 del self.jobs[job_id]
             return len(removed)
+
+
+class _HeldCanonicalStore(InMemoryCanonicalEventStore):
+    def __init__(self):
+        super().__init__()
+        self.hold_uid = None
+        self.write_entered = threading.Event()
+        self.release_write = threading.Event()
+
+    async def write_batch(self, events):
+        if self.hold_uid and any(event.uid == self.hold_uid for event in events):
+            self.write_entered.set()
+            assert await asyncio.to_thread(self.release_write.wait, 5)
+        return await super().write_batch(events)
+
+    def purge(self, uid):
+        event_keys = [key for key, event in self._events.items() if event.get("uid") == uid]
+        session_keys = [key for key, session in self._sessions.items() if session.get("uid") == uid]
+        for key in event_keys:
+            del self._events[key]
+        for key in session_keys:
+            del self._sessions[key]
+        return len(event_keys) + len(session_keys)
+
+
+def _canonical_event(uid, event_id):
+    return {
+        "uid": uid,
+        "canonical_identity": uid,
+        "event_id": event_id,
+        "channel": "ios_voice",
+        "provider": "mounted-adversarial-test",
+        "role": "user",
+        "text": "Synthetic private transcript",
+        "started_at": "2026-08-03T00:00:00Z",
+        "source_ref": {"source_identity": f"source:{event_id}"},
+        "metadata": {"synthetic": True},
+    }
+
+
+def test_positive_control_legacy_mounted_canonical_route_writes_after_tombstone(deletion_fence):
+    del deletion_fence
+    assert asyncio.run(content_write_fence.tombstone_content_writes(UID)) is True
+    store = InMemoryCanonicalEventStore()
+    router = APIRouter()
+
+    @router.post("/v1/ella/events")
+    async def legacy_write(batch: CanonicalEventsBatch):
+        return await store.write_batch(batch.events)
+
+    app = FastAPI()
+    app.include_router(router)
+    app.add_middleware(content_write_fence.ContentWriteFenceMiddleware)
+    response = TestClient(app).post(
+        "/v1/ella/events",
+        json={"events": [_canonical_event(UID, "legacy-post-tombstone")]},
+    )
+
+    assert response.status_code == 200
+    assert any(event["uid"] == UID for event in store._events.values())
+
+
+def test_mounted_canonical_auth_drain_exact_purge_firebase_last_and_retry(monkeypatch, deletion_fence):
+    del deletion_fence
+    store = _HeldCanonicalStore()
+    asyncio.run(
+        store.write_batch(
+            [canonical_events.CanonicalEventIn(**_canonical_event(OTHER_UID, "retained-canonical-event"))]
+        )
+    )
+    store.hold_uid = UID
+    order = []
+
+    def authenticate(authorization):
+        if authorization != "Bearer exact-user-token":
+            raise HTTPException(status_code=401, detail="Invalid authorization token")
+        return UID
+
+    monkeypatch.setattr(canonical_events.auth, "get_authenticated_user_uid", authenticate)
+
+    async def purge_memory(_uid):
+        return 0
+
+    async def purge_canonical(uid):
+        order.append("canonical-purge")
+        return store.purge(uid)
+
+    app = _deletion_app(
+        monkeypatch,
+        authority_enabled=True,
+        delete_firestore=lambda _uid: order.append("firestore-purge"),
+        delete_firebase=lambda _uid: order.append("firebase-delete"),
+        purge_memory=purge_memory,
+        purge_canonical=purge_canonical,
+    )
+    app.include_router(create_canonical_events_router(store))
+
+    with TestClient(app) as client:
+        unauthenticated = client.post(
+            "/v1/ella/events",
+            json={"events": [_canonical_event(UID, "unauthenticated")]},
+        )
+        mismatch = client.post(
+            "/v1/ella/events",
+            headers={"Authorization": "Bearer exact-user-token"},
+            json={"events": [_canonical_event(OTHER_UID, "cross-subject")]},
+        )
+        assert unauthenticated.status_code == 401
+        assert mismatch.status_code == 403
+
+        write_result = {}
+
+        def write():
+            write_result["response"] = client.post(
+                "/v1/ella/events",
+                headers={"Authorization": "Bearer exact-user-token"},
+                json={"events": [_canonical_event(UID, "held-canonical-event")]},
+            )
+
+        writer = threading.Thread(target=write)
+        writer.start()
+        assert store.write_entered.wait(3)
+        pending = client.delete("/v1/users/delete-account")
+        assert pending.status_code == 202
+        assert "firebase-delete" not in order
+
+        store.release_write.set()
+        writer.join(3)
+        assert not writer.is_alive()
+        assert write_result["response"].status_code == 200
+
+        completed = client.delete("/v1/users/delete-account")
+        assert completed.status_code == 200
+        denied = client.post(
+            "/v1/ella/events",
+            headers={"Authorization": "Bearer exact-user-token"},
+            json={"events": [_canonical_event(UID, "fresh-post-tombstone")]},
+        )
+        assert denied.status_code == 403
+
+    assert not any(event["uid"] == UID for event in store._events.values())
+    assert any(event["uid"] == OTHER_UID for event in store._events.values())
+    assert order == ["canonical-purge", "firestore-purge", "firebase-delete"]
 
 
 @pytest.mark.parametrize("authority_enabled", [True, False])
@@ -462,3 +626,173 @@ def test_startup_memory_worker_is_drained_purged_and_tombstone_denied(
     assert asyncio.run(worker.run_once("post-tombstone-worker")) is None
     assert repository.jobs[post_tombstone["id"]]["status"] == "pending"
     assert hermes.calls == calls_before
+
+
+@pytest.mark.parametrize("terminal", ["success", "error", "timeout"])
+def test_stop_worker_joins_actual_enrichment_thread_before_deletion(monkeypatch, deletion_fence, terminal):
+    del deletion_fence
+    repository = _EnrichmentOutbox()
+    delivery_entered = threading.Event()
+    release_delivery = threading.Event()
+    order = []
+
+    def deliver(_job):
+        order.append("delivery-entered")
+        delivery_entered.set()
+        assert release_delivery.wait(5)
+        order.append(f"delivery-{terminal}")
+        if terminal == "error":
+            raise RuntimeError("synthetic-delivery-error")
+        if terminal == "timeout":
+            raise requests.Timeout("synthetic-delivery-timeout")
+        return DeliveryResult(True, receipt={"content_free": True})
+
+    worker = HermesCloudEnrichmentOutboxWorker(repository, deliver=deliver, poll_seconds=0.01)
+
+    async def purge_memory(_uid):
+        return 0
+
+    app = _deletion_app(
+        monkeypatch,
+        authority_enabled=True,
+        delete_firestore=lambda uid: (order.append("enrichment-purge"), repository.purge(uid)),
+        delete_firebase=lambda _uid: order.append("firebase-delete"),
+        purge_memory=purge_memory,
+    )
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS", UID)
+    monkeypatch.setattr(enrichment_service, "_worker_task", None)
+
+    async def start():
+        await enrichment_service.start_worker(worker)
+
+    app.router.add_event_handler("startup", start)
+    app.router.add_event_handler("shutdown", enrichment_service.stop_worker)
+
+    async def scenario():
+        await app.router.startup()
+        first_task = enrichment_service._worker_task
+        assert first_task is not None
+        await enrichment_service.start_worker(worker)
+        assert enrichment_service._worker_task is first_task
+        assert await asyncio.to_thread(delivery_entered.wait, 3)
+
+        shutdown = asyncio.create_task(app.router.shutdown())
+        await asyncio.sleep(0.05)
+        assert not shutdown.done()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            pending = await client.delete("/v1/users/delete-account")
+            assert pending.status_code == 202
+            assert "firebase-delete" not in order
+            assert repository.jobs["target"]["status"] == "running"
+
+            release_delivery.set()
+            await asyncio.wait_for(shutdown, 3)
+            assert enrichment_service._worker_task is None
+            completed = await client.delete("/v1/users/delete-account")
+            assert completed.status_code == 200
+
+    asyncio.run(scenario())
+    assert "target" not in repository.jobs
+    assert repository.jobs["retained"]["uid"] == OTHER_UID
+    assert order.index(f"delivery-{terminal}") < order.index("enrichment-purge")
+    assert order.index("enrichment-purge") < order.index("firebase-delete")
+
+
+def test_stop_worker_joins_actual_memory_proposal_thread_before_deletion(monkeypatch, deletion_fence):
+    del deletion_fence
+    repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+    target = asyncio.run(_seed_reinterpretation(repository, UID))
+    retained = asyncio.run(_seed_reinterpretation(repository, OTHER_UID, completed=True))
+    proposal_entered = threading.Event()
+    release_proposal = threading.Event()
+    order = []
+
+    class AmbiguousHermes:
+        async def propose(self, **_kwargs):
+            return ReinterpretationPlan(
+                outcome="proposals",
+                proposals=[
+                    {
+                        "kind": "ambiguous_reinterpretation",
+                        "certainty": "ambiguous",
+                        "correction_text": "The remembered location may have changed.",
+                        "evidence_event_ids": [f"event-{UID}"],
+                    }
+                ],
+            )
+
+    async def conversation_loader(uid, conversation_id):
+        return {
+            "id": conversation_id,
+            "active_summary_version_id": f"version-{uid}",
+            "structured": {"overview": "[Ella] A remembered detail."},
+        }
+
+    def create_proposal(**_kwargs):
+        order.append("proposal-entered")
+        proposal_entered.set()
+        assert release_proposal.wait(5)
+        order.append("proposal-returned")
+        return {"proposal": {"proposal_id": "proposal-after-cancel"}}
+
+    monkeypatch.setattr(proposal_ingest, "create_proposal", create_proposal)
+    worker = MemoryReinterpretationWorker(
+        repository,
+        hermes_client=AmbiguousHermes(),
+        conversation_loader=conversation_loader,
+        lease_seconds=30,
+    )
+
+    async def purge_memory(uid):
+        order.append("memory-purge")
+        removed = [job_id for job_id, job in repository.jobs.items() if job["uid"] == uid]
+        for job_id in removed:
+            del repository.jobs[job_id]
+        repository.attempts = [attempt for attempt in repository.attempts if attempt["job_id"] not in removed]
+        return len(removed)
+
+    app = _deletion_app(
+        monkeypatch,
+        authority_enabled=True,
+        delete_firestore=lambda _uid: order.append("firestore-purge"),
+        delete_firebase=lambda _uid: order.append("firebase-delete"),
+        purge_memory=purge_memory,
+    )
+    monkeypatch.setenv("ELLA_MEMORY_REINTERPRETATION_WORKER_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MEMORY_REINTERPRETATION_IDLE_SECONDS", "0.01")
+    monkeypatch.setattr(reinterpretation_service, "_worker_task", None)
+
+    async def start():
+        await reinterpretation_service.start_worker(worker)
+
+    app.router.add_event_handler("startup", start)
+    app.router.add_event_handler("shutdown", reinterpretation_service.stop_worker)
+
+    async def scenario():
+        await app.router.startup()
+        first_task = reinterpretation_service._worker_task
+        assert first_task is not None
+        await reinterpretation_service.start_worker(worker)
+        assert reinterpretation_service._worker_task is first_task
+        assert await asyncio.to_thread(proposal_entered.wait, 3)
+
+        shutdown = asyncio.create_task(app.router.shutdown())
+        await asyncio.sleep(0.05)
+        assert not shutdown.done()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            pending = await client.delete("/v1/users/delete-account")
+            assert pending.status_code == 202
+            assert "firebase-delete" not in order
+            assert repository.jobs[target["id"]]["status"] == "running"
+
+            release_proposal.set()
+            await asyncio.wait_for(shutdown, 3)
+            assert reinterpretation_service._worker_task is None
+            completed = await client.delete("/v1/users/delete-account")
+            assert completed.status_code == 200
+
+    asyncio.run(scenario())
+    assert target["id"] not in repository.jobs
+    assert repository.jobs[retained["id"]]["uid"] == OTHER_UID
+    assert order.index("proposal-returned") < order.index("memory-purge")
+    assert order.index("memory-purge") < order.index("firebase-delete")

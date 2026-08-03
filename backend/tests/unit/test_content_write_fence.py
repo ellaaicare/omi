@@ -131,6 +131,9 @@ def fence_environment(monkeypatch):
     async def purge_memory_reinterpretation_work(_uid):
         return 0
 
+    async def purge_canonical_event_ledger(_uid):
+        return 0
+
     monkeypatch.setattr(
         account_deletion_service.account_deletion_db,
         "purge_routing_traces",
@@ -141,6 +144,11 @@ def fence_environment(monkeypatch):
         "purge_memory_reinterpretation_work",
         purge_memory_reinterpretation_work,
     )
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_canonical_event_ledger",
+        purge_canonical_event_ledger,
+    )
     yield database
     content_write_fence.configure_firestore_db(previous_database)
 
@@ -148,6 +156,38 @@ def fence_environment(monkeypatch):
 def _fence_state(database):
     reference = content_write_fence._fence_reference(database, UID)
     return deepcopy(database.documents.get(reference.key))
+
+
+def test_threaded_mutation_stale_token_is_joined_before_failure(monkeypatch, fence_environment):
+    entered = threading.Event()
+    release = threading.Event()
+    terminal = threading.Event()
+
+    async def assert_postgres_active(_uid):
+        return None
+
+    def mutate():
+        entered.set()
+        assert release.wait(3)
+        terminal.set()
+        return "mutated"
+
+    monkeypatch.setattr(content_write_fence, "_assert_postgres_owner_active", assert_postgres_active)
+
+    async def scenario():
+        async with content_write_fence.detached_content_write_fence(UID) as writer:
+            operation = asyncio.create_task(content_write_fence.run_admitted_threaded_mutation(UID, mutate))
+            assert await asyncio.to_thread(entered.wait, 2)
+            state = _fence_state(fence_environment)
+            state["writers"].pop(writer.token)
+            reference = content_write_fence._fence_reference(fence_environment, UID)
+            fence_environment.documents[reference.key] = state
+            release.set()
+            with pytest.raises(content_write_fence.ContentWriteFenceError, match="account_write_forbidden"):
+                await operation
+            assert terminal.is_set()
+
+    asyncio.run(scenario())
 
 
 def _load_production_delete_route():
@@ -228,6 +268,7 @@ def _deterministic_backend_inventory(backend: Path, overrides=None):
                     or "Depends(auth_endpoints.get_writable_user_uid)" in function_source
                     or "Depends(require_current_ai_consent)" in function_source
                     or "request_content_write_fence(" in function_source
+                    or "_canonical_write_fences(" in function_source
                 ):
                     protected_mutations.append(key)
                 if (
@@ -247,7 +288,21 @@ def _deterministic_backend_inventory(backend: Path, overrides=None):
                 name = node.func.id
             elif isinstance(node.func, ast.Attribute):
                 name = node.func.attr
-            if name in {"create_task", "run_in_executor", "Thread", "start_new_thread"}:
+            if name in {
+                "Thread",
+                "TaskGroup",
+                "add_task",
+                "create_task",
+                "finish_admitted_content_mutation",
+                "run_admitted_threaded_mutation",
+                "run_in_executor",
+                "safe_create_task",
+                "start_content_writer_task",
+                "start_content_writer_thread",
+                "start_new_thread",
+                "submit",
+                "to_thread",
+            }:
                 function = self.functions[-1] if self.functions else "<module>"
                 launches.append(f"{self.path.relative_to(backend)}:{function}:{name}:{ast.unparse(node)}")
             self.generic_visit(node)
@@ -279,12 +334,12 @@ def test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_u
         snapshot,
         digest,
         counts={
-            "launches": 71,
+            "launches": 188,
             "mutations": 229,
-            "protected_mutations": 135,
+            "protected_mutations": 136,
             "raw_uid_mutations": 0,
         },
-        expected_digest="3d0639b02127ec612d03244f05ca29faaed2fdefbf333cc8e9f3f5b432ea0e05",
+        expected_digest="fa3f77dfd53a40a08ae365824de91d14b111fc258ac70898989c83c4522ccd53",
     )
     assert any(
         item.startswith("ella/services/hermes_cloud_enrichment_outbox.py:start_worker:create_task:")
@@ -294,15 +349,21 @@ def test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_u
         item.startswith("ella/services/memory_reinterpretation.py:start_worker:create_task:")
         for item in snapshot["launches"]
     )
+    assert any(":submit:" in item for item in snapshot["launches"])
+    assert any(":add_task:" in item for item in snapshot["launches"])
+    assert any(":to_thread:" in item for item in snapshot["launches"])
+    assert any(":run_in_executor:" in item for item in snapshot["launches"])
+    assert any(":start_content_writer_thread:" in item for item in snapshot["launches"])
+    assert any("utils/ella/scanner_keyterms.py:_schedule_refresh:create_task:" in item for item in snapshot["launches"])
 
 
 def test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfenced_uid_writer():
     backend = Path(__file__).resolve().parents[2]
     baseline, baseline_digest = _deterministic_backend_inventory(backend)
     expected_counts = {
-        "launches": 71,
+        "launches": 188,
         "mutations": 229,
-        "protected_mutations": 135,
+        "protected_mutations": 136,
         "raw_uid_mutations": 0,
     }
 
@@ -311,19 +372,48 @@ def test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfence
     injected_service = service_source.replace(
         "    _worker_task = asyncio.create_task(active_worker.run_forever())",
         "    _worker_task = asyncio.create_task(active_worker.run_forever())\n"
-        "    asyncio.create_task(active_worker.run_once())",
+        "    asyncio.create_task(active_worker.run_once())\n"
+        "    executor.submit(active_worker.run_once)",
         1,
     )
     startup_snapshot, startup_digest = _deterministic_backend_inventory(
         backend,
         {service_path: injected_service},
     )
-    assert len(startup_snapshot["launches"]) == len(baseline["launches"]) + 1
+    assert len(startup_snapshot["launches"]) == len(baseline["launches"]) + 2
     assert any("active_worker.run_once()" in item for item in startup_snapshot["launches"])
+    assert any("executor.submit(active_worker.run_once)" in item for item in startup_snapshot["launches"])
     with pytest.raises(AssertionError):
         _assert_deterministic_backend_inventory(
             startup_snapshot,
             startup_digest,
+            counts=expected_counts,
+            expected_digest=baseline_digest,
+        )
+
+    background_path = backend / "ella" / "routers" / "onboarding.py"
+    injected_background = (
+        background_path.read_text(encoding="utf-8")
+        + """
+
+@router.post('/positive-control-background-writer')
+async def positive_control_background_writer(
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(auth.get_writable_user_uid),
+):
+    background_tasks.add_task(mutate_uid_content, uid)
+"""
+    )
+    background_snapshot, background_digest = _deterministic_backend_inventory(
+        backend,
+        {background_path: injected_background},
+    )
+    assert len(background_snapshot["launches"]) == len(baseline["launches"]) + 1
+    assert any("background_tasks.add_task(mutate_uid_content, uid)" in item for item in background_snapshot["launches"])
+    with pytest.raises(AssertionError):
+        _assert_deterministic_backend_inventory(
+            background_snapshot,
+            background_digest,
             counts=expected_counts,
             expected_digest=baseline_digest,
         )
@@ -986,6 +1076,7 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
                     or "Depends(auth_endpoints.get_writable_user_uid)" in function_source
                     or "Depends(require_current_ai_consent)" in function_source
                     or "request_content_write_fence(" in function_source
+                    or "_canonical_write_fences(" in function_source
                 ):
                     protected_mutations.append(key)
                 if (
@@ -996,10 +1087,11 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
 
     exact_protected = sorted(set(protected_mutations))
     exact_inventory_hash = hashlib.sha256("\n".join(exact_protected).encode("utf-8")).hexdigest()
-    assert len(exact_protected) == 135
-    assert exact_inventory_hash == "d7f12be323f1e987a1dc047ca96cc97da8e3e7798820e319edc6d6de47efe429"
+    assert len(exact_protected) == 136
+    assert exact_inventory_hash == "164bcf6a4bb4a643a6c61ca519e55a2debbf15cae25cc8270c3e7427b7217748"
     assert raw_mutation_dependencies == []
     assert "ella/routers/trace.py:ingest_client_trace" in protected_mutations
+    assert "ella/routers/canonical_events.py:write_events" in protected_mutations
     assert "ella/routers/canonical_events.py:complete_session" in protected_mutations
 
     exact_mutations = sorted(set(mutation_routes))
@@ -1010,8 +1102,8 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
     unauthenticated_inventory_hash = hashlib.sha256(
         "\n".join(mutations_without_writable_authority).encode("utf-8")
     ).hexdigest()
-    assert len(mutations_without_writable_authority) == 94
-    assert unauthenticated_inventory_hash == "084701269e75c53763662a82dbbd23218456fe524df327378e8d6a6219c02037"
+    assert len(mutations_without_writable_authority) == 93
+    assert unauthenticated_inventory_hash == "073c713813921f26ce6cdcecfb04e359fce313b20f8d9f97e13cc649294a5434"
     assert "ella/routers/trace.py:ingest_client_trace" not in mutations_without_writable_authority
     assert "routers/announcements.py:dismiss_announcement_endpoint" in protected_mutations
     assert "routers/transcribe.py:listen_handler" in protected_mutations

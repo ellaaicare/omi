@@ -122,6 +122,23 @@ CREATE TABLE users (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE canonical_events (
+    id BIGSERIAL PRIMARY KEY,
+    uid TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    metadata JSONB NOT NULL,
+    raw_event JSONB NOT NULL
+);
+
+CREATE TABLE canonical_event_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    uid TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    metadata JSONB NOT NULL,
+    raw_completion JSONB NOT NULL
+);
+
 CREATE TABLE ella_provisioning_jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -4182,6 +4199,99 @@ def test_account_deletion_memory_reinterpretation_purge_removes_attempts_and_ret
             )
         assert [dict(row) for row in jobs] == [{"id": "retained-memory-job", "uid": "memory-retained-user"}]
         assert [dict(row) for row in attempts] == [{"job_id": "retained-memory-job", "lease_token": "retained-lease"}]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_canonical_ledger_positive_control_exact_purge_rollback_and_retry():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        target_uid = "canonical-delete-user"
+        retained_uid = "canonical-retained-user"
+        async with pool.acquire() as connection:
+            await connection.executemany(
+                """
+                INSERT INTO canonical_events (uid, event_id, text, metadata, raw_event)
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                """,
+                [
+                    (target_uid, "owned-1", "private transcript one", '{"source":"owned"}', '{"uid":"owned"}'),
+                    (target_uid, "owned-2", "private transcript two", '{"source":"owned"}', '{"uid":"owned"}'),
+                    (retained_uid, "retained", "retained transcript", '{"source":"other"}', '{"uid":"other"}'),
+                ],
+            )
+            await connection.executemany(
+                """
+                INSERT INTO canonical_event_sessions (uid, session_id, metadata, raw_completion)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb)
+                """,
+                [
+                    (target_uid, "owned-session", '{"source":"owned"}', '{"uid":"owned"}'),
+                    (retained_uid, "retained-session", '{"source":"other"}', '{"uid":"other"}'),
+                ],
+            )
+
+        # Positive control: the previously available deletion purges do not
+        # touch either canonical table.
+        assert await account_deletion.purge_routing_traces(target_uid) == 0
+        assert await account_deletion.purge_memory_reinterpretation_work(target_uid) == 0
+        async with pool.acquire() as connection:
+            assert await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", target_uid) == 2
+            assert (
+                await connection.fetchval("SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1", target_uid)
+                == 1
+            )
+            await connection.execute(
+                """
+                CREATE FUNCTION suppress_canonical_session_delete()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    RETURN NULL;
+                END
+                $$;
+                CREATE TRIGGER suppress_canonical_session_delete
+                BEFORE DELETE ON canonical_event_sessions
+                FOR EACH ROW EXECUTE FUNCTION suppress_canonical_session_delete()
+                """
+            )
+
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as ambiguous:
+            await account_deletion.purge_canonical_event_ledger(target_uid)
+        assert ambiguous.value.code == "account_deletion_canonical_event_ledger_unavailable"
+        async with pool.acquire() as connection:
+            # The affected-count ambiguity rolls back the event delete too.
+            assert await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", target_uid) == 2
+            assert (
+                await connection.fetchval("SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1", target_uid)
+                == 1
+            )
+            await connection.execute("DROP TRIGGER suppress_canonical_session_delete ON canonical_event_sessions")
+
+        assert await account_deletion.purge_canonical_event_ledger(target_uid) == 3
+        assert await account_deletion.purge_canonical_event_ledger(target_uid) == 0
+        async with pool.acquire() as connection:
+            retained = await connection.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM canonical_events WHERE uid = $1) AS events,
+                    (SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1) AS sessions
+                """,
+                retained_uid,
+            )
+            assert tuple(retained.values()) == (1, 1)
+            await connection.execute("DROP TABLE canonical_event_sessions")
+            await connection.execute(
+                """
+                INSERT INTO canonical_events (uid, event_id, text, metadata, raw_event)
+                VALUES ($1, 'missing-table', 'private transcript', '{}'::jsonb, '{}'::jsonb)
+                """,
+                target_uid,
+            )
+
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as missing:
+            await account_deletion.purge_canonical_event_ledger(target_uid)
+        assert missing.value.code == "account_deletion_canonical_event_ledger_unavailable"
+        async with pool.acquire() as connection:
+            assert await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", target_uid) == 1
 
     asyncio.run(_run_with_database(scenario))
 

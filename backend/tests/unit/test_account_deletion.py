@@ -24,6 +24,9 @@ def _successful_content_fence(monkeypatch):
     async def purge_memory_reinterpretation_work(_uid):
         return 0
 
+    async def purge_canonical_event_ledger(_uid):
+        return 0
+
     monkeypatch.setattr(
         account_deletion_service.content_write_fence,
         "tombstone_content_writes",
@@ -38,6 +41,11 @@ def _successful_content_fence(monkeypatch):
         account_deletion_service.account_deletion_db,
         "purge_memory_reinterpretation_work",
         purge_memory_reinterpretation_work,
+    )
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_canonical_event_ledger",
+        purge_canonical_event_ledger,
     )
 
 
@@ -412,6 +420,51 @@ def test_deletion_service_retains_firebase_when_memory_work_purge_is_unavailable
     assert result.status_code == 202
     assert result.body["deletion_receipt"]["remaining"] == ["memory_reinterpretation"]
     assert calls == [("firestore", "synthetic-user")]
+
+
+def test_canonical_ledger_purge_is_resumable_and_precedes_firebase_last(monkeypatch):
+    calls = []
+
+    async def quarantine(_uid):
+        return _state()
+
+    async def unavailable(_uid):
+        calls.append("canonical-purge-failed")
+        raise account_deletion_db.AccountDeletionUnavailable("account_deletion_canonical_event_ledger_unavailable")
+
+    async def purged(_uid):
+        calls.append("canonical-purged")
+        return 2
+
+    async def finalize(_uid):
+        calls.append("finalized")
+        return True
+
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "quarantine_account_for_deletion", quarantine)
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "purge_canonical_event_ledger", unavailable)
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "finalize_account_deletion", finalize)
+
+    pending = asyncio.run(
+        account_deletion_service.execute_account_deletion(
+            "synthetic-user",
+            delete_firestore=lambda _uid: calls.append("firestore"),
+            delete_firebase=lambda _uid: calls.append("firebase"),
+        )
+    )
+    assert pending.status_code == 202
+    assert pending.body["deletion_receipt"]["remaining"] == ["canonical_event_ledger"]
+    assert calls == ["canonical-purge-failed", "firestore"]
+
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "purge_canonical_event_ledger", purged)
+    completed = asyncio.run(
+        account_deletion_service.execute_account_deletion(
+            "synthetic-user",
+            delete_firestore=lambda _uid: calls.append("firestore-retry"),
+            delete_firebase=lambda _uid: calls.append("firebase"),
+        )
+    )
+    assert completed.status_code == 200
+    assert calls[-4:] == ["canonical-purged", "firestore-retry", "finalized", "firebase"]
 
 
 def test_firebase_delete_lost_ack_converges_only_after_authoritative_absence(monkeypatch):

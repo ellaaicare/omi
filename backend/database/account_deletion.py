@@ -305,6 +305,58 @@ async def purge_memory_reinterpretation_work(uid: str) -> int:
         raise AccountDeletionUnavailable("account_deletion_memory_reinterpretation_unavailable") from exc
 
 
+async def purge_canonical_event_ledger(uid: str) -> int:
+    """Transactionally prove the exact UID absent from both canonical tables."""
+    code = "account_deletion_canonical_event_ledger_unavailable"
+    try:
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                events_exists = await connection.fetchval("SELECT to_regclass('canonical_events') IS NOT NULL")
+                sessions_exists = await connection.fetchval(
+                    "SELECT to_regclass('canonical_event_sessions') IS NOT NULL"
+                )
+                if not events_exists or not sessions_exists:
+                    raise AccountDeletionUnavailable(code)
+
+                event_count = int(
+                    await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", uid) or 0
+                )
+                session_count = int(
+                    await connection.fetchval("SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1", uid) or 0
+                )
+                session_result = await connection.execute(
+                    "DELETE FROM canonical_event_sessions WHERE uid = $1",
+                    uid,
+                )
+                event_result = await connection.execute(
+                    "DELETE FROM canonical_events WHERE uid = $1",
+                    uid,
+                )
+                affected_sessions = _affected(session_result)
+                affected_events = _affected(event_result)
+                remaining = await connection.fetchrow(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) FROM canonical_events WHERE uid = $1) AS events,
+                        (SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1) AS sessions
+                    """,
+                    uid,
+                )
+                if (
+                    affected_events != event_count
+                    or affected_sessions != session_count
+                    or int(remaining["events"] or 0) != 0
+                    or int(remaining["sessions"] or 0) != 0
+                ):
+                    raise AccountDeletionUnavailable(code)
+                return affected_events + affected_sessions
+    except AccountDeletionUnavailable:
+        raise
+    except Exception as exc:
+        raise AccountDeletionUnavailable(code) from exc
+
+
 async def finalize_account_deletion(uid: str) -> bool:
     """Mark a quarantined identity complete only after external state is absent."""
     try:
