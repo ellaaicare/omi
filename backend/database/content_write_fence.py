@@ -110,6 +110,32 @@ def _fence_reference(db: Any, uid: str) -> Any:
     return db.collection(FENCE_COLLECTION).document(subject_hash)
 
 
+def content_writes_active(uid: str, *, db: Any = None) -> bool:
+    """Return whether new UID-scoped durable work may be admitted.
+
+    This is only a queue-selection hint. Callers must still acquire a durable
+    writer registration before claiming or mutating work because deletion can
+    begin immediately after this read.
+    """
+    firestore_db = _configured_firestore_db(db)
+    data = _snapshot_data(_fence_reference(firestore_db, uid).get())
+    return data.get("state", ACTIVE) == ACTIVE
+
+
+def transaction_content_writer_current(
+    transaction: Any,
+    firestore_db: Any,
+    uid: str,
+    writer_token: str,
+    *,
+    allow_draining: bool,
+) -> bool:
+    """Check one durable writer token inside another Firestore transaction."""
+    data = _snapshot_data(_fence_reference(firestore_db, uid).get(transaction=transaction))
+    allowed_states = {ACTIVE, DRAINING} if allow_draining else {ACTIVE}
+    return data.get("state", ACTIVE) in allowed_states and writer_token in _registered_writers(data)
+
+
 def _snapshot_data(snapshot: Any) -> dict[str, Any]:
     if not getattr(snapshot, "exists", False):
         return {}

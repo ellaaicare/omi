@@ -263,6 +263,48 @@ async def purge_routing_traces(uid: str) -> int:
         raise AccountDeletionUnavailable("account_deletion_routing_traces_unavailable") from exc
 
 
+async def purge_memory_reinterpretation_work(uid: str) -> int:
+    """Delete exact-UID reinterpretation jobs and their cascading attempts."""
+    try:
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                jobs_exists = await connection.fetchval(
+                    "SELECT to_regclass('memory_reinterpretation_jobs') IS NOT NULL"
+                )
+                attempts_exists = await connection.fetchval(
+                    "SELECT to_regclass('memory_reinterpretation_attempts') IS NOT NULL"
+                )
+                if not jobs_exists and not attempts_exists:
+                    return 0
+                if not jobs_exists or not attempts_exists:
+                    raise AccountDeletionUnavailable("account_deletion_memory_reinterpretation_unavailable")
+                attempt_result = await connection.execute(
+                    """
+                    DELETE FROM memory_reinterpretation_attempts attempt
+                    USING memory_reinterpretation_jobs job
+                    WHERE attempt.job_id = job.id
+                      AND job.uid = $1
+                    """,
+                    uid,
+                )
+                result = await connection.execute(
+                    "DELETE FROM memory_reinterpretation_jobs WHERE uid = $1",
+                    uid,
+                )
+                remaining = await connection.fetchval(
+                    "SELECT COUNT(*) FROM memory_reinterpretation_jobs WHERE uid = $1",
+                    uid,
+                )
+                if int(remaining or 0) != 0:
+                    raise AccountDeletionUnavailable("account_deletion_memory_reinterpretation_unavailable")
+                return _affected(result) + _affected(attempt_result)
+    except AccountDeletionUnavailable:
+        raise
+    except Exception as exc:
+        raise AccountDeletionUnavailable("account_deletion_memory_reinterpretation_unavailable") from exc
+
+
 async def finalize_account_deletion(uid: str) -> bool:
     """Mark a quarantined identity complete only after external state is absent."""
     try:

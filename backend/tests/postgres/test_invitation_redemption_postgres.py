@@ -230,6 +230,7 @@ async def _run_with_database(
         async with pool.acquire() as conn:
             await conn.execute(BASE_PROVISIONING_SCHEMA)
             for name in (
+                "007_create_memory_reinterpretation_outbox.sql",
                 "008_create_voice_canary_controls.sql",
                 "009_create_hermes_cloud_runtime_pool.sql",
                 "010_add_cloud_profile_class.sql",
@@ -4121,6 +4122,66 @@ def test_account_deletion_routing_trace_purge_is_exact_repeatable_and_retains_ot
                 "notes": '["retained"]',
             }
         ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_memory_reinterpretation_purge_removes_attempts_and_retains_other_users():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        async with pool.acquire() as connection:
+            await connection.executemany(
+                """
+                INSERT INTO memory_reinterpretation_jobs (
+                    id, uid, logical_session_id, conversation_id,
+                    starting_summary_version_id, source_identity,
+                    canonical_refs, transcript_hash, status, not_before
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, '[]'::jsonb, $7, 'running', NOW())
+                """,
+                [
+                    (
+                        "owned-memory-job",
+                        "memory-delete-user",
+                        "session-owned",
+                        "conversation-owned",
+                        "v1",
+                        "source-owned",
+                        "hash-owned",
+                    ),
+                    (
+                        "retained-memory-job",
+                        "memory-retained-user",
+                        "session-retained",
+                        "conversation-retained",
+                        "v1",
+                        "source-retained",
+                        "hash-retained",
+                    ),
+                ],
+            )
+            await connection.executemany(
+                """
+                INSERT INTO memory_reinterpretation_attempts (
+                    job_id, transcript_revision, attempt_number,
+                    lease_token, worker_id, status
+                )
+                VALUES ($1, 1, 1, $2, $3, 'running')
+                """,
+                [
+                    ("owned-memory-job", "owned-lease", "owned-worker"),
+                    ("retained-memory-job", "retained-lease", "retained-worker"),
+                ],
+            )
+
+        assert await account_deletion.purge_memory_reinterpretation_work("memory-delete-user") == 2
+        assert await account_deletion.purge_memory_reinterpretation_work("memory-delete-user") == 0
+        async with pool.acquire() as connection:
+            jobs = await connection.fetch("SELECT id, uid FROM memory_reinterpretation_jobs ORDER BY id")
+            attempts = await connection.fetch(
+                "SELECT job_id, lease_token FROM memory_reinterpretation_attempts ORDER BY job_id"
+            )
+        assert [dict(row) for row in jobs] == [{"id": "retained-memory-job", "uid": "memory-retained-user"}]
+        assert [dict(row) for row in attempts] == [{"job_id": "retained-memory-job", "lease_token": "retained-lease"}]
 
     asyncio.run(_run_with_database(scenario))
 

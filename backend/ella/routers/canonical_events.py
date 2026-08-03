@@ -19,6 +19,8 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
+from database import content_write_fence
 from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
@@ -715,7 +717,15 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
             completion,
             request.headers.get("Authorization", ""),
         )
-        return await default_store.complete_session(session_id, completion)
+        try:
+            async with content_write_fence.request_content_write_fence(completion.uid):
+                return await default_store.complete_session(session_id, completion)
+        except content_write_fence.ContentWriteFenceError as exc:
+            status_code = 403 if exc.code == "account_write_forbidden" else 503
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "retryable": status_code == 503},
+            ) from exc
 
     @router.get("/v1/ella/timeline")
     async def read_timeline(

@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
+from database import content_write_fence
 from database.memory_reinterpretations import canonical_transcript_hash
 from ella.services.hermes_session import canonical_omi_session_key
 from ella.services.summary_recovery import (
@@ -411,6 +412,7 @@ class MemoryReinterpretationWorker:
         self.lease_seconds = max(30, configured_lease)
 
     async def _require_current_lease(self, job: dict[str, Any]) -> None:
+        content_write_fence.assert_content_writer_admitted(job["uid"])
         try:
             current = await self.repository.renew_lease(
                 job,
@@ -425,18 +427,22 @@ class MemoryReinterpretationWorker:
             ) from exc
         if not current:
             raise ReinterpretationWorkerError("lease_lost", retryable=True)
+        content_write_fence.assert_content_writer_admitted(job["uid"])
 
     async def _heartbeat_lease(self, job: dict[str, Any]) -> None:
         interval = max(5.0, self.lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
             try:
+                content_write_fence.assert_content_writer_admitted(job["uid"])
                 renewed = await self.repository.renew_lease(
                     job,
                     lease_seconds=self.lease_seconds,
                 )
             except asyncio.CancelledError:
                 raise
+            except content_write_fence.ContentWriteFenceError:
+                return
             except Exception:
                 _WORKER_RUNTIME_METRICS["lease_renewal_failures_total"] += 1
                 logger.exception(
@@ -448,12 +454,24 @@ class MemoryReinterpretationWorker:
                 return
 
     async def run_once(self, worker_id: str) -> Optional[dict[str, Any]]:
-        job = await self.repository.claim_due(
-            worker_id,
-            lease_seconds=self.lease_seconds,
-        )
-        if job is None:
+        uid = await self.repository.next_due_uid()
+        if uid is None:
             return None
+        try:
+            async with content_write_fence.detached_content_write_fence(uid):
+                job = await self.repository.claim_due(
+                    worker_id,
+                    lease_seconds=self.lease_seconds,
+                    uid=uid,
+                )
+                if job is None:
+                    return None
+                content_write_fence.assert_content_writer_admitted(uid)
+                return await self._run_claimed(job)
+        except content_write_fence.ContentWriteFenceError:
+            return None
+
+    async def _run_claimed(self, job: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         metrics: dict[str, Any] = {
             "attempt": job["attempt_count"],
@@ -495,6 +513,7 @@ class MemoryReinterpretationWorker:
                     if not finished:
                         raise ReinterpretationWorkerError("lease_lost", retryable=True)
                     return {"job_id": job["id"], "status": "conflict"}
+                content_write_fence.assert_content_writer_admitted(job["uid"])
                 plan = await self.hermes_client.propose(
                     job=job,
                     transcript=_ordered_transcript(rows),
@@ -603,6 +622,7 @@ class MemoryReinterpretationWorker:
                     "applied_indexes": sorted(applied_indexes),
                     "active_summary_version_id": expected_version_id,
                 }
+                content_write_fence.assert_content_writer_admitted(job["uid"])
                 if not await self.repository.record_progress(
                     job,
                     progress=progress,
@@ -631,7 +651,10 @@ class MemoryReinterpretationWorker:
             if not finished:
                 raise ReinterpretationWorkerError("lease_lost", retryable=True)
             return {"job_id": job["id"], "status": status}
+        except content_write_fence.ContentWriteFenceError:
+            raise
         except ReinterpretationWorkerError as exc:
+            content_write_fence.assert_content_writer_admitted(job["uid"])
             status = await self.repository.fail_or_retry(
                 job,
                 error_code=exc.code,
@@ -647,6 +670,7 @@ class MemoryReinterpretationWorker:
             )
             return {"job_id": job["id"], "status": status, "error_code": exc.code}
         except Exception as exc:
+            content_write_fence.assert_content_writer_admitted(job["uid"])
             status = await self.repository.fail_or_retry(
                 job,
                 error_code="worker_unhandled_error",

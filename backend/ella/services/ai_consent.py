@@ -217,6 +217,7 @@ def build_account_deletion_receipt(
         "firestore_data",
         "hermes_profile",
         "honcho_tenancy",
+        "memory_reinterpretation",
         "routing_traces",
         "runtime_registry",
     }

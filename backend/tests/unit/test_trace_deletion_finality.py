@@ -233,6 +233,11 @@ def _fixed_app(monkeypatch, routing_pool, identity, order):
         order.append("purge")
         return routing_pool.purge(uid)
 
+    async def purge_memory_reinterpretation_work(uid):
+        assert uid == UID
+        order.append("purge_memory_reinterpretation")
+        return 0
+
     async def finalize(uid):
         assert uid == UID
         order.append("finalize")
@@ -245,6 +250,11 @@ def _fixed_app(monkeypatch, routing_pool, identity, order):
     monkeypatch.setattr(content_write_fence, "_assert_postgres_owner_active", assert_postgres_active)
     monkeypatch.setattr(account_deletion_service.account_deletion_db, "quarantine_account_for_deletion", quarantine)
     monkeypatch.setattr(account_deletion_service.account_deletion_db, "purge_routing_traces", purge)
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_memory_reinterpretation_work",
+        purge_memory_reinterpretation_work,
+    )
     monkeypatch.setattr(account_deletion_service.account_deletion_db, "finalize_account_deletion", finalize)
 
     delete_route, namespace = _load_production_delete_route()

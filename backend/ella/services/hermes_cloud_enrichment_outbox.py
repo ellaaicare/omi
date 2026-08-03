@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from database import content_write_fence
 from database.hermes_cloud_enrichment_outbox import (
     FirestoreHermesCloudEnrichmentOutbox,
 )
@@ -19,9 +20,13 @@ DEFAULT_URL = "http://127.0.0.1:8000" "/v1/ella/internal/hermes-cloud/enrichment
 
 
 class EnrichmentOutboxRepository(Protocol):
+    def peek_next_uid(self, *, scan_limit: int = 50) -> Optional[str]: ...
+
     def claim_next(
         self,
         *,
+        uid: str,
+        writer_token: str,
         lease_seconds: int,
         scan_limit: int = 50,
     ) -> Optional[dict[str, Any]]: ...
@@ -165,38 +170,49 @@ class HermesCloudEnrichmentOutboxWorker:
         self.poll_seconds = poll_seconds
 
     async def run_once(self) -> bool:
-        job = await asyncio.to_thread(
-            self.repository.claim_next,
-            lease_seconds=self.lease_seconds,
-        )
-        if not job:
+        uid = await asyncio.to_thread(self.repository.peek_next_uid)
+        if not uid:
             return False
-        result = await asyncio.to_thread(self.deliver, job)
-        if result.ok:
-            completed = await asyncio.to_thread(
-                self.repository.complete,
-                job_id=job["job_id"],
-                lease_token=job["lease_token"],
-                receipt=result.receipt or {"content_free": True},
-            )
-            if not completed:
-                raise RuntimeError("hermes_cloud_enrichment_lease_lost")
-            return True
-        retry_after = min(
-            900,
-            self.retry_base_seconds * (2 ** min(int(job.get("attempt_count") or 1) - 1, 6)),
-        )
-        failed = await asyncio.to_thread(
-            self.repository.fail,
-            job_id=job["job_id"],
-            lease_token=job["lease_token"],
-            error_code=result.error_code,
-            retryable=result.retryable,
-            retry_after_seconds=retry_after,
-        )
-        if not failed:
-            raise RuntimeError("hermes_cloud_enrichment_lease_lost")
-        return True
+        try:
+            async with content_write_fence.detached_content_write_fence(uid) as writer:
+                job = await asyncio.to_thread(
+                    self.repository.claim_next,
+                    uid=uid,
+                    writer_token=writer.token,
+                    lease_seconds=self.lease_seconds,
+                )
+                if not job:
+                    return False
+                writer.assert_current()
+                result = await asyncio.to_thread(self.deliver, job)
+                writer.assert_current()
+                if result.ok:
+                    completed = await asyncio.to_thread(
+                        self.repository.complete,
+                        job_id=job["job_id"],
+                        lease_token=job["lease_token"],
+                        receipt=result.receipt or {"content_free": True},
+                    )
+                    if not completed:
+                        raise RuntimeError("hermes_cloud_enrichment_lease_lost")
+                    return True
+                retry_after = min(
+                    900,
+                    self.retry_base_seconds * (2 ** min(int(job.get("attempt_count") or 1) - 1, 6)),
+                )
+                failed = await asyncio.to_thread(
+                    self.repository.fail,
+                    job_id=job["job_id"],
+                    lease_token=job["lease_token"],
+                    error_code=result.error_code,
+                    retryable=result.retryable,
+                    retry_after_seconds=retry_after,
+                )
+                if not failed:
+                    raise RuntimeError("hermes_cloud_enrichment_lease_lost")
+                return True
+        except content_write_fence.ContentWriteFenceError:
+            return False
 
     async def run_forever(self) -> None:
         while True:

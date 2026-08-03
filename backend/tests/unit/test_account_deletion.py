@@ -21,6 +21,9 @@ def _successful_content_fence(monkeypatch):
     async def purge_routing_traces(_uid):
         return 0
 
+    async def purge_memory_reinterpretation_work(_uid):
+        return 0
+
     monkeypatch.setattr(
         account_deletion_service.content_write_fence,
         "tombstone_content_writes",
@@ -30,6 +33,11 @@ def _successful_content_fence(monkeypatch):
         account_deletion_service.account_deletion_db,
         "purge_routing_traces",
         purge_routing_traces,
+    )
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_memory_reinterpretation_work",
+        purge_memory_reinterpretation_work,
     )
 
 
@@ -89,9 +97,10 @@ class _Batch:
 
 
 class _Firestore:
-    def __init__(self, user_document, *, import_jobs=None):
+    def __init__(self, user_document, *, import_jobs=None, enrichment_jobs=None):
         self.user_document = user_document
         self.import_jobs = _Collection(import_jobs)
+        self.enrichment_jobs = _Collection(enrichment_jobs)
         self.fail_next_commit = False
 
     def collection(self, name):
@@ -99,6 +108,8 @@ class _Firestore:
             return self
         if name == "import_jobs":
             return self.import_jobs
+        if name == "ella_hermes_cloud_enrichment_outbox":
+            return self.enrichment_jobs
         raise AssertionError(name)
 
     def document(self, _uid):
@@ -180,19 +191,27 @@ def test_firestore_delete_is_idempotent_and_resumes_after_partial_failure():
     assert replay["documents_deleted"] == 0
 
 
-def test_firestore_delete_removes_only_owned_top_level_import_jobs_and_retries():
+def test_firestore_delete_removes_only_owned_top_level_jobs_and_retries():
     owned_job = _Document("owned-job", data={"uid": "synthetic-user"})
     other_job = _Document("other-job", data={"uid": "other-user"})
+    owned_enrichment = _Document("owned-enrichment", data={"uid": "synthetic-user"})
+    other_enrichment = _Document("other-enrichment", data={"uid": "other-user"})
     root_document = _Document("user")
-    firestore = _Firestore(root_document, import_jobs=[owned_job, other_job])
+    firestore = _Firestore(
+        root_document,
+        import_jobs=[owned_job, other_job],
+        enrichment_jobs=[owned_enrichment, other_enrichment],
+    )
 
     result = delete_firestore_user_data(firestore, "synthetic-user")
     replay = delete_firestore_user_data(firestore, "synthetic-user")
 
-    assert result["documents_deleted"] == 2
+    assert result["documents_deleted"] == 3
     assert replay["documents_deleted"] == 0
     assert owned_job.deleted is True
     assert other_job.deleted is False
+    assert owned_enrichment.deleted is True
+    assert other_enrichment.deleted is False
     assert root_document.deleted is True
 
 
@@ -359,6 +378,39 @@ def test_deletion_service_never_reports_success_when_routing_trace_purge_is_unav
 
     assert result.status_code == 202
     assert result.body["deletion_receipt"]["remaining"] == ["routing_traces"]
+    assert calls == [("firestore", "synthetic-user")]
+
+
+def test_deletion_service_retains_firebase_when_memory_work_purge_is_unavailable(monkeypatch):
+    calls = []
+
+    async def quarantine(_uid):
+        return _state()
+
+    async def unavailable(_uid):
+        raise account_deletion_db.AccountDeletionUnavailable("account_deletion_memory_reinterpretation_unavailable")
+
+    async def forbidden_finalize(_uid):
+        raise AssertionError("memory-work absence must precede finalization")
+
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "quarantine_account_for_deletion", quarantine)
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_memory_reinterpretation_work",
+        unavailable,
+    )
+    monkeypatch.setattr(account_deletion_service.account_deletion_db, "finalize_account_deletion", forbidden_finalize)
+
+    result = asyncio.run(
+        account_deletion_service.execute_account_deletion(
+            "synthetic-user",
+            delete_firestore=lambda uid: calls.append(("firestore", uid)),
+            delete_firebase=lambda uid: calls.append(("firebase", uid)),
+        )
+    )
+
+    assert result.status_code == 202
+    assert result.body["deletion_receipt"]["remaining"] == ["memory_reinterpretation"]
     assert calls == [("firestore", "synthetic-user")]
 
 

@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from google.cloud.firestore_v1 import FieldFilter, transactional
 
+from database import content_write_fence
 from database._client import db
 
 COLLECTION = "ella_hermes_cloud_enrichment_outbox"
@@ -49,15 +50,24 @@ def _enqueue_transaction(
 @transactional
 def _claim_transaction(
     transaction,
+    firestore_db,
     reference,
     *,
+    writer_token: str,
     now: datetime,
     lease_seconds: int,
 ) -> Optional[dict[str, Any]]:
     snapshot = reference.get(transaction=transaction)
-    if not snapshot.exists:
+    current = snapshot.to_dict() if snapshot.exists else {}
+    uid = str(current.get("uid") or "")
+    if not current or not content_write_fence.transaction_content_writer_current(
+        transaction,
+        firestore_db,
+        uid,
+        writer_token,
+        allow_draining=False,
+    ):
         return None
-    current = snapshot.to_dict() or {}
     status = current.get("status")
     next_attempt_at = _aware(current.get("next_attempt_at"))
     lease_expires_at = _aware(current.get("lease_expires_at"))
@@ -72,6 +82,7 @@ def _claim_transaction(
         "status": "running",
         "lease_token": lease_token,
         "lease_expires_at": now + timedelta(seconds=lease_seconds),
+        "content_writer_token": writer_token,
         "attempt_count": int(current.get("attempt_count") or 0) + 1,
         "updated_at": now,
     }
@@ -81,6 +92,7 @@ def _claim_transaction(
             "status": claimed["status"],
             "lease_token": claimed["lease_token"],
             "lease_expires_at": claimed["lease_expires_at"],
+            "content_writer_token": claimed["content_writer_token"],
             "attempt_count": claimed["attempt_count"],
             "updated_at": claimed["updated_at"],
         },
@@ -91,6 +103,7 @@ def _claim_transaction(
 @transactional
 def _complete_transaction(
     transaction,
+    firestore_db,
     reference,
     *,
     lease_token: str,
@@ -101,6 +114,14 @@ def _complete_transaction(
     current = snapshot.to_dict() if snapshot.exists else {}
     if not current or current.get("status") != "running" or current.get("lease_token") != lease_token:
         return False
+    if not content_write_fence.transaction_content_writer_current(
+        transaction,
+        firestore_db,
+        str(current.get("uid") or ""),
+        str(current.get("content_writer_token") or ""),
+        allow_draining=True,
+    ):
+        return False
     transaction.update(
         reference,
         {
@@ -109,6 +130,7 @@ def _complete_transaction(
             "last_error_code": None,
             "lease_token": None,
             "lease_expires_at": None,
+            "content_writer_token": None,
             "completed_at": now,
             "updated_at": now,
         },
@@ -119,6 +141,7 @@ def _complete_transaction(
 @transactional
 def _fail_transaction(
     transaction,
+    firestore_db,
     reference,
     *,
     lease_token: str,
@@ -131,6 +154,14 @@ def _fail_transaction(
     current = snapshot.to_dict() if snapshot.exists else {}
     if not current or current.get("status") != "running" or current.get("lease_token") != lease_token:
         return False
+    if not content_write_fence.transaction_content_writer_current(
+        transaction,
+        firestore_db,
+        str(current.get("uid") or ""),
+        str(current.get("content_writer_token") or ""),
+        allow_draining=True,
+    ):
+        return False
     transaction.update(
         reference,
         {
@@ -139,6 +170,7 @@ def _fail_transaction(
             "next_attempt_at": next_attempt_at if retryable else None,
             "lease_token": None,
             "lease_expires_at": None,
+            "content_writer_token": None,
             "updated_at": now,
         },
     )
@@ -159,6 +191,7 @@ class FirestoreHermesCloudEnrichmentOutbox:
         transcript_sha256: str,
         policy_version: str,
     ) -> dict[str, Any]:
+        content_write_fence.assert_content_writer_admitted(uid)
         now = _utcnow()
         payload = {
             "job_id": job_id,
@@ -172,6 +205,7 @@ class FirestoreHermesCloudEnrichmentOutbox:
             "next_attempt_at": now,
             "lease_token": None,
             "lease_expires_at": None,
+            "content_writer_token": None,
             "last_error_code": None,
             "receipt": None,
             "created_at": now,
@@ -180,9 +214,23 @@ class FirestoreHermesCloudEnrichmentOutbox:
         reference = self.db.collection(COLLECTION).document(job_id)
         return _enqueue_transaction(self.db.transaction(), reference, payload)
 
+    def peek_next_uid(self, *, scan_limit: int = 50) -> Optional[str]:
+        query = (
+            self.db.collection(COLLECTION)
+            .where(filter=FieldFilter("status", "in", list(PENDING_STATUSES)))
+            .limit(scan_limit)
+        )
+        for snapshot in query.stream():
+            uid = str((snapshot.to_dict() or {}).get("uid") or "")
+            if uid and content_write_fence.content_writes_active(uid, db=self.db):
+                return uid
+        return None
+
     def claim_next(
         self,
         *,
+        uid: str,
+        writer_token: str,
         lease_seconds: int,
         scan_limit: int = 50,
     ) -> Optional[dict[str, Any]]:
@@ -193,9 +241,13 @@ class FirestoreHermesCloudEnrichmentOutbox:
             .limit(scan_limit)
         )
         for snapshot in query.stream():
+            if str((snapshot.to_dict() or {}).get("uid") or "") != uid:
+                continue
             claimed = _claim_transaction(
                 self.db.transaction(),
+                self.db,
                 snapshot.reference,
+                writer_token=writer_token,
                 now=now,
                 lease_seconds=lease_seconds,
             )
@@ -212,6 +264,7 @@ class FirestoreHermesCloudEnrichmentOutbox:
     ) -> bool:
         return _complete_transaction(
             self.db.transaction(),
+            self.db,
             self.db.collection(COLLECTION).document(job_id),
             lease_token=lease_token,
             receipt=receipt,
@@ -230,6 +283,7 @@ class FirestoreHermesCloudEnrichmentOutbox:
         now = _utcnow()
         return _fail_transaction(
             self.db.transaction(),
+            self.db,
             self.db.collection(COLLECTION).document(job_id),
             lease_token=lease_token,
             error_code=error_code,

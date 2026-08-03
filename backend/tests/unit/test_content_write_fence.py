@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -127,10 +128,18 @@ def fence_environment(monkeypatch):
     async def purge_routing_traces(_uid):
         return 0
 
+    async def purge_memory_reinterpretation_work(_uid):
+        return 0
+
     monkeypatch.setattr(
         account_deletion_service.account_deletion_db,
         "purge_routing_traces",
         purge_routing_traces,
+    )
+    monkeypatch.setattr(
+        account_deletion_service.account_deletion_db,
+        "purge_memory_reinterpretation_work",
+        purge_memory_reinterpretation_work,
     )
     yield database
     content_write_fence.configure_firestore_db(previous_database)
@@ -175,6 +184,174 @@ def _load_voice_entitlement_route():
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[])), str(path), "exec"), namespace)
     return namespace["get_voice_entitlement"], namespace
+
+
+def _deterministic_backend_inventory(backend: Path, overrides=None):
+    overrides = overrides or {}
+    paths = {backend / "main.py", backend / "ella" / "__init__.py"}
+    for directory in (
+        backend / "routers",
+        backend / "ella" / "routers",
+        backend / "ella" / "services",
+        backend / "ella" / "utils",
+        backend / "utils",
+        backend / "database",
+    ):
+        paths.update(directory.rglob("*.py"))
+
+    launches = []
+    mutations = []
+    protected_mutations = []
+    raw_uid_mutations = []
+
+    class InventoryVisitor(ast.NodeVisitor):
+        def __init__(self, path, source):
+            self.path = path
+            self.source = source
+            self.functions = []
+
+        def _visit_function(self, node):
+            self.functions.append(node.name)
+            methods = {
+                decorator.func.attr
+                for decorator in node.decorator_list
+                if isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in {"post", "put", "patch", "delete", "websocket"}
+            }
+            if methods:
+                key = f"{self.path.relative_to(backend)}:{node.name}"
+                function_source = ast.get_source_segment(self.source, node) or ""
+                mutations.append(key)
+                if (
+                    "Depends(auth.get_writable_user_uid)" in function_source
+                    or "Depends(auth_endpoints.get_writable_user_uid)" in function_source
+                    or "Depends(require_current_ai_consent)" in function_source
+                    or "request_content_write_fence(" in function_source
+                ):
+                    protected_mutations.append(key)
+                if (
+                    "Depends(auth.get_current_user_uid)" in function_source
+                    or "Depends(auth_endpoints.get_current_user_uid)" in function_source
+                ):
+                    raw_uid_mutations.append(key)
+            self.generic_visit(node)
+            self.functions.pop()
+
+        visit_FunctionDef = _visit_function
+        visit_AsyncFunctionDef = _visit_function
+
+        def visit_Call(self, node):
+            name = ""
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name in {"create_task", "run_in_executor", "Thread", "start_new_thread"}:
+                function = self.functions[-1] if self.functions else "<module>"
+                launches.append(f"{self.path.relative_to(backend)}:{function}:{name}:{ast.unparse(node)}")
+            self.generic_visit(node)
+
+    for path in sorted(paths):
+        source = overrides.get(path, path.read_text(encoding="utf-8"))
+        InventoryVisitor(path, source).visit(ast.parse(source, filename=str(path)))
+
+    snapshot = {
+        "launches": sorted(launches),
+        "mutations": sorted(set(mutations)),
+        "protected_mutations": sorted(set(protected_mutations)),
+        "raw_uid_mutations": sorted(set(raw_uid_mutations)),
+    }
+    serialized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return snapshot, hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _assert_deterministic_backend_inventory(snapshot, digest, *, counts, expected_digest):
+    assert {key: len(value) for key, value in snapshot.items()} == counts
+    assert digest == expected_digest
+
+
+def test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_utilities():
+    backend = Path(__file__).resolve().parents[2]
+    snapshot, digest = _deterministic_backend_inventory(backend)
+
+    _assert_deterministic_backend_inventory(
+        snapshot,
+        digest,
+        counts={
+            "launches": 71,
+            "mutations": 229,
+            "protected_mutations": 135,
+            "raw_uid_mutations": 0,
+        },
+        expected_digest="3d0639b02127ec612d03244f05ca29faaed2fdefbf333cc8e9f3f5b432ea0e05",
+    )
+    assert any(
+        item.startswith("ella/services/hermes_cloud_enrichment_outbox.py:start_worker:create_task:")
+        for item in snapshot["launches"]
+    )
+    assert any(
+        item.startswith("ella/services/memory_reinterpretation.py:start_worker:create_task:")
+        for item in snapshot["launches"]
+    )
+
+
+def test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfenced_uid_writer():
+    backend = Path(__file__).resolve().parents[2]
+    baseline, baseline_digest = _deterministic_backend_inventory(backend)
+    expected_counts = {
+        "launches": 71,
+        "mutations": 229,
+        "protected_mutations": 135,
+        "raw_uid_mutations": 0,
+    }
+
+    service_path = backend / "ella" / "services" / "hermes_cloud_enrichment_outbox.py"
+    service_source = service_path.read_text(encoding="utf-8")
+    injected_service = service_source.replace(
+        "    _worker_task = asyncio.create_task(active_worker.run_forever())",
+        "    _worker_task = asyncio.create_task(active_worker.run_forever())\n"
+        "    asyncio.create_task(active_worker.run_once())",
+        1,
+    )
+    startup_snapshot, startup_digest = _deterministic_backend_inventory(
+        backend,
+        {service_path: injected_service},
+    )
+    assert len(startup_snapshot["launches"]) == len(baseline["launches"]) + 1
+    assert any("active_worker.run_once()" in item for item in startup_snapshot["launches"])
+    with pytest.raises(AssertionError):
+        _assert_deterministic_backend_inventory(
+            startup_snapshot,
+            startup_digest,
+            counts=expected_counts,
+            expected_digest=baseline_digest,
+        )
+
+    route_path = backend / "ella" / "routers" / "settings.py"
+    injected_route = (
+        route_path.read_text(encoding="utf-8")
+        + """
+
+@router.post('/positive-control-unfenced-writer')
+async def positive_control_unfenced_writer(
+    uid: str = Depends(auth.get_current_user_uid),
+):
+    await mutate_uid_content(uid)
+"""
+    )
+    writer_snapshot, writer_digest = _deterministic_backend_inventory(
+        backend,
+        {route_path: injected_route},
+    )
+    assert "ella/routers/settings.py:positive_control_unfenced_writer" in writer_snapshot["raw_uid_mutations"]
+    with pytest.raises(AssertionError):
+        _assert_deterministic_backend_inventory(
+            writer_snapshot,
+            writer_digest,
+            counts=expected_counts,
+            expected_digest=baseline_digest,
+        )
 
 
 def _production_app(delete_route):
@@ -808,6 +985,7 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
                     "Depends(auth.get_writable_user_uid)" in function_source
                     or "Depends(auth_endpoints.get_writable_user_uid)" in function_source
                     or "Depends(require_current_ai_consent)" in function_source
+                    or "request_content_write_fence(" in function_source
                 ):
                     protected_mutations.append(key)
                 if (
@@ -818,10 +996,11 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
 
     exact_protected = sorted(set(protected_mutations))
     exact_inventory_hash = hashlib.sha256("\n".join(exact_protected).encode("utf-8")).hexdigest()
-    assert len(exact_protected) == 133
-    assert exact_inventory_hash == "34e4792e5e7e04cf26e50e3af31d6abf4936e8f49637adcb151b457ca0bd3a36"
+    assert len(exact_protected) == 135
+    assert exact_inventory_hash == "d7f12be323f1e987a1dc047ca96cc97da8e3e7798820e319edc6d6de47efe429"
     assert raw_mutation_dependencies == []
     assert "ella/routers/trace.py:ingest_client_trace" in protected_mutations
+    assert "ella/routers/canonical_events.py:complete_session" in protected_mutations
 
     exact_mutations = sorted(set(mutation_routes))
     exact_mutation_hash = hashlib.sha256("\n".join(exact_mutations).encode("utf-8")).hexdigest()
@@ -831,8 +1010,8 @@ def test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact
     unauthenticated_inventory_hash = hashlib.sha256(
         "\n".join(mutations_without_writable_authority).encode("utf-8")
     ).hexdigest()
-    assert len(mutations_without_writable_authority) == 96
-    assert unauthenticated_inventory_hash == "a002a673c6ea5c5f04a7a558ccfce9f466feafde568899bc8b3ebe8be6cabd8d"
+    assert len(mutations_without_writable_authority) == 94
+    assert unauthenticated_inventory_hash == "084701269e75c53763662a82dbbd23218456fe524df327378e8d6a6219c02037"
     assert "ella/routers/trace.py:ingest_client_trace" not in mutations_without_writable_authority
     assert "routers/announcements.py:dismiss_announcement_endpoint" in protected_mutations
     assert "routers/transcribe.py:listen_handler" in protected_mutations
