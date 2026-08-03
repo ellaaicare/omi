@@ -7,6 +7,7 @@ returned plan and report delivery status to trace tables.
 
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -29,7 +30,7 @@ router = APIRouter(prefix="/v1/ella/escalations", tags=["Ella Escalations"])
 
 ESCALATION_WEBHOOK_KEY = os.getenv(
     "ELLA_ESCALATION_WEBHOOK_KEY",
-    os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"),
+    os.getenv("GUARDIAN_WEBHOOK_KEY", ""),
 )
 
 _pool: Optional[asyncpg.Pool] = None
@@ -63,9 +64,20 @@ async def _get_pool() -> asyncpg.Pool:
     return _pool
 
 
-def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
+def _has_valid_service_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> bool:
     provided = x_escalation_key or x_guardian_key or key
-    if provided != ESCALATION_WEBHOOK_KEY:
+    configured = ESCALATION_WEBHOOK_KEY
+    return bool(
+        configured
+        and configured.strip()
+        and provided
+        and provided.strip()
+        and secrets.compare_digest(provided, configured)
+    )
+
+
+def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
+    if not _has_valid_service_key(x_guardian_key, x_escalation_key, key):
         raise HTTPException(status_code=403, detail="Invalid escalation key")
 
 
@@ -77,8 +89,7 @@ def _resolve_policy_view_uid(
     key: Optional[str],
 ) -> str:
     """Resolve the policy-view UID for either app auth or internal callers."""
-    provided_key = x_escalation_key or x_guardian_key or key
-    if provided_key == ESCALATION_WEBHOOK_KEY:
+    if _has_valid_service_key(x_guardian_key, x_escalation_key, key):
         if not uid:
             raise HTTPException(status_code=400, detail="uid is required for internal policy lookup")
         return uid
@@ -125,7 +136,7 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         """
         SELECT id, omi_uid, guardian_mode, email, phone_number, identities
         FROM users
-        WHERE LOWER(omi_uid) = LOWER($1)
+        WHERE omi_uid = $1
         """,
         uid,
     )

@@ -1,11 +1,13 @@
 import asyncio
+import inspect
 import sys
 from dataclasses import replace
 from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
 
 sys.modules.setdefault("websockets", ModuleType("websockets"))
 conversations_module = ModuleType("database.conversations")
@@ -15,6 +17,7 @@ sys.modules.setdefault("database.conversations", conversations_module)
 from ella.routers import chat, resolve, voice
 from ella.services import runtime_resolver
 from ella.services.provisioning import ProvisioningError
+from utils.ella import exact_firebase_auth
 
 RUNTIME_AUTHORITY_DIGEST = "a" * 64
 
@@ -206,6 +209,94 @@ def test_chat_history_rejects_query_uid_that_differs_from_firebase_subject():
     assert error.value.status_code == 403
 
 
+def test_mounted_chat_history_authenticates_before_runtime_or_history_work(monkeypatch):
+    downstream_calls = []
+
+    def verify_token(token):
+        if token == "valid-a":
+            return {"uid": "user-a"}
+        raise ValueError("expired or invalid")
+
+    async def authority_enabled(uid):
+        downstream_calls.append(("authority", uid))
+        return True
+
+    async def runtime(uid, **_kwargs):
+        downstream_calls.append(("runtime", uid))
+        return SimpleNamespace(provider="hermes_cloud")
+
+    async def no_events(uid, *, limit, before=None):
+        downstream_calls.append(("history", uid, limit, before))
+        return []
+
+    monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", runtime)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    app = FastAPI()
+    app.include_router(chat.router)
+    client = TestClient(app)
+
+    for headers in ({}, {"Authorization": "Basic valid-a"}, {"Authorization": "Bearer expired"}):
+        assert client.get("/v1/ella/chat/history", headers=headers).status_code == 401
+    assert (
+        client.get(
+            "/v1/ella/chat/history?uid=user-b",
+            headers={"Authorization": "Bearer valid-a"},
+        ).status_code
+        == 403
+    )
+    assert downstream_calls == []
+
+    response = client.get(
+        "/v1/ella/chat/history?limit=17",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "messages": [],
+        "hasMore": False,
+        "source": "canonical_timeline_empty",
+        "fallback": False,
+    }
+    assert downstream_calls == [
+        ("authority", "user-a"),
+        ("runtime", "user-a"),
+        ("history", "user-a", 17, None),
+    ]
+
+    async def valid_events(uid, *, limit, before=None):
+        downstream_calls.append(("valid-history", uid, limit, before))
+        return [
+            {
+                "uid": uid,
+                "event_id": "history-a",
+                "channel": "ios_chat",
+                "provider": "omi-backend",
+                "role": "assistant",
+                "text": "A valid first-party history turn.",
+                "started_at": "2026-08-03T12:00:00+00:00",
+                "metadata": {},
+            }
+        ]
+
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", valid_events)
+    valid = client.get(
+        "/v1/ella/chat/history?limit=5",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert valid.status_code == 200
+    assert valid.json()["source"] == "canonical_timeline"
+    assert valid.json()["messages"][0]["text"] == "A valid first-party history turn."
+    assert downstream_calls[-3:] == [
+        ("authority", "user-a"),
+        ("runtime", "user-a"),
+        ("valid-history", "user-a", 5, None),
+    ]
+
+
 def test_isolated_history_never_uses_openclaw_fallback(monkeypatch):
     async def fake_runtime(uid, **kwargs):
         assert uid == "user-a"
@@ -258,6 +349,76 @@ def test_cloud_history_never_uses_openclaw_fallback(monkeypatch):
     }
 
 
+def test_legacy_history_unexpected_failure_logs_fixed_content_free_classification(monkeypatch, caplog):
+    class HostileHistoryError(RuntimeError):
+        def __init__(self):
+            super().__init__(
+                "endpoint=https://secret token=secret session=secret-session workspace=/secret/workspace "
+                "provider_payload=SECRET"
+            )
+            self.endpoint = "https://secret"
+            self.token = "secret"
+            self.session = "secret-session"
+            self.workspace = "/secret/workspace"
+            self.provider_payload = {"private": "SECRET"}
+
+    class HostileAsyncClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            raise HostileHistoryError()
+
+    async def authority_disabled(uid):
+        assert uid == "user-a"
+        return False
+
+    async def no_events(uid, *, limit, before=None):
+        assert uid == "user-a"
+        return []
+
+    async def owned_legacy_routing(uid):
+        assert uid == "user-a"
+        return {"routing": {"agentId": "ella-user-a", "workspace": "/legacy/user-a"}}
+
+    monkeypatch.setattr(chat, "runtime_authority_enabled", authority_disabled)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "resolve_user_routing", owned_legacy_routing)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", HostileAsyncClient)
+
+    with caplog.at_level("ERROR", logger=chat.__name__):
+        result = asyncio.run(chat.ella_chat_history("user-a", authenticated_uid="user-a"))
+
+    assert result == {
+        "messages": [],
+        "hasMore": False,
+        "source": "provision_openclaw_history_migration",
+        "fallback": True,
+    }
+    assert len(caplog.records) == 1
+    log_message = caplog.records[0].getMessage()
+    log_prefix = "[FLOW:HISTORY] code=ella_legacy_history_unavailable classification=unexpected latency="
+    assert log_message.startswith(log_prefix) and log_message.endswith("ms")
+    assert int(log_message.removeprefix(log_prefix).removesuffix("ms")) >= 0
+    assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)
+    serialized = f"{caplog.text} {result}"
+    for forbidden in (
+        "https://secret",
+        "token=secret",
+        "secret-session",
+        "/secret/workspace",
+        "provider_payload",
+        "SECRET",
+    ):
+        assert forbidden not in serialized
+
+
 def test_isolated_history_fails_closed_without_binding(monkeypatch):
     async def missing_runtime(uid, **kwargs):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
@@ -303,47 +464,50 @@ def test_isolated_history_fails_closed_without_binding(monkeypatch):
 
 
 def test_public_resolver_is_authenticated_and_redacts_internal_runtime(monkeypatch):
-    async def fake_resolve(uid):
-        assert uid == "user-a"
-        return {
-            "user": {"id": "1", "omiUid": uid, "name": "A"},
-            "routing": {
-                "agentId": "hermes",
-                "gatewayUrl": "http://100.76.138.56:8701",
-                "token": "secret",
-                "profileName": "omi-user-a",
-                "bindingRevision": 3,
-                "modelPolicyVersion": "frontier-v1",
-                "voicePolicyVersion": "ella-voice-v1",
-            },
-        }
+    class Pool:
+        async def fetchrow(self, _query, uid):
+            assert uid == "user-a"
+            return {
+                "omi_uid": uid,
+                "status": "active",
+                "agents": {
+                    "userAgentId": "hermes",
+                    "gatewayToken": "secret",
+                    "workspace": "/private/user-a",
+                },
+                "cluster_status": "ready",
+            }
 
-    monkeypatch.setattr(resolve, "runtime_bindings_enabled", lambda uid=None: True)
-    monkeypatch.setattr(resolve, "resolve_user_routing", fake_resolve)
+    monkeypatch.setattr(resolve, "_pool", Pool())
+    monkeypatch.setattr(resolve, "CHAT_PLATFORM", "hermes")
+    runtime_calls = []
 
-    result = asyncio.run(resolve.resolve_endpoint(uid="user-a", email=None, phone=None, authenticated_uid="user-a"))
+    async def active_runtime(uid, repository, target_mode):
+        runtime_calls.append((uid, repository.pool, target_mode))
+        return SimpleNamespace(provider="hermes", status="active")
 
-    assert result["routing"] == {
-        "agentId": "hermes",
-        "historyUrl": "/v1/ella/chat/history",
-        "platform": "hermes",
-        "bindingRevision": 3,
-        "modelPolicyVersion": "frontier-v1",
-        "voicePolicyVersion": "ella-voice-v1",
+    monkeypatch.setattr(resolve, "resolve_isolated_runtime", active_runtime)
+
+    result = asyncio.run(resolve.resolve_endpoint(uid="user-a", authenticated_uid="user-a"))
+
+    assert result == {
+        "user": {"omiUid": "user-a", "status": "active"},
+        "routing": {"available": True, "clusterStatus": "active", "platform": "hermes"},
     }
+    assert runtime_calls == [("user-a", resolve._pool, "hermes-cloud-chat")]
     assert "secret" not in str(result)
     assert "gatewayUrl" not in result["routing"]
-    assert "profileName" not in result["routing"]
+    assert "workspace" not in result["routing"]
 
 
 def test_public_resolver_rejects_cross_user_and_email_lookup():
     with pytest.raises(HTTPException) as mismatch:
-        asyncio.run(resolve.resolve_endpoint(uid="user-b", email=None, phone=None, authenticated_uid="user-a"))
+        asyncio.run(resolve.resolve_endpoint(uid="user-b", authenticated_uid="user-a"))
     assert mismatch.value.status_code == 403
 
-    with pytest.raises(HTTPException) as unsupported:
-        asyncio.run(resolve.resolve_endpoint(uid=None, email="a@example.com", phone=None, authenticated_uid="user-a"))
-    assert unsupported.value.status_code == 400
+    parameters = inspect.signature(resolve.resolve_endpoint).parameters
+    assert "email" not in parameters
+    assert "phone" not in parameters
 
 
 def test_voice_session_rejects_cross_user_before_issuing_token():

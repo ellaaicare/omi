@@ -1,6 +1,8 @@
 import asyncio
+import json
 import sys
 import types
+from pathlib import Path
 
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
 
@@ -12,6 +14,43 @@ from utils.ella.canonical_context import (
     canonical_events_to_chat_turns,
     format_canonical_context,
 )
+
+_HISTORY_CONTRACT_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "ella_chat_history_canonical_response_v1.json"
+)
+
+
+def _history_contract_fixture():
+    return json.loads(_HISTORY_CONTRACT_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _history_contract_events():
+    return [
+        {
+            "uid": "uid-1",
+            "event_id": "canonical-user-turn",
+            "source_identity": "omi:user-turn",
+            "channel": "ios_chat",
+            "provider": "omi-backend",
+            "role": "user",
+            "text": "Exact user history request.",
+            "title": "User message",
+            "started_at": "2026-08-03T12:00:00+00:00",
+            "metadata": {},
+        },
+        {
+            "uid": "uid-1",
+            "event_id": "canonical-assistant-turn",
+            "source_identity": "omi:assistant-turn",
+            "channel": "ios_chat",
+            "provider": "omi-backend",
+            "role": "assistant",
+            "text": "Exact assistant history response.",
+            "title": "Assistant message",
+            "started_at": "2026-08-03T12:01:00+00:00",
+            "metadata": {},
+        },
+    ]
 
 
 def _cafe_event():
@@ -47,14 +86,10 @@ def test_default_context_channels_include_external_continuity_sources():
     assert "companion_note" in DEFAULT_CONTEXT_CHANNELS
 
 
-def test_canonical_events_to_server_messages_maps_ios_history_shape():
-    messages = canonical_events_to_server_messages([_cafe_event()])
+def test_canonical_events_to_server_messages_matches_first_party_history_contract_fixture():
+    messages = canonical_events_to_server_messages(_history_contract_events())
 
-    assert messages[0]["id"] == "omi:cafe-123:summary"
-    assert messages[0]["sender"] == "human"
-    assert messages[0]["metadata"]["source"] == "canonical_timeline"
-    assert messages[0]["metadata"]["channel"] == "omi"
-    assert "Cafe Coffee and Waffle Stop" in messages[0]["metadata"]["title"]
+    assert messages == _history_contract_fixture()["messages"]
 
 
 def test_chat_history_prefers_canonical_timeline(monkeypatch):
@@ -62,19 +97,22 @@ def test_chat_history_prefers_canonical_timeline(monkeypatch):
         assert uid == "uid-1"
         assert limit == 5
         assert before is None
-        return [_cafe_event()]
+        return _history_contract_events()
+
+    async def authority_disabled(uid):
+        assert uid == "uid-1"
+        return False
 
     async def fail_resolve(_uid):
         raise AssertionError("legacy routing fallback should not be used when canonical has events")
 
     monkeypatch.setattr(ella_chat, "_fetch_chat_canonical_events", fake_events)
+    monkeypatch.setattr(ella_chat, "runtime_authority_enabled", authority_disabled)
     monkeypatch.setattr(ella_chat, "resolve_user_routing", fail_resolve)
 
     result = asyncio.run(ella_chat.ella_chat_history("uid-1", limit=5, authenticated_uid="uid-1"))
 
-    assert result["source"] == "canonical_timeline"
-    assert result["fallback"] is False
-    assert result["messages"][0]["id"] == "omi:cafe-123:summary"
+    assert result == _history_contract_fixture()
 
 
 def test_guardian_recent_turns_prefers_canonical_timeline(monkeypatch):
@@ -101,8 +139,12 @@ def test_guardian_isolated_context_never_uses_openclaw_history(monkeypatch):
     async def fail_resolve(_uid):
         raise AssertionError("isolated Guardian context must not use OpenClaw history")
 
+    async def authority_enabled(uid):
+        assert uid == "uid-isolated"
+        return True
+
     monkeypatch.setattr(guardian, "fetch_canonical_timeline", no_events)
-    monkeypatch.setattr(guardian, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(guardian, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(guardian, "resolve_user_routing", fail_resolve)
 
     assert asyncio.run(guardian._get_recent_chat_turns("uid-isolated", limit=3)) == []

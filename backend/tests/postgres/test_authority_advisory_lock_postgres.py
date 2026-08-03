@@ -6,11 +6,15 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import asyncpg
+import httpx
 import pytest
+from fastapi import FastAPI
 
 from database import authority_advisory_lock, managed_cloud_consent, voice_canary
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
+from ella.routers import guardian
+from utils.ella import exact_firebase_auth
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -37,6 +41,7 @@ CREATE TABLE users (
     identities JSONB NOT NULL DEFAULT '{}'::jsonb,
     settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    guardian_mode TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -160,6 +165,177 @@ async def _seed_grant(pool, uid):
             "sha256:" + ("3" * 64),
         )
     return authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+
+
+def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
+    async def scenario(pool):
+        await pool.execute(
+            """
+            INSERT INTO users (omi_uid, guardian_mode)
+            VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
+            """
+        )
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        try:
+            upper = await guardian.get_guardian_mode(authenticated_uid="CaseUID")
+            lower = await guardian.get_guardian_mode(authenticated_uid="caseuid")
+        finally:
+            guardian._pool = previous_pool
+
+        assert upper["currentMode"] == "EMERGENCY_ONLY"
+        assert lower["currentMode"] == "ACTIVE_SUPPORT"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
+    async def scenario(pool):
+        await pool.execute(
+            """
+            CREATE TABLE guardian_queue (
+                id TEXT PRIMARY KEY,
+                uid TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL,
+                message TEXT,
+                trigger_type TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                consumed_at TIMESTAMPTZ
+            );
+
+            CREATE TABLE guardian_pipeline_events (
+                id BIGSERIAL PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                latency_ms INTEGER,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE guardian_delivery_log (
+                id BIGSERIAL PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                target TEXT NOT NULL,
+                caregiver_id TEXT,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            INSERT INTO users (omi_uid, timezone)
+            VALUES ('CaseUID', 'UTC'), ('caseuid', 'America/Los_Angeles');
+
+            INSERT INTO guardian_queue (
+                id, uid, priority, message, trigger_type, metadata, created_at
+            ) VALUES
+                (
+                    'upper-private', 'CaseUID', 'urgent', 'UPPER_QUEUE_PRIVATE', 'safety',
+                    '{"trace_id":"owner-local-trace","private":"UPPER_QUEUE_METADATA"}',
+                    '2026-08-03T12:01:00Z'
+                ),
+                (
+                    'lower-private', 'caseuid', 'normal', 'LOWER_QUEUE_PRIVATE', 'safety',
+                    '{"trace_id":"owner-local-trace","private":"LOWER_QUEUE_METADATA"}',
+                    '2026-08-03T12:00:00Z'
+                );
+
+            INSERT INTO guardian_pipeline_events (
+                trace_id, uid, stage, status, metadata, created_at
+            ) VALUES
+                (
+                    'owner-local-trace', 'CaseUID', 'upper-private-event', 'success',
+                    '{"private":"UPPER_EVENT_PRIVATE"}', '2026-08-03T12:01:10Z'
+                ),
+                (
+                    'owner-local-trace', 'caseuid', 'lower-private-event', 'success',
+                    '{"private":"LOWER_EVENT_PRIVATE"}', '2026-08-03T12:00:10Z'
+                );
+
+            INSERT INTO guardian_delivery_log (
+                trace_id, uid, channel, target, status, error_message, created_at, updated_at
+            ) VALUES
+                (
+                    'owner-local-trace', 'CaseUID', 'email', 'upper-private-target', 'sent',
+                    'UPPER_DELIVERY_PRIVATE', '2026-08-03T12:01:20Z', '2026-08-03T12:01:20Z'
+                ),
+                (
+                    'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
+                    'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
+                );
+            """
+        )
+
+        before = {
+            table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("guardian_queue", "guardian_pipeline_events", "guardian_delivery_log")
+        }
+
+        def verify_token(token):
+            if token == "valid-lower":
+                return {"uid": "caseuid"}
+            if token == "valid-upper":
+                return {"uid": "CaseUID"}
+            raise ValueError("invalid bearer")
+
+        monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        app = FastAPI()
+        app.include_router(guardian.alerts_router)
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                lower_response = await client.get(
+                    "/v1/ella/guardian-alerts?limit=50&uid=CaseUID",
+                    headers={"Authorization": "Bearer valid-lower"},
+                )
+                upper_response = await client.get(
+                    "/v1/ella/guardian-alerts?limit=50",
+                    headers={"Authorization": "Bearer valid-upper"},
+                )
+        finally:
+            guardian._pool = previous_pool
+
+        assert lower_response.status_code == 200
+        lower = lower_response.json()
+        assert lower["uid"] == "caseuid"
+        assert [alert["queue_item_id"] for alert in lower["alerts"]] == ["lower-private"]
+        assert [event["stage"] for event in lower["alerts"][0]["events"]] == ["lower-private-event"]
+        assert [delivery["target"] for delivery in lower["alerts"][0]["deliveries"]] == ["lower-private-target"]
+        lower_serialized = str(lower)
+        assert "LOWER_QUEUE_PRIVATE" in lower_serialized
+        for upper_private in (
+            "upper-private",
+            "UPPER_QUEUE_PRIVATE",
+            "UPPER_QUEUE_METADATA",
+            "upper-private-event",
+            "UPPER_EVENT_PRIVATE",
+            "upper-private-target",
+            "UPPER_DELIVERY_PRIVATE",
+        ):
+            assert upper_private not in lower_serialized
+
+        assert upper_response.status_code == 200
+        upper = upper_response.json()
+        assert upper["uid"] == "CaseUID"
+        assert [alert["queue_item_id"] for alert in upper["alerts"]] == ["upper-private"]
+        assert [event["stage"] for event in upper["alerts"][0]["events"]] == ["upper-private-event"]
+        assert [delivery["target"] for delivery in upper["alerts"][0]["deliveries"]] == ["upper-private-target"]
+
+        after = {
+            table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("guardian_queue", "guardian_pipeline_events", "guardian_delivery_log")
+        }
+        assert after == before
+
+    asyncio.run(_run_with_database(scenario))
 
 
 def _prompt_receipt() -> dict[str, Any]:
@@ -627,7 +803,7 @@ async def _prepare_writer_case(
             expected_after=0,
         )
 
-    if name in {"identity_create", "identity_update", "identity_bind", "user_activate"}:
+    if name in {"identity_create", "identity_update", "identity_bind", "user_activate", "guardian_mode"}:
         email = f"{uid}@example.invalid"
         if name == "identity_create":
             owner = authority_advisory_lock.provisional_identity_owner(uid)
@@ -673,6 +849,11 @@ async def _prepare_writer_case(
                     uid,
                     email,
                 )
+                if name == "guardian_mode":
+                    await conn.execute(
+                        "UPDATE users SET status = 'ACTIVE' WHERE id = $1",
+                        user_id,
+                    )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
         if name == "identity_bind":
 
@@ -724,6 +905,22 @@ async def _prepare_writer_case(
                 snapshot=snapshot,
                 expected_before="Synthetic Before",
                 expected_after="Synthetic After",
+            )
+
+        if name == "guardian_mode":
+
+            async def guardian_mode_snapshot():
+                return await pool.fetchval(
+                    "SELECT guardian_mode FROM users WHERE id = $1",
+                    user_id,
+                )
+
+            return _WriterCase(
+                owner=owner,
+                writer=lambda: repository.update_guardian_mode(uid, "ACTIVE_SUPPORT"),
+                snapshot=guardian_mode_snapshot,
+                expected_before=None,
+                expected_after="ACTIVE_SUPPORT",
             )
 
         async def status_snapshot():
@@ -972,6 +1169,7 @@ async def _prepare_writer_case(
         "identity_update",
         "identity_bind",
         "user_activate",
+        "guardian_mode",
         "runtime_stage",
         "runtime_activate",
         "cloud_claim",
@@ -1008,6 +1206,7 @@ def _authority_error_code(error: BaseException) -> str | None:
         "entitlement_status",
         "entitlement_delete",
         "user_activate",
+        "guardian_mode",
         "runtime_stage",
         "runtime_activate",
         "cloud_claim",

@@ -27,7 +27,7 @@ ELLA_POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
 ELLA_POSTGRES_PASSWORD = os.getenv("ELLA_POSTGRES_PASSWORD", "postgres")
 ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
 GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
-GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
+GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "")
 GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
     "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
     "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
@@ -620,6 +620,8 @@ def _log_trace_event(
     latency_ms: Optional[int] = None,
 ) -> None:
     """Best-effort trace write; scanner must never block transcription."""
+    if not GUARDIAN_WEBHOOK_KEY:
+        return
     try:
         requests.post(
             GUARDIAN_TRACE_LOG_URL,
@@ -631,6 +633,7 @@ def _log_trace_event(
                 "latency_ms": latency_ms,
                 "metadata": metadata or {},
             },
+            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
             timeout=0.25,
         )
     except Exception:
@@ -692,6 +695,8 @@ def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_seg
     def _post() -> None:
         start = time.time()
         try:
+            if not GUARDIAN_WEBHOOK_KEY:
+                return
             if GUARDIAN_WAKE_ACK_DIRECT_DB:
                 result = _insert_wake_ack_direct(uid, trace_id, payload)
                 _log_trace_event(
@@ -777,7 +782,7 @@ def _insert_wake_ack_direct(uid: str, trace_id: str, payload: dict) -> dict:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER(%s)",
+                    "SELECT guardian_mode FROM users WHERE omi_uid = %s",
                     (uid,),
                 )
                 row = cur.fetchone()
