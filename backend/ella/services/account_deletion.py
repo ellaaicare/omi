@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from database import account_deletion as account_deletion_db
+from database import content_write_fence
 from ella.services.ai_consent import build_account_deletion_receipt
 
 
@@ -59,9 +60,37 @@ async def execute_account_deletion(
 
     remaining = set(state.external_cleanup_required)
     try:
+        writers_drained = await content_write_fence.tombstone_content_writes(uid)
+    except content_write_fence.ContentWriteFenceError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
+    if not writers_drained:
+        remaining.add("firestore_data")
+        ordered_remaining = tuple(sorted(remaining))
+        return AccountDeletionResponse(
+            status_code=202,
+            body={
+                "status": "deletion_pending",
+                "code": "account_deletion_cleanup_pending",
+                "authority_quarantined": state.authority_quarantined,
+                "capacity_released": state.capacity_released,
+                "retryable": True,
+                "deletion_receipt": build_account_deletion_receipt(
+                    status="pending",
+                    remaining=ordered_remaining,
+                    external_cleanup_references=state.external_cleanup_references,
+                ),
+            },
+        )
+
+    try:
         await run_in_threadpool(delete_firestore, uid)
     except Exception:
         remaining.add("firestore_data")
+    else:
+        remaining.discard("firestore_data")
 
     if authority_enabled and not remaining:
         try:

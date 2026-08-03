@@ -7,6 +7,11 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/workflow.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
@@ -91,6 +96,7 @@ on:
       - "backend/tests/unit/test_hermes_product_fit_canary.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
@@ -116,6 +122,11 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/workflow.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
@@ -200,6 +211,7 @@ on:
       - "backend/tests/unit/test_hermes_product_fit_canary.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
@@ -278,6 +290,11 @@ jobs:
           python -m py_compile
           database/account_deletion.py
           database/authority_advisory_lock.py
+          database/content_write_fence.py
+          routers/apps.py
+          routers/integration.py
+          routers/mcp_sse.py
+          routers/workflow.py
           database/firestore_account_deletion.py
           database/users.py
           database/ella_provisioning.py
@@ -337,6 +354,9 @@ jobs:
           black --check --line-length 120 --skip-string-normalization
           database/account_deletion.py
           database/authority_advisory_lock.py
+          database/content_write_fence.py
+          routers/apps.py routers/integration.py
+          routers/mcp_sse.py routers/workflow.py
           database/firestore_account_deletion.py
           database/ella_provisioning.py database/invitations.py
           database/managed_cloud_consent.py
@@ -365,6 +385,7 @@ jobs:
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
           tests/unit/test_account_deletion.py
+          tests/unit/test_content_write_fence.py
           tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_guardian_delivery.py
@@ -399,6 +420,7 @@ jobs:
           collected="$(
             pytest --collect-only -q \
               tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
               tests/unit/test_ella_ai_consent.py \
               tests/unit/test_ella_ai_consent_route_gates.py \
               tests/unit/test_hermes_cloud_migration.py \
@@ -432,6 +454,10 @@ jobs:
             "tests/unit/test_account_deletion.py::test_production_route_uses_legacy_resumable_deletion_when_ella_authority_is_explicitly_disabled"
             "tests/unit/test_account_deletion.py::test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable"
             "tests/unit/test_account_deletion.py::test_retained_firebase_subject_is_fenced_from_authenticated_content_writes"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
+            "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_uses_scope_holding_dependencies"
+            "tests/unit/test_content_write_fence.py::test_request_fence_covers_streamed_commit_after_route_returns"
             "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
             "tests/unit/test_hermes_product_fit_canary.py::test_scenarios_a_to_f_pass_with_content_free_stage_tables"
@@ -456,6 +482,7 @@ jobs:
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_ella_runtime_route_isolation.py \
@@ -471,9 +498,10 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 506
+          test "$collected" -eq 515
           pytest \
             tests/unit/test_account_deletion.py \
+            tests/unit/test_content_write_fence.py \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
             tests/unit/test_hermes_cloud_migration.py \
@@ -546,13 +574,17 @@ jobs:
             tests/unit/test_ella_provision_authority_split.py \
             tests/unit/test_ella_plato_mcp.py \
             -v
-          test "$(
+          advisory_ids="$(
             pytest --collect-only -q \
               tests/unit/test_authority_advisory_lock.py \
               tests/unit/test_authority_writer_guard.py \
               tests/postgres/test_authority_advisory_lock_postgres.py |
-              grep -c '::'
-          )" -eq 65
+              sed '/^$/d'
+          )"
+          test "$(grep -c '::' <<<"$advisory_ids")" -eq 66
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_content_request_holds_owner_lock_across_real_commit_and_releases_on_cancellation" \
+            <<<"$advisory_ids"
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \

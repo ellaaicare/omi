@@ -17,7 +17,7 @@ import opuslib  # type: ignore
 
 import lc3  # lc3py
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from websockets.exceptions import ConnectionClosed
@@ -33,7 +33,7 @@ import database.conversations as conversations_db
 import database.calendar_meetings as calendar_db
 import database.users as user_db
 from database.users import get_user_conversation_lifecycle_preferences, get_user_transcription_preferences
-from database import redis_db
+from database import content_write_fence, redis_db
 from database.redis_db import (
     get_cached_user_geolocation,
     try_acquire_listen_lock,
@@ -2627,7 +2627,6 @@ async def web_listen_handler(
     # Authenticate via first message
     try:
         uid = auth.get_current_user_uid_from_ws_message(first_message)
-        await auth.assert_authenticated_user_writable(uid)
     except ValueError as e:
         await websocket.close(code=1008, reason=str(e))
         return
@@ -2642,57 +2641,63 @@ async def web_listen_handler(
         return
 
     try:
-        assert_current_ai_consent(uid)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {}
-        await websocket.send_json(
-            {
-                "type": "auth_response",
-                "success": False,
-                "error": detail.get("code", "ai_consent_required"),
-            }
-        )
-        await websocket.close(code=1008, reason="AI consent required")
+        async with content_write_fence.request_content_write_fence(uid):
+            try:
+                assert_current_ai_consent(uid)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                await websocket.send_json(
+                    {
+                        "type": "auth_response",
+                        "success": False,
+                        "error": detail.get("code", "ai_consent_required"),
+                    }
+                )
+                await websocket.close(code=1008, reason="AI consent required")
+                return
+
+            runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
+            if runtime_gate.get("required") and not runtime_gate.get("success"):
+                logging.getLogger(__name__).warning(
+                    "Isolated Ella web listen setup incomplete for uid=%s code=%s",
+                    uid,
+                    runtime_gate.get("error"),
+                )
+                await websocket.send_json(
+                    {
+                        "type": "auth_response",
+                        "success": False,
+                        "error": "ella_setup_incomplete",
+                    }
+                )
+                await websocket.close(code=1013, reason="Ella setup incomplete")
+                return
+
+            # Send success response
+            await websocket.send_json({"type": "auth_response", "success": True})
+            print("web_listen_handler authenticated", uid)
+
+            # Proceed with streaming (websocket already accepted, uid already validated)
+            custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
+            onboarding_mode = onboarding == 'enabled'
+
+            await _stream_handler(
+                websocket,
+                uid,
+                language,
+                sample_rate,
+                codec,
+                channels,
+                include_speech_profile,
+                None,
+                conversation_timeout=conversation_timeout,
+                source=source,
+                custom_stt_mode=custom_stt_mode,
+                onboarding_mode=onboarding_mode,
+                socket_accepted_at=socket_accepted_at,
+            )
+    except content_write_fence.ContentWriteFenceError as exc:
+        await websocket.send_json({"type": "auth_response", "success": False, "error": exc.code})
+        await websocket.close(code=1008, reason="Account content unavailable")
         return
-
-    runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
-    if runtime_gate.get("required") and not runtime_gate.get("success"):
-        logging.getLogger(__name__).warning(
-            "Isolated Ella web listen setup incomplete for uid=%s code=%s",
-            uid,
-            runtime_gate.get("error"),
-        )
-        await websocket.send_json(
-            {
-                "type": "auth_response",
-                "success": False,
-                "error": "ella_setup_incomplete",
-            }
-        )
-        await websocket.close(code=1013, reason="Ella setup incomplete")
-        return
-
-    # Send success response
-    await websocket.send_json({"type": "auth_response", "success": True})
-    print("web_listen_handler authenticated", uid)
-
-    # Proceed with streaming (websocket already accepted, uid already validated)
-    custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
-    onboarding_mode = onboarding == 'enabled'
-
-    await _stream_handler(
-        websocket,
-        uid,
-        language,
-        sample_rate,
-        codec,
-        channels,
-        include_speech_profile,
-        None,
-        conversation_timeout=conversation_timeout,
-        source=source,
-        custom_stt_mode=custom_stt_mode,
-        onboarding_mode=onboarding_mode,
-        socket_accepted_at=socket_accepted_at,
-    )
     print("web_listen_handler ended", uid)

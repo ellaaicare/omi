@@ -25,8 +25,16 @@ from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_s
 from models.memories import MemoryDB, Memory, MemoryCategory
 from models.conversation import CategoryEnum
 from utils.llm.memories import identify_category_for_memory
+from utils.other.endpoints import admit_authenticated_content_writer
 
 router = APIRouter()
+
+_CONTENT_MUTATION_TOOLS = {
+    "create_memory",
+    "delete_memory",
+    "edit_memory",
+    "update_conversation_summary",
+}
 
 # Store active sessions
 active_sessions: dict = {}
@@ -525,6 +533,12 @@ async def mcp_streamable_http(
 
     # Handle batch requests (array of messages)
     messages = body if isinstance(body, list) else [body]
+
+    if any(
+        message.get("method") == "tools/call" and (message.get("params") or {}).get("name") in _CONTENT_MUTATION_TOOLS
+        for message in messages
+    ):
+        await admit_authenticated_content_writer(user_id)
 
     # Check if all messages are notifications/responses (no id)
     all_notifications = all(msg.get("id") is None for msg in messages)

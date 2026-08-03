@@ -6,6 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database._client import db as firestore_db
+from database.content_write_fence import (
+    ContentWriteFenceMiddleware,
+    configure_firestore_db as configure_content_write_fence_firestore_db,
+)
 from modal import Image, App, asgi_app, Secret
 from routers import (
     workflow,
@@ -80,6 +84,7 @@ app.add_middleware(
 # Consent authority stays available even when ELLA_ENABLED=false so rollback
 # cannot leave protected generic OMI routes without grant/revoke endpoints.
 configure_ai_consent_firestore_db(firestore_db)
+configure_content_write_fence_firestore_db(firestore_db)
 app.include_router(ai_consent.router)
 app.include_router(transcribe.router)
 app.include_router(conversations.router)
@@ -131,6 +136,7 @@ methods_timeout = {
 }
 
 app.add_middleware(TimeoutMiddleware, methods_timeout=methods_timeout)
+app.add_middleware(ContentWriteFenceMiddleware)
 
 
 modal_app = App(

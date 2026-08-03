@@ -10,6 +10,7 @@ import models.integrations as integration_models
 import models.conversation as conversation_models
 from routers.conversations import process_conversation, trigger_external_integrations
 from utils.conversations.location import get_google_maps_location
+from utils.other.endpoints import admit_authenticated_content_writer
 
 router = APIRouter()
 
@@ -19,7 +20,7 @@ router = APIRouter()
     response_model=integration_models.EmptyResponse,
     tags=['integration', 'workflow', 'memories'],
 )
-def create_memory(
+async def create_memory(
     request: Request,
     uid: str,
     api_key: Annotated[str | None, Header()],
@@ -27,6 +28,8 @@ def create_memory(
 ):
     if api_key != os.getenv('WORKFLOW_API_KEY'):
         raise HTTPException(status_code=401, detail="Invalid workflow API Key")
+
+    await admit_authenticated_content_writer(uid)
 
     # Time
     started_at = create_memory.started_at if create_memory.started_at is not None else datetime.now(timezone.utc)

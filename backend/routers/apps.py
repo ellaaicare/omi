@@ -1,6 +1,5 @@
 import json
 import os
-import asyncio
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -8,7 +7,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 import requests
 from ulid import ULID
-from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Header, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, UploadFile, File, HTTPException, Header, Query
 from fastapi.responses import HTMLResponse
 
 from utils.apps import fetch_app_chat_tools_from_manifest
@@ -1267,13 +1266,17 @@ async def get_twitter_initial_message(username: str, uid: str = Depends(auth.get
 
 
 @router.post('/v1/apps/migrate-owner', tags=['v1'])
-async def migrate_app_owner(old_id, uid: str = Depends(auth.get_writable_user_uid)):
+async def migrate_app_owner(
+    old_id,
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(auth.get_writable_user_uid),
+):
     # Migrate app ownership in the database
     migrate_app_owner_id_db(uid, old_id)
 
     # Start async tasks to migrate memories and update persona connected accounts
-    asyncio.create_task(migrate_memories(old_id, uid))
-    asyncio.create_task(update_omi_persona_connected_accounts(uid))
+    background_tasks.add_task(migrate_memories, old_id, uid)
+    background_tasks.add_task(update_omi_persona_connected_accounts, uid)
 
     return {"status": "ok", "message": "Migration started"}
 

@@ -93,6 +93,19 @@ pytestmark = pytest.mark.skipif(
     reason="ELLA_TEST_POSTGRES_DSN is required for invitation PostgreSQL tests",
 )
 
+
+@pytest.fixture(autouse=True)
+def _successful_content_writer_drain(monkeypatch):
+    async def tombstone(_uid):
+        return True
+
+    monkeypatch.setattr(
+        account_deletion_service.content_write_fence,
+        "tombstone_content_writes",
+        tombstone,
+    )
+
+
 BASE_PROVISIONING_SCHEMA = """
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

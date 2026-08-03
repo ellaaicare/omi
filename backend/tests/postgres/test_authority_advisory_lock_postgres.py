@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable
 import asyncpg
 import pytest
 
-from database import authority_advisory_lock, managed_cloud_consent, voice_canary
+from database import authority_advisory_lock, content_write_fence, managed_cloud_consent, voice_canary
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
 
@@ -987,6 +987,93 @@ def test_each_production_writer_waits_before_mutation_and_commits_after_release(
     async def scenario(pool):
         case = await _prepare_writer_case(pool, name)
         await _assert_serialized_writer(pool, case)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_content_request_holds_owner_lock_across_real_commit_and_releases_on_cancellation():
+    async def scenario(pool):
+        uid = "synthetic-content-request-fence"
+        async with pool.acquire() as seed:
+            user_id = await seed.fetchval(
+                """
+                INSERT INTO users (omi_uid, email, profile_class, status)
+                VALUES ($1, $2, 'synthetic', 'ACTIVE')
+                RETURNING id
+                """,
+                uid,
+                f"{uid}@example.invalid",
+            )
+        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+        writer_entered = asyncio.Event()
+        release_writer = asyncio.Event()
+
+        async def writer():
+            async with content_write_fence._postgres_owner_fence(uid):
+                writer_entered.set()
+                await release_writer.wait()
+
+        writer_task = asyncio.create_task(writer())
+        await asyncio.wait_for(writer_entered.wait(), timeout=5)
+
+        async with pool.acquire() as deletion_connection:
+            deletion_transaction = deletion_connection.transaction()
+            await deletion_transaction.start()
+            deletion_lock = asyncio.create_task(
+                authority_advisory_lock.acquire_authority_lock(deletion_connection, owner=owner)
+            )
+            await _wait_for_advisory_waiter(pool, owner)
+            assert not deletion_lock.done()
+            release_writer.set()
+            await asyncio.wait_for(writer_task, timeout=5)
+            await asyncio.wait_for(deletion_lock, timeout=5)
+            await deletion_connection.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                user_id,
+            )
+            await deletion_transaction.commit()
+
+        with pytest.raises(content_write_fence.ContentWriteFenceError) as forbidden:
+            async with content_write_fence._postgres_owner_fence(uid):
+                pass
+        assert forbidden.value.code == "account_write_forbidden"
+
+        cancellation_uid = f"{uid}-cancellation"
+        async with pool.acquire() as seed_cancellation:
+            cancellation_user_id = await seed_cancellation.fetchval(
+                """
+                INSERT INTO users (omi_uid, email, profile_class, status)
+                VALUES ($1, $2, 'synthetic', 'ACTIVE')
+                RETURNING id
+                """,
+                cancellation_uid,
+                f"{cancellation_uid}@example.invalid",
+            )
+        cancellation_owner = authority_advisory_lock.AuthorityOwner.from_values(
+            cancellation_user_id,
+            cancellation_user_id,
+        )
+        cancellation_entered = asyncio.Event()
+
+        async def cancelled_writer():
+            async with content_write_fence._postgres_owner_fence(cancellation_uid):
+                cancellation_entered.set()
+                await asyncio.Event().wait()
+
+        cancelled_task = asyncio.create_task(cancelled_writer())
+        await asyncio.wait_for(cancellation_entered.wait(), timeout=5)
+        cancelled_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_task
+
+        async with pool.acquire() as cleanup_probe:
+            cleanup_transaction = cleanup_probe.transaction()
+            await cleanup_transaction.start()
+            await asyncio.wait_for(
+                authority_advisory_lock.acquire_authority_lock(cleanup_probe, owner=cancellation_owner),
+                timeout=5,
+            )
+            await cleanup_transaction.rollback()
 
     asyncio.run(_run_with_database(scenario))
 

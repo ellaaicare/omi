@@ -1,13 +1,17 @@
 import json
 import os
 import time
+from typing import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException
 from fastapi import Request
 from firebase_admin import auth
 from firebase_admin.auth import InvalidIdTokenError, UserNotFoundError
 
-from database import voice_canary
+from database import content_write_fence
+
+# Retained import surface used by focused Guardian collection and test overrides.
+voice_canary = content_write_fence.voice_canary
 
 
 def get_user(uid: str):
@@ -65,31 +69,37 @@ def get_authenticated_user_uid(authorization: str = Header(None)) -> str:
         raise HTTPException(status_code=401, detail="Invalid authorization token")
 
 
-def _ella_authority_persistence_enabled() -> bool:
-    configured = os.getenv("ELLA_POSTGRES_AUTHORITY_ENABLED")
-    if configured is not None:
-        return configured.strip().lower() != "false"
-    return os.getenv("ELLA_ENABLED", "true").strip().lower() != "false"
-
-
 async def assert_authenticated_user_writable(uid: str) -> str:
-    """Reject retained Firebase subjects once PostgreSQL is tombstoned."""
-    if not _ella_authority_persistence_enabled():
-        return uid
+    """Perform a compatibility preflight; committers must hold the dependency."""
     try:
-        pool = await voice_canary.get_pool()
-        status = await pool.fetchval("SELECT status FROM users WHERE omi_uid = $1", uid)
-    except Exception as exc:
+        async with content_write_fence.content_write_fence(uid):
+            return uid
+    except content_write_fence.ContentWriteFenceError as exc:
+        if exc.code == "account_write_forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "account_write_forbidden", "retryable": False},
+            ) from exc
         raise HTTPException(
             status_code=503,
-            detail={"code": "account_authority_unavailable", "retryable": True},
+            detail={"code": exc.code, "retryable": True},
         ) from exc
-    if str(status or "") in {"DELETION_PENDING", "DELETED"}:
+
+
+async def admit_authenticated_content_writer(uid: str) -> str:
+    """Admit a manually authenticated writer for the full ASGI request."""
+    try:
+        return await content_write_fence.admit_request_content_writer(uid)
+    except content_write_fence.ContentWriteFenceError as exc:
+        if exc.code == "account_write_forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "account_write_forbidden", "retryable": False},
+            ) from exc
         raise HTTPException(
-            status_code=403,
-            detail={"code": "account_write_forbidden", "retryable": False},
-        )
-    return uid
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
 
 
 def get_current_user_uid(authorization: str = Header(None)) -> str:
@@ -97,9 +107,21 @@ def get_current_user_uid(authorization: str = Header(None)) -> str:
     return get_authenticated_user_uid(authorization)
 
 
-async def get_writable_user_uid(uid: str = Depends(get_current_user_uid)) -> str:
-    """Fence normal authenticated content access against deletion tombstones."""
-    return await assert_authenticated_user_writable(uid)
+async def get_writable_user_uid(uid: str = Depends(get_current_user_uid)) -> AsyncIterator[str]:
+    """Hold the distributed deletion fence through the complete ASGI request."""
+    try:
+        async with content_write_fence.request_content_write_fence(uid):
+            yield uid
+    except content_write_fence.ContentWriteFenceError as exc:
+        if exc.code == "account_write_forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "account_write_forbidden", "retryable": False},
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
 
 
 def get_current_user_uid_from_ws_message(message: dict) -> str:

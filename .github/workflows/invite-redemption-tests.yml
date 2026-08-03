@@ -6,6 +6,11 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/workflow.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
@@ -41,6 +46,7 @@ on:
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
@@ -55,6 +61,11 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/workflow.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
@@ -90,6 +101,7 @@ on:
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
@@ -150,6 +162,11 @@ jobs:
           python -m py_compile
           database/account_deletion.py
           database/authority_advisory_lock.py
+          database/content_write_fence.py
+          routers/apps.py
+          routers/integration.py
+          routers/mcp_sse.py
+          routers/workflow.py
           database/firestore_account_deletion.py
           database/users.py
           database/ella_provisioning.py
@@ -179,6 +196,7 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
               tests/unit/test_synthetic_invite_admin.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
@@ -189,11 +207,12 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 156
+          test "$collected" -eq 165
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
               tests/unit/test_ella_onboarding_contract.py \
@@ -214,6 +233,10 @@ jobs:
             "tests/unit/test_account_deletion.py::test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable"
             "tests/unit/test_account_deletion.py::test_retained_firebase_subject_is_fenced_from_authenticated_content_writes"
             "tests/unit/test_account_deletion.py::test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
+            "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_uses_scope_holding_dependencies"
+            "tests/unit/test_content_write_fence.py::test_request_fence_covers_streamed_commit_after_route_returns"
             "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
             "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
@@ -244,6 +267,7 @@ jobs:
           pytest \
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_account_deletion.py \
+            tests/unit/test_content_write_fence.py \
             tests/unit/test_synthetic_invite_admin.py \
             tests/unit/test_pilot_invite_admin.py \
             tests/unit/test_authority_writer_guard.py \

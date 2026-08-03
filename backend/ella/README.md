@@ -249,6 +249,9 @@ print('Adapters:', list(get_all_adapters().keys()))
 |----------|---------|-------------|
 | `ELLA_ENABLED` | `true` | Master switch for all Ella features |
 | `ELLA_POSTGRES_AUTHORITY_ENABLED` | follows `ELLA_ENABLED` | Explicit account-deletion authority boundary. Set `false` only when Ella PostgreSQL persistence/schema is intentionally absent; enabled database failures remain fail-closed. |
+| `ELLA_CONTENT_WRITE_FENCE_LEASE_SECONDS` | `900` | Renewable Firestore writer lease; bounded to 900 seconds and removed on every request exit. |
+| `ELLA_CONTENT_WRITE_FENCE_ACQUIRE_SECONDS` | `15` | Bounded wait for the distributed content/owner fence. |
+| `ELLA_CONTENT_WRITE_FENCE_DRAIN_SECONDS` | `15` | Bounded deletion drain wait before returning truthful HTTP 202 for pending Firestore cleanup. |
 | `ELLA_N8N_BASE_URL` | `https://n8n.ella-ai-care.com` | n8n webhook base URL |
 | `ELLA_SUMMARY_ENABLED` | `true` | Use n8n for summary generation |
 | `ELLA_MEMORY_ENABLED` | `true` | Use n8n for memory extraction |
