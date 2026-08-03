@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import hashlib
+import time as _time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -57,8 +58,8 @@ from utils.ella.canonical_context import (
     fetch_canonical_timeline,
     format_canonical_context,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.ella.time_context import timezone_name
-from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
 
@@ -401,8 +402,6 @@ async def _stream_level_1_ack(user_message: str):
 
 async def _stream_level_2_grok(user_message: str):
     """Level 2: Direct Grok API call via xAI."""
-    import time as _time
-
     _start = _time.time()
 
     if not XAI_API_KEY:
@@ -467,8 +466,6 @@ async def _stream_level_2_grok(user_message: str):
 
 async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str):
     """Level 3: Route through n8n webhook for full pipeline testing."""
-    import time as _time
-
     _start = _time.time()
 
     webhook_url = ELLA_CONFIG.n8n_chat_webhook
@@ -542,8 +539,6 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
     Sends SSE keep-alive comments (: keepalive) every 5s while waiting
     for OpenClaw to prevent proxy/client idle timeouts.
     """
-    import time as _time
-
     _start = _time.time()
 
     if not OPENCLAW_GATEWAY_TOKEN:
@@ -731,8 +726,6 @@ async def _stream_hermes_chat(
     runtime: IsolatedRuntime | None = None,
 ):
     """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
-    import time as _time
-
     _start = _time.time()
     if runtime is None and await runtime_authority_enabled(uid):
         yield "data: Error: isolated runtime required\n\n"
@@ -1056,8 +1049,6 @@ async def ella_chat_stream(
 
     Set via env ELLA_DEBUG_LEVEL or header X-Ella-Debug-Level.
     """
-    import time as _time
-
     _trace_start = _time.time()
 
     if request.uid and request.uid != authenticated_uid:
@@ -1213,7 +1204,7 @@ async def ella_chat_history(
     uid: str = "",
     limit: int = 50,
     before: str = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """Return recent chat/context messages for a user from canonical timeline.
 
@@ -1228,13 +1219,9 @@ async def ella_chat_history(
         limit: Max messages to return (default 50, max 200)
         before: ISO timestamp — only return messages before this time
     """
-    import time as _time
-
     _start = _time.time()
 
-    if uid and uid != authenticated_uid:
-        raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
-    uid = authenticated_uid
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Chat history")
     runtime_bound = await runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:

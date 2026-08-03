@@ -3,6 +3,13 @@ name: Hermes Cloud Runtime Tests
 on:
   pull_request:
     paths:
+      - "app/ios/Runner.xcodeproj/project.pbxproj"
+      - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
+      - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
+      - "app/ios/Runner/GuardianMode/GuardianModePollingService.swift"
+      - "app/ios/Tests/GuardianAuthenticatedTransportTests.swift"
+      - "app/lib/ella/services/ella_chat_service.dart"
+      - "app/test/ella/services/ella_chat_history_test.dart"
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
@@ -20,6 +27,7 @@ on:
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
@@ -66,6 +74,7 @@ on:
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/exact_firebase_auth.py"
+      - "backend/utils/ella/scanner.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
@@ -103,10 +112,18 @@ on:
       - "backend/tests/unit/test_ella_onboarding_contract.py"
       - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
+      - "backend/tests/unit/test_ella_scanner_batching.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
     paths:
+      - "app/ios/Runner.xcodeproj/project.pbxproj"
+      - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
+      - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
+      - "app/ios/Runner/GuardianMode/GuardianModePollingService.swift"
+      - "app/ios/Tests/GuardianAuthenticatedTransportTests.swift"
+      - "app/lib/ella/services/ella_chat_service.dart"
+      - "app/test/ella/services/ella_chat_history_test.dart"
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
@@ -124,6 +141,7 @@ on:
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
@@ -170,6 +188,7 @@ on:
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/exact_firebase_auth.py"
+      - "backend/utils/ella/scanner.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
@@ -207,6 +226,7 @@ on:
       - "backend/tests/unit/test_ella_onboarding_contract.py"
       - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
+      - "backend/tests/unit/test_ella_scanner_batching.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -278,6 +298,8 @@ jobs:
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
           ella/routers/ai_consent.py
+          ella/routers/chat.py
+          ella/routers/escalations.py
           ella/routers/hermes_cloud_enrichment.py
           ella/routers/guardian.py
           ella/routers/invites.py
@@ -317,6 +339,7 @@ jobs:
           scripts/voice_canary_admin.py
           utils/ella/postprocess.py
           utils/ella/exact_firebase_auth.py
+          utils/ella/scanner.py
           utils/ella/scanner_keyterms.py
           tests/unit/test_ella_reviewed_route_integration.py
 
@@ -329,7 +352,7 @@ jobs:
           database/runtime_targets.py database/voice_canary.py
           routers/users.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
-          ella/routers/ai_consent.py ella/routers/chat.py
+          ella/routers/ai_consent.py ella/routers/chat.py ella/routers/escalations.py
           ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
           ella/services/hermes_cloud_policy.py
@@ -345,7 +368,7 @@ jobs:
           ella/services/summary_recovery.py
           ella/utils/auto_provision.py ella/utils/identity_sync.py
           ella/utils/provision_authority.py utils/ella/exact_firebase_auth.py
-          utils/ella/scanner_keyterms.py
+          utils/ella/scanner.py utils/ella/scanner_keyterms.py
           scripts/voice_canary_admin.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
@@ -355,6 +378,8 @@ jobs:
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_guardian_delivery.py
           tests/unit/test_ella_reviewed_route_integration.py
+          tests/unit/test_ella_runtime_route_isolation.py
+          tests/unit/test_ella_scanner_batching.py
           tests/unit/test_ella_listen_runtime_gate.py
           tests/unit/test_ella_observer.py tests/unit/test_invitation_redemption.py
           tests/unit/test_ella_plato_mcp.py
@@ -372,6 +397,7 @@ jobs:
           tests/unit/test_hermes_cloud_runtime.py
           tests/unit/test_hermes_cloud_staged_attestation.py
           tests/unit/test_memory_reinterpretation_outbox.py
+          tests/unit/test_ella_scanner_batching.py
           tests/unit/test_scanner_keyterms.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
           tests/postgres/test_authority_advisory_lock_postgres.py
@@ -449,7 +475,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 490
+          test "$collected" -eq 491
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -529,7 +555,7 @@ jobs:
               tests/unit/test_authority_writer_guard.py \
               tests/postgres/test_authority_advisory_lock_postgres.py |
               grep -c '::'
-          )" -eq 67
+          )" -eq 68
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
@@ -539,18 +565,19 @@ jobs:
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 27
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
           pytest tests/unit/test_ella_guardian_delivery.py -v
           reviewed_route_ids="$(pytest --collect-only -q tests/unit/test_ella_reviewed_route_integration.py | sed '/^$/d')"
           required_reviewed_route_ids=(
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing"
-            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_missing_workspace_fails_closed_without_global_fallback"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_retained_user_without_isolated_binding_fails_closed_without_global_fallback"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_reports_ready_invitation_self_hosted_binding_without_legacy_workspace"
             "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_declines_before_firestore_or_firebase_removal"
           )
           for required_id in "${required_reviewed_route_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$reviewed_route_ids"
           done
-          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 3
+          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 4
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
@@ -562,3 +589,35 @@ jobs:
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 8
+          pytest tests/unit/test_ella_scanner_batching.py -v
+
+  guardian-app-contracts:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.1"
+          channel: stable
+          cache: true
+
+      - name: Run standard app tests and authenticated history contract
+        working-directory: app
+        run: |
+          ./test.sh
+          flutter test --no-pub test/ella/services/ella_chat_history_test.dart
+
+      - name: Compile and run Guardian authenticated transport contract
+        working-directory: app
+        run: |
+          swiftc \
+            -warnings-as-errors \
+            -D GUARDIAN_AUTH_TRANSPORT_TESTS \
+            ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift \
+            ios/Tests/GuardianAuthenticatedTransportTests.swift \
+            -o "$RUNNER_TEMP/guardian-authenticated-transport-tests"
+          "$RUNNER_TEMP/guardian-authenticated-transport-tests"

@@ -11,13 +11,6 @@ class GuardianModePollingService {
 
     private var pollTimer: DispatchSourceTimer?
 
-    private let session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10.0
-        config.timeoutIntervalForResource = 10.0
-        return URLSession(configuration: config)
-    }()
-
     var pollInterval: TimeInterval = 3.0
     var backendURL: String = "https://api.ella-ai-care.com"
 
@@ -109,17 +102,13 @@ class GuardianModePollingService {
     }
 
     func pollForNewAudio() async throws -> PollResponse? {
-        // Flutter shared_preferences stores with "flutter." prefix on iOS
-        let uid = UserDefaults.standard.string(forKey: "flutter.uid") ?? UserDefaults.standard.string(forKey: "uid") ?? "unknown"
-        let endpoint = "\(backendURL)/v1/ella/guardian/next-audio?uid=\(uid)"
-
-        guard let url = URL(string: endpoint) else {
+        guard let request = GuardianNativeRequestFactory.pollRequest(backendURL: backendURL) else {
             throw NSError(domain: "GuardianPolling", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Invalid backend URL"
             ])
         }
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await GuardianAuthenticatedTransport.shared.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NSError(domain: "GuardianPolling", code: 2, userInfo: [

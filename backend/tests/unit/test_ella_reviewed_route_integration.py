@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -16,8 +17,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 
 
 class _ResolvePool:
-    def __init__(self, *, workspace="/profiles/uid-a/workspace"):
-        self.workspace = workspace
+    def __init__(self):
         self.fetchrow_calls = []
 
     async def fetchrow(self, _query, *args):
@@ -25,12 +25,6 @@ class _ResolvePool:
         return {
             "omi_uid": "uid-a",
             "status": "active",
-            "agents": {
-                "userAgentId": "private-agent",
-                "gatewayToken": "private-routing-value",
-                "workspace": self.workspace,
-            },
-            "cluster_status": "ready",
         }
 
 
@@ -50,8 +44,15 @@ def _load_resolve_router():
         return None
 
     runtime_module.resolve_isolated_runtime = resolve_isolated_runtime
+    runtime_errors_module = types.ModuleType("ella.services.runtime_errors")
+
+    class ProvisioningError(Exception):
+        pass
+
+    runtime_errors_module.ProvisioningError = ProvisioningError
     sys.modules.setdefault("ella", types.ModuleType("ella"))
     sys.modules.setdefault("ella.services", types.ModuleType("ella.services"))
+    sys.modules.setdefault("ella.services.runtime_errors", runtime_errors_module)
     sys.modules.setdefault("ella.services.runtime_resolver", runtime_module)
 
     path = _BACKEND / "ella" / "routers" / "resolve.py"
@@ -65,8 +66,16 @@ def _load_resolve_router():
 resolve = _load_resolve_router()
 
 
-def _resolve_client(monkeypatch, pool):
+def _resolve_client(monkeypatch, pool, *, runtime):
     monkeypatch.setattr(resolve, "_pool", pool)
+    runtime_calls = []
+
+    async def resolve_runtime(uid, repository, target_mode):
+        runtime_calls.append((uid, repository, target_mode))
+        return runtime
+
+    monkeypatch.setattr(resolve, "EllaProvisioningRepository", lambda active_pool: ("repository", active_pool))
+    monkeypatch.setattr(resolve, "resolve_isolated_runtime", resolve_runtime)
 
     def verify_token(token):
         if token == "valid-a":
@@ -76,12 +85,13 @@ def _resolve_client(monkeypatch, pool):
     monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
     app = FastAPI()
     app.include_router(resolve.router)
-    return TestClient(app)
+    return TestClient(app), runtime_calls
 
 
 def test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing(monkeypatch):
     pool = _ResolvePool()
-    client = _resolve_client(monkeypatch, pool)
+    runtime = SimpleNamespace(provider="hermes_cloud", status="active")
+    client, runtime_calls = _resolve_client(monkeypatch, pool, runtime=runtime)
 
     assert client.get("/v1/ella/resolve?uid=uid-a").status_code == 401
     assert (
@@ -100,19 +110,20 @@ def test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routi
 
     assert response.status_code == 200
     assert pool.fetchrow_calls == [("uid-a",)]
+    assert runtime_calls == [("uid-a", ("repository", pool), "hermes-cloud-chat")]
     assert response.json() == {
         "user": {"omiUid": "uid-a", "status": "active"},
-        "routing": {"available": True, "clusterStatus": "ready", "platform": "openclaw"},
+        "routing": {"available": True, "clusterStatus": "active", "platform": "hermes_cloud"},
     }
     serialized = str(response.json()).lower()
     for forbidden in ("token", "session", "agentid", "workspace", "condition", "medication", "provision"):
         assert forbidden not in serialized
 
 
-def test_resolve_missing_workspace_fails_closed_without_global_fallback(monkeypatch):
-    pool = _ResolvePool(workspace="")
+def test_resolve_retained_user_without_isolated_binding_fails_closed_without_global_fallback(monkeypatch):
+    pool = _ResolvePool()
     monkeypatch.setattr(resolve, "CHAT_PLATFORM", "hermes")
-    client = _resolve_client(monkeypatch, pool)
+    client, runtime_calls = _resolve_client(monkeypatch, pool, runtime=None)
 
     response = client.get(
         "/v1/ella/resolve?uid=uid-a",
@@ -122,9 +133,28 @@ def test_resolve_missing_workspace_fails_closed_without_global_fallback(monkeypa
     assert response.status_code == 200
     assert response.json() == {
         "user": {"omiUid": "uid-a", "status": "active"},
-        "routing": {"available": False, "clusterStatus": "ready", "platform": "hermes"},
+        "routing": {"available": False, "clusterStatus": None, "platform": None},
     }
+    assert runtime_calls == [("uid-a", ("repository", pool), "hermes-cloud-chat")]
     assert "HERMES_WORKSPACE" not in (_BACKEND / "ella" / "routers" / "resolve.py").read_text(encoding="utf-8")
+
+
+def test_resolve_reports_ready_invitation_self_hosted_binding_without_legacy_workspace(monkeypatch):
+    pool = _ResolvePool()
+    runtime = SimpleNamespace(provider="hermes", status="active")
+    client, runtime_calls = _resolve_client(monkeypatch, pool, runtime=runtime)
+
+    response = client.get(
+        "/v1/ella/resolve",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user": {"omiUid": "uid-a", "status": "active"},
+        "routing": {"available": True, "clusterStatus": "active", "platform": "hermes"},
+    }
+    assert runtime_calls == [("uid-a", ("repository", pool), "hermes-cloud-chat")]
 
 
 def _load_delete_account_route():

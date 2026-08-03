@@ -29,7 +29,7 @@ router = APIRouter(prefix="/v1/ella/escalations", tags=["Ella Escalations"])
 
 ESCALATION_WEBHOOK_KEY = os.getenv(
     "ELLA_ESCALATION_WEBHOOK_KEY",
-    os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"),
+    os.getenv("GUARDIAN_WEBHOOK_KEY", ""),
 )
 
 _pool: Optional[asyncpg.Pool] = None

@@ -11,6 +11,7 @@ import pytest
 from database import authority_advisory_lock, managed_cloud_consent, voice_canary
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
+from ella.routers import guardian
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -161,6 +162,28 @@ async def _seed_grant(pool, uid):
             "sha256:" + ("3" * 64),
         )
     return authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+
+
+def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
+    async def scenario(pool):
+        await pool.execute(
+            """
+            INSERT INTO users (omi_uid, guardian_mode)
+            VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
+            """
+        )
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        try:
+            upper = await guardian.get_guardian_mode(authenticated_uid="CaseUID")
+            lower = await guardian.get_guardian_mode(authenticated_uid="caseuid")
+        finally:
+            guardian._pool = previous_pool
+
+        assert upper["currentMode"] == "EMERGENCY_ONLY"
+        assert lower["currentMode"] == "ACTIVE_SUPPORT"
+
+    asyncio.run(_run_with_database(scenario))
 
 
 def _prompt_receipt() -> dict[str, Any]:

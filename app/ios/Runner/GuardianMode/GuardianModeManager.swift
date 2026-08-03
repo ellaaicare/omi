@@ -250,18 +250,7 @@ class GuardianModeManager: NSObject {
         let portName = port.portName
         let deviceUID = port.uid
 
-        let uid = UserDefaults.standard.string(forKey: "flutter.uid")
-                   ?? UserDefaults.standard.string(forKey: "uid")
-                   ?? "unknown"
-        guard uid != "unknown" else { return }
-
         let backendURL = GuardianModePollingService.shared.backendURL
-        guard let url = URL(string: "\(backendURL)/v1/ella/guardian/playback-event") else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 3.0
 
         var eventMetadata = metadata ?? [:]
         if let triggerType = triggerType {
@@ -269,7 +258,6 @@ class GuardianModeManager: NSObject {
         }
 
         var body: [String: Any] = [
-            "uid": uid,
             "event_type": eventType,
             "port_type": portType,
             "port_name": portName,
@@ -285,11 +273,11 @@ class GuardianModeManager: NSObject {
         if !eventMetadata.isEmpty {
             body["metadata"] = eventMetadata
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
-        request.httpBody = data
-
-        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
-        NSLog("PLAYBACK_EVENT type=\(eventType) trace=\(traceId ?? "none") item=\(queueItemId ?? "none") port=\(portType) device=\(portName.isEmpty ? "unknown" : portName) uid=\(uid)")
+        guard let request = GuardianNativeRequestFactory.playbackRequest(backendURL: backendURL, body: body) else { return }
+        Task {
+            _ = try? await GuardianAuthenticatedTransport.shared.data(for: request)
+        }
+        NSLog("PLAYBACK_EVENT type=\(eventType) trace=\(traceId ?? "none") item=\(queueItemId ?? "none") port=\(portType) device=\(portName.isEmpty ? "unknown" : portName)")
     }
 
     // MARK: - Audio Injection with Pre-download + Retry

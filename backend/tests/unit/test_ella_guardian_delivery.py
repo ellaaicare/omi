@@ -14,6 +14,12 @@ from utils.ella import exact_firebase_auth
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, Connection=object, create_pool=None))
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
 
+
+@pytest.fixture(autouse=True)
+def _configured_guardian_service_key(monkeypatch):
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-service-key")
+
+
 _BACKEND = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _BACKEND / "ella" / "services" / "escalation_policy.py"
 _POLICY_SPEC = importlib.util.spec_from_file_location("ella.services.escalation_policy", _POLICY_PATH)
@@ -409,14 +415,24 @@ def test_wake_word_row_matches_fallback_variants():
     assert guardian._is_wake_word_row({"trigger_type": "wake_word_fallback", "metadata": {}})
 
 
-def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):
+def test_trace_log_requires_configured_key_and_rejects_bad_key(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(guardian, "_pool", pool)
+
+    with pytest.raises(HTTPException) as missing:
+        asyncio.run(
+            guardian.log_pipeline_event(
+                guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
+                x_guardian_key=None,
+                key=None,
+            )
+        )
+    assert missing.value.status_code == 403
 
     ok = asyncio.run(
         guardian.log_pipeline_event(
             guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
-            x_guardian_key=None,
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
             key=None,
         )
     )
@@ -548,7 +564,7 @@ def test_guardian_alerts_endpoint_excludes_ack_only_rows_but_keeps_real_wake_wor
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: "auth-uid"
 
     response = TestClient(app).get("/v1/ella/guardian-alerts?limit=50")
 
@@ -581,7 +597,7 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: "auth-uid"
     client = TestClient(app)
 
     response = client.get("/v1/ella/guardian-alerts?limit=50&uid=other-user")
@@ -756,6 +772,9 @@ class _GuardianRoutePool:
     def __init__(self, mode=None):
         self.mode = mode
         self.fetchrow_calls = []
+        self.fetch_calls = []
+        self.fetchval_calls = []
+        self.execute_calls = []
         self.guardian_mode_updates = []
 
     async def fetchrow(self, query, *args):
@@ -773,6 +792,34 @@ class _GuardianRoutePool:
                 "created_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
             }
         return {"guardian_mode": self.mode}
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
+        if "guardian_pipeline_events" in query and "trace_id = $1 AND uid = $2" in query:
+            now = datetime(2026, 8, 3, tzinfo=timezone.utc)
+            return [
+                {
+                    "stage": "scanner_classified",
+                    "status": "success",
+                    "latency_ms": 4,
+                    "metadata": {},
+                    "created_at": now,
+                    "uid": args[1],
+                }
+            ]
+        return []
+
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        return 0
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "OK"
+
+    @property
+    def call_count(self):
+        return len(self.fetchrow_calls) + len(self.fetch_calls) + len(self.fetchval_calls) + len(self.execute_calls)
 
 
 class _GuardianRepository:
@@ -815,6 +862,161 @@ def test_guardian_next_audio_uses_authenticated_owner_only(monkeypatch):
     assert accepted.json()["id"] == "queue-a"
     assert len(pool.fetchrow_calls) == 2
     assert all(args == ("uid-a",) for _, args in pool.fetchrow_calls)
+
+
+def test_guardian_native_owner_routes_derive_subject_without_caller_uid(monkeypatch):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+    headers = {"Authorization": "Bearer valid-a"}
+
+    next_audio = client.get("/v1/ella/guardian/next-audio", headers=headers)
+    playback = client.post(
+        "/v1/ella/guardian/playback-event",
+        headers=headers,
+        json={"event_type": "started", "port_type": "Speaker", "trace_id": "trace-a"},
+    )
+    playback_debug = client.post(
+        "/v1/ella/guardian/playback-debug",
+        headers=headers,
+        json={"event_name": "received", "trace_id": "trace-a"},
+    )
+    queue = client.get("/v1/ella/guardian/queue", headers=headers)
+    activate = client.post("/v1/ella/guardian/activate", headers=headers, json={})
+    trace = client.get("/v1/ella/guardian/trace/trace-a", headers=headers)
+
+    assert [response.status_code for response in (next_audio, playback, playback_debug, queue, activate, trace)] == [
+        200,
+        200,
+        200,
+        200,
+        200,
+        200,
+    ]
+    assert guardian._playback_events["uid-a"]["trace_id"] == "trace-a"
+    assert queue.json()["uid"] == "uid-a"
+    assert activate.json()["uid"] == "uid-a"
+    assert trace.json()["uid"] == "uid-a"
+    assert any(args == ("trace-a", "uid-a") for _, args in pool.fetch_calls)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/v1/ella/guardian/queue?uid=uid-b", None),
+        ("POST", "/v1/ella/guardian/activate", {"uid": "uid-b"}),
+        ("GET", "/v1/ella/guardian/trace/trace-a?uid=uid-b", None),
+        ("POST", "/v1/ella/guardian/playback-event", {"uid": "uid-b", "port_type": "Speaker"}),
+        (
+            "POST",
+            "/v1/ella/guardian/playback-debug",
+            {"uid": "uid-b", "event_name": "received", "trace_id": "trace-a"},
+        ),
+    ],
+)
+def test_guardian_owner_routes_reject_missing_malformed_and_cross_user_before_state(
+    monkeypatch,
+    method,
+    path,
+    body,
+):
+    for headers, expected_status in (
+        ({}, 401),
+        ({"Authorization": "Basic valid-a"}, 401),
+        ({"Authorization": "Bearer expired"}, 401),
+        ({"Authorization": "Bearer valid-a"}, 403),
+    ):
+        pool = _GuardianRoutePool()
+        client = _guardian_route_client(monkeypatch, pool)
+
+        response = client.request(method, path, headers=headers, json=body)
+
+        assert response.status_code == expected_status
+        assert pool.call_count == 0
+
+
+def test_guardian_owner_or_service_reads_enforce_service_scope_and_owner(monkeypatch):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+    service_headers = {"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY}
+
+    queue = client.get("/v1/ella/guardian/queue?uid=uid-b", headers=service_headers)
+    trace = client.get("/v1/ella/guardian/trace/trace-a?uid=uid-b", headers=service_headers)
+
+    assert queue.status_code == 200
+    assert trace.status_code == 200
+    assert queue.json()["uid"] == "uid-b"
+    assert trace.json()["uid"] == "uid-b"
+    assert any(args == ("trace-a", "uid-b") for _, args in pool.fetch_calls)
+
+    calls_after_success = pool.call_count
+    for headers in (
+        {"X-Guardian-Key": "wrong-service"},
+        {"Authorization": "Bearer valid-a", "X-Guardian-Key": "wrong-service"},
+    ):
+        assert client.get("/v1/ella/guardian/queue?uid=uid-a", headers=headers).status_code == 403
+        assert client.get("/v1/ella/guardian/trace/trace-a?uid=uid-a", headers=headers).status_code == 403
+    assert pool.call_count == calls_after_success
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "files", "data"),
+    [
+        ("POST", "/v1/ella/guardian/enqueue", {"uid": "uid-a", "url": "https://audio.example/a.mp3"}, None, None),
+        ("POST", "/v1/ella/guardian/synthesize", {"uid": "uid-a", "text": "Hello"}, None, None),
+        ("POST", "/v1/ella/guardian/upload", None, {"file": ("a.mp3", b"audio", "audio/mpeg")}, {"uid": "uid-a"}),
+        ("POST", "/v1/ella/guardian/upload-json", {"uid": "uid-a", "audio_base64": "YXVkaW8="}, None, None),
+        ("GET", "/v1/ella/guardian/debug-events?uid=uid-a", None, None, None),
+        ("POST", "/v1/ella/guardian/debug-trigger", {"uid": "uid-a"}, None, None),
+        ("POST", "/v1/ella/guardian/deliver", {"uid": "uid-a"}, None, None),
+        (
+            "POST",
+            "/v1/ella/guardian/email/send",
+            {"to": "owner@example.test", "subject": "Alert", "body": "Body", "uid": "uid-a"},
+            None,
+            None,
+        ),
+        ("POST", "/v1/ella/guardian/trace/log", {"trace_id": "trace-a", "uid": "uid-a", "stage": "scan"}, None, None),
+    ],
+)
+def test_guardian_service_routes_reject_missing_and_wrong_scope_before_state(
+    monkeypatch,
+    method,
+    path,
+    body,
+    files,
+    data,
+):
+    for headers in ({}, {"X-Guardian-Key": "wrong-service"}):
+        pool = _GuardianRoutePool()
+        client = _guardian_route_client(monkeypatch, pool)
+        request_kwargs = {"headers": headers}
+        if body is not None:
+            request_kwargs["json"] = body
+        if files is not None:
+            request_kwargs["files"] = files
+        if data is not None:
+            request_kwargs["data"] = data
+
+        response = client.request(method, path, **request_kwargs)
+
+        assert response.status_code == 403
+        assert pool.call_count == 0
+
+
+def test_guardian_trace_log_accepts_only_configured_trace_service_key(monkeypatch):
+    pool = _GuardianRoutePool()
+    client = _guardian_route_client(monkeypatch, pool)
+    payload = {"trace_id": "trace-a", "uid": "uid-a", "stage": "scanner_classified"}
+
+    accepted = client.post(
+        "/v1/ella/guardian/trace/log",
+        headers={"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY},
+        json=payload,
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["logged"] is True
+    assert pool.execute_calls
 
 
 def test_guardian_mode_read_and_write_use_authenticated_owner_only(monkeypatch):

@@ -6,11 +6,8 @@ Resolves the exact Firebase bearer subject to non-secret runtime availability.
 Endpoints:
 - GET  /v1/ella/resolve?uid={firebase_uid}
 
-Used by:
-- iOS Flutter app for history/config discovery. Production chat should use
-  /v1/ella/chat/stream so the backend can hydrate from and write to the
-  canonical timeline.
-- Authenticated clients that need a non-secret runtime readiness signal
+Used by authenticated clients that need a non-secret runtime readiness signal.
+Chat history uses the first-party /v1/ella/chat/history endpoint directly.
 """
 
 import json
@@ -24,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from database.ella_provisioning import EllaProvisioningRepository
+from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.other import endpoints as auth
@@ -194,9 +192,8 @@ async def resolve_endpoint(
     pool = await _get_pool()
     row = await pool.fetchrow(
         """
-        SELECT u.omi_uid, u.status, ac.agents, ac.status AS cluster_status
+        SELECT u.omi_uid, u.status
         FROM users u
-        LEFT JOIN agent_clusters ac ON ac.user_id = u.id
         WHERE u.omi_uid = $1
         """,
         uid,
@@ -208,9 +205,18 @@ async def resolve_endpoint(
             detail={"error": "user_not_found"},
         )
 
-    agents_raw = row["agents"]
-    agents = json.loads(agents_raw) if isinstance(agents_raw, str) else agents_raw
-    workspace = str(agents.get("workspace") or "").strip() if isinstance(agents, dict) else ""
+    try:
+        runtime = await resolve_isolated_runtime(
+            uid,
+            EllaProvisioningRepository(pool),
+            target_mode="hermes-cloud-chat",
+        )
+    except ProvisioningError as exc:
+        logger.info("Ella resolve runtime unavailable for uid=%s code=%s", uid, exc.code)
+        runtime = None
+    except Exception:
+        logger.exception("Ella resolve runtime authority failed closed for uid=%s", uid)
+        runtime = None
 
     return {
         "user": {
@@ -218,9 +224,9 @@ async def resolve_endpoint(
             "status": row["status"],
         },
         "routing": {
-            "available": bool(agents and workspace),
-            "clusterStatus": row["cluster_status"],
-            "platform": "hermes" if CHAT_PLATFORM == "hermes" else "openclaw",
+            "available": runtime is not None,
+            "clusterStatus": runtime.status if runtime else None,
+            "platform": runtime.provider if runtime else None,
         },
     }
 
