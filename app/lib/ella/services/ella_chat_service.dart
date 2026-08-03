@@ -74,30 +74,14 @@ Future<List<ServerMessage>> fetchEllaChatHistory({
 
     final result = <ServerMessage>[];
     for (final m in rawMessages) {
-      final role = m['role'] as String? ?? '';
-      final content = m['content'] as String? ?? '';
-      final ts = m['timestamp'] as String?;
-      final id = m['id'] as String? ?? const Uuid().v4();
+      final message = Map<String, dynamic>.from(m as Map);
+      final content = message['text'] as String? ?? '';
       if (content.isEmpty) continue;
       if (content.startsWith('[SYSTEM:')) {
         continue; // Filter scanner notifications from chat UI
       }
-
-      result.add(
-        ServerMessage(
-          id,
-          ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
-          content,
-          role == 'user' ? MessageSender.human : MessageSender.ai,
-          MessageType.text,
-          null,
-          false,
-          [],
-          [],
-          [],
-          askForNps: false,
-        ),
-      );
+      final parsed = ServerMessage.fromJson(message)..askForNps = false;
+      result.add(parsed);
     }
 
     // API returns newest first; reverse for chronological UI order

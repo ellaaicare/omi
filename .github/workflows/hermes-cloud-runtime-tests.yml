@@ -549,13 +549,17 @@ jobs:
             tests/unit/test_ella_provision_authority_split.py \
             tests/unit/test_ella_plato_mcp.py \
             -v
-          test "$(
+          authority_lock_ids="$(
             pytest --collect-only -q \
               tests/unit/test_authority_advisory_lock.py \
               tests/unit/test_authority_writer_guard.py \
               tests/postgres/test_authority_advisory_lock_postgres.py |
-              grep -c '::'
-          )" -eq 68
+              sed '/^$/d'
+          )"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_guardian_alert_history_returns_only_exact_case_sensitive_firebase_subject" \
+            <<<"$authority_lock_ids"
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 69
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
@@ -572,12 +576,13 @@ jobs:
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing"
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_retained_user_without_isolated_binding_fails_closed_without_global_fallback"
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_reports_ready_invitation_self_hosted_binding_without_legacy_workspace"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_unexpected_runtime_failure_logs_only_fixed_content_free_code"
             "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_declines_before_firestore_or_firebase_removal"
           )
           for required_id in "${required_reviewed_route_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$reviewed_route_ids"
           done
-          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 4
+          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 5
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v

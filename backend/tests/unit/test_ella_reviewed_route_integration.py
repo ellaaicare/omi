@@ -157,6 +157,35 @@ def test_resolve_reports_ready_invitation_self_hosted_binding_without_legacy_wor
     assert runtime_calls == [("uid-a", ("repository", pool), "hermes-cloud-chat")]
 
 
+def test_resolve_unexpected_runtime_failure_logs_only_fixed_content_free_code(monkeypatch, caplog):
+    pool = _ResolvePool()
+    client, _runtime_calls = _resolve_client(monkeypatch, pool, runtime=None)
+    endpoint_marker = "https://private-runtime.example/internal"
+    token_marker = "runtime-token-marker"
+
+    async def fail_with_runtime_material(*_args, **_kwargs):
+        raise RuntimeError(f"endpoint={endpoint_marker} token={token_marker}")
+
+    monkeypatch.setattr(resolve, "resolve_isolated_runtime", fail_with_runtime_material)
+
+    with caplog.at_level("ERROR"):
+        response = client.get(
+            "/v1/ella/resolve?uid=uid-a",
+            headers={"Authorization": "Bearer valid-a"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["routing"] == {
+        "available": False,
+        "clusterStatus": None,
+        "platform": None,
+    }
+    assert "code=unexpected_runtime_authority_error" in caplog.text
+    assert endpoint_marker not in caplog.text
+    assert token_marker not in caplog.text
+    assert "RuntimeError" not in caplog.text
+
+
 def _load_delete_account_route():
     source = (_BACKEND / "routers" / "users.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

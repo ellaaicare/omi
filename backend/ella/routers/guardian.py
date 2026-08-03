@@ -775,7 +775,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
                     id
                 ) AS trace_id
             FROM guardian_queue
-            WHERE LOWER(uid) = LOWER($1)
+            WHERE uid = $1
               AND COALESCE(trigger_type, '') <> 'wake_word_ack'
               AND COALESCE(metadata->>'ack_only', '') <> 'true'
             ORDER BY created_at DESC
@@ -795,7 +795,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
                     ORDER BY created_at DESC
                 ) AS events
             FROM guardian_pipeline_events
-            WHERE LOWER(uid) = LOWER($1)
+            WHERE uid = $1
               AND trace_id IN (SELECT trace_id FROM queue_rows)
             GROUP BY trace_id
         ),
@@ -815,7 +815,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
                     ORDER BY updated_at DESC
                 ) AS deliveries
             FROM guardian_delivery_log
-            WHERE LOWER(uid) = LOWER($1)
+            WHERE uid = $1
               AND trace_id IN (SELECT trace_id FROM queue_rows)
             GROUP BY trace_id
         )

@@ -215,7 +215,7 @@ async def resolve_endpoint(
         logger.info("Ella resolve runtime unavailable for uid=%s code=%s", uid, exc.code)
         runtime = None
     except Exception:
-        logger.exception("Ella resolve runtime authority failed closed for uid=%s", uid)
+        logger.error("Ella resolve runtime authority failed closed code=unexpected_runtime_authority_error")
         runtime = None
 
     return {

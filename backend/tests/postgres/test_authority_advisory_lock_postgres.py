@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import asyncpg
+import httpx
 import pytest
+from fastapi import FastAPI
 
 from database import authority_advisory_lock, managed_cloud_consent, voice_canary
 from database.ella_provisioning import EllaProvisioningRepository
@@ -182,6 +184,95 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
         assert upper["currentMode"] == "EMERGENCY_ONLY"
         assert lower["currentMode"] == "ACTIVE_SUPPORT"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_guardian_alert_history_returns_only_exact_case_sensitive_firebase_subject():
+    async def scenario(pool):
+        await pool.execute(
+            """
+            CREATE TABLE guardian_queue (
+                id TEXT PRIMARY KEY,
+                uid TEXT NOT NULL,
+                url TEXT,
+                priority TEXT,
+                message TEXT,
+                trigger_type TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                consumed_at TIMESTAMPTZ
+            );
+            CREATE TABLE guardian_pipeline_events (
+                id BIGSERIAL PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                latency_ms INTEGER,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE guardian_delivery_log (
+                id BIGSERIAL PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                target TEXT NOT NULL,
+                caregiver_id TEXT,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO users (omi_uid, timezone)
+            VALUES ('CaseUID', 'UTC'), ('caseuid', 'UTC');
+            INSERT INTO guardian_queue (id, uid, message, trigger_type, metadata)
+            VALUES
+                ('upper-private', 'CaseUID', 'Upper private alert', 'wake_word', '{"trace_id":"shared-trace"}'),
+                ('lower-private', 'caseuid', 'Lower private alert', 'wake_word', '{"trace_id":"shared-trace"}');
+            INSERT INTO guardian_pipeline_events (trace_id, uid, stage, status, metadata)
+            VALUES
+                ('shared-trace', 'CaseUID', 'upper-private-stage', 'success', '{}'::jsonb),
+                ('shared-trace', 'caseuid', 'lower-private-stage', 'success', '{}'::jsonb);
+            INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, status)
+            VALUES
+                ('shared-trace', 'CaseUID', 'upper-private-channel', 'user', 'sent'),
+                ('shared-trace', 'caseuid', 'lower-private-channel', 'user', 'sent');
+            """
+        )
+
+        authenticated_uid = {"value": "CaseUID"}
+        app = FastAPI()
+        app.include_router(guardian.alerts_router)
+        app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: authenticated_uid["value"]
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as client:
+                upper = await client.get("/v1/ella/guardian-alerts")
+                authenticated_uid["value"] = "caseuid"
+                lower = await client.get("/v1/ella/guardian-alerts")
+        finally:
+            guardian._pool = previous_pool
+
+        assert upper.status_code == 200
+        assert lower.status_code == 200
+        assert upper.json()["uid"] == "CaseUID"
+        assert lower.json()["uid"] == "caseuid"
+        assert [alert["queue_item_id"] for alert in upper.json()["alerts"]] == ["upper-private"]
+        assert [alert["queue_item_id"] for alert in lower.json()["alerts"]] == ["lower-private"]
+        assert [event["stage"] for event in upper.json()["alerts"][0]["events"]] == ["upper-private-stage"]
+        assert [event["stage"] for event in lower.json()["alerts"][0]["events"]] == ["lower-private-stage"]
+        assert [delivery["channel"] for delivery in upper.json()["alerts"][0]["deliveries"]] == [
+            "upper-private-channel"
+        ]
+        assert [delivery["channel"] for delivery in lower.json()["alerts"][0]["deliveries"]] == [
+            "lower-private-channel"
+        ]
 
     asyncio.run(_run_with_database(scenario))
 
