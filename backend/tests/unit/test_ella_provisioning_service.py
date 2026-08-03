@@ -11,6 +11,7 @@ from database.runtime_targets import (
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+    ensure_omi_user_document_contents,
 )
 from ella.services.ai_consent import (
     CURRENT_POLICY_VERSION,
@@ -290,15 +291,12 @@ def test_provision_timeout_is_bounded_for_cold_runtime_starts(monkeypatch, confi
 
 def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission():
     document = _FakeDocument(exists=True, data={"onboarding": {"completed": True}})
-    repository = EllaProvisioningRepository(pool=None, firestore_db=_FakeFirestore(document))
-
-    changed = asyncio.run(
-        repository.ensure_omi_user_document(
-            uid="user-a",
-            email="a@example.com",
-            name="A",
-            timezone_name="America/Los_Angeles",
-        )
+    changed = ensure_omi_user_document_contents(
+        _FakeFirestore(document),
+        uid="user-a",
+        email="a@example.com",
+        name="A",
+        timezone_name="America/Los_Angeles",
     )
 
     assert changed is True
@@ -310,16 +308,13 @@ def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission():
 
 def test_legacy_omi_identity_repair_preserves_cloud_sync_default():
     document = _FakeDocument(exists=True, data={"onboarding": {"completed": True}})
-    repository = EllaProvisioningRepository(pool=None, firestore_db=_FakeFirestore(document))
-
-    changed = asyncio.run(
-        repository.ensure_omi_user_document(
-            uid="legacy-user",
-            email="legacy@example.com",
-            name="Legacy",
-            timezone_name="America/Los_Angeles",
-            private_cloud_sync_default=True,
-        )
+    changed = ensure_omi_user_document_contents(
+        _FakeFirestore(document),
+        uid="legacy-user",
+        email="legacy@example.com",
+        name="Legacy",
+        timezone_name="America/Los_Angeles",
+        private_cloud_sync_default=True,
     )
 
     assert changed is True
@@ -334,6 +329,7 @@ def test_repository_schema_preflight_reports_missing_objects():
         {
             "jobs_table": True,
             "bindings_table": False,
+            "provider_attempts_table": False,
             "missing_indexes": ["ella_runtime_bindings_one_active_role_key"],
         }
     )
@@ -344,6 +340,7 @@ def test_repository_schema_preflight_reports_missing_objects():
 
     assert error.value.missing == (
         "table:ella_runtime_bindings",
+        "table:ella_provider_attempts",
         "index:ella_runtime_bindings_one_active_role_key",
     )
     assert len(pool.calls) == 1

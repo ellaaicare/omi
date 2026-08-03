@@ -204,15 +204,51 @@ ACCOUNT_DELETION_CONTRACT = {
 
 def build_account_deletion_receipt(
     *,
+    status: str = "completed",
+    remaining: tuple[str, ...] = (),
+    external_cleanup_references: tuple[str, ...] = (),
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-) -> dict[str, str]:
-    """Return a non-identifying receipt for a completed synchronous deletion."""
-    return {
-        "request_id": f"aidel_{secrets.token_hex(16)}",
-        "status": "completed",
-        "scope": ACCOUNT_DELETION_CONTRACT["scope"],
-        "server_completed_at": now().astimezone(timezone.utc).isoformat(),
+) -> dict[str, Any]:
+    """Return a non-identifying receipt for deletion progress."""
+    if status not in {"completed", "pending"}:
+        raise ValueError("account_deletion_receipt_status_invalid")
+    allowed_remaining = {
+        "canonical_event_ledger",
+        "firebase_identity",
+        "firestore_data",
+        "hermes_profile",
+        "honcho_tenancy",
+        "memory_reinterpretation",
+        "routing_traces",
+        "runtime_registry",
     }
+    if any(item not in allowed_remaining for item in remaining):
+        raise ValueError("account_deletion_receipt_remaining_invalid")
+    if any(
+        not isinstance(value, str)
+        or len(value) != 25
+        or not value.startswith("ella-ext-")
+        or any(character not in "0123456789abcdef" for character in value[9:])
+        for value in external_cleanup_references
+    ):
+        raise ValueError("account_deletion_receipt_external_reference_invalid")
+    timestamp = now().astimezone(timezone.utc).isoformat()
+    receipt: dict[str, Any] = {
+        "request_id": f"aidel_{secrets.token_hex(16)}",
+        "status": status,
+        "scope": ACCOUNT_DELETION_CONTRACT["scope"],
+    }
+    if status == "pending":
+        receipt["server_updated_at"] = timestamp
+        receipt["remaining"] = sorted(set(remaining))
+        receipt["operator_action_required"] = bool(
+            {"hermes_profile", "honcho_tenancy", "runtime_registry"} & set(remaining)
+        )
+        if external_cleanup_references:
+            receipt["external_cleanup_references"] = sorted(set(external_cleanup_references))
+    else:
+        receipt["server_completed_at"] = timestamp
+    return receipt
 
 
 class ConsentPolicyMismatch(ValueError):
@@ -720,7 +756,7 @@ def assert_current_ai_consent(uid: str) -> str:
 
 
 def require_current_ai_consent(
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(auth.get_writable_user_uid),
 ) -> str:
     return assert_current_ai_consent(authenticated_uid)
 

@@ -11,6 +11,7 @@ import asyncpg
 import pytest
 
 from database import (
+    account_deletion,
     authority_advisory_lock,
     invitation_operator,
     invitations,
@@ -23,8 +24,9 @@ from database.ella_provisioning import (
 )
 from database.runtime_targets import RuntimeTargetLineage, SELF_HOSTED_RUNTIME_MODEL
 from ella.services import ai_consent
+from ella.services import account_deletion as account_deletion_service
 from ella.services import consent_authority, invitation_authority
-from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
+from ella.services.provisioning import HermesProvisionClient, ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
@@ -91,6 +93,19 @@ pytestmark = pytest.mark.skipif(
     reason="ELLA_TEST_POSTGRES_DSN is required for invitation PostgreSQL tests",
 )
 
+
+@pytest.fixture(autouse=True)
+def _successful_content_writer_drain(monkeypatch):
+    async def tombstone(_uid):
+        return True
+
+    monkeypatch.setattr(
+        account_deletion_service.content_write_fence,
+        "tombstone_content_writes",
+        tombstone,
+    )
+
+
 BASE_PROVISIONING_SCHEMA = """
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,7 +117,26 @@ CREATE TABLE users (
     identities JSONB NOT NULL DEFAULT '{}'::jsonb,
     settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    conditions TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    medications TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE canonical_events (
+    id BIGSERIAL PRIMARY KEY,
+    uid TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    metadata JSONB NOT NULL,
+    raw_event JSONB NOT NULL
+);
+
+CREATE TABLE canonical_event_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    uid TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    metadata JSONB NOT NULL,
+    raw_completion JSONB NOT NULL
 );
 
 CREATE TABLE ella_provisioning_jobs (
@@ -153,6 +187,13 @@ CREATE TABLE ella_runtime_bindings (
 
 CREATE UNIQUE INDEX ella_runtime_bindings_user_role_provider_key
     ON ella_runtime_bindings(user_id, role, provider);
+
+CREATE TABLE agent_clusters (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    agents JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'ACTIVE'
+);
 """
 
 
@@ -206,6 +247,7 @@ async def _run_with_database(
         async with pool.acquire() as conn:
             await conn.execute(BASE_PROVISIONING_SCHEMA)
             for name in (
+                "007_create_memory_reinterpretation_outbox.sql",
                 "008_create_voice_canary_controls.sql",
                 "009_create_hermes_cloud_runtime_pool.sql",
                 "010_add_cloud_profile_class.sql",
@@ -214,6 +256,7 @@ async def _run_with_database(
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_provider_attempt_deletion_fence.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(
@@ -3883,6 +3926,1199 @@ def test_kill_switch_after_invite_blocks_claim_and_preserves_pool(monkeypatch):
             "user_id": None,
             "claim_job_id": None,
             "claim_token": None,
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+async def _prepare_deletion_account(
+    pool: asyncpg.Pool,
+    *,
+    uid: str,
+    email: str,
+    code: str,
+    activate_runtime: bool,
+) -> tuple[str, str]:
+    issued = await pilot_invite_admin._issue_invitation(
+        code=code,
+        code_file_existed=False,
+        code_file_ref_hmac="7" * 64,
+        kind="ordinary",
+        allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        environment="account-deletion-postgres-test",
+        config=CONFIG,
+    )
+    await _redeem_self_hosted(uid, email, code)
+    if activate_runtime:
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        await repository.stage_runtime_binding(
+            uid=uid,
+            binding=_local_runtime_binding(uid),
+        )
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+        async with pool.acquire() as connection:
+            user_id = await connection.fetchval(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                uid,
+            )
+            await connection.execute(
+                """
+                INSERT INTO agent_clusters (user_id, agents, status)
+                VALUES ($1, '{"agentId":"content-free"}'::jsonb, 'ACTIVE')
+                """,
+                user_id,
+            )
+    return str(issued["receipt_id"]), uid
+
+
+def test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        invitation_id, uid = await _prepare_deletion_account(
+            pool,
+            uid="account-delete-complete",
+            email="account-delete-complete@example.test",
+            code="CDEF-6789",
+            activate_runtime=True,
+        )
+
+        first = await account_deletion.quarantine_account_for_deletion(uid)
+        second = await account_deletion.quarantine_account_for_deletion(uid)
+
+        assert first.capacity_released is True
+        assert first.authority_quarantined is True
+        assert first.external_cleanup_required == (
+            "hermes_profile",
+            "honcho_tenancy",
+            "runtime_registry",
+        )
+        assert second.capacity_released is True
+        assert second.counts["invitations"] == 0
+        assert second.counts["capacity_reservations"] == 0
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as pending:
+            await account_deletion.finalize_account_deletion(uid)
+        assert pending.value.code == "account_deletion_external_cleanup_incomplete"
+
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT invitation.state AS invitation_state,
+                       reservation.state AS capacity_state,
+                       entitlement.status AS entitlement_status,
+                       app_user.status AS user_status,
+                       app_user.email,
+                       binding.status AS binding_status,
+                       binding.active,
+                       cluster.status AS cluster_status,
+                       cluster.agents
+                FROM ella_invitations invitation
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.invitation_id = invitation.id
+                JOIN users app_user ON app_user.id = redemption.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = app_user.id AND binding.provider = 'hermes'
+                JOIN agent_clusters cluster ON cluster.user_id = app_user.id
+                WHERE invitation.id = $1::uuid
+                """,
+                invitation_id,
+            )
+            target_states = await connection.fetch(
+                """
+                SELECT status
+                FROM ella_runtime_targets
+                WHERE invitation_target_id IN (
+                    SELECT invitation_target_id
+                    FROM ella_invitation_redemptions
+                    WHERE invitation_id = $1::uuid
+                )
+                """,
+                invitation_id,
+            )
+        row_data = dict(row)
+        deleted_email = row_data.pop("email")
+        assert row_data == {
+            "invitation_state": "revoked",
+            "capacity_state": "released",
+            "entitlement_status": "revoked",
+            "user_status": "DELETION_PENDING",
+            "binding_status": "disabled",
+            "active": False,
+            "cluster_status": "INACTIVE",
+            "agents": "{}",
+        }
+        assert deleted_email.startswith("deleted+")
+        assert deleted_email.endswith("@invalid.ella")
+        assert deleted_email != "account-delete-complete@example.test"
+        assert {target["status"] for target in target_states} == {"revoked"}
+
+        # A trusted operator can remove only the already-quarantined external
+        # binding after independently proving the profile/tenancy are absent.
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    DELETE FROM ella_runtime_targets
+                    WHERE account_user_id = (
+                        SELECT id FROM users WHERE omi_uid = $1
+                    )
+                    """,
+                    uid,
+                )
+                await connection.execute(
+                    """
+                    DELETE FROM ella_runtime_bindings
+                    WHERE user_id = (
+                        SELECT id FROM users WHERE omi_uid = $1
+                    ) AND provider = 'hermes'
+                    """,
+                    uid,
+                )
+        after_external_cleanup = await account_deletion.quarantine_account_for_deletion(uid)
+        assert after_external_cleanup.external_cleanup_required == ()
+        assert await account_deletion.finalize_account_deletion(uid) is True
+        assert await account_deletion.finalize_account_deletion(uid) is False
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT status FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == "DELETED"
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_routing_trace_purge_is_exact_repeatable_and_retains_other_users():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                CREATE TABLE routing_traces (
+                    trace_id TEXT PRIMARY KEY,
+                    uid TEXT,
+                    notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    client_headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    resolved_session_key TEXT,
+                    error TEXT
+                )
+                """
+            )
+            await connection.executemany(
+                """
+                INSERT INTO routing_traces (
+                    trace_id, uid, notes, client_headers, resolved_session_key, error
+                ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+                """,
+                [
+                    ("owned-1", "routing-delete-user", '["sensitive-1"]', '{"Secret":"one"}', "session-1", "error-1"),
+                    ("owned-2", "routing-delete-user", '["sensitive-2"]', '{"Secret":"two"}', "session-2", "error-2"),
+                    ("retained", "routing-retained-user", '["retained"]', '{}', None, None),
+                ],
+            )
+
+        assert await account_deletion.purge_routing_traces("routing-delete-user") == 2
+        assert await account_deletion.purge_routing_traces("routing-delete-user") == 0
+        async with pool.acquire() as connection:
+            rows = await connection.fetch("SELECT trace_id, uid, notes FROM routing_traces ORDER BY trace_id")
+        assert [dict(row) for row in rows] == [
+            {
+                "trace_id": "retained",
+                "uid": "routing-retained-user",
+                "notes": '["retained"]',
+            }
+        ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_memory_reinterpretation_purge_removes_attempts_and_retains_other_users():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        async with pool.acquire() as connection:
+            await connection.executemany(
+                """
+                INSERT INTO memory_reinterpretation_jobs (
+                    id, uid, logical_session_id, conversation_id,
+                    starting_summary_version_id, source_identity,
+                    canonical_refs, transcript_hash, status, not_before
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, '[]'::jsonb, $7, 'running', NOW())
+                """,
+                [
+                    (
+                        "owned-memory-job",
+                        "memory-delete-user",
+                        "session-owned",
+                        "conversation-owned",
+                        "v1",
+                        "source-owned",
+                        "hash-owned",
+                    ),
+                    (
+                        "retained-memory-job",
+                        "memory-retained-user",
+                        "session-retained",
+                        "conversation-retained",
+                        "v1",
+                        "source-retained",
+                        "hash-retained",
+                    ),
+                ],
+            )
+            await connection.executemany(
+                """
+                INSERT INTO memory_reinterpretation_attempts (
+                    job_id, transcript_revision, attempt_number,
+                    lease_token, worker_id, status
+                )
+                VALUES ($1, 1, 1, $2, $3, 'running')
+                """,
+                [
+                    ("owned-memory-job", "owned-lease", "owned-worker"),
+                    ("retained-memory-job", "retained-lease", "retained-worker"),
+                ],
+            )
+
+        assert await account_deletion.purge_memory_reinterpretation_work("memory-delete-user") == 2
+        assert await account_deletion.purge_memory_reinterpretation_work("memory-delete-user") == 0
+        async with pool.acquire() as connection:
+            jobs = await connection.fetch("SELECT id, uid FROM memory_reinterpretation_jobs ORDER BY id")
+            attempts = await connection.fetch(
+                "SELECT job_id, lease_token FROM memory_reinterpretation_attempts ORDER BY job_id"
+            )
+        assert [dict(row) for row in jobs] == [{"id": "retained-memory-job", "uid": "memory-retained-user"}]
+        assert [dict(row) for row in attempts] == [{"job_id": "retained-memory-job", "lease_token": "retained-lease"}]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_canonical_ledger_positive_control_exact_purge_rollback_and_retry():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        target_uid = "canonical-delete-user"
+        retained_uid = "canonical-retained-user"
+        async with pool.acquire() as connection:
+            await connection.executemany(
+                """
+                INSERT INTO canonical_events (uid, event_id, text, metadata, raw_event)
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                """,
+                [
+                    (target_uid, "owned-1", "private transcript one", '{"source":"owned"}', '{"uid":"owned"}'),
+                    (target_uid, "owned-2", "private transcript two", '{"source":"owned"}', '{"uid":"owned"}'),
+                    (retained_uid, "retained", "retained transcript", '{"source":"other"}', '{"uid":"other"}'),
+                ],
+            )
+            await connection.executemany(
+                """
+                INSERT INTO canonical_event_sessions (uid, session_id, metadata, raw_completion)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb)
+                """,
+                [
+                    (target_uid, "owned-session", '{"source":"owned"}', '{"uid":"owned"}'),
+                    (retained_uid, "retained-session", '{"source":"other"}', '{"uid":"other"}'),
+                ],
+            )
+
+        # Positive control: the previously available deletion purges do not
+        # touch either canonical table.
+        assert await account_deletion.purge_routing_traces(target_uid) == 0
+        assert await account_deletion.purge_memory_reinterpretation_work(target_uid) == 0
+        async with pool.acquire() as connection:
+            assert await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", target_uid) == 2
+            assert (
+                await connection.fetchval("SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1", target_uid)
+                == 1
+            )
+            await connection.execute(
+                """
+                CREATE FUNCTION suppress_canonical_session_delete()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    RETURN NULL;
+                END
+                $$;
+                CREATE TRIGGER suppress_canonical_session_delete
+                BEFORE DELETE ON canonical_event_sessions
+                FOR EACH ROW EXECUTE FUNCTION suppress_canonical_session_delete()
+                """
+            )
+
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as ambiguous:
+            await account_deletion.purge_canonical_event_ledger(target_uid)
+        assert ambiguous.value.code == "account_deletion_canonical_event_ledger_unavailable"
+        async with pool.acquire() as connection:
+            # The affected-count ambiguity rolls back the event delete too.
+            assert await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", target_uid) == 2
+            assert (
+                await connection.fetchval("SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1", target_uid)
+                == 1
+            )
+            await connection.execute("DROP TRIGGER suppress_canonical_session_delete ON canonical_event_sessions")
+
+        assert await account_deletion.purge_canonical_event_ledger(target_uid) == 3
+        assert await account_deletion.purge_canonical_event_ledger(target_uid) == 0
+        async with pool.acquire() as connection:
+            retained = await connection.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM canonical_events WHERE uid = $1) AS events,
+                    (SELECT COUNT(*) FROM canonical_event_sessions WHERE uid = $1) AS sessions
+                """,
+                retained_uid,
+            )
+            assert tuple(retained.values()) == (1, 1)
+            await connection.execute("DROP TABLE canonical_event_sessions")
+            await connection.execute(
+                """
+                INSERT INTO canonical_events (uid, event_id, text, metadata, raw_event)
+                VALUES ($1, 'missing-table', 'private transcript', '{}'::jsonb, '{}'::jsonb)
+                """,
+                target_uid,
+            )
+
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as missing:
+            await account_deletion.purge_canonical_event_ledger(target_uid)
+        assert missing.value.code == "account_deletion_canonical_event_ledger_unavailable"
+        async with pool.acquire() as connection:
+            assert await connection.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", target_uid) == 1
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        invitation_id, uid = await _prepare_deletion_account(
+            pool,
+            uid="account-delete-rollback",
+            email="account-delete-rollback@example.test",
+            code="DEFG-789A",
+            activate_runtime=True,
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                CREATE FUNCTION fail_account_deletion_user_update()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF NEW.status = 'DELETION_PENDING' THEN
+                        RAISE EXCEPTION 'synthetic account deletion failure';
+                    END IF;
+                    RETURN NEW;
+                END
+                $$
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER fail_account_deletion_user_update
+                BEFORE UPDATE ON users
+                FOR EACH ROW EXECUTE FUNCTION fail_account_deletion_user_update()
+                """
+            )
+
+        with pytest.raises(account_deletion.AccountDeletionUnavailable) as failed:
+            await account_deletion.quarantine_account_for_deletion(uid)
+        assert failed.value.code == "account_deletion_authority_unavailable"
+
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT invitation.state AS invitation_state,
+                       reservation.state AS capacity_state,
+                       entitlement.status AS entitlement_status,
+                       app_user.status AS user_status,
+                       binding.status AS binding_status,
+                       binding.active
+                FROM ella_invitations invitation
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.invitation_id = invitation.id
+                JOIN users app_user ON app_user.id = redemption.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = app_user.id AND binding.provider = 'hermes'
+                WHERE invitation.id = $1::uuid
+                """,
+                invitation_id,
+            )
+        assert dict(state) == {
+            "invitation_state": "redeemed",
+            "capacity_state": "consumed",
+            "entitlement_status": "active",
+            "user_status": "ACTIVE",
+            "binding_status": "active",
+            "active": True,
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_account_deletion_service_handles_partial_provision_and_repeat_without_operator():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        _invitation_id, uid = await _prepare_deletion_account(
+            pool,
+            uid="account-delete-partial",
+            email="account-delete-partial@example.test",
+            code="EFGH-89AB",
+            activate_runtime=False,
+        )
+        side_effects = []
+        for _attempt in range(2):
+            result = await account_deletion_service.execute_account_deletion(
+                uid,
+                delete_firestore=lambda exact_uid: side_effects.append(("firestore", exact_uid)),
+                delete_firebase=lambda exact_uid: side_effects.append(("firebase", exact_uid)),
+            )
+            assert result.status_code == 200
+            assert result.body["status"] == "ok"
+            assert result.body["deletion_receipt"]["status"] == "completed"
+
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT app_user.status AS user_status,
+                       invitation.state AS invitation_state,
+                       reservation.state AS capacity_state,
+                       entitlement.status AS entitlement_status
+                FROM users app_user
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.user_id = app_user.id
+                JOIN ella_invitations invitation
+                  ON invitation.id = redemption.invitation_id
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                WHERE app_user.omi_uid = $1
+                """,
+                uid,
+            )
+        assert dict(state) == {
+            "user_status": "DELETED",
+            "invitation_state": "revoked",
+            "capacity_state": "released",
+            "entitlement_status": "revoked",
+        }
+        assert side_effects == [
+            ("firestore", uid),
+            ("firebase", uid),
+            ("firestore", uid),
+            ("firebase", uid),
+        ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges(monkeypatch):
+    class LostAcknowledgementClient(HermesProvisionClient):
+        provider_created = False
+
+        @staticmethod
+        def resolve_authority(_expected_snapshot=None):
+            return None
+
+        @classmethod
+        def snapshot_authority(cls, _expected_snapshot=None):
+            return None
+
+        async def provision(self, _identity, _target_schema_version, **kwargs):
+            assert kwargs["idempotency_key"]
+            self.provider_created = True
+            raise ProvisioningError("provision_service_timeout", retryable=True)
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "account-delete-lost-provider-ack"
+        email = "account-delete-lost-provider-ack@example.test"
+        await _prepare_deletion_account(
+            pool,
+            uid=uid,
+            email=email,
+            code="FGHJ-9ABC",
+            activate_runtime=False,
+        )
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        async with pool.acquire() as connection:
+            job = dict(
+                await connection.fetchrow(
+                    """
+                    INSERT INTO ella_provisioning_jobs (user_id, target_schema_version, state, stage)
+                    SELECT id, 'hermes-user-v1', 'provisioning', 'profile_ready'
+                    FROM users WHERE omi_uid = $1
+                    RETURNING *
+                    """,
+                    uid,
+                )
+            )
+
+        monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+        monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+        client = LostAcknowledgementClient()
+        coordinator = ProvisioningCoordinator(EllaProvisioningRepository(pool), client=client)
+        await coordinator.process_claimed_job(
+            job=job,
+            identity=VerifiedIdentity(uid=uid, email=email, name="Synthetic", timezone="UTC"),
+        )
+        assert client.provider_created is True
+
+        async with pool.acquire() as connection:
+            marker = dict(
+                await connection.fetchrow(
+                    """
+                    SELECT proof_state, content_free, idempotency_key, correlation_ref
+                    FROM ella_provider_attempts
+                    WHERE provisioning_job_id = $1
+                    """,
+                    job["id"],
+                )
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_runtime_bindings WHERE user_id = (SELECT id FROM users WHERE omi_uid = $1)",
+                    uid,
+                )
+                == 0
+            )
+        assert marker["proof_state"] == "unproven"
+        assert marker["content_free"] is True
+        assert str(marker["idempotency_key"])
+        assert str(marker["correlation_ref"]).startswith("ella-ext-")
+
+        destructive_calls = []
+        for _attempt in range(2):
+            response = await account_deletion_service.execute_account_deletion(
+                uid,
+                delete_firestore=lambda exact_uid: destructive_calls.append(("firestore", exact_uid)),
+                delete_firebase=lambda exact_uid: destructive_calls.append(("firebase", exact_uid)),
+            )
+            assert response.status_code == 202
+            assert response.body["status"] == "deletion_pending"
+            assert response.body["deletion_receipt"]["external_cleanup_references"] == [marker["correlation_ref"]]
+            assert "firebase" not in {kind for kind, _uid in destructive_calls}
+
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_provider_attempts
+                SET proof_state = 'absence_proven',
+                    proved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE provisioning_job_id = $1
+                """,
+                job["id"],
+            )
+        completed = await account_deletion_service.execute_account_deletion(
+            uid,
+            delete_firestore=lambda exact_uid: destructive_calls.append(("firestore", exact_uid)),
+            delete_firebase=lambda exact_uid: destructive_calls.append(("firebase", exact_uid)),
+        )
+        assert completed.status_code == 200
+        assert destructive_calls[-1] == ("firebase", uid)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_provider_attempt_tombstone_trigger_allows_only_monotonic_terminal_proof():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        async with pool.acquire() as connection:
+            await _ensure_users(
+                connection,
+                ("provider-trigger-active", "provider-trigger-pending", "provider-trigger-deleted", "other-owner"),
+            )
+
+            async def seed_attempt(uid: str, suffix: str) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+                user_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+                job_id = await connection.fetchval(
+                    """
+                    INSERT INTO ella_provisioning_jobs (user_id, target_schema_version)
+                    VALUES ($1, $2) RETURNING id
+                    """,
+                    user_id,
+                    f"provider-trigger-{suffix}",
+                )
+                attempt_id = await connection.fetchval(
+                    """
+                    INSERT INTO ella_provider_attempts (
+                        user_id, provisioning_job_id, provider, operation,
+                        idempotency_key, correlation_ref
+                    ) VALUES ($1, $2, 'hermes', 'provision', $3, $4)
+                    RETURNING id
+                    """,
+                    user_id,
+                    job_id,
+                    uuid.uuid4(),
+                    f"ella-ext-{uuid.uuid4().hex[:16]}",
+                )
+                return user_id, job_id, attempt_id
+
+            active_user_id, _active_job_id, active_attempt_id = await seed_attempt(
+                "provider-trigger-active",
+                "active",
+            )
+            await connection.execute(
+                "UPDATE ella_provider_attempts SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                active_attempt_id,
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT proof_state FROM ella_provider_attempts WHERE id = $1",
+                    active_attempt_id,
+                )
+                == "unproven"
+            )
+
+            pending_user_id, pending_job_id, pending_attempt_id = await seed_attempt(
+                "provider-trigger-pending",
+                "pending",
+            )
+            _pending_user_id_2, _pending_job_id_2, pending_cleanup_id = await seed_attempt(
+                "provider-trigger-pending",
+                "pending-cleanup",
+            )
+            deleted_user_id, deleted_job_id, deleted_attempt_id = await seed_attempt(
+                "provider-trigger-deleted",
+                "deleted",
+            )
+            other_owner_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = 'other-owner'")
+            await connection.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                pending_user_id,
+            )
+            await connection.execute(
+                "UPDATE users SET status = 'DELETED' WHERE id = $1",
+                deleted_user_id,
+            )
+
+            trigger_name = await connection.fetchval(
+                """
+                SELECT tgname
+                FROM pg_trigger
+                WHERE tgrelid = 'ella_provider_attempts'::regclass
+                  AND NOT tgisinternal
+                """
+            )
+            assert trigger_name == "ella_provider_attempt_tombstone_write_fence"
+
+            for user_id, job_id in (
+                (pending_user_id, pending_job_id),
+                (deleted_user_id, deleted_job_id),
+            ):
+                with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                    await connection.execute(
+                        """
+                        INSERT INTO ella_provider_attempts (
+                            user_id, provisioning_job_id, provider, operation,
+                            idempotency_key, correlation_ref
+                        ) VALUES ($1, $2, 'hermes', 'provision', $3, $4)
+                        """,
+                        user_id,
+                        job_id,
+                        uuid.uuid4(),
+                        f"ella-ext-{uuid.uuid4().hex[:16]}",
+                    )
+
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET updated_at = updated_at WHERE id = $1",
+                    pending_attempt_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET user_id = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    other_owner_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET idempotency_key = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    uuid.uuid4(),
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET correlation_ref = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    f"ella-ext-{uuid.uuid4().hex[:16]}",
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET id = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    uuid.uuid4(),
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET provisioning_job_id = $2 WHERE id = $1",
+                    pending_attempt_id,
+                    _pending_job_id_2,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET provider = 'other' WHERE id = $1",
+                    pending_attempt_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET operation = 'other' WHERE id = $1",
+                    pending_attempt_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    "UPDATE ella_provider_attempts SET content_free = false WHERE id = $1",
+                    pending_attempt_id,
+                )
+
+            await connection.execute(
+                """
+                UPDATE ella_provider_attempts
+                SET proof_state = 'absence_proven',
+                    proved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                pending_cleanup_id,
+            )
+            await connection.execute(
+                """
+                UPDATE ella_provider_attempts
+                SET proof_state = 'deprovisioned',
+                    proved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                deleted_attempt_id,
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_provider_attempts WHERE proof_state = 'unproven' AND user_id = $1",
+                    deleted_user_id,
+                )
+                == 0
+            )
+
+            for attempt_id in (pending_cleanup_id, deleted_attempt_id):
+                with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                    await connection.execute(
+                        """
+                        UPDATE ella_provider_attempts
+                        SET proof_state = 'unproven', proved_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                        """,
+                        attempt_id,
+                    )
+                with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                    await connection.execute(
+                        """
+                        UPDATE ella_provider_attempts
+                        SET proof_state = CASE
+                                WHEN proof_state = 'deprovisioned' THEN 'absence_proven'
+                                ELSE 'deprovisioned'
+                            END,
+                            proved_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                        """,
+                        attempt_id,
+                    )
+
+            assert active_user_id != pending_user_id != deleted_user_id
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_provider_attempt_direct_writer_cannot_cross_finalization_count_read():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "provider-attempt-finalize-race"
+        async with pool.acquire() as connection:
+            await _ensure_users(connection, (uid,))
+            user_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            job_id = await connection.fetchval(
+                """
+                INSERT INTO ella_provisioning_jobs (user_id, target_schema_version)
+                VALUES ($1, 'provider-attempt-finalize-race') RETURNING id
+                """,
+                user_id,
+            )
+            await connection.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                user_id,
+            )
+            await connection.execute("CREATE SEQUENCE provider_attempt_finalize_probe")
+            await connection.execute(
+                """
+                CREATE FUNCTION delay_provider_attempt_finalization() RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.status = 'DELETED' AND OLD.status = 'DELETION_PENDING' THEN
+                        PERFORM nextval('provider_attempt_finalize_probe');
+                        PERFORM pg_sleep(0.5);
+                    END IF;
+                    RETURN NEW;
+                END
+                $$ LANGUAGE plpgsql
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER delay_provider_attempt_finalization
+                BEFORE UPDATE ON users
+                FOR EACH ROW EXECUTE FUNCTION delay_provider_attempt_finalization()
+                """
+            )
+
+        async def direct_insert() -> None:
+            async with pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO ella_provider_attempts (
+                        user_id, provisioning_job_id, provider, operation,
+                        idempotency_key, correlation_ref
+                    ) VALUES ($1, $2, 'hermes', 'provision', $3, $4)
+                    """,
+                    user_id,
+                    job_id,
+                    uuid.uuid4(),
+                    f"ella-ext-{uuid.uuid4().hex[:16]}",
+                )
+
+        finalization = asyncio.create_task(account_deletion.finalize_account_deletion(uid))
+        for _attempt in range(200):
+            async with pool.acquire() as connection:
+                count_read_completed = await connection.fetchval(
+                    "SELECT is_called FROM provider_attempt_finalize_probe"
+                )
+            if count_read_completed:
+                break
+            await asyncio.sleep(0.01)
+        assert count_read_completed is True
+        racing_insert = asyncio.create_task(direct_insert())
+        assert await finalization is True
+        with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+            await racing_insert
+
+        with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+            await direct_insert()
+        async with pool.acquire() as connection:
+            assert await connection.fetchval("SELECT status FROM users WHERE id = $1", user_id) == "DELETED"
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_provider_attempts WHERE user_id = $1",
+                    user_id,
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "account-delete-writer-fence"
+        email = "account-delete-writer-fence@example.test"
+        await _prepare_deletion_account(
+            pool,
+            uid=uid,
+            email=email,
+            code="GHJK-ABCD",
+            activate_runtime=True,
+        )
+        repository = EllaProvisioningRepository(pool)
+        async with pool.acquire() as connection:
+            user_id = await connection.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET active = false, status = 'disabled', updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND active = true
+                """,
+                user_id,
+            )
+            photon_runtime_binding_id = await connection.fetchval(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id, role, provider,
+                    profile_name, agent_id, runtime_instance_id, api_base_url_ref,
+                    api_key_ref, honcho_workspace, observed_peer, observer_peer,
+                    template_version, prompt_pack_version, prompt_artifact_receipt,
+                    model_policy_version, voice_policy_version, expected_model,
+                    health_state, status, active, runtime_target_mode,
+                    target_endpoint_ref, target_credential_ref
+                ) VALUES (
+                    $1, $1, $1, 'user', 'hermes_cloud', $2, 'hermes-cloud', $3,
+                    'env:ELLA_TEST_ENDPOINT', 'env:ELLA_TEST_KEY', $4, $5, $6,
+                    'template-v1', 'prompt-v1', $7::jsonb, 'model-v1', 'voice-v1',
+                    'gpt-5.6-terra', 'healthy', 'active', true,
+                    'hermes-cloud-photon', 'env:ELLA_TEST_ENDPOINT', 'env:ELLA_TEST_KEY'
+                ) RETURNING id
+                """,
+                user_id,
+                f"photon-{uid}",
+                f"runtime-{uid}",
+                f"photon-workspace-{uid}",
+                f"photon-observed-{uid}",
+                f"photon-observer-{uid}",
+                json.dumps(_prompt_receipt()),
+            )
+            photon_binding_id = await connection.fetchval(
+                """
+                INSERT INTO ella_photon_channel_bindings (
+                    runtime_binding_id, user_id, status, line_identity_key,
+                    contact_identity_key, policy_commit_sha, command_tier_version,
+                    daily_message_limit, daily_initiation_limit
+                ) VALUES ($1, $2, 'enabled', $3, $4, $5, 'tier-v1', 10, 2)
+                RETURNING id
+                """,
+                photon_runtime_binding_id,
+                user_id,
+                "1" * 64,
+                "2" * 64,
+                "a" * 40,
+            )
+            job_id = await connection.fetchval(
+                """
+                INSERT INTO ella_provisioning_jobs (user_id, target_schema_version)
+                VALUES ($1, 'queued-after-delete-v1') RETURNING id
+                """,
+                user_id,
+            )
+            claim_token = uuid.uuid4()
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET claim_job_id = $2, claim_token = $3
+                WHERE id = $1
+                """,
+                photon_runtime_binding_id,
+                job_id,
+                claim_token,
+            )
+            await connection.execute(
+                """
+                CREATE FUNCTION delay_account_deletion_tombstone() RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.status = 'DELETION_PENDING' THEN PERFORM pg_sleep(0.5); END IF;
+                    RETURN NEW;
+                END
+                $$ LANGUAGE plpgsql
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER delay_account_deletion_tombstone
+                BEFORE UPDATE ON users
+                FOR EACH ROW EXECUTE FUNCTION delay_account_deletion_tombstone()
+                """
+            )
+
+        positive = await repository.resolve_photon_channel_binding(
+            line_identity_key="1" * 64,
+            contact_identity_key="2" * 64,
+        )
+        assert positive and positive["omi_uid"] == uid
+
+        deletion = asyncio.create_task(account_deletion.quarantine_account_for_deletion(uid))
+        await asyncio.sleep(0.05)
+        queued_stage = asyncio.create_task(
+            repository.stage_runtime_binding(uid=uid, binding=_local_runtime_binding(uid))
+        )
+        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+        await _wait_for_operator_authority_waiter(pool, owner)
+        await deletion
+        with pytest.raises(authority_advisory_lock.AuthorityLockError) as blocked_stage:
+            await queued_stage
+        assert blocked_stage.value.code == "authority_write_user_not_active"
+
+        for _attempt in range(2):
+            assert (
+                await repository.resolve_photon_channel_binding(
+                    line_identity_key="1" * 64,
+                    contact_identity_key="2" * 64,
+                )
+                is None
+            )
+
+        with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+            await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.activate_user(uid)
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.update_job(
+                job_id=str(job_id),
+                state="ready",
+                stage="active",
+                retryable=False,
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.acquire_job(
+                uid=uid,
+                target_schema_version="post-delete-job-v1",
+                client_request_id=None,
+                request_payload_hash="0" * 64,
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.claim_job(str(job_id))
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.begin_provider_attempt(uid=uid, job_id=str(job_id))
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.record_cloud_side_effect(
+                uid=uid,
+                job_id=str(job_id),
+                claim_token=str(claim_token),
+                effect={"kind": "synthetic"},
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.record_cloud_rollback(
+                job_id=str(job_id),
+                state="blocked",
+                rollback_receipt={"content_free": True},
+                error_code="synthetic",
+                retryable=False,
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.record_photon_sidecar_preflight(
+                photon_binding_id=str(photon_binding_id),
+                connection_key="synthetic-connection",
+                oauth_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                receipt={"content_free": True},
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await repository.ensure_user_identity(
+                uid=uid,
+                email=str(await pool.fetchval("SELECT email FROM users WHERE omi_uid = $1", uid)),
+                name="Resurrected",
+                timezone_name="UTC",
+            )
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await voice_canary.upsert_entitlement(
+                uid=uid,
+                plan="resurrected",
+                daily_limit_s=1,
+                monthly_limit_s=1,
+                max_session_s=1,
+                max_concurrent=1,
+                soft_limit_ratio=0.8,
+                provider_allowlist=["hermes"],
+                mode_allowlist=["hermes-chat"],
+                fallback_policy={"enabled": False, "order": []},
+                operator_note="synthetic",
+            )
+
+        async with pool.acquire() as connection:
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    """
+                    INSERT INTO ella_runtime_session_scopes (
+                        binding_id, user_id, role, channel, session_key
+                    ) VALUES ($1, $2, 'user', 'chat', $3)
+                    """,
+                    photon_runtime_binding_id,
+                    user_id,
+                    f"post-delete-{uid}",
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    """
+                    INSERT INTO ella_runtime_ingestion_receipts (
+                        binding_id, canonical_event_id, source_identity, provenance
+                    ) VALUES ($1, 'post-delete-event', 'post-delete-source', 'synthetic')
+                    """,
+                    photon_runtime_binding_id,
+                )
+            with pytest.raises(asyncpg.PostgresError, match="authority_write_user_not_active"):
+                await connection.execute(
+                    """
+                    INSERT INTO ella_photon_message_receipts (
+                        photon_binding_id, inbound_provider_message_key,
+                        inbound_payload_sha256, consent_grant_epoch
+                    ) VALUES ($1, $2, $3, $4)
+                    """,
+                    photon_binding_id,
+                    "3" * 64,
+                    "4" * 64,
+                    "post-delete-grant-epoch",
+                )
+
+        class FirestoreDocument:
+            exists = False
+            writes = []
+
+            def get(self):
+                return self
+
+            def set(self, payload, *, merge):
+                self.writes.append((payload, merge))
+
+        class Firestore:
+            document_ref = FirestoreDocument()
+
+            def collection(self, _name):
+                return self
+
+            def document(self, _uid):
+                return self.document_ref
+
+        fenced_firestore_repository = EllaProvisioningRepository(pool, firestore_db=Firestore())
+        with pytest.raises(authority_advisory_lock.AuthorityLockError):
+            await fenced_firestore_repository.ensure_omi_user_document(
+                uid=uid,
+                email=email,
+                name="Resurrected",
+                timezone_name="UTC",
+            )
+        assert FirestoreDocument.writes == []
+
+        async with pool.acquire() as connection:
+            state = dict(
+                await connection.fetchrow(
+                    """
+                        SELECT u.status, u.identities, entitlement.status AS entitlement_status,
+                               consent.decision AS consent_decision,
+                               photon.status AS photon_status, binding.active,
+                               job.state AS job_state,
+                               (SELECT array_agg(target_status ORDER BY target_status)
+                                FROM (
+                                    SELECT DISTINCT target.status AS target_status
+                                    FROM ella_runtime_targets target
+                                    WHERE target.account_user_id = u.id
+                                       OR target.profile_user_id = u.id
+                                ) statuses) AS target_statuses,
+                               (SELECT COUNT(*)
+                                FROM ella_runtime_bindings all_bindings
+                                WHERE all_bindings.user_id = u.id) AS binding_count
+                        FROM users u
+                        JOIN voice_entitlements entitlement ON entitlement.uid = u.omi_uid
+                        JOIN ella_managed_cloud_consent_authority consent ON consent.user_id = u.id
+                    JOIN ella_photon_channel_bindings photon ON photon.user_id = u.id
+                    JOIN ella_runtime_bindings binding ON binding.id = photon.runtime_binding_id
+                    JOIN ella_provisioning_jobs job ON job.id = $2
+                    WHERE u.id = $1
+                    """,
+                    user_id,
+                    job_id,
+                )
+            )
+        assert state == {
+            "status": "DELETION_PENDING",
+            "identities": "{}",
+            "entitlement_status": "revoked",
+            "consent_decision": "revoked",
+            "photon_status": "quarantined",
+            "active": False,
+            "job_state": "blocked",
+            "target_statuses": ["revoked"],
+            "binding_count": 2,
         }
 
     asyncio.run(_run_with_database(scenario))

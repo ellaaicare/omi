@@ -278,6 +278,37 @@ async def require_self_owner_lock(
     )
 
 
+async def require_user_write_status(
+    connection: asyncpg.Connection,
+    proof: AuthorityLockProof,
+    *,
+    user_id: Any,
+    allowed_statuses: tuple[str, ...] = ("ACTIVE",),
+) -> str:
+    """Fence authority writes after the owner lock has been proven.
+
+    PENDING is allowed only at explicitly named bootstrap/activation call sites.
+    Tombstoned accounts are never writable through this helper.
+    """
+    await require_self_owner_lock(
+        connection,
+        proof,
+        user_id=user_id,
+    )
+    if not allowed_statuses or any(status in {"DELETION_PENDING", "DELETED"} for status in allowed_statuses):
+        raise AuthorityLockError("authority_write_status_policy_invalid")
+    status = await connection.fetchval(
+        "SELECT status FROM users WHERE id = $1 FOR UPDATE",
+        _validated_database_uuid(user_id, field="user_id"),
+    )
+    if status is None:
+        raise AuthorityLockError("authority_write_owner_missing")
+    normalized = str(status)
+    if normalized not in allowed_statuses:
+        raise AuthorityLockError("authority_write_user_not_active")
+    return normalized
+
+
 async def resolve_self_owner_unlocked(
     connection: asyncpg.Connection,
     *,

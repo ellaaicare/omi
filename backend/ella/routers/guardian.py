@@ -823,7 +823,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
 @alerts_router.get("/guardian-alerts")
 async def guardian_alerts(
     limit: int = Query(default=50, ge=1, le=200),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ) -> dict[str, Any]:
     """Return newest-first Guardian alert history for the authenticated user."""
     return await _guardian_alert_history(uid, limit)

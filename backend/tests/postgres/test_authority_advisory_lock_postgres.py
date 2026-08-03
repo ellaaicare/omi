@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable
 import asyncpg
 import pytest
 
-from database import authority_advisory_lock, managed_cloud_consent, voice_canary
+from database import authority_advisory_lock, content_write_fence, managed_cloud_consent, voice_canary
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
 
@@ -114,6 +114,7 @@ async def _run_with_database(scenario):
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_provider_attempt_deletion_fence.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         await scenario(pool)
@@ -657,21 +658,23 @@ async def _prepare_writer_case(
                     """
                     INSERT INTO users (
                         email, name, status, profile_class
-                    ) VALUES ($1, 'Synthetic Before', 'PENDING', 'synthetic')
+                    ) VALUES ($1, 'Synthetic Before', 'ACTIVE', 'synthetic')
                     RETURNING id
                     """,
                     email,
                 )
             else:
+                initial_status = "ACTIVE" if name == "identity_update" else "PENDING"
                 user_id = await conn.fetchval(
                     """
                     INSERT INTO users (
                         omi_uid, email, name, status, profile_class
-                    ) VALUES ($1, $2, 'Synthetic Before', 'PENDING', 'synthetic')
+                    ) VALUES ($1, $2, 'Synthetic Before', $3, 'synthetic')
                     RETURNING id
                     """,
                     uid,
                     email,
+                    initial_status,
                 )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
         if name == "identity_bind":
@@ -984,6 +987,72 @@ def test_each_production_writer_waits_before_mutation_and_commits_after_release(
     async def scenario(pool):
         case = await _prepare_writer_case(pool, name)
         await _assert_serialized_writer(pool, case)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_content_admission_releases_pool_before_same_owner_nested_writers_at_full_capacity():
+    async def scenario(pool):
+        capacity = 6
+        users = []
+        async with pool.acquire() as seed:
+            for index in range(capacity):
+                uid = f"synthetic-content-reentry-{index}"
+                user_id = await seed.fetchval(
+                    """
+                    INSERT INTO users (omi_uid, email, profile_class, status)
+                    VALUES ($1, $2, 'synthetic', 'ACTIVE')
+                    RETURNING id
+                    """,
+                    uid,
+                    f"{uid}@example.invalid",
+                )
+                users.append((uid, user_id))
+
+        nested_count = 0
+        nested_lock = asyncio.Lock()
+        all_nested = asyncio.Event()
+
+        async def mounted_request(uid, user_id):
+            nonlocal nested_count
+            await content_write_fence._assert_postgres_owner_active(uid)
+            owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+            async with pool.acquire() as nested_connection:
+                async with nested_connection.transaction():
+                    proof = await authority_advisory_lock.acquire_authority_lock(
+                        nested_connection,
+                        owner=owner,
+                    )
+                    assert (
+                        await authority_advisory_lock.verify_self_owner_after_lock(
+                            nested_connection,
+                            uid=uid,
+                            owner=owner,
+                            proof=proof,
+                        )
+                        == user_id
+                    )
+                    async with nested_lock:
+                        nested_count += 1
+                        if nested_count == capacity:
+                            all_nested.set()
+                    await asyncio.wait_for(all_nested.wait(), timeout=5)
+
+        await asyncio.wait_for(
+            asyncio.gather(*(mounted_request(uid, user_id) for uid, user_id in users)),
+            timeout=10,
+        )
+        assert nested_count == capacity
+
+        blocked_uid, blocked_user_id = users[0]
+        async with pool.acquire() as tombstone:
+            await tombstone.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                blocked_user_id,
+            )
+        with pytest.raises(content_write_fence.ContentWriteFenceError) as forbidden:
+            await content_write_fence._assert_postgres_owner_active(blocked_uid)
+        assert forbidden.value.code == "account_write_forbidden"
 
     asyncio.run(_run_with_database(scenario))
 

@@ -8,12 +8,16 @@ PROTECTED_TABLES = {
     "voice_entitlements",
     "ella_runtime_targets",
     "ella_runtime_bindings",
+    "ella_provisioning_jobs",
+    "ella_photon_channel_bindings",
+    "ella_provider_attempts",
     "users",
 }
 MUTATION_RE = re.compile(
     r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
     r"(ella_managed_cloud_consent_authority|voice_entitlements|"
-    r"ella_runtime_targets|ella_runtime_bindings|users)\b",
+    r"ella_runtime_targets|ella_runtime_bindings|ella_provisioning_jobs|"
+    r"ella_photon_channel_bindings|ella_provider_attempts|users)\b",
     re.IGNORECASE,
 )
 USER_MUTATION_RE = re.compile(
@@ -22,8 +26,13 @@ USER_MUTATION_RE = re.compile(
 )
 
 EXPECTED_WRITERS = {
+    ("database/account_deletion.py", "finalize_account_deletion"),
+    ("database/account_deletion.py", "quarantine_account_for_deletion"),
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
+    ("database/ella_provisioning.py", "acquire_job"),
+    ("database/ella_provisioning.py", "begin_provider_attempt"),
+    ("database/ella_provisioning.py", "claim_job"),
     ("database/ella_provisioning.py", "claim_cloud_pool_binding"),
     ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
@@ -31,8 +40,12 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"),
     ("database/ella_provisioning.py", "promote_cloud_binding"),
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"),
+    ("database/ella_provisioning.py", "record_cloud_rollback"),
+    ("database/ella_provisioning.py", "record_cloud_side_effect"),
+    ("database/ella_provisioning.py", "record_photon_sidecar_preflight"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/ella_provisioning.py", "stage_runtime_binding"),
+    ("database/ella_provisioning.py", "update_job"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
@@ -64,6 +77,8 @@ PROOF_GATED_HELPERS = {
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 EXPECTED_GLOBAL_USER_WRITERS = {
+    ("database/account_deletion.py", "finalize_account_deletion"),
+    ("database/account_deletion.py", "quarantine_account_for_deletion"),
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
@@ -76,6 +91,14 @@ NON_AUTHORITY_USER_WRITERS = {
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
 REAL_POSTGRES_WRITER_COVERAGE = {
+    ("database/account_deletion.py", "finalize_account_deletion"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries",
+    ),
+    ("database/account_deletion.py", "quarantine_account_for_deletion"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write",
+    ),
     ("database/ella_provisioning.py", "activate_runtime_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"runtime_activate"',
@@ -83,6 +106,18 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/ella_provisioning.py", "activate_user"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"user_activate"',
+    ),
+    ("database/ella_provisioning.py", "acquire_job"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately",
+    ),
+    ("database/ella_provisioning.py", "begin_provider_attempt"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges",
+    ),
+    ("database/ella_provisioning.py", "claim_job"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately",
     ),
     ("database/ella_provisioning.py", "claim_cloud_pool_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
@@ -108,9 +143,25 @@ REAL_POSTGRES_WRITER_COVERAGE = {
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"cloud_quarantine"',
     ),
+    ("database/ella_provisioning.py", "record_cloud_rollback"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately",
+    ),
+    ("database/ella_provisioning.py", "record_cloud_side_effect"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately",
+    ),
+    ("database/ella_provisioning.py", "record_photon_sidecar_preflight"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately",
+    ),
     ("database/ella_provisioning.py", "stage_runtime_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"runtime_stage"',
+    ),
+    ("database/ella_provisioning.py", "update_job"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately",
     ),
     ("database/invitations.py", "_redeem_locked_invitation"): (
         "tests/postgres/test_invitation_redemption_postgres.py",

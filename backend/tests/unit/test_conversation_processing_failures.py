@@ -169,6 +169,11 @@ from utils.conversations.failure_state import (
 from routers import conversations as conversations_router
 
 
+@pytest.fixture(autouse=True)
+def _isolate_conversation_meeting_cache(monkeypatch):
+    monkeypatch.setattr(conversation_processor.redis_db, "get_conversation_meeting_id", lambda _conversation_id: None)
+
+
 def _long_conversation() -> Conversation:
     text = " ".join(["important"] * 3200)
     return Conversation(
@@ -384,7 +389,7 @@ def test_retry_claim_rejects_a_different_request_while_processing():
 def _conversation_api_client():
     app = FastAPI()
     app.include_router(conversations_router.router)
-    app.dependency_overrides[conversations_router.auth.get_current_user_uid] = lambda: "authenticated-user"
+    app.dependency_overrides[conversations_router.auth.get_writable_user_uid] = lambda: "authenticated-user"
     return app, TestClient(app)
 
 

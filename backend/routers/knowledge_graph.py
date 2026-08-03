@@ -40,7 +40,7 @@ class RebuildResponse(BaseModel):
 
 
 @router.get('/v1/knowledge-graph', tags=['knowledge_graph'], response_model=KnowledgeGraphResponse)
-def get_knowledge_graph(uid: str = Depends(auth.get_current_user_uid)):
+def get_knowledge_graph(uid: str = Depends(auth.get_writable_user_uid)):
     graph = kg_db.get_knowledge_graph(uid)
     return KnowledgeGraphResponse(
         nodes=graph.get('nodes', []),
@@ -55,7 +55,7 @@ def _rebuild_graph_task(uid: str, user_name: str):
 @router.post('/v1/knowledge-graph/rebuild', tags=['knowledge_graph'], response_model=RebuildResponse)
 def rebuild_graph(
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid)
+    uid: str = Depends(auth.get_writable_user_uid)
 ):
     user = users_db.get_user_profile(uid)
     user_name = user.get('name', 'User') if isinstance(user, dict) else 'User'
@@ -74,6 +74,6 @@ def rebuild_graph(
 
 
 @router.delete('/v1/knowledge-graph', tags=['knowledge_graph'])
-def delete_knowledge_graph(uid: str = Depends(auth.get_current_user_uid)):
+def delete_knowledge_graph(uid: str = Depends(auth.get_writable_user_uid)):
     kg_db.delete_knowledge_graph(uid)
     return {"status": "deleted"}

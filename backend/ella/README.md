@@ -248,6 +248,10 @@ print('Adapters:', list(get_all_adapters().keys()))
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ELLA_ENABLED` | `true` | Master switch for all Ella features |
+| `ELLA_POSTGRES_AUTHORITY_ENABLED` | follows `ELLA_ENABLED` | Explicit account-deletion authority boundary. Set `false` only when Ella PostgreSQL persistence/schema is intentionally absent; enabled database failures remain fail-closed. |
+| `ELLA_CONTENT_WRITE_FENCE_LEASE_SECONDS` | `900` | Diagnostic writer-registration horizon. Expiry never proves absence; only explicit release permits deletion completion. |
+| `ELLA_CONTENT_WRITE_FENCE_ACQUIRE_SECONDS` | `15` | Bounded wait for short PostgreSQL admission proof and Firestore writer registration. No pool connection is held across route code. |
+| `ELLA_CONTENT_WRITE_FENCE_DRAIN_SECONDS` | `15` | Bounded deletion drain wait before returning truthful HTTP 202 for pending Firestore cleanup. |
 | `ELLA_N8N_BASE_URL` | `https://n8n.ella-ai-care.com` | n8n webhook base URL |
 | `ELLA_SUMMARY_ENABLED` | `true` | Use n8n for summary generation |
 | `ELLA_MEMORY_ENABLED` | `true` | Use n8n for memory extraction |
@@ -301,10 +305,29 @@ receipt subcollection; callers cannot submit or select another UID.
   idempotent; reuse with different metadata fails with `409`.
 - `GET /v1/users/ai-consent/receipts/{receipt_id}` verifies a receipt only
   within the authenticated user's path.
-- Account/data deletion remains `DELETE /v1/users/delete-account`; deletion
-  also removes the user's consent receipt subcollection and returns a
-  non-identifying synchronous completion receipt with request ID and server
-  completion time.
+- Account/data deletion remains `DELETE /v1/users/delete-account`. The route
+  first atomically quarantines PostgreSQL consent, entitlement, target,
+  binding, and OMI identity authority and releases any ordinary invitation
+  capacity. Firestore cleanup is recursive and retry-safe. A fully completed
+  deletion returns a non-identifying receipt; `202 deletion_pending` names only
+  the remaining artifact classes when cleanup must resume. The content fence
+  transfers a separate durable registration to detached import,
+  conversation-processing, persona, vector, and cache workers before their
+  caller returns. Top-level Limitless import-job records are deleted by exact
+  UID with the recursive user tree. Registration timestamps are diagnostic;
+  an unreleased worker keeps deletion pending instead of being assumed dead.
+  The self-hosted
+  `:8210` authority currently has no authenticated deprovision operation, so a
+  provisioned Hermes profile/Honcho tenancy/registry entry remains disabled and
+  requires an operator until that authority can issue a trusted deletion
+  receipt. Firebase Auth is retained while deletion is pending so the same
+  authenticated caller can retry.
+
+The deletion proof schema in this release applies in executable order
+`011 -> 012 -> 013 -> 014 -> 015 -> 017_add_provider_attempt_deletion_fence.sql`.
+Migration `016_create_today_cards.sql` is reserved by open `ellaaicare/omi#360`, is not part
+of account deletion, and is not modified here. On a fresh database containing
+both changes, apply `016` before `017`; `017` has no dependency on `016`.
 
 Exact-policy grants are required at the Ella chat stream, Hermes onboarding
 ensure, voice-session issuance, necklace/web transcription sockets, direct TTS,

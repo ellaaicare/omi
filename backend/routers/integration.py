@@ -24,6 +24,7 @@ from utils.conversations.location import get_google_maps_location
 from utils.conversations.memories import process_external_integration_memory
 from utils.conversations.search import search_conversations
 from utils.app_integrations import send_app_notification
+from utils.other.endpoints import admit_authenticated_content_writer
 
 # Rate limit settings - more conservative limits to prevent notification fatigue
 RATE_LIMIT_PERIOD = 3600  # 1 hour in seconds
@@ -97,6 +98,8 @@ async def create_conversation_via_integration(
     # Check if the app has the capability external_integration > action > create_conversation
     if not apps_utils.app_can_create_conversation(app):
         raise HTTPException(status_code=403, detail="App does not have the capability to create conversations")
+
+    await admit_authenticated_content_writer(uid)
 
     # Time
     started_at = (
@@ -172,6 +175,8 @@ async def create_memories_via_integration(
     # Check if the app has the capability external_integration > action > create_memories / create_facts
     if not apps_utils.app_can_create_memories(app):
         raise HTTPException(status_code=403, detail="App does not have the capability to create memories")
+
+    await admit_authenticated_content_writer(uid)
 
     # Validate that text is provided or explicit facts are provided
     if (not fact_data.text or len(fact_data.text.strip()) == 0) and (

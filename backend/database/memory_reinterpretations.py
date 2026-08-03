@@ -382,27 +382,57 @@ class PostgresMemoryReinterpretationRepository:
         )
         return row_to_job(row) if row else existing
 
-    async def claim_due(self, worker_id: str, *, lease_seconds: int = 120) -> Optional[dict[str, Any]]:
+    async def next_due_uid(self) -> Optional[str]:
+        pool = await self._pool()
+        uid = await pool.fetchval(
+            """
+            SELECT uid
+            FROM memory_reinterpretation_jobs
+            WHERE (
+                    status IN ('pending', 'retry')
+                    AND not_before <= NOW()
+                  )
+               OR (
+                    status = 'running'
+                    AND lease_expires_at < NOW()
+                  )
+            ORDER BY not_before ASC, created_at ASC
+            LIMIT 1
+            """
+        )
+        return str(uid) if uid else None
+
+    async def claim_due(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int = 120,
+        uid: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         pool = await self._pool()
         lease_token = str(uuid.uuid4())
+        uid_filter = "AND uid = $1" if uid is not None else ""
+        candidate_args = (uid,) if uid is not None else ()
         async with pool.acquire() as conn:
             async with conn.transaction():
                 candidate_row = await conn.fetchrow(
-                    """
+                    f"""
                     SELECT *
                     FROM memory_reinterpretation_jobs
-                    WHERE (
+                    WHERE ((
                             status IN ('pending', 'retry')
                             AND not_before <= NOW()
                           )
                        OR (
                             status = 'running'
                             AND lease_expires_at < NOW()
-                          )
+                          ))
+                      {uid_filter}
                     ORDER BY not_before ASC, created_at ASC
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                     """,
+                    *candidate_args,
                 )
                 if candidate_row is None:
                     return None
@@ -744,16 +774,20 @@ class PostgresMemoryReinterpretationRepository:
 
     async def metrics(self) -> dict[str, Any]:
         pool = await self._pool()
-        rows = await pool.fetch("""
+        rows = await pool.fetch(
+            """
             SELECT status, COUNT(*) AS count
             FROM memory_reinterpretation_jobs
             GROUP BY status
-            """)
-        oldest_due_seconds = await pool.fetchval("""
+            """
+        )
+        oldest_due_seconds = await pool.fetchval(
+            """
             SELECT EXTRACT(EPOCH FROM (NOW() - MIN(not_before)))
             FROM memory_reinterpretation_jobs
             WHERE status IN ('pending', 'retry') AND not_before <= NOW()
-            """)
+            """
+        )
         return {
             "jobs_by_status": {str(_row_value(row, "status")): int(_row_value(row, "count", 0) or 0) for row in rows},
             "oldest_due_seconds": float(oldest_due_seconds or 0),
@@ -919,12 +953,33 @@ class InMemoryMemoryReinterpretationRepository:
         current["updated_at"] = self.now
         return True
 
-    async def claim_due(self, worker_id: str, *, lease_seconds: int = 120) -> Optional[dict[str, Any]]:
+    async def next_due_uid(self) -> Optional[str]:
         candidates = [
             job
             for job in self.jobs.values()
             if (job["status"] in RUNNABLE_STATUSES and job["not_before"] <= self.now)
             or (job["status"] == "running" and job["lease_expires_at"] and job["lease_expires_at"] < self.now)
+        ]
+        if not candidates:
+            return None
+        job = sorted(candidates, key=lambda item: (item["not_before"], item["created_at"]))[0]
+        return str(job["uid"])
+
+    async def claim_due(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int = 120,
+        uid: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        candidates = [
+            job
+            for job in self.jobs.values()
+            if (uid is None or job["uid"] == uid)
+            and (
+                (job["status"] in RUNNABLE_STATUSES and job["not_before"] <= self.now)
+                or (job["status"] == "running" and job["lease_expires_at"] and job["lease_expires_at"] < self.now)
+            )
         ]
         if not candidates:
             return None

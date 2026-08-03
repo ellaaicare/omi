@@ -1,7 +1,6 @@
 import uuid
 import re
 import base64
-import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
@@ -12,6 +11,7 @@ from multipart.multipart import shutil
 
 import database.chat as chat_db
 import database.conversations as conversations_db
+from database import content_write_fence
 from database.apps import record_app_usage
 from models.app import App, UsageHistoryType
 from models.chat import (
@@ -73,13 +73,14 @@ def send_message(
     data: SendMessageRequest,
     plugin_id: Optional[str] = None,
     app_id: Optional[str] = None,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     compat_app_id = app_id or plugin_id
     print('send_message', data.text, compat_app_id, uid)
 
     # Set Ella context for LLM proxy
     from utils.llm.clients import set_ella_context
+
     set_ella_context(uid=uid, task='chat')
 
     if compat_app_id in ['null', '']:
@@ -115,7 +116,12 @@ def send_message(
     chat_db.add_message(uid, message.dict())
 
     # Check for goal progress (background)
-    threading.Thread(target=extract_and_update_goal_progress, args=(uid, data.text)).start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        extract_and_update_goal_progress,
+        args=(uid, data.text),
+        name="chat-goal-progress",
+    )
 
     app = get_available_app_by_id(compat_app_id, uid)
     app = App(**app) if app else None
@@ -198,7 +204,7 @@ def send_message(
 
 
 @router.post('/v2/messages/{message_id}/report', tags=['chat'], response_model=dict)
-def report_message(message_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def report_message(message_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     message, msg_doc_id = chat_db.get_message(uid, message_id)
     if message is None:
         raise HTTPException(status_code=404, detail='Message not found')
@@ -212,7 +218,7 @@ def report_message(message_id: str, uid: str = Depends(auth.get_current_user_uid
 
 @router.delete('/v2/messages', tags=['chat'], response_model=Message)
 def clear_chat_messages(
-    app_id: Optional[str] = None, plugin_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
+    app_id: Optional[str] = None, plugin_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     compat_app_id = app_id or plugin_id
     if compat_app_id in ['null', '']:
@@ -290,7 +296,7 @@ def initial_message_util(uid: str, app_id: Optional[str] = None):
     dependencies=[Depends(require_current_ai_consent)],
 )
 def create_initial_message(
-    app_id: Optional[str] = None, plugin_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
+    app_id: Optional[str] = None, plugin_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     compat_app_id = app_id or plugin_id
     return initial_message_util(uid, compat_app_id)
@@ -298,7 +304,7 @@ def create_initial_message(
 
 @router.get('/v2/messages', response_model=List[Message], tags=['chat'])
 def get_messages(
-    plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
+    plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     compat_app_id = app_id or plugin_id
     if compat_app_id in ['null', '']:
@@ -328,7 +334,7 @@ def get_messages(
 async def create_voice_message_stream(
     files: List[UploadFile] = File(...),
     language: Optional[str] = Form(None),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     # wav
     paths = retrieve_file_paths(files, uid)
@@ -353,7 +359,7 @@ async def create_voice_message_stream(
 async def transcribe_voice_message(
     files: List[UploadFile] = File(...),
     language: Optional[str] = Form(None),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     # Check if files are empty
     if not files or len(files) == 0:
@@ -450,7 +456,7 @@ async def transcribe_voice_message(
     tags=['chat'],
     dependencies=[Depends(require_current_ai_consent)],
 )
-def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_current_user_uid)):
+def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_writable_user_uid)):
     thumbs_name = []
     files_chat = []
     for file in files:
@@ -508,7 +514,7 @@ def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(aut
     tags=['chat'],
     dependencies=[Depends(require_current_ai_consent)],
 )
-def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_current_user_uid)):
+def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_writable_user_uid)):
     thumbs_name = []
     files_chat = []
     for file in files:
@@ -557,7 +563,7 @@ def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(aut
 
 
 @router.post('/v1/messages/{message_id}/report', tags=['chat'], response_model=dict)
-def report_message(message_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def report_message(message_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     message, msg_doc_id = chat_db.get_message(uid, message_id)
     if message is None:
         raise HTTPException(status_code=404, detail='Message not found')
@@ -571,7 +577,7 @@ def report_message(message_id: str, uid: str = Depends(auth.get_current_user_uid
 
 @router.delete('/v1/messages', tags=['chat'], response_model=Message)
 def clear_chat_messages(
-    plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
+    plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     compat_app_id = app_id or plugin_id
     if compat_app_id in ['null', '']:
@@ -608,7 +614,7 @@ def clear_chat_messages(
     dependencies=[Depends(require_current_ai_consent)],
 )
 def create_initial_message(
-    plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
+    plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     compat_app_id = app_id or plugin_id
     return initial_message_util(uid, compat_app_id)

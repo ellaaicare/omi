@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
+from database import content_write_fence
 from database.memory_reinterpretations import canonical_transcript_hash
 from ella.services.hermes_session import canonical_omi_session_key
 from ella.services.summary_recovery import (
@@ -330,7 +331,8 @@ async def _create_pending_proposal(
         "scopes": ["proposals:write"],
         "allowed_tools": ["memory_reinterpretation_propose"],
     }
-    result = await asyncio.to_thread(
+    result = await content_write_fence.run_admitted_threaded_mutation(
+        job["uid"],
         proposal_ingest.create_proposal,
         session_claims=claims,
         tool_name="memory_reinterpretation_propose",
@@ -411,6 +413,7 @@ class MemoryReinterpretationWorker:
         self.lease_seconds = max(30, configured_lease)
 
     async def _require_current_lease(self, job: dict[str, Any]) -> None:
+        content_write_fence.assert_content_writer_admitted(job["uid"])
         try:
             current = await self.repository.renew_lease(
                 job,
@@ -425,18 +428,22 @@ class MemoryReinterpretationWorker:
             ) from exc
         if not current:
             raise ReinterpretationWorkerError("lease_lost", retryable=True)
+        content_write_fence.assert_content_writer_admitted(job["uid"])
 
     async def _heartbeat_lease(self, job: dict[str, Any]) -> None:
         interval = max(5.0, self.lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
             try:
+                content_write_fence.assert_content_writer_admitted(job["uid"])
                 renewed = await self.repository.renew_lease(
                     job,
                     lease_seconds=self.lease_seconds,
                 )
             except asyncio.CancelledError:
                 raise
+            except content_write_fence.ContentWriteFenceError:
+                return
             except Exception:
                 _WORKER_RUNTIME_METRICS["lease_renewal_failures_total"] += 1
                 logger.exception(
@@ -448,12 +455,24 @@ class MemoryReinterpretationWorker:
                 return
 
     async def run_once(self, worker_id: str) -> Optional[dict[str, Any]]:
-        job = await self.repository.claim_due(
-            worker_id,
-            lease_seconds=self.lease_seconds,
-        )
-        if job is None:
+        uid = await self.repository.next_due_uid()
+        if uid is None:
             return None
+        try:
+            async with content_write_fence.detached_content_write_fence(uid):
+                job = await self.repository.claim_due(
+                    worker_id,
+                    lease_seconds=self.lease_seconds,
+                    uid=uid,
+                )
+                if job is None:
+                    return None
+                content_write_fence.assert_content_writer_admitted(uid)
+                return await self._run_claimed(job)
+        except content_write_fence.ContentWriteFenceError:
+            return None
+
+    async def _run_claimed(self, job: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         metrics: dict[str, Any] = {
             "attempt": job["attempt_count"],
@@ -495,6 +514,7 @@ class MemoryReinterpretationWorker:
                     if not finished:
                         raise ReinterpretationWorkerError("lease_lost", retryable=True)
                     return {"job_id": job["id"], "status": "conflict"}
+                content_write_fence.assert_content_writer_admitted(job["uid"])
                 plan = await self.hermes_client.propose(
                     job=job,
                     transcript=_ordered_transcript(rows),
@@ -543,12 +563,15 @@ class MemoryReinterpretationWorker:
                     )
                     await self._require_current_lease(job)
                     try:
-                        applied = await self.correction_writer(
-                            job=job,
-                            proposal=proposal,
-                            correction_id=correction_id,
-                            proposal_index=index,
-                            expected_version_id=expected_version_id,
+                        applied = await content_write_fence.finish_admitted_content_mutation(
+                            job["uid"],
+                            self.correction_writer(
+                                job=job,
+                                proposal=proposal,
+                                correction_id=correction_id,
+                                proposal_index=index,
+                                expected_version_id=expected_version_id,
+                            ),
                         )
                     except ConcurrentConversationSummaryChangeError:
                         await self._require_current_lease(job)
@@ -586,11 +609,14 @@ class MemoryReinterpretationWorker:
                         index,
                     )
                     await self._require_current_lease(job)
-                    proposal_id = await self.pending_proposal_writer(
-                        job=job,
-                        proposal=proposal,
-                        proposal_id=fallback_id,
-                        proposal_index=index,
+                    proposal_id = await content_write_fence.finish_admitted_content_mutation(
+                        job["uid"],
+                        self.pending_proposal_writer(
+                            job=job,
+                            proposal=proposal,
+                            proposal_id=fallback_id,
+                            proposal_index=index,
+                        ),
                     )
                     if proposal_id not in proposal_ids:
                         proposal_ids.append(proposal_id)
@@ -603,6 +629,7 @@ class MemoryReinterpretationWorker:
                     "applied_indexes": sorted(applied_indexes),
                     "active_summary_version_id": expected_version_id,
                 }
+                content_write_fence.assert_content_writer_admitted(job["uid"])
                 if not await self.repository.record_progress(
                     job,
                     progress=progress,
@@ -631,7 +658,10 @@ class MemoryReinterpretationWorker:
             if not finished:
                 raise ReinterpretationWorkerError("lease_lost", retryable=True)
             return {"job_id": job["id"], "status": status}
+        except content_write_fence.ContentWriteFenceError:
+            raise
         except ReinterpretationWorkerError as exc:
+            content_write_fence.assert_content_writer_admitted(job["uid"])
             status = await self.repository.fail_or_retry(
                 job,
                 error_code=exc.code,
@@ -647,6 +677,7 @@ class MemoryReinterpretationWorker:
             )
             return {"job_id": job["id"], "status": status, "error_code": exc.code}
         except Exception as exc:
+            content_write_fence.assert_content_writer_admitted(job["uid"])
             status = await self.repository.fail_or_retry(
                 job,
                 error_code="worker_unhandled_error",
@@ -672,6 +703,22 @@ class MemoryReinterpretationWorker:
 
 
 _worker_task: Optional[asyncio.Task] = None
+_worker_shutdown_task: Optional[asyncio.Task] = None
+
+
+async def _finish_worker_shutdown(worker_task: asyncio.Task) -> None:
+    global _worker_task, _worker_shutdown_task
+    try:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        if worker_task.done() and _worker_task is worker_task:
+            _worker_task = None
+        if _worker_shutdown_task is asyncio.current_task():
+            _worker_shutdown_task = None
 
 
 def worker_enabled() -> bool:
@@ -719,18 +766,32 @@ async def run_worker_loop(
 
 async def start_worker(worker: MemoryReinterpretationWorker) -> None:
     global _worker_task
-    if not worker_enabled() or (_worker_task and not _worker_task.done()):
+    if not worker_enabled():
+        return
+    while _worker_shutdown_task is not None:
+        await asyncio.shield(_worker_shutdown_task)
+    if _worker_task and not _worker_task.done():
         return
     _worker_task = asyncio.create_task(run_worker_loop(worker))
 
 
 async def stop_worker() -> None:
-    global _worker_task
-    if _worker_task is None:
-        return
-    _worker_task.cancel()
+    global _worker_shutdown_task
+    shutdown_task = _worker_shutdown_task
+    if shutdown_task is None:
+        worker_task = _worker_task
+        if worker_task is None:
+            return
+        shutdown_task = asyncio.create_task(_finish_worker_shutdown(worker_task))
+        _worker_shutdown_task = shutdown_task
     try:
-        await _worker_task
+        await asyncio.shield(shutdown_task)
     except asyncio.CancelledError:
-        pass
-    _worker_task = None
+        # A caller timeout/cancellation must not cancel the shared join or
+        # clear the worker reference while its durable writer is still live.
+        raise
+    if shutdown_task.cancelled():
+        raise asyncio.CancelledError
+    exception = shutdown_task.exception()
+    if exception is not None:
+        raise exception

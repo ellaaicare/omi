@@ -594,6 +594,12 @@ async def _bind_verified_identity_on_connection(
     if by_email:
         if by_email["omi_uid"] not in (None, "", uid):
             raise InvitePilotGateDenied("invite_identity_mismatch")
+        await authority_advisory_lock.require_user_write_status(
+            conn,
+            owner_lock,
+            user_id=by_email["id"],
+            allowed_statuses=("PENDING", "ACTIVE"),
+        )
         row = await conn.fetchrow(
             """
             UPDATE users

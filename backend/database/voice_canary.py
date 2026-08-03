@@ -4,6 +4,8 @@ The billing/operations ledger is deliberately content-free. Transcript text and
 audio never enter these tables.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -500,11 +502,16 @@ async def upsert_entitlement(
         async with conn.transaction():
             owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
             await lock_runtime_authority_on_connection(conn, uid=uid)
-            await authority_advisory_lock.verify_self_owner_after_lock(
+            user_id = await authority_advisory_lock.verify_self_owner_after_lock(
                 conn,
                 uid=uid,
                 owner=owner,
                 proof=owner_lock,
+            )
+            await authority_advisory_lock.require_user_write_status(
+                conn,
+                owner_lock,
+                user_id=user_id,
             )
             row = await conn.fetchrow(
                 """
@@ -562,11 +569,16 @@ async def update_entitlement_status(
         async with conn.transaction():
             owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
             await lock_runtime_authority_on_connection(conn, uid=uid)
-            await authority_advisory_lock.verify_self_owner_after_lock(
+            user_id = await authority_advisory_lock.verify_self_owner_after_lock(
                 conn,
                 uid=uid,
                 owner=owner,
                 proof=owner_lock,
+            )
+            await authority_advisory_lock.require_user_write_status(
+                conn,
+                owner_lock,
+                user_id=user_id,
             )
             row = await conn.fetchrow(
                 """

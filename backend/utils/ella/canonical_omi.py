@@ -188,6 +188,9 @@ def write_omi_canonical_event(
     """Best-effort synchronous write to the local canonical ledger endpoint."""
     if not CANONICAL_OMI_WRITE_ENABLED:
         return {"ok": False, "skipped": True, "reason": "disabled"}
+    ledger_token = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
+    if not ledger_token:
+        raise RuntimeError("canonical_events_auth_not_configured")
 
     event = build_omi_canonical_event(
         uid,
@@ -200,7 +203,7 @@ def write_omi_canonical_event(
     response = requests.post(
         CANONICAL_EVENTS_URL,
         json={"events": [event]},
-        headers={"Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {ledger_token}", "Content-Type": "application/json"},
         timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
     )
     elapsed_ms = int((time.time() - started) * 1000)

@@ -1,11 +1,17 @@
 import json
 import os
 import time
+from typing import AsyncIterator
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 from fastapi import Request
 from firebase_admin import auth
-from firebase_admin.auth import InvalidIdTokenError
+from firebase_admin.auth import InvalidIdTokenError, UserNotFoundError
+
+from database import content_write_fence
+
+# Retained import surface used by focused Guardian collection and test overrides.
+voice_canary = content_write_fence.voice_canary
 
 
 def get_user(uid: str):
@@ -46,8 +52,8 @@ def verify_token(token: str) -> str:
         raise InvalidIdTokenError(str(e))
 
 
-def get_current_user_uid(authorization: str = Header(None)):
-    """FastAPI dependency for HTTP endpoints with Authorization header."""
+def get_authenticated_user_uid(authorization: str = Header(None)) -> str:
+    """Verify the Firebase subject without consulting optional Ella storage."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header not found")
     elif len(str(authorization).split(' ')) != 2:
@@ -61,6 +67,61 @@ def get_current_user_uid(authorization: str = Header(None)):
     except InvalidIdTokenError as e:
         print(f"Error verifying Firebase ID token: {e}", flush=True)
         raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+
+async def assert_authenticated_user_writable(uid: str) -> str:
+    """Perform a compatibility preflight; committers must hold the dependency."""
+    try:
+        async with content_write_fence.content_write_fence(uid):
+            return uid
+    except content_write_fence.ContentWriteFenceError as exc:
+        if exc.code == "account_write_forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "account_write_forbidden", "retryable": False},
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
+
+
+async def admit_authenticated_content_writer(uid: str) -> str:
+    """Admit a manually authenticated writer for the full ASGI request."""
+    try:
+        return await content_write_fence.admit_request_content_writer(uid)
+    except content_write_fence.ContentWriteFenceError as exc:
+        if exc.code == "account_write_forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "account_write_forbidden", "retryable": False},
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
+
+
+def get_current_user_uid(authorization: str = Header(None)) -> str:
+    """Backward-compatible raw Firebase authentication dependency."""
+    return get_authenticated_user_uid(authorization)
+
+
+async def get_writable_user_uid(uid: str = Depends(get_current_user_uid)) -> AsyncIterator[str]:
+    """Hold the distributed deletion fence through the complete ASGI request."""
+    try:
+        async with content_write_fence.request_content_write_fence(uid):
+            yield uid
+    except content_write_fence.ContentWriteFenceError as exc:
+        if exc.code == "account_write_forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "account_write_forbidden", "retryable": False},
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
 
 
 def get_current_user_uid_from_ws_message(message: dict) -> str:
@@ -157,5 +218,16 @@ def timeit(func):
 
 
 def delete_account(uid: str):
-    auth.delete_user(uid)
-    return {"message": "User deleted"}
+    try:
+        auth.delete_user(uid)
+        return {"status": "deleted"}
+    except UserNotFoundError:
+        return {"status": "already_deleted"}
+    except Exception:
+        # A lost delete acknowledgement is outcome-ambiguous. Confirm absence
+        # before treating it as success; otherwise preserve the retryable error.
+        try:
+            auth.get_user(uid)
+        except UserNotFoundError:
+            return {"status": "already_deleted"}
+        raise

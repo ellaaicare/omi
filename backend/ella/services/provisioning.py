@@ -11,6 +11,7 @@ import math
 import os
 import posixpath
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -391,7 +392,12 @@ class HermesProvisionClient:
         target_schema_version: str,
         *,
         authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+        idempotency_key: str,
     ) -> dict[str, Any]:
+        try:
+            request_idempotency_key = str(uuid.UUID(idempotency_key))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ProvisioningError("provider_idempotency_key_invalid", retryable=False) from exc
         entry_snapshot = self.snapshot_authority(authority_snapshot)
         send_snapshot: ProvisionAuthoritySnapshot | None = None
         try:
@@ -413,9 +419,13 @@ class HermesProvisionClient:
                 }
                 authority = self.resolve_authority(payload_authority.snapshot())
                 send_snapshot = authority.snapshot()
+                headers = {
+                    "Authorization": f"Bearer {authority.token}",
+                    "Idempotency-Key": request_idempotency_key,
+                }
                 response = await client.post(
                     f"{authority.base_url}/provision",
-                    headers={"Authorization": f"Bearer {authority.token}"},
+                    headers=headers,
                     json=payload,
                 )
                 self.resolve_authority(send_snapshot)
@@ -813,10 +823,17 @@ class ProvisioningCoordinator:
             if not self_hosted_required and not legacy_required:
                 raise ProvisioningError("provisioning_disabled", retryable=False)
             if isinstance(self.client, HermesProvisionClient):
+                attempt = await self._repository_call(
+                    authority_snapshot,
+                    self.repository.begin_provider_attempt,
+                    uid=identity.uid,
+                    job_id=str(job["id"]),
+                )
                 result = await self.client.provision(
                     identity,
                     str(job["target_schema_version"]),
                     authority_snapshot=authority_snapshot,
+                    idempotency_key=str(attempt["idempotency_key"]),
                 )
                 self.client.resolve_authority(authority_snapshot)
             else:

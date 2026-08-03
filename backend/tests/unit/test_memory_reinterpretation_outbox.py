@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import sys
 import types
@@ -38,6 +39,7 @@ from database.memory_reinterpretations import (
     InMemoryMemoryReinterpretationRepository,
     PostgresMemoryReinterpretationRepository,
 )
+from database import content_write_fence
 from ella.routers import corrections, memory_reinterpretation as reinterpretation_router
 from ella.routers.canonical_events import (
     CanonicalEventIn,
@@ -62,6 +64,17 @@ UID = "CaseSensitiveUserA"
 SESSION_ID = "signed-jti-1"
 CONVERSATION_ID = "memory-1"
 VERSION_ID = "summary-v1"
+
+
+@pytest.fixture(autouse=True)
+def _admitted_worker(monkeypatch):
+    @asynccontextmanager
+    async def admitted(uid):
+        yield SimpleNamespace(uid=uid)
+
+    monkeypatch.setattr(content_write_fence, "detached_content_write_fence", admitted)
+    monkeypatch.setattr(content_write_fence, "request_content_write_fence", admitted)
+    monkeypatch.setattr(content_write_fence, "assert_content_writer_admitted", lambda _uid: None)
 
 
 def _event(
@@ -542,6 +555,35 @@ def test_reinterpretation_completion_requires_configured_ledger_bearer(monkeypat
     assert accepted.json()["reinterpretation"]["job_id"]
 
 
+def test_reinterpretation_completion_rejects_post_tombstone_enqueue(monkeypatch):
+    repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=45)
+    store = InMemoryCanonicalEventStore(repository)
+    asyncio.run(store.write_batch([_event("turn-tombstoned", "The glasses are in the blue backpack.")]))
+
+    @asynccontextmanager
+    async def tombstoned(uid):
+        assert uid == UID
+        raise content_write_fence.ContentWriteFenceError("account_write_forbidden")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(content_write_fence, "request_content_write_fence", tombstoned)
+    monkeypatch.setenv("ELLA_MEMORY_REINTERPRETATION_ENABLED", "true")
+    monkeypatch.setenv("ELLA_EVENT_LEDGER_TOKEN", "ledger-secret")
+    app = FastAPI()
+    app.include_router(create_canonical_events_router(store))
+    session_id, completion = _completion()
+
+    response = TestClient(app).post(
+        f"/v1/ella/sessions/{session_id}/complete",
+        headers={"Authorization": "Bearer ledger-secret"},
+        json=completion.model_dump(mode="json"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == {"code": "account_write_forbidden", "retryable": False}
+    assert repository.jobs == {}
+
+
 def test_read_only_or_noise_completion_never_enqueues():
     async def run():
         for completion_values in (
@@ -852,6 +894,43 @@ def test_stale_starting_version_is_typed_conflict_before_hermes_call():
     asyncio.run(run())
 
 
+def test_stale_claim_fails_closed_before_hermes_delivery_or_durable_retry(monkeypatch):
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        hermes = _Hermes({"outcome": "no_change", "proposals": []})
+        checks = 0
+
+        @asynccontextmanager
+        async def admitted(uid):
+            assert uid == UID
+            yield SimpleNamespace(uid=uid)
+
+        def assert_current(uid):
+            nonlocal checks
+            assert uid == UID
+            checks += 1
+            if checks >= 2:
+                raise content_write_fence.ContentWriteFenceError("account_write_forbidden")
+
+        monkeypatch.setattr(content_write_fence, "detached_content_write_fence", admitted)
+        monkeypatch.setattr(content_write_fence, "assert_content_writer_admitted", assert_current)
+        worker = MemoryReinterpretationWorker(
+            repository,
+            hermes_client=hermes,
+            conversation_loader=_loader,
+        )
+
+        assert await worker.run_once("stale-worker") is None
+        job = next(iter(repository.jobs.values()))
+        assert job["status"] == "running"
+        assert hermes.calls == 0
+        assert repository.attempts[0]["status"] == "running"
+
+    asyncio.run(run())
+
+
 def test_retry_backoff_reaches_dead_letter_at_attempt_limit():
     class UnavailableHermes:
         async def propose(self, **kwargs):
@@ -1014,6 +1093,7 @@ def test_worker_heartbeat_renews_long_running_lease(monkeypatch):
         await worker._heartbeat_lease(
             {
                 "id": "job-1",
+                "uid": UID,
                 "transcript_revision": 4,
             }
         )
@@ -1224,7 +1304,7 @@ def test_authenticated_status_is_identifier_only_and_missing_nonowned_have_parit
     repository, job = asyncio.run(seed())
     app = FastAPI()
     app.include_router(reinterpretation_router.create_memory_reinterpretation_router(repository))
-    app.dependency_overrides[reinterpretation_router.auth.get_current_user_uid] = lambda: UID
+    app.dependency_overrides[reinterpretation_router.auth.get_writable_user_uid] = lambda: UID
     monkeypatch.setattr(
         reinterpretation_router.conversations_db,
         "get_conversation",
@@ -1241,7 +1321,7 @@ def test_authenticated_status_is_identifier_only_and_missing_nonowned_have_parit
     assert "proposal_plan" not in body
 
     missing = client.get("/v1/ella/conversations/missing/reinterpretations/latest")
-    app.dependency_overrides[reinterpretation_router.auth.get_current_user_uid] = lambda: UID.lower()
+    app.dependency_overrides[reinterpretation_router.auth.get_writable_user_uid] = lambda: UID.lower()
     nonowned = client.get(f"/v1/ella/conversations/{CONVERSATION_ID}/reinterpretations/latest")
     assert (missing.status_code, missing.json()) == (
         nonowned.status_code,
@@ -1496,7 +1576,7 @@ def test_worker_reinterpretation_receipt_and_authenticated_undo_restore_prior_su
 
     app = FastAPI()
     app.include_router(corrections.router)
-    app.dependency_overrides[corrections.auth.get_current_user_uid] = lambda: UID
+    app.dependency_overrides[corrections.auth.get_writable_user_uid] = lambda: UID
     client = TestClient(app)
 
     receipt = client.get(f"/v1/ella/conversations/{CONVERSATION_ID}/corrections/{correction_id}")

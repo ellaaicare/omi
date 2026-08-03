@@ -64,7 +64,7 @@ def create_memory_reinterpretation_router(
     @router.get("/v1/ella/conversations/{conversation_id}/reinterpretations/latest")
     async def latest_reinterpretation(
         conversation_id: str,
-        uid: str = Depends(auth.get_current_user_uid),
+        uid: str = Depends(auth.get_writable_user_uid),
     ) -> dict[str, Any]:
         job = await _owned_job(uid=uid, conversation_id=conversation_id)
         return {"ok": True, "reinterpretation": public_job(job)}
@@ -73,7 +73,7 @@ def create_memory_reinterpretation_router(
     async def get_reinterpretation(
         conversation_id: str,
         job_id: str,
-        uid: str = Depends(auth.get_current_user_uid),
+        uid: str = Depends(auth.get_writable_user_uid),
     ) -> dict[str, Any]:
         job = await _owned_job(uid=uid, conversation_id=conversation_id, job_id=job_id)
         return {"ok": True, "reinterpretation": public_job(job)}

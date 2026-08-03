@@ -196,7 +196,7 @@ class IntegrationResponse(BaseModel):
 
 
 @router.get("/v1/integrations/{app_key}", response_model=IntegrationResponse, tags=['integrations'])
-def get_integration(app_key: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_integration(app_key: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get integration connection status for the current user."""
     integration = users_db.get_integration(uid, app_key)
 
@@ -207,7 +207,7 @@ def get_integration(app_key: str, uid: str = Depends(auth.get_current_user_uid))
 
 
 @router.put("/v1/integrations/{app_key}", tags=['integrations'])
-def save_integration(app_key: str, data: IntegrationData, uid: str = Depends(auth.get_current_user_uid)):
+def save_integration(app_key: str, data: IntegrationData, uid: str = Depends(auth.get_writable_user_uid)):
     """Save or update an integration connection."""
     # Convert Pydantic model to dict, excluding None values
     integration_data = data.model_dump(exclude_none=True)
@@ -218,7 +218,7 @@ def save_integration(app_key: str, data: IntegrationData, uid: str = Depends(aut
 
 
 @router.delete("/v1/integrations/{app_key}", status_code=204, tags=['integrations'])
-def delete_integration(app_key: str, uid: str = Depends(auth.get_current_user_uid)):
+def delete_integration(app_key: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Delete an integration connection."""
     success = users_db.delete_integration(uid, app_key)
 
@@ -229,7 +229,7 @@ def delete_integration(app_key: str, uid: str = Depends(auth.get_current_user_ui
 
 
 @router.put("/v1/integrations/apple-health/sync", tags=['integrations'])
-def sync_apple_health_data(data: AppleHealthSyncData, uid: str = Depends(auth.get_current_user_uid)):
+def sync_apple_health_data(data: AppleHealthSyncData, uid: str = Depends(auth.get_writable_user_uid)):
     """
     Sync Apple Health data from the iOS device.
 
@@ -312,7 +312,7 @@ class OAuthUrlResponse(BaseModel):
 
 
 @router.get("/v1/integrations/{app_key}/oauth-url", response_model=OAuthUrlResponse, tags=['integrations'])
-def get_oauth_url(app_key: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_oauth_url(app_key: str, uid: str = Depends(auth.get_writable_user_uid)):
     """
     Get OAuth authorization URL for an integration.
     Frontend opens this URL in browser to start OAuth flow.

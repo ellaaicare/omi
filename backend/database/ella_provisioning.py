@@ -24,6 +24,7 @@ from database.runtime_targets import (
 )
 
 _pool: Optional[asyncpg.Pool] = None
+PROVIDER_ATTEMPT_NAMESPACE = uuid.UUID("48f8770f-c801-5ba7-8be1-aaafaf68480d")
 REQUIRED_PROVISIONING_INDEXES = (
     "ella_provisioning_jobs_user_schema_key",
     "ella_provisioning_jobs_state_updated_idx",
@@ -37,6 +38,10 @@ REQUIRED_PROVISIONING_INDEXES = (
     "ella_runtime_bindings_one_active_role_key",
     "ella_runtime_bindings_user_role_active_idx",
     "ella_runtime_bindings_health_updated_idx",
+    "ella_provider_attempts_idempotency_key",
+    "ella_provider_attempts_job_operation_key",
+    "ella_provider_attempts_correlation_ref_key",
+    "ella_provider_attempts_user_pending_idx",
 )
 REQUIRED_CLOUD_RUNTIME_INDEXES = (
     "users_profile_class_idx",
@@ -343,6 +348,54 @@ def _json_object(value: Any) -> Any:
     return value
 
 
+def ensure_omi_user_document_contents(
+    firestore_db: Any,
+    *,
+    uid: str,
+    email: str,
+    name: str,
+    timezone_name: str,
+    private_cloud_sync_default: bool = False,
+) -> bool:
+    """Apply the content-only Firestore mutation after the SQL write fence."""
+    user_ref = firestore_db.collection("users").document(uid)
+    snapshot = user_ref.get()
+    if snapshot.exists:
+        data = snapshot.to_dict() or {}
+        missing_defaults = {
+            key: value
+            for key, value in {
+                "uid": uid,
+                "email": email,
+                "name": name,
+                "time_zone": timezone_name,
+                "private_cloud_sync_enabled": private_cloud_sync_default,
+                "store_recording_permission": False,
+            }.items()
+            if key not in data
+        }
+        if missing_defaults:
+            missing_defaults["updated_at"] = datetime.now(timezone.utc)
+            user_ref.set(missing_defaults, merge=True)
+            return True
+        return False
+    now = datetime.now(timezone.utc)
+    user_ref.set(
+        {
+            "uid": uid,
+            "email": email,
+            "name": name,
+            "time_zone": timezone_name,
+            "created_at": now,
+            "updated_at": now,
+            "private_cloud_sync_enabled": private_cloud_sync_default,
+            "store_recording_permission": False,
+        },
+        merge=False,
+    )
+    return True
+
+
 class EllaProvisioningRepository:
     def __init__(self, pool: asyncpg.Pool, *, firestore_db: Any = None):
         self.pool = pool
@@ -359,6 +412,7 @@ class EllaProvisioningRepository:
             SELECT
                 to_regclass('public.ella_provisioning_jobs') IS NOT NULL AS jobs_table,
                 to_regclass('public.ella_runtime_bindings') IS NOT NULL AS bindings_table,
+                to_regclass('public.ella_provider_attempts') IS NOT NULL AS provider_attempts_table,
                 ARRAY(
                     SELECT required.index_name
                     FROM unnest($1::text[]) AS required(index_name)
@@ -378,6 +432,8 @@ class EllaProvisioningRepository:
             missing.append("table:ella_provisioning_jobs")
         if not row or not row["bindings_table"]:
             missing.append("table:ella_runtime_bindings")
+        if not row or not row["provider_attempts_table"]:
+            missing.append("table:ella_provider_attempts")
         if row:
             missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
         if missing:
@@ -499,7 +555,7 @@ class EllaProvisioningRepository:
             raise ProvisioningSchemaNotReadyError(missing)
 
     async def assert_self_hosted_invite_schema_ready(self) -> None:
-        """Require migration 015 before any invited self-hosted side effect."""
+        """Require migrations 015 and 017 before a self-hosted side effect."""
         row = await self.pool.fetchrow(
             """
             SELECT
@@ -536,6 +592,8 @@ class EllaProvisioningRepository:
                     )
                     ORDER BY required.index_name
                 ) AS missing_indexes
+                ,to_regclass(current_schema() || '.ella_provider_attempts') IS NOT NULL
+                    AS provider_attempts_table
             """,
             [table for table, _column in REQUIRED_SELF_HOSTED_INVITE_COLUMNS],
             [column for _table, column in REQUIRED_SELF_HOSTED_INVITE_COLUMNS],
@@ -549,6 +607,8 @@ class EllaProvisioningRepository:
             missing.extend(f"column:{value}" for value in (row["missing_columns"] or []))
             missing.extend(f"constraint:{value}" for value in (row["missing_constraints"] or []))
             missing.extend(f"index:{value}" for value in (row["missing_indexes"] or []))
+            if not row["provider_attempts_table"]:
+                missing.append("table:ella_provider_attempts")
         if missing:
             raise ProvisioningSchemaNotReadyError(missing)
 
@@ -700,6 +760,14 @@ class EllaProvisioningRepository:
                 if by_uid:
                     if str(by_uid["email"]).lower() != email.lower():
                         raise IdentityConflictError("uid_email_mismatch")
+                    status = str(by_uid["status"])
+                    if status == "PENDING":
+                        return dict(by_uid)
+                    await authority_advisory_lock.require_user_write_status(
+                        connection,
+                        owner_lock,
+                        user_id=by_uid["id"],
+                    )
                     updated = await connection.fetchrow(
                         """
                         UPDATE users
@@ -725,6 +793,11 @@ class EllaProvisioningRepository:
                     existing_uid = by_email["omi_uid"]
                     if existing_uid and existing_uid != uid:
                         raise IdentityConflictError("email_owned_by_different_uid")
+                    await authority_advisory_lock.require_user_write_status(
+                        connection,
+                        owner_lock,
+                        user_id=by_email["id"],
+                    )
                     updated = await connection.fetchrow(
                         """
                         UPDATE users
@@ -790,45 +863,37 @@ class EllaProvisioningRepository:
         if self.firestore_db is None:
             raise RuntimeError("firestore_client_unavailable")
 
-        def _ensure() -> bool:
-            user_ref = self.firestore_db.collection("users").document(uid)
-            snapshot = user_ref.get()
-            if snapshot.exists:
-                data = snapshot.to_dict() or {}
-                missing_defaults = {
-                    key: value
-                    for key, value in {
-                        "uid": uid,
-                        "email": email,
-                        "name": name,
-                        "time_zone": timezone_name,
-                        "private_cloud_sync_enabled": private_cloud_sync_default,
-                        "store_recording_permission": False,
-                    }.items()
-                    if key not in data
-                }
-                if missing_defaults:
-                    missing_defaults["updated_at"] = datetime.now(timezone.utc)
-                    user_ref.set(missing_defaults, merge=True)
-                    return True
-                return False
-            now = datetime.now(timezone.utc)
-            user_ref.set(
-                {
-                    "uid": uid,
-                    "email": email,
-                    "name": name,
-                    "time_zone": timezone_name,
-                    "created_at": now,
-                    "updated_at": now,
-                    "private_cloud_sync_enabled": private_cloud_sync_default,
-                    "store_recording_permission": False,
-                },
-                merge=False,
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
             )
-            return True
-
-        return await asyncio.to_thread(_ensure)
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
+                return await asyncio.to_thread(
+                    ensure_omi_user_document_contents,
+                    self.firestore_db,
+                    uid=uid,
+                    email=email,
+                    name=name,
+                    timezone_name=timezone_name,
+                    private_cloud_sync_default=private_cloud_sync_default,
+                )
 
     async def acquire_job(
         self,
@@ -838,25 +903,38 @@ class EllaProvisioningRepository:
         client_request_id: Optional[str],
         request_payload_hash: str,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO ella_provisioning_jobs (
-                id, user_id, target_schema_version, client_request_id,
-                request_payload_hash, state, stage, retryable
-            )
-            SELECT $1, u.id, $3, $4, $5, 'pending', 'identity_ready', true
-            FROM users u
-            WHERE u.omi_uid = $2
-            ON CONFLICT (user_id, target_schema_version) DO UPDATE
-            SET client_request_id = EXCLUDED.client_request_id
-            RETURNING *
-            """,
-            uuid.uuid4(),
-            uid,
-            target_schema_version,
-            client_request_id,
-            request_payload_hash,
-        )
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_provisioning_jobs (
+                        id, user_id, target_schema_version, client_request_id,
+                        request_payload_hash, state, stage, retryable
+                    ) VALUES ($1, $2, $3, $4, $5, 'pending', 'identity_ready', true)
+                    ON CONFLICT (user_id, target_schema_version) DO UPDATE
+                    SET client_request_id = EXCLUDED.client_request_id
+                    RETURNING *
+                    """,
+                    uuid.uuid4(),
+                    user_id,
+                    target_schema_version,
+                    client_request_id,
+                    request_payload_hash,
+                )
         if not row:
             raise LookupError("user_not_found")
         return dict(row)
@@ -875,26 +953,56 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def claim_job(self, job_id: str) -> Optional[dict[str, Any]]:
-        row = await self.pool.fetchrow(
-            """
-            UPDATE ella_provisioning_jobs
-            SET state = 'provisioning',
-                stage = 'profile_ready',
-                attempts = attempts + 1,
-                retryable = true,
-                error_code = NULL,
-                error_detail = '{}'::jsonb,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-              AND state NOT IN ('ready', 'blocked', 'rolling_back', 'manual_intervention')
-              AND (
-                    state NOT IN ('provisioning', 'retryable')
-                    OR updated_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
-                  )
-            RETURNING *
-            """,
-            uuid.UUID(str(job_id)),
-        )
+        job_uuid = uuid.UUID(str(job_id))
+        async with self.pool.acquire() as connection:
+            owner_row = await connection.fetchrow(
+                """
+                SELECT u.id, u.omi_uid
+                FROM ella_provisioning_jobs job
+                JOIN users u ON u.id = job.user_id
+                WHERE job.id = $1
+                """,
+                job_uuid,
+            )
+            if not owner_row:
+                return None
+            owner = authority_advisory_lock.AuthorityOwner.from_values(owner_row["id"], owner_row["id"])
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=str(owner_row["omi_uid"]),
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_provisioning_jobs
+                    SET state = 'provisioning',
+                        stage = 'profile_ready',
+                        attempts = attempts + 1,
+                        retryable = true,
+                        error_code = NULL,
+                        error_detail = '{}'::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND user_id = $2
+                      AND state NOT IN ('ready', 'blocked', 'rolling_back', 'manual_intervention')
+                      AND (
+                            state NOT IN ('provisioning', 'retryable')
+                            OR updated_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+                          )
+                    RETURNING *
+                    """,
+                    job_uuid,
+                    user_id,
+                )
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
@@ -1096,6 +1204,11 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=owner.account_id,
+                )
                 existing = await connection.fetchrow(
                     """
                     SELECT b.*, u.omi_uid, u.profile_class
@@ -1255,6 +1368,11 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=owner.account_id,
+                )
                 entitlement = admission.entitlement or {}
                 if (
                     str(entitlement.get("consent_policy_version") or "") != lineage.policy_version
@@ -1407,7 +1525,20 @@ class EllaProvisioningRepository:
     ) -> dict[str, Any]:
         """Append one receipt-owned external artifact before the next side effect."""
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
             async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                )
                 binding = await connection.fetchrow(
                     """
                     SELECT b.id
@@ -1458,28 +1589,56 @@ class EllaProvisioningRepository:
     ) -> dict[str, Any]:
         if state not in {"retryable", "blocked", "manual_intervention"}:
             raise ValueError("invalid_cloud_rollback_state")
-        row = await self.pool.fetchrow(
-            """
-            UPDATE ella_provisioning_jobs
-            SET state = $2,
-                stage = 'runtime_ready',
-                retryable = $3,
-                error_code = $4,
-                rollback_receipt = $5::jsonb,
-                manual_intervention_at = CASE
-                    WHEN $2 = 'manual_intervention' THEN CURRENT_TIMESTAMP
-                    ELSE manual_intervention_at
-                END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-            RETURNING *
-            """,
-            uuid.UUID(str(job_id)),
-            state,
-            retryable,
-            error_code[:120],
-            json.dumps(rollback_receipt),
-        )
+        job_uuid = uuid.UUID(str(job_id))
+        async with self.pool.acquire() as connection:
+            owner_row = await connection.fetchrow(
+                """
+                SELECT u.id, u.omi_uid
+                FROM ella_provisioning_jobs job
+                JOIN users u ON u.id = job.user_id
+                WHERE job.id = $1
+                """,
+                job_uuid,
+            )
+            if not owner_row:
+                raise RuntimePoolClaimError("runtime_pool_job_lost")
+            owner = authority_advisory_lock.AuthorityOwner.from_values(owner_row["id"], owner_row["id"])
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=str(owner_row["omi_uid"]),
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_provisioning_jobs
+                    SET state = $3,
+                        stage = 'runtime_ready',
+                        retryable = $4,
+                        error_code = $5,
+                        rollback_receipt = $6::jsonb,
+                        manual_intervention_at = CASE
+                            WHEN $3 = 'manual_intervention' THEN CURRENT_TIMESTAMP
+                            ELSE manual_intervention_at
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1 AND user_id = $2
+                    RETURNING *
+                    """,
+                    job_uuid,
+                    user_id,
+                    state,
+                    retryable,
+                    error_code[:120],
+                    json.dumps(rollback_receipt),
+                )
         if not row:
             raise RuntimePoolClaimError("runtime_pool_job_lost")
         return dict(row)
@@ -1508,6 +1667,11 @@ class EllaProvisioningRepository:
                     uid=uid,
                     owner=owner,
                     proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=owner.account_id,
                 )
                 selected = await connection.fetchrow(
                     """
@@ -1719,6 +1883,11 @@ class EllaProvisioningRepository:
                     uid=uid,
                     owner=owner,
                     proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=owner.account_id,
                 )
                 entitlement = admission.entitlement or {}
                 if (
@@ -2202,6 +2371,15 @@ class EllaProvisioningRepository:
             WHERE p.line_identity_key = $1
               AND p.contact_identity_key = $2
               AND p.status = 'enabled'
+              AND u.status = 'ACTIVE'
+              AND b.active = true
+              AND b.status IN ('internal_canary', 'active')
+              AND b.health_state = 'healthy'
+              AND b.account_user_id = u.id
+              AND b.profile_user_id = u.id
+              AND b.runtime_target_mode = 'hermes-cloud-photon'
+              AND b.target_endpoint_ref IS NOT NULL
+              AND b.target_credential_ref IS NOT NULL
             ORDER BY p.id
             LIMIT 2
             """,
@@ -2220,26 +2398,64 @@ class EllaProvisioningRepository:
         oauth_expires_at: datetime,
         receipt: dict[str, Any],
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
-            """
-            UPDATE ella_photon_channel_bindings
-            SET sidecar_connection_key = $2,
-                sidecar_connected_at = CURRENT_TIMESTAMP,
-                oauth_expires_at = $3,
-                preflight_receipt = $4::jsonb,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-              AND status = 'enabled'
-              AND allow_all = false
-              AND attachments_enabled = false
-              AND caregiver_delivery_enabled = false
-            RETURNING *
-            """,
-            uuid.UUID(str(photon_binding_id)),
-            connection_key,
-            oauth_expires_at,
-            json.dumps(receipt),
-        )
+        binding_uuid = uuid.UUID(str(photon_binding_id))
+        async with self.pool.acquire() as connection:
+            owner_row = await connection.fetchrow(
+                """
+                SELECT u.id, u.omi_uid
+                FROM ella_photon_channel_bindings p
+                JOIN users u ON u.id = p.user_id
+                WHERE p.id = $1
+                """,
+                binding_uuid,
+            )
+            if not owner_row:
+                raise RuntimePoolClaimError("photon_binding_not_ready")
+            owner = authority_advisory_lock.AuthorityOwner.from_values(owner_row["id"], owner_row["id"])
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=str(owner_row["omi_uid"]),
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_photon_channel_bindings p
+                    SET sidecar_connection_key = $2,
+                        sidecar_connected_at = CURRENT_TIMESTAMP,
+                        oauth_expires_at = $3,
+                        preflight_receipt = $4::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM ella_runtime_bindings b
+                    WHERE p.id = $1
+                      AND p.status = 'enabled'
+                      AND p.allow_all = false
+                      AND p.attachments_enabled = false
+                      AND p.caregiver_delivery_enabled = false
+                      AND b.id = p.runtime_binding_id
+                      AND b.user_id = p.user_id
+                      AND b.active = true
+                      AND b.status IN ('internal_canary', 'active')
+                      AND b.health_state = 'healthy'
+                      AND b.account_user_id = p.user_id
+                      AND b.profile_user_id = p.user_id
+                      AND b.runtime_target_mode = 'hermes-cloud-photon'
+                      AND b.target_endpoint_ref IS NOT NULL
+                      AND b.target_credential_ref IS NOT NULL
+                    RETURNING p.*
+                    """,
+                    binding_uuid,
+                    connection_key,
+                    oauth_expires_at,
+                    json.dumps(receipt),
+                )
         if not row:
             raise RuntimePoolClaimError("photon_binding_not_ready")
         return dict(row)
@@ -2712,33 +2928,116 @@ class EllaProvisioningRepository:
         error_detail: Optional[dict[str, Any]] = None,
         receipt: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
-            """
-            UPDATE ella_provisioning_jobs
-            SET state = $2,
-                stage = $3,
-                retryable = $4,
-                error_code = $5,
-                error_detail = $6::jsonb,
-                receipts = CASE
-                    WHEN $7::jsonb = '{}'::jsonb THEN receipts
-                    ELSE COALESCE(receipts, '[]'::jsonb) || jsonb_build_array($7::jsonb)
-                END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-            RETURNING *
-            """,
-            uuid.UUID(str(job_id)),
-            state,
-            stage,
-            retryable,
-            error_code,
-            json.dumps(error_detail or {}),
-            json.dumps(receipt or {}),
-        )
+        job_uuid = uuid.UUID(str(job_id))
+        async with self.pool.acquire() as connection:
+            owner_row = await connection.fetchrow(
+                """
+                SELECT u.id, u.omi_uid
+                FROM ella_provisioning_jobs job
+                JOIN users u ON u.id = job.user_id
+                WHERE job.id = $1
+                """,
+                job_uuid,
+            )
+            if not owner_row:
+                raise LookupError("provisioning_job_not_found")
+            owner = authority_advisory_lock.AuthorityOwner.from_values(owner_row["id"], owner_row["id"])
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=str(owner_row["omi_uid"]),
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_provisioning_jobs
+                    SET state = $3,
+                        stage = $4,
+                        retryable = $5,
+                        error_code = $6,
+                        error_detail = $7::jsonb,
+                        receipts = CASE
+                            WHEN $8::jsonb = '{}'::jsonb THEN receipts
+                            ELSE COALESCE(receipts, '[]'::jsonb) || jsonb_build_array($8::jsonb)
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1 AND user_id = $2
+                    RETURNING *
+                    """,
+                    job_uuid,
+                    user_id,
+                    state,
+                    stage,
+                    retryable,
+                    error_code,
+                    json.dumps(error_detail or {}),
+                    json.dumps(receipt or {}),
+                )
         if not row:
             raise LookupError("provisioning_job_not_found")
         return dict(row)
+
+    async def begin_provider_attempt(
+        self,
+        *,
+        uid: str,
+        job_id: str,
+        provider: str = "hermes",
+        operation: str = "provision",
+    ) -> dict[str, Any]:
+        """Persist the durable marker before an external provider call."""
+        if provider != "hermes" or operation != "provision":
+            raise ValueError("provider_attempt_contract_invalid")
+        job_uuid = uuid.UUID(str(job_id))
+        idempotency_key = uuid.uuid5(PROVIDER_ATTEMPT_NAMESPACE, f"{job_uuid}:{provider}:{operation}")
+        correlation_ref = f"ella-ext-{uuid.uuid4().hex[:16]}"
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_provider_attempts (
+                        user_id, provisioning_job_id, provider, operation,
+                        idempotency_key, correlation_ref
+                    )
+                    SELECT $1, job.id, $3, $4, $5, $6
+                    FROM ella_provisioning_jobs job
+                    WHERE job.id = $2 AND job.user_id = $1
+                    ON CONFLICT (provisioning_job_id, provider, operation)
+                    DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    user_id,
+                    job_uuid,
+                    provider,
+                    operation,
+                    idempotency_key,
+                    correlation_ref,
+                )
+                if not row:
+                    raise LookupError("provisioning_job_not_found")
+                return dict(row)
 
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
         async with self.pool.acquire() as connection:
@@ -2757,6 +3056,12 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=owner.account_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
                 row = await connection.fetchrow(
                     """
                     INSERT INTO ella_runtime_bindings (
@@ -2772,6 +3077,7 @@ class EllaProvisioningRepository:
                         $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
                     FROM users u
                     WHERE u.omi_uid = $2
+                      AND u.status IN ('PENDING', 'ACTIVE')
                     ON CONFLICT (user_id, role, provider)
                     WHERE provider <> 'hermes_cloud'
                     DO UPDATE
@@ -2856,6 +3162,12 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=owner.account_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
+                )
                 await voice_canary_db.lock_runtime_authority_on_connection(
                     connection,
                     uid=uid,
@@ -2867,7 +3179,9 @@ class EllaProvisioningRepository:
                     SELECT b.*
                     FROM ella_runtime_bindings b
                     JOIN users u ON u.id = b.user_id
-                    WHERE u.omi_uid = $1 AND b.provider = $2 AND b.role = $3
+                    WHERE u.omi_uid = $1
+                      AND u.status IN ('PENDING', 'ACTIVE')
+                      AND b.provider = $2 AND b.role = $3
                     FOR UPDATE
                     """,
                     uid,
@@ -3065,6 +3379,7 @@ class EllaProvisioningRepository:
                     UPDATE users
                     SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
+                      AND status IN ('PENDING', 'ACTIVE')
                     """,
                     selected["user_id"],
                 )
@@ -3081,17 +3396,24 @@ class EllaProvisioningRepository:
                     connection,
                     owner=owner,
                 )
-                await authority_advisory_lock.verify_self_owner_after_lock(
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
                     connection,
                     uid=uid,
                     owner=owner,
                     proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    connection,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
                 )
                 result = await connection.execute(
                     """
                     UPDATE users
                     SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
                     WHERE omi_uid = $1
+                      AND status IN ('PENDING', 'ACTIVE')
                     """,
                     uid,
                 )

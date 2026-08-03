@@ -10,6 +10,7 @@ from fastapi.websockets import WebSocketDisconnect, WebSocket
 from starlette.websockets import WebSocketState
 
 import database.conversations as conversations_db
+from database import content_write_fence
 from database import users as users_db
 from database.redis_db import get_cached_user_geolocation
 from models.conversation import Conversation, ConversationStatus, Geolocation
@@ -105,6 +106,27 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
     except Exception as e:
         print(f"Error in _process_conversation_task: {e}", uid, conversation_id)
         response = {"conversation_id": conversation_id, "error": str(e)}
+        data = bytearray()
+        data.extend(struct.pack("I", 201))
+        data.extend(bytes(json.dumps(response), "utf-8"))
+        try:
+            await websocket.send_bytes(data)
+        except Exception:
+            pass
+
+
+async def _process_conversation_task_with_fence(
+    uid: str,
+    conversation_id: str,
+    language: str,
+    websocket: WebSocket,
+):
+    """Own a durable registration for the complete detached processing graph."""
+    try:
+        async with content_write_fence.detached_content_write_fence(uid):
+            await _process_conversation_task(uid, conversation_id, language, websocket)
+    except content_write_fence.ContentWriteFenceError as exc:
+        response = {"conversation_id": conversation_id, "error": exc.code}
         data = bytearray()
         data.extend(struct.pack("I", 201))
         data.extend(bytes(json.dumps(response), "utf-8"))
@@ -327,11 +349,15 @@ async def _websocket_util_trigger(
                     memory_id = res.get('memory_id')
 
                     # DEBUG: Log received transcript segments
-                    print(f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}")
+                    print(
+                        f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}"
+                    )
                     if segments and len(segments) > 0:
                         # Log first segment content (truncated)
                         first_seg = segments[0]
-                        text_preview = first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
+                        text_preview = (
+                            first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
+                        )
                         print(f"[TRANSCRIPT-DEBUG] First segment preview: {text_preview}")
 
                     # Update conversation_id from transcript if provided
@@ -351,7 +377,9 @@ async def _websocket_util_trigger(
                     language = res.get('language', 'en')
                     if conversation_id:
                         print(f"Pusher received process_conversation request: {conversation_id}", uid)
-                        safe_create_task(_process_conversation_task(uid, conversation_id, language, websocket))
+                        safe_create_task(
+                            _process_conversation_task_with_fence(uid, conversation_id, language, websocket)
+                        )
                     continue
 
                 # Speaker sample extraction request - queue for background processing
@@ -412,11 +440,13 @@ async def _websocket_util_trigger(
                     ):
                         if len(audio_bytes_queue) >= AUDIO_BYTES_QUEUE_WARN_SIZE:
                             print(f"Warning: audio_bytes_queue size {len(audio_bytes_queue)}", uid)
-                        audio_bytes_queue.append({
-                            'type': 'app',
-                            'sample_rate': sample_rate,
-                            'data': trigger_audiobuffer.copy(),
-                        })
+                        audio_bytes_queue.append(
+                            {
+                                'type': 'app',
+                                'sample_rate': sample_rate,
+                                'data': trigger_audiobuffer.copy(),
+                            }
+                        )
                         audio_bytes_event.set()  # Wake consumer immediately
                         trigger_audiobuffer = bytearray()
                     if (
@@ -425,11 +455,13 @@ async def _websocket_util_trigger(
                     ):
                         if len(audio_bytes_queue) >= AUDIO_BYTES_QUEUE_WARN_SIZE:
                             print(f"Warning: audio_bytes_queue size {len(audio_bytes_queue)}", uid)
-                        audio_bytes_queue.append({
-                            'type': 'webhook',
-                            'sample_rate': sample_rate,
-                            'data': audiobuffer.copy(),
-                        })
+                        audio_bytes_queue.append(
+                            {
+                                'type': 'webhook',
+                                'sample_rate': sample_rate,
+                                'data': audiobuffer.copy(),
+                            }
+                        )
                         audio_bytes_event.set()  # Wake consumer immediately
                         audiobuffer = bytearray()
                     continue

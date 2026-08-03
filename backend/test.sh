@@ -16,4 +16,6 @@ pytest tests/unit/test_voice_message_language.py -v
 pytest tests/unit/test_speaker_assignment.py -v
 pytest tests/unit/test_voice_canary.py -v
 pytest tests/unit/test_voice_proxy_auth.py -v
+pytest tests/unit/test_content_write_fence.py -v
+pytest tests/unit/test_trace_deletion_finality.py -v
 pytest tests/postgres/test_voice_canary_postgres.py -v

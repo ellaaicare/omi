@@ -160,7 +160,7 @@ class DismissAnnouncementRequest(BaseModel):
 async def dismiss_announcement_endpoint(
     announcement_id: str,
     data: DismissAnnouncementRequest,
-    uid: str = Depends(auth_endpoints.get_current_user_uid),
+    uid: str = Depends(auth_endpoints.get_writable_user_uid),
 ):
     """
     Mark an announcement as dismissed for the current user.

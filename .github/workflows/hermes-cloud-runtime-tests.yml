@@ -5,14 +5,41 @@ on:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
+      - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
+      - "backend/database/content_writer_owner.py"
+      - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
+      - "backend/database/memory_reinterpretations.py"
+      - "backend/routers/action_items.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/chat.py"
+      - "backend/routers/developer.py"
+      - "backend/routers/imports.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/memories.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/sync.py"
+      - "backend/routers/transcribe.py"
+      - "backend/routers/wrapped.py"
+      - "backend/routers/workflow.py"
+      - "backend/utils/imports/limitless.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/other/storage.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
-      - "backend/routers/transcribe.py"
+      - "backend/routers/users.py"
+      - "backend/database/users.py"
+      - "backend/utils/other/endpoints.py"
       - "backend/ella/__init__.py"
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
@@ -35,6 +62,7 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/account_deletion.py"
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
@@ -57,17 +85,22 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
       - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/scripts/voice_canary_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/canonical_omi.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
@@ -83,6 +116,14 @@ on:
       - "backend/tests/unit/test_hermes_binding_envelope_contract.py"
       - "backend/tests/unit/test_hermes_product_fit_canary.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
+      - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
+      - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
+      - "backend/tests/unit/test_trace_deletion_finality.py"
+      - "backend/tests/unit/test_conversation_processing_failures.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
@@ -106,14 +147,41 @@ on:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
+      - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
+      - "backend/database/content_writer_owner.py"
+      - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
+      - "backend/database/memory_reinterpretations.py"
+      - "backend/routers/action_items.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/chat.py"
+      - "backend/routers/developer.py"
+      - "backend/routers/imports.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/memories.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/sync.py"
+      - "backend/routers/transcribe.py"
+      - "backend/routers/wrapped.py"
+      - "backend/routers/workflow.py"
+      - "backend/utils/imports/limitless.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/other/storage.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
-      - "backend/routers/transcribe.py"
+      - "backend/routers/users.py"
+      - "backend/database/users.py"
+      - "backend/utils/other/endpoints.py"
       - "backend/ella/__init__.py"
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
@@ -136,6 +204,7 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/account_deletion.py"
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
@@ -158,17 +227,22 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
       - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/scripts/voice_canary_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/canonical_omi.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
@@ -184,6 +258,14 @@ on:
       - "backend/tests/unit/test_hermes_binding_envelope_contract.py"
       - "backend/tests/unit/test_hermes_product_fit_canary.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
+      - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
+      - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
+      - "backend/tests/unit/test_trace_deletion_finality.py"
+      - "backend/tests/unit/test_conversation_processing_failures.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
@@ -224,6 +306,7 @@ jobs:
       ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED: "false"
       ELLA_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/hermes_cloud_test
       FIRESTORE_EMULATOR_HOST: localhost:9999
+      STORAGE_EMULATOR_HOST: http://localhost:4443
       GCLOUD_PROJECT: omi-ci
       GOOGLE_CLOUD_PROJECT: omi-ci
       ENCRYPTION_SECRET: omi_ci_hermes_cloud_test_only_32_bytes
@@ -255,28 +338,58 @@ jobs:
           "openapi-spec-validator==0.7.1"
           "PyYAML==6.0.2"
           "python-multipart==0.0.9"
+          "redis==5.0.8"
+          "stripe==11.3.0"
           "websockets==12.0"
 
       - name: Compile Hermes Cloud runtime modules
         run: >-
           python -m py_compile
+          database/account_deletion.py
           database/authority_advisory_lock.py
+          database/content_write_fence.py
+          database/content_write_recovery.py
+          database/content_write_recovery_authority.py
+          database/content_writer_owner.py
+          database/firestore_account_deletion.py
+          database/redis_db.py
+          database/memory_reinterpretations.py
+          routers/action_items.py
+          routers/apps.py
+          routers/chat.py
+          routers/developer.py
+          routers/imports.py
+          routers/integration.py
+          routers/mcp.py
+          routers/mcp_sse.py
+          routers/memories.py
+          routers/pusher.py
+          routers/sync.py
+          routers/transcribe.py
+          routers/wrapped.py
+          routers/workflow.py
+          utils/imports/limitless.py
+          utils/conversations/process_conversation.py
+          utils/other/storage.py
+          database/users.py
           database/ella_provisioning.py
           database/hermes_cloud_enrichment_outbox.py
           database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py
           database/voice_canary.py
-          routers/transcribe.py
+          routers/users.py
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
           ella/routers/ai_consent.py
+          ella/routers/canonical_events.py
           ella/routers/hermes_cloud_enrichment.py
           ella/routers/guardian.py
           ella/routers/invites.py
           ella/routers/onboarding.py
           ella/routers/observer.py
           ella/routers/plato_mcp.py
+          ella/services/account_deletion.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
           ella/services/hermes_broker_client.py
@@ -302,23 +415,47 @@ jobs:
           ella/utils/identity_sync.py
           ella/utils/provision_authority.py
           scripts/hermes_cloud_pool_admin.py
+          scripts/ella_memory_e2e_smoke.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_product_fit_canary.py
           scripts/pilot_invite_admin.py
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
+          scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
           utils/ella/postprocess.py
+          utils/ella/canonical_omi.py
           utils/ella/scanner_keyterms.py
+          utils/other/endpoints.py
 
       - name: Validate formatting and OpenAPI contract
         run: >-
           black --check --line-length 120 --skip-string-normalization
+          database/account_deletion.py
           database/authority_advisory_lock.py
+          database/content_write_fence.py
+          database/content_write_recovery.py
+          database/content_write_recovery_authority.py
+          database/content_writer_owner.py
+          database/firestore_account_deletion.py
+          database/redis_db.py
+          database/memory_reinterpretations.py
+          routers/action_items.py
+          routers/apps.py routers/integration.py
+          routers/chat.py routers/developer.py routers/imports.py
+          routers/mcp.py routers/mcp_sse.py routers/memories.py
+          routers/pusher.py
+          routers/sync.py routers/transcribe.py routers/wrapped.py routers/workflow.py
+          utils/imports/limitless.py
+          utils/conversations/process_conversation.py utils/other/storage.py
           database/ella_provisioning.py database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/ai_consent.py ella/routers/chat.py
+          ella/routers/canonical_events.py
           ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py
           ella/services/hermes_cloud_policy.py
@@ -327,6 +464,9 @@ jobs:
           ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
           ella/services/hermes_cloud_staged_attestation.py
           ella/services/hermes_cloud_runtime.py
+          ella/services/account_deletion.py
+          ella/services/ai_consent.py
+          ella/services/hermes_cloud_enrichment_outbox.py
           ella/services/consent_authority.py ella/services/invitation_authority.py
           ella/services/memory_reinterpretation.py
           ella/services/observer_extractor.py
@@ -334,11 +474,21 @@ jobs:
           ella/services/summary_recovery.py
           ella/utils/auto_provision.py ella/utils/identity_sync.py
           ella/utils/provision_authority.py utils/ella/scanner_keyterms.py
+          utils/ella/canonical_omi.py
+          scripts/ella_memory_e2e_smoke.py
           scripts/voice_canary_admin.py
+          scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
+          tests/unit/test_account_deletion.py
+          tests/unit/test_content_write_fence.py
+          tests/unit/test_durable_worker_deletion_finality.py
+          tests/unit/test_trace_deletion_finality.py
           tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_guardian_delivery.py
@@ -367,11 +517,72 @@ jobs:
           &&
           python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
 
+      - name: Prove container root refuses before imports or writes
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/source:ro" python:3.12-slim sh -ceu '
+            mkdir -p /opt/omi-recovery /tmp/hostile/database /tmp/recovery-cwd
+            cp -a /source /opt/omi-recovery/backend
+            chown -R 0:0 /opt/omi-recovery
+            chmod -R go-w /opt/omi-recovery
+            printf "%s\n" "from pathlib import Path" "Path(\"/tmp/hostile-marker\").write_text(\"loaded\")" > /tmp/hostile/database/__init__.py
+            ln -s /tmp/credential-target /tmp/recovery-cwd/google-credentials.json
+            set +e
+            cd /tmp/recovery-cwd
+            env \
+              PYTHONPATH=/tmp/hostile \
+              SERVICE_ACCOUNT_JSON="{\"private_key\":\"fake-control\"}" \
+              FIRESTORE_EMULATOR_HOST=127.0.0.1:65530 \
+              GCLOUD_PROJECT=wrong-project \
+              GOOGLE_CLOUD_PROJECT=wrong-project \
+              /usr/local/bin/python -I \
+              /opt/omi-recovery/backend/scripts/content_writer_recovery.py \
+              --subject-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+              --token-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            status=$?
+            set -e
+            test "$status" -eq 77
+            test ! -e /tmp/credential-target
+            test ! -e /tmp/hostile-marker
+            test "$(find /tmp/recovery-cwd -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+          '
+          docker run --rm --privileged --pid=host -v "$PWD:/source:ro" python:3.12-slim sh -ceu '
+            mkdir -p /opt/omi-recovery /tmp/hostile/database /tmp/recovery-cwd
+            cp -a /source /opt/omi-recovery/backend
+            chown -R 0:0 /opt/omi-recovery
+            chmod -R go-w /opt/omi-recovery
+            printf "%s\n" "from pathlib import Path" "Path(\"/tmp/hostile-marker\").write_text(\"loaded\")" > /tmp/hostile/database/__init__.py
+            ln -s /tmp/credential-target /tmp/recovery-cwd/google-credentials.json
+            set +e
+            cd /tmp/recovery-cwd
+            env \
+              PYTHONPATH=/tmp/hostile \
+              SERVICE_ACCOUNT_JSON="{\"private_key\":\"fake-control\"}" \
+              FIRESTORE_EMULATOR_HOST=127.0.0.1:65530 \
+              GCLOUD_PROJECT=wrong-project \
+              GOOGLE_CLOUD_PROJECT=wrong-project \
+              /usr/local/bin/python -I \
+              /opt/omi-recovery/backend/scripts/content_writer_recovery.py \
+              --subject-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+              --token-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            status=$?
+            set -e
+            test "$status" -eq 77
+            test ! -e /tmp/credential-target
+            test ! -e /tmp/hostile-marker
+            test "$(find /tmp/recovery-cwd -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+          '
+
       - name: Run Hermes Cloud and isolation failure-path tests
         run: |
           set -euo pipefail
           collected="$(
             pytest --collect-only -q \
+              tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
+              tests/unit/test_durable_worker_deletion_finality.py \
+              tests/unit/test_trace_deletion_finality.py \
+              tests/unit/test_conversation_processing_failures.py \
               tests/unit/test_ella_ai_consent.py \
               tests/unit/test_ella_ai_consent_route_gates.py \
               tests/unit/test_hermes_cloud_migration.py \
@@ -401,6 +612,68 @@ jobs:
           )"
           required_ids=(
             "tests/unit/test_hermes_binding_envelope_contract.py::test_hermes_binding_envelope_v1_identity_and_content_free_shape"
+            "tests/unit/test_account_deletion.py::test_authenticated_route_delegates_to_the_resumable_deletion_service"
+            "tests/unit/test_account_deletion.py::test_production_route_uses_legacy_resumable_deletion_when_ella_authority_is_explicitly_disabled"
+            "tests/unit/test_account_deletion.py::test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable"
+            "tests/unit/test_account_deletion.py::test_retained_firebase_subject_is_fenced_from_authenticated_content_writes"
+            "tests/unit/test_account_deletion.py::test_deletion_service_never_reports_success_when_routing_trace_purge_is_unavailable"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
+            "tests/unit/test_account_deletion.py::test_firestore_inventory_snapshot_covers_every_repository_owned_root"
+            "tests/unit/test_account_deletion.py::test_production_firestore_cleanup_removes_seeded_inventory_and_retains_other_uid"
+            "tests/unit/test_account_deletion.py::test_firestore_owned_collection_purge_is_bounded_across_multiple_batches"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[analytics]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[tasks]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_positive_control_detects_new_uid_linked_top_level_collection"
+            "tests/unit/test_account_deletion.py::test_firestore_api_key_cache_failure_preserves_resumable_key_record"
+            "tests/unit/test_account_deletion.py::test_deletion_service_retains_firebase_when_memory_work_purge_is_unavailable"
+            "tests/unit/test_account_deletion.py::test_canonical_ledger_purge_is_resumable_and_precedes_firebase_last"
+            "tests/unit/test_content_write_fence.py::test_expired_registration_never_proves_a_live_writer_absent"
+            "tests/unit/test_content_write_fence.py::test_detached_writer_transfers_child_registration_before_parent_release"
+            "tests/unit/test_content_write_fence.py::test_mounted_limitless_worker_transfers_fence_until_actual_upsert_finishes"
+            "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[consent]"
+            "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[entitlement]"
+            "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact"
+            "tests/unit/test_content_write_fence.py::test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_utilities"
+            "tests/unit/test_content_write_fence.py::test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfenced_uid_writer"
+            "tests/unit/test_content_write_fence.py::test_threaded_mutation_stale_token_is_joined_before_failure"
+            "tests/unit/test_content_write_fence.py::test_threaded_mutation_survives_repeated_cancellation_until_thread_terminal"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_mounted_canonical_route_writes_after_tombstone"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_mounted_canonical_auth_drain_exact_purge_firebase_last_and_retry"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_two_stops_release_enrichment_writer_before_thread_terminal"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_process_restart_uses_root_cli_and_real_kernel_terminal_proof_before_firebase_last"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[host-account_writer_recovery_host_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[boot-account_writer_recovery_boot_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[namespace-account_writer_recovery_pid_namespace_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[start-account_writer_recovery_pid_reused]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_stale_cross_uid_ownerless_and_actual_unprivileged_invocation"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_cross_generation_replacement_after_real_terminal_proof"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_recovery_surface_is_exact_and_idempotent"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_different_token_compaction_keeps_only_latest_retry_authority"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_receipt_is_strictly_bounded_across_five_thousand_cycles_and_deletion_converges"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stale_receipt_or_hash_collision_never_releases_a_different_writer"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_pinned_recovery_authority_ignores_hostile_ambient_project_and_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_rejects_emulator_mismatch_and_symlink_before_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_wrong_receipt_or_credential_project_loads_no_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_production_recovery_modules_refuse_darwin_before_firestore_calls"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[timeout]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[proposal]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[correction]"
+            "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_stale_claim_fails_closed_at_external_delivery_boundary"
+            "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_retry"
+            "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_enqueue"
+            "tests/unit/test_conversation_processing_failures.py::test_process_conversation_provider_failure_persists_retryable_payload"
+            "tests/unit/test_content_write_fence.py::test_request_fence_covers_streamed_commit_after_route_returns"
+            "tests/unit/test_trace_deletion_finality.py::test_trace_probe_positive_control_reproduces_old_mounted_escape"
+            "tests/unit/test_trace_deletion_finality.py::test_mounted_trace_persistence_is_drained_purged_and_tombstoned"
+            "tests/unit/test_trace_deletion_finality.py::test_trace_reads_require_exact_authenticated_subject"
+            "tests/unit/test_trace_deletion_finality.py::test_concurrent_trace_requests_release_request_lifetimes_before_bounded_pool_progress"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_routing_trace_purge_is_exact_repeatable_and_retains_other_users"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_memory_reinterpretation_purge_removes_attempts_and_retains_other_users"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_canonical_ledger_positive_control_exact_purge_rollback_and_retry"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
             "tests/unit/test_hermes_product_fit_canary.py::test_scenarios_a_to_f_pass_with_content_free_stage_tables"
             "tests/unit/test_hermes_product_fit_canary.py::test_replay_errors_fail_closed_for_outcome_correlation_session_timeout_and_ordering"
@@ -417,10 +690,21 @@ jobs:
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_tombstone_trigger_allows_only_monotonic_terminal_proof"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_direct_writer_cannot_cross_finalization_count_read"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
+          test "${#required_ids[@]}" -eq 84
           collected_ids="$(
             pytest --collect-only -q \
+              tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
+              tests/unit/test_durable_worker_deletion_finality.py \
+              tests/unit/test_trace_deletion_finality.py \
+              tests/unit/test_conversation_processing_failures.py \
+              tests/unit/test_hermes_cloud_enrichment_outbox.py \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_ella_runtime_route_isolation.py \
@@ -436,8 +720,13 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 490
+          test "$collected" -eq 582
           pytest \
+            tests/unit/test_account_deletion.py \
+            tests/unit/test_content_write_fence.py \
+            tests/unit/test_durable_worker_deletion_finality.py \
+            tests/unit/test_trace_deletion_finality.py \
+            tests/unit/test_conversation_processing_failures.py \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
             tests/unit/test_hermes_cloud_migration.py \
@@ -510,13 +799,17 @@ jobs:
             tests/unit/test_ella_provision_authority_split.py \
             tests/unit/test_ella_plato_mcp.py \
             -v
-          test "$(
+          advisory_ids="$(
             pytest --collect-only -q \
               tests/unit/test_authority_advisory_lock.py \
               tests/unit/test_authority_writer_guard.py \
               tests/postgres/test_authority_advisory_lock_postgres.py |
-              grep -c '::'
-          )" -eq 65
+              sed '/^$/d'
+          )"
+          test "$(grep -c '::' <<<"$advisory_ids")" -eq 66
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_content_admission_releases_pool_before_same_owner_nested_writers_at_full_capacity" \
+            <<<"$advisory_ids"
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
@@ -526,7 +819,7 @@ jobs:
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 18
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 19
           pytest tests/unit/test_ella_guardian_delivery.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
@@ -534,7 +827,17 @@ jobs:
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 19
           pytest tests/unit/test_invitation_redemption.py -v
-          test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 28
+          memory_reinterpretation_ids="$(
+            pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py |
+              sed '/^$/d'
+          )"
+          test "$(grep -c '::' <<<"$memory_reinterpretation_ids")" -eq 30
+          grep -Fqx \
+            "tests/unit/test_memory_reinterpretation_outbox.py::test_reinterpretation_completion_rejects_post_tombstone_enqueue" \
+            <<<"$memory_reinterpretation_ids"
+          grep -Fqx \
+            "tests/unit/test_memory_reinterpretation_outbox.py::test_stale_claim_fails_closed_before_hermes_delivery_or_durable_retry" \
+            <<<"$memory_reinterpretation_ids"
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v

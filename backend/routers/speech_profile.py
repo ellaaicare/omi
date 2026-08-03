@@ -31,12 +31,12 @@ router = APIRouter()
 
 
 @router.get('/v3/speech-profile', tags=['v3'])
-def has_speech_profile(uid: str = Depends(auth.get_current_user_uid)):
+def has_speech_profile(uid: str = Depends(auth.get_writable_user_uid)):
     return {'has_profile': get_user_has_speech_profile(uid, max_age_days=90)}
 
 
 @router.get('/v4/speech-profile', tags=['v3'])
-def get_speech_profile(uid: str = Depends(auth.get_current_user_uid)):
+def get_speech_profile(uid: str = Depends(auth.get_writable_user_uid)):
     return {'url': get_profile_audio_if_exists(uid, download=False)}
 
 
@@ -49,7 +49,7 @@ def get_speech_profile(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.post('/v3/upload-audio', tags=['v3'])
-def upload_profile(file: UploadFile, uid: str = Depends(auth.get_current_user_uid)):
+def upload_profile(file: UploadFile, uid: str = Depends(auth.get_writable_user_uid)):
     os.makedirs(f'_temp/{uid}', exist_ok=True)
     file_path = f"_temp/{uid}/{file.filename}"
     with open(file_path, 'wb') as f:
@@ -81,7 +81,7 @@ def upload_profile(file: UploadFile, uid: str = Depends(auth.get_current_user_ui
 
 @router.delete('/v3/speech-profile/expand', tags=['v3'])
 def delete_extra_speech_profile_sample(
-    memory_id: str, segment_idx: int, person_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
+    memory_id: str, segment_idx: int, person_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)
 ):
     print('delete_extra_speech_profile_sample', memory_id, segment_idx, person_id, uid)
     file_name = f'{memory_id}_segment_{segment_idx}.wav'
@@ -97,7 +97,7 @@ def delete_extra_speech_profile_sample(
 
 
 @router.get('/v3/speech-profile/expand', tags=['v3'])
-def get_extra_speech_profile_samples(person_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)):
+def get_extra_speech_profile_samples(person_id: Optional[str] = None, uid: str = Depends(auth.get_writable_user_uid)):
     if person_id:
         return get_user_person_speech_samples(uid, person_id)
     return get_additional_profile_recordings(uid)

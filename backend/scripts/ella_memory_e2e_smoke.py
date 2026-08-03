@@ -217,6 +217,8 @@ class MemorySmoke:
     def seed_multichannel_events(self) -> None:
         if not self.args.seed_multichannel:
             return
+        if not self.args.ledger_token:
+            raise SmokeFailure("Canonical event ledger token is required for multichannel seeding")
         phrase = self.args.phrase
         batch = []
         for channel in ("ios_chat", "imessage", "ios_voice"):
@@ -234,7 +236,12 @@ class MemorySmoke:
                     "metadata": {"test": "ella_memory_e2e_smoke", "synthetic": True, "phrase": phrase},
                 }
             )
-        response, elapsed = _json_request("POST", self.backend_url + "/v1/ella/events", {"events": batch})
+        response, elapsed = _json_request(
+            "POST",
+            self.backend_url + "/v1/ella/events",
+            {"events": batch},
+            headers={"Authorization": f"Bearer {self.args.ledger_token}"},
+        )
         self.metrics["write_multichannel_events_ms"] = elapsed
         self.artifacts["multichannel_write"] = response
         if response.get("ok") is not True:
@@ -288,6 +295,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--canonical-identity", default="plato")
     parser.add_argument("--mcp-token", default=_env("ELLA_PLATO_MCP_TOKEN", "").split(",")[0])
     parser.add_argument("--observer-token", default=_env("ELLA_OBSERVER_ADMIN_TOKEN", _env("ELLA_ADMIN_TOKEN", "")))
+    parser.add_argument("--ledger-token", default=_env("ELLA_EVENT_LEDGER_TOKEN", ""))
     parser.add_argument("--phrase", default=_default_phrase())
     parser.add_argument("--seed-multichannel", action="store_true")
     parser.add_argument("--enforce-latency", action="store_true")

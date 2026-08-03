@@ -1,9 +1,17 @@
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
+import os
 
 import pytest
 import requests
 
+os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "omi-ci")
+
+from database import content_write_fence
+from database import hermes_cloud_enrichment_outbox as outbox_db
 from ella.services.hermes_cloud_enrichment_outbox import (
     DeliveryResult,
     HermesCloudEnrichmentOutboxWorker,
@@ -30,7 +38,15 @@ class FakeOutbox:
         self.failures = []
         self.lease_number = 0
 
-    def claim_next(self, *, lease_seconds, scan_limit=50):
+    def peek_next_uid(self, *, scan_limit=50):
+        del scan_limit
+        if self.job["status"] not in {"pending", "retryable", "running"}:
+            return None
+        return self.job["uid"]
+
+    def claim_next(self, *, uid, writer_token, lease_seconds, scan_limit=50):
+        assert uid == self.job["uid"]
+        assert writer_token
         if self.job["status"] not in {"pending", "retryable", "running"}:
             return None
         if self.job["status"] == "running" and not self.job.get("lease_expired"):
@@ -55,6 +71,23 @@ class FakeOutbox:
         self.job["status"] = "retryable" if kwargs["retryable"] else "blocked"
         self.failures.append(kwargs)
         return True
+
+
+@pytest.fixture(autouse=True)
+def _admitted_worker(monkeypatch):
+    class Writer:
+        token = "test-writer-token"
+
+        @staticmethod
+        def assert_current():
+            return None
+
+    @asynccontextmanager
+    async def admitted(_uid):
+        yield Writer()
+
+    monkeypatch.setattr(content_write_fence, "detached_content_write_fence", admitted)
+    monkeypatch.setattr(content_write_fence, "assert_content_writer_admitted", lambda _uid: None)
 
 
 @pytest.mark.parametrize(
@@ -165,7 +198,11 @@ def test_401_blocks_until_operator_repairs_loopback_token(monkeypatch):
 
 def test_expired_lease_reclaims_after_process_interruption():
     repository = FakeOutbox()
-    first_claim = repository.claim_next(lease_seconds=240)
+    first_claim = repository.claim_next(
+        uid=_job()["uid"],
+        writer_token="direct-test-writer",
+        lease_seconds=240,
+    )
     assert first_claim["lease_token"] == "lease-1"
 
     repository.job["lease_expired"] = True
@@ -197,3 +234,192 @@ def test_successful_replay_is_idempotent():
     assert asyncio.run(worker.run_once()) is True
     assert asyncio.run(worker.run_once()) is False
     assert deliveries == [_job()["job_id"]]
+
+
+def test_stale_claim_fails_closed_at_external_delivery_boundary(monkeypatch):
+    repository = FakeOutbox()
+    deliveries = []
+
+    class StaleWriter:
+        token = "stale-writer-token"
+
+        @staticmethod
+        def assert_current():
+            raise content_write_fence.ContentWriteFenceError("account_write_forbidden")
+
+    @asynccontextmanager
+    async def stale(_uid):
+        yield StaleWriter()
+
+    monkeypatch.setattr(content_write_fence, "detached_content_write_fence", stale)
+    worker = HermesCloudEnrichmentOutboxWorker(
+        repository,
+        deliver=lambda job: deliveries.append(job) or DeliveryResult(True),
+    )
+
+    assert asyncio.run(worker.run_once()) is False
+    assert repository.job["status"] == "running"
+    assert deliveries == []
+    assert repository.completed == []
+    assert repository.failures == []
+
+
+def test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_retry():
+    class Snapshot:
+        def __init__(self, data):
+            self.data = data
+            self.exists = data is not None
+
+        def to_dict(self):
+            return deepcopy(self.data)
+
+    class Reference:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            del transaction
+            return Snapshot(self.data)
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, reference, values):
+            self.updates.append(values)
+            reference.data.update(values)
+
+    fence_reference = Reference({"state": content_write_fence.TOMBSTONED, "writers": {}})
+
+    class Collection:
+        def document(self, _document_id):
+            return fence_reference
+
+    class Database:
+        def collection(self, name):
+            assert name == content_write_fence.FENCE_COLLECTION
+            return Collection()
+
+    now = datetime.now(timezone.utc)
+    database = Database()
+
+    pending = Reference({**_job(), "status": "pending"})
+    claim_transaction = Transaction()
+    assert (
+        outbox_db._claim_transaction.to_wrap(
+            claim_transaction,
+            database,
+            pending,
+            writer_token="missing-writer",
+            now=now,
+            lease_seconds=240,
+        )
+        is None
+    )
+    assert claim_transaction.updates == []
+    assert pending.data["status"] == "pending"
+
+    running = Reference({**_job(), "status": "running", "lease_token": "stale-lease"})
+    complete_transaction = Transaction()
+    assert (
+        outbox_db._complete_transaction.to_wrap(
+            complete_transaction,
+            database,
+            running,
+            lease_token="stale-lease",
+            receipt={"content_free": True},
+            now=now,
+        )
+        is False
+    )
+    assert complete_transaction.updates == []
+
+    for retryable in (True, False):
+        fail_transaction = Transaction()
+        assert (
+            outbox_db._fail_transaction.to_wrap(
+                fail_transaction,
+                database,
+                running,
+                lease_token="stale-lease",
+                error_code="stale_worker",
+                retryable=retryable,
+                next_attempt_at=now if retryable else None,
+                now=now,
+            )
+            is False
+        )
+        assert fail_transaction.updates == []
+
+    fence_reference.data = {
+        "state": content_write_fence.ACTIVE,
+        "writers": {
+            "current-writer": {
+                "expires_at": now,
+                "owner": content_write_fence._current_process_owner().to_storage(),
+            }
+        },
+    }
+    admitted = Reference({**_job(), "status": "pending"})
+    admitted_transaction = Transaction()
+    claimed = outbox_db._claim_transaction.to_wrap(
+        admitted_transaction,
+        database,
+        admitted,
+        writer_token="current-writer",
+        now=now,
+        lease_seconds=240,
+    )
+    assert claimed["status"] == "running"
+    assert claimed["content_writer_token"] == "current-writer"
+
+    complete_transaction = Transaction()
+    assert outbox_db._complete_transaction.to_wrap(
+        complete_transaction,
+        database,
+        admitted,
+        lease_token=claimed["lease_token"],
+        receipt={"content_free": True},
+        now=now,
+    )
+    assert admitted.data["status"] == "completed"
+
+    retry_job = Reference(
+        {
+            **_job(),
+            "status": "running",
+            "lease_token": "current-lease",
+            "content_writer_token": "current-writer",
+        }
+    )
+    retry_transaction = Transaction()
+    assert outbox_db._fail_transaction.to_wrap(
+        retry_transaction,
+        database,
+        retry_job,
+        lease_token="current-lease",
+        error_code="retryable_failure",
+        retryable=True,
+        next_attempt_at=now,
+        now=now,
+    )
+    assert retry_job.data["status"] == "retryable"
+
+
+def test_firestore_repository_rejects_post_tombstone_enqueue(monkeypatch):
+    def forbidden(uid):
+        assert uid == _job()["uid"]
+        raise content_write_fence.ContentWriteFenceError("account_write_forbidden")
+
+    monkeypatch.setattr(content_write_fence, "assert_content_writer_admitted", forbidden)
+    repository = outbox_db.FirestoreHermesCloudEnrichmentOutbox(firestore_db=object())
+
+    with pytest.raises(content_write_fence.ContentWriteFenceError, match="account_write_forbidden"):
+        repository.enqueue(
+            job_id=_job()["job_id"],
+            uid=_job()["uid"],
+            conversation_id=_job()["conversation_id"],
+            client_interaction_id=_job()["client_interaction_id"],
+            transcript_sha256=_job()["transcript_sha256"],
+            policy_version="test-policy",
+        )

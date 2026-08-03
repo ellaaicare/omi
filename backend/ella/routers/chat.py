@@ -681,7 +681,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         _l4_trace.openclaw_latency_ms = _elapsed
         _l4_trace.total_latency_ms = _elapsed
         _l4_trace.response_status = 200
-        record_trace(_l4_trace)
+        await record_trace(_l4_trace)
 
         reply_preview = reply[:80] if reply else "(empty)"
         print(
@@ -1101,7 +1101,7 @@ async def ella_chat_stream(
         trace.resolved_agent = runtime.agent_id if runtime else HERMES_AGENT_ID
         trace.resolve_source = "isolated_runtime_binding" if runtime else "hermes_platform"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
-        record_trace(trace)
+        await record_trace(trace)
         stream = (
             _stream_hermes_cloud_chat(
                 request.message,
@@ -1140,7 +1140,7 @@ async def ella_chat_stream(
         trace.resolved_agent = "N/A (ACK)"
         trace.resolve_source = "level_1_ack"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
-        record_trace(trace)
+        await record_trace(trace)
         return StreamingResponse(
             _stream_level_1_ack(request.message),
             media_type="text/event-stream",
@@ -1150,7 +1150,7 @@ async def ella_chat_stream(
         trace.resolved_agent = "grok-direct"
         trace.resolve_source = "level_2_grok"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
-        record_trace(trace)
+        await record_trace(trace)
         return StreamingResponse(
             _stream_level_2_grok(request.message),
             media_type="text/event-stream",
@@ -1160,7 +1160,7 @@ async def ella_chat_stream(
         trace.resolved_agent = "n8n-webhook"
         trace.resolve_source = "level_3_n8n"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
-        record_trace(trace)
+        await record_trace(trace)
         return StreamingResponse(
             _stream_level_3_n8n(request.message, uid, request.conversation_id),
             media_type="text/event-stream",
@@ -1188,7 +1188,7 @@ async def ella_chat_stream(
     trace.resolved_agent = "grok-direct (level 0)"
     trace.resolve_source = "level_0_production"
     trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
-    record_trace(trace)
+    await record_trace(trace)
     return StreamingResponse(
         _stream_level_2_grok(request.message),
         media_type="text/event-stream",
@@ -1213,7 +1213,7 @@ async def ella_chat_history(
     uid: str = "",
     limit: int = 50,
     before: str = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Return recent chat/context messages for a user from canonical timeline.
 

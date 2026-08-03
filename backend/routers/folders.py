@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.get('/v1/folders', response_model=List[Folder], tags=['folders'])
-def get_folders(uid: str = Depends(auth.get_current_user_uid)):
+def get_folders(uid: str = Depends(auth.get_writable_user_uid)):
     """
     Get all folders for the current user.
     Initializes system folders if this is the first access.
@@ -30,7 +30,7 @@ def get_folders(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.post('/v1/folders', response_model=Folder, tags=['folders'])
-def create_folder(request: CreateFolderRequest, uid: str = Depends(auth.get_current_user_uid)):
+def create_folder(request: CreateFolderRequest, uid: str = Depends(auth.get_writable_user_uid)):
     """Create a new custom folder."""
     # Check folder limit (50 custom folders)
     existing = folders_db.get_folders(uid)
@@ -49,7 +49,7 @@ def create_folder(request: CreateFolderRequest, uid: str = Depends(auth.get_curr
 
 
 @router.get('/v1/folders/{folder_id}', response_model=Folder, tags=['folders'])
-def get_folder(folder_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_folder(folder_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get a specific folder by ID."""
     folder = folders_db.get_folder(uid, folder_id)
     if not folder:
@@ -58,7 +58,7 @@ def get_folder(folder_id: str, uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.patch('/v1/folders/{folder_id}', response_model=Folder, tags=['folders'])
-def update_folder(folder_id: str, request: UpdateFolderRequest, uid: str = Depends(auth.get_current_user_uid)):
+def update_folder(folder_id: str, request: UpdateFolderRequest, uid: str = Depends(auth.get_writable_user_uid)):
     """Update folder metadata (name, description, color, icon, order)."""
     folder = folders_db.get_folder(uid, folder_id)
     if not folder:
@@ -75,7 +75,7 @@ def update_folder(folder_id: str, request: UpdateFolderRequest, uid: str = Depen
 def delete_folder(
     folder_id: str,
     move_to_folder_id: Optional[str] = Query(None, description="Target folder for conversations (defaults to 'Other')"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Delete a folder and move its conversations to another folder."""
     folder = folders_db.get_folder(uid, folder_id)
@@ -89,7 +89,7 @@ def delete_folder(
 
 
 @router.post('/v1/folders/reorder', tags=['folders'])
-def reorder_folders(request: ReorderFoldersRequest, uid: str = Depends(auth.get_current_user_uid)):
+def reorder_folders(request: ReorderFoldersRequest, uid: str = Depends(auth.get_writable_user_uid)):
     """Reorder folders by providing an ordered list of folder IDs."""
     folders_db.reorder_folders(uid, request.folder_ids)
     return {"status": "ok"}
@@ -101,7 +101,7 @@ def get_folder_conversations(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     include_discarded: bool = Query(False),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """Get all conversations in a folder with pagination."""
     folder = folders_db.get_folder(uid, folder_id)
@@ -116,7 +116,7 @@ def get_folder_conversations(
 
 @router.patch('/v1/conversations/{conversation_id}/folder', tags=['folders'])
 def move_conversation_to_folder(
-    conversation_id: str, request: MoveConversationRequest, uid: str = Depends(auth.get_current_user_uid)
+    conversation_id: str, request: MoveConversationRequest, uid: str = Depends(auth.get_writable_user_uid)
 ):
     """Move a conversation to a different folder."""
     conversation = conversations_db.get_conversation(uid, conversation_id)
@@ -134,7 +134,7 @@ def move_conversation_to_folder(
 
 @router.post('/v1/folders/{folder_id}/conversations/bulk-move', tags=['folders'])
 def bulk_move_conversations(
-    folder_id: str, request: BulkMoveConversationsRequest, uid: str = Depends(auth.get_current_user_uid)
+    folder_id: str, request: BulkMoveConversationsRequest, uid: str = Depends(auth.get_writable_user_uid)
 ):
     """Move multiple conversations to a folder."""
     folder = folders_db.get_folder(uid, folder_id)

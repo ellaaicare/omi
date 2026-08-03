@@ -4,7 +4,9 @@ from typing import Optional
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter, transactional
 
+from database import redis_db
 from ._client import db, document_id_from_seed
+from .firestore_account_deletion import delete_firestore_user_data
 from models.users import Subscription, PlanLimits, PlanType, SubscriptionStatus
 from utils.subscription import get_default_basic_subscription
 
@@ -408,48 +410,8 @@ def update_person_speech_samples_version(uid: str, person_id: str, version: int)
 
 
 def delete_user_data(uid: str):
-    user_ref = db.collection('users').document(uid)
-    if not user_ref.get().exists:
-        return {'status': 'error', 'message': 'User not found'}
-
-    subcollections_to_delete = [
-        'conversations',
-        'messages',
-        'chat_sessions',
-        'people',
-        'memories',
-        'files',
-        'ai_consent_receipts',
-    ]
-    batch_size = 450
-
-    for cname in subcollections_to_delete:
-        print(f"Deleting subcollection: {cname} for user {uid}")
-        collection_ref = user_ref.collection(cname)
-
-        while True:
-            docs_query = collection_ref.limit(batch_size)
-            docs = list(docs_query.stream())
-
-            if not docs:
-                # docs might not exists, try using {parent path / id}
-                print(f"No more documents to delete in {collection_ref.parent.path}/{collection_ref.id}")
-                break
-
-            batch = db.batch()
-            for doc in docs:
-                print(f"Deleting document: {doc.reference.path}")
-                batch.delete(doc.reference)
-            batch.commit()
-
-            if len(docs) < batch_size:
-                print(f"Processed all documents in {collection_ref.path}")
-                break
-
-    # delete the user document itself
-    print(f"Deleting user document: {uid}")
-    user_ref.delete()
-    return {'status': 'ok', 'message': 'Account deleted successfully'}
+    """Idempotently remove a user's complete Firestore document tree."""
+    return delete_firestore_user_data(db, uid, cache_authority=redis_db)
 
 
 # **************************************
@@ -1065,18 +1027,14 @@ def set_user_conversation_lifecycle_preferences(
     update_data = {}
 
     if update_enabled:
-        update_data[
-            'conversation_lifecycle_preferences.conversation_max_duration_enabled'
-        ] = (
+        update_data['conversation_lifecycle_preferences.conversation_max_duration_enabled'] = (
             conversation_max_duration_enabled
             if conversation_max_duration_enabled is not None
             else firestore.DELETE_FIELD
         )
 
     if update_seconds:
-        update_data[
-            'conversation_lifecycle_preferences.conversation_max_duration_seconds'
-        ] = (
+        update_data['conversation_lifecycle_preferences.conversation_max_duration_seconds'] = (
             conversation_max_duration_seconds
             if conversation_max_duration_seconds is not None
             else firestore.DELETE_FIELD

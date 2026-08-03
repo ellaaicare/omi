@@ -10,7 +10,7 @@ from typing import Union, Tuple, List, Optional
 
 from fastapi import HTTPException
 
-from database import redis_db
+from database import content_write_fence, redis_db
 import database.memories as memories_db
 import database.conversations as conversations_db
 import database.notifications as notification_db
@@ -538,7 +538,11 @@ def _save_action_items(uid: str, conversation: Conversation):
         def _run_auto_sync():
             asyncio.run(auto_sync_action_items_batch(uid, created_items))
 
-        threading.Thread(target=_run_auto_sync, daemon=True).start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            _run_auto_sync,
+            name=f"conversation-action-sync-{conversation.id}",
+        )
 
 
 def _update_personas_async(uid: str):
@@ -650,21 +654,25 @@ def process_conversation(
         _trigger_apps(
             uid, conversation, is_reprocess=is_reprocess, app_id=app_id, language_code=language_code, people=people
         )
-        (
-            threading.Thread(
-                target=save_structured_vector,
-                args=(
-                    uid,
-                    conversation,
-                ),
-            ).start()
-            if not is_reprocess
-            else None
-        )
-        threading.Thread(target=_extract_memories, args=(uid, conversation)).start()
-        threading.Thread(target=_extract_trends, args=(uid, conversation)).start()
-        threading.Thread(target=_save_action_items, args=(uid, conversation)).start()
-        threading.Thread(target=_update_goal_progress, args=(uid, conversation)).start()
+        if not is_reprocess:
+            content_write_fence.start_content_writer_thread(
+                uid,
+                save_structured_vector,
+                args=(uid, conversation),
+                name=f"conversation-vector-{conversation.id}",
+            )
+        for name, target in (
+            ("memories", _extract_memories),
+            ("trends", _extract_trends),
+            ("action-items", _save_action_items),
+            ("goal-progress", _update_goal_progress),
+        ):
+            content_write_fence.start_content_writer_thread(
+                uid,
+                target,
+                args=(uid, conversation),
+                name=f"conversation-{name}-{conversation.id}",
+            )
 
     # Create audio files from chunks if private cloud sync was enabled
     if not is_reprocess and conversation.private_cloud_sync_enabled:
@@ -688,15 +696,19 @@ def process_conversation(
         folders_db.update_folder_conversation_count(uid, assigned_folder_id)
 
     if not is_reprocess:
-        threading.Thread(
-            target=conversation_created_webhook,
-            args=(
-                uid,
-                conversation,
-            ),
-        ).start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            conversation_created_webhook,
+            args=(uid, conversation),
+            name=f"conversation-webhook-{conversation.id}",
+        )
         # Update persona prompts with new conversation
-        threading.Thread(target=update_personas_async, args=(uid,)).start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            update_personas_async,
+            args=(uid,),
+            name=f"conversation-personas-{conversation.id}",
+        )
 
         # Disable important conversation for now
         # Send important conversation notification for long conversations (>30 minutes)
@@ -707,10 +719,12 @@ def process_conversation(
 
     # Ella post-process hook: notify n8n after conversation is fully saved
     if fire_postprocess_webhook:  # Fires for both initial processing and reprocessing
-        threading.Thread(
-            target=fire_postprocess_webhook,
+        content_write_fence.start_content_writer_thread(
+            uid,
+            fire_postprocess_webhook,
             args=(uid, conversation),
-        ).start()
+            name=f"conversation-postprocess-{conversation.id}",
+        )
 
     print('process_conversation completed conversation.id=', conversation.id)
     return conversation

@@ -3,7 +3,6 @@ Import endpoints for importing data from external sources.
 """
 
 import os
-import threading
 import uuid
 from typing import List, Optional
 
@@ -11,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 import database.import_jobs as import_jobs_db
 import database.conversations as conversations_db
+from database import content_write_fence
 from models.import_job import ImportJob, ImportJobResponse, ImportJobStatus, ImportSourceType
 from utils.other import endpoints as auth
 from utils.imports.limitless import create_import_job, process_limitless_import
@@ -29,7 +29,7 @@ TEMP_DIR = '_temp'
 async def import_limitless_data(
     file: UploadFile = File(...),
     language: str = 'en',
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Start a Limitless data import from a ZIP file export.
@@ -66,9 +66,26 @@ async def import_limitless_data(
         )
         raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {str(e)}")
 
-    # Start background processing
-    thread = threading.Thread(target=process_limitless_import, args=(job.id, uid, zip_path, language), daemon=True)
-    thread.start()
+    # Transfer a durable writer registration before the request fence exits.
+    try:
+        content_write_fence.start_content_writer_thread(
+            uid,
+            process_limitless_import,
+            args=(job.id, uid, zip_path, language),
+            name=f"limitless-import-{job.id}",
+        )
+    except content_write_fence.ContentWriteFenceError as exc:
+        import_jobs_db.update_import_job(
+            job.id,
+            {
+                'status': ImportJobStatus.failed.value,
+                'error': exc.code,
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "retryable": True},
+        ) from exc
 
     return ImportJobResponse(
         job_id=job.id,
@@ -82,7 +99,7 @@ async def import_limitless_data(
     tags=['import'],
 )
 async def get_import_jobs(
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
     limit: int = 50,
 ):
     """
@@ -114,7 +131,7 @@ async def get_import_jobs(
 )
 async def get_import_job_status(
     job_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Get the status of a specific import job.
@@ -150,7 +167,7 @@ async def get_import_job_status(
     tags=['import'],
 )
 async def delete_limitless_conversations(
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(auth.get_writable_user_uid),
 ):
     """
     Delete all conversations imported from Limitless.

@@ -4,7 +4,32 @@ on:
   pull_request:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
+      - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
+      - "backend/database/content_writer_owner.py"
+      - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
+      - "backend/database/memory_reinterpretations.py"
+      - "backend/routers/action_items.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/chat.py"
+      - "backend/routers/developer.py"
+      - "backend/routers/imports.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/memories.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/sync.py"
+      - "backend/routers/transcribe.py"
+      - "backend/routers/wrapped.py"
+      - "backend/routers/workflow.py"
+      - "backend/utils/imports/limitless.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/other/storage.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
@@ -14,6 +39,7 @@ on:
       - "backend/ella/routers/invites.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/routers/canonical_events.py"
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/provisioning.py"
@@ -21,17 +47,37 @@ on:
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
+      - "backend/ella/services/account_deletion.py"
+      - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
+      - "backend/ella/services/memory_reinterpretation.py"
+      - "backend/database/users.py"
+      - "backend/routers/users.py"
+      - "backend/utils/other/endpoints.py"
+      - "backend/utils/ella/canonical_omi.py"
+      - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
+      - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
+      - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
+      - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
@@ -44,7 +90,32 @@ on:
     branches: [main]
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
+      - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/content_write_fence.py"
+      - "backend/database/content_write_recovery.py"
+      - "backend/database/content_write_recovery_authority.py"
+      - "backend/database/content_writer_owner.py"
+      - "backend/database/firestore_account_deletion.py"
+      - "backend/database/redis_db.py"
+      - "backend/database/memory_reinterpretations.py"
+      - "backend/routers/action_items.py"
+      - "backend/routers/apps.py"
+      - "backend/routers/chat.py"
+      - "backend/routers/developer.py"
+      - "backend/routers/imports.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/mcp.py"
+      - "backend/routers/mcp_sse.py"
+      - "backend/routers/memories.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/sync.py"
+      - "backend/routers/transcribe.py"
+      - "backend/routers/wrapped.py"
+      - "backend/routers/workflow.py"
+      - "backend/utils/imports/limitless.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/other/storage.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
@@ -54,6 +125,7 @@ on:
       - "backend/ella/routers/invites.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/routers/canonical_events.py"
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/provisioning.py"
@@ -61,17 +133,37 @@ on:
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
+      - "backend/ella/services/account_deletion.py"
+      - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
+      - "backend/ella/services/memory_reinterpretation.py"
+      - "backend/database/users.py"
+      - "backend/routers/users.py"
+      - "backend/utils/other/endpoints.py"
+      - "backend/utils/ella/canonical_omi.py"
+      - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_provider_attempt_deletion_fence.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
+      - "backend/scripts/content_writer_recovery.py"
+      - "backend/ella/docs/CONTENT_WRITER_RECOVERY.md"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_account_deletion.py"
+      - "backend/tests/unit/test_content_write_fence.py"
+      - "backend/tests/unit/test_durable_worker_deletion_finality.py"
+      - "backend/tests/conftest.py"
+      - "backend/tests/support/__init__.py"
+      - "backend/tests/support/content_writer_owner_nonlinux.py"
+      - "backend/tests/unit/test_hermes_cloud_enrichment_outbox.py"
+      - "backend/tests/unit/test_trace_deletion_finality.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
@@ -101,6 +193,10 @@ jobs:
     env:
       ELLA_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/invite_redemption_test
       ENCRYPTION_SECRET: omi_ci_invite_redemption_only
+      FIRESTORE_EMULATOR_HOST: localhost:9999
+      GCLOUD_PROJECT: omi-ci
+      GOOGLE_CLOUD_PROJECT: omi-ci
+      STORAGE_EMULATOR_HOST: http://localhost:4443
     defaults:
       run:
         working-directory: backend
@@ -119,18 +215,48 @@ jobs:
         run: >-
           python -m pip install
           "asyncpg==0.31.0"
+          "black==24.8.0"
           "fastapi==0.112.0"
           "firebase-admin==6.5.0"
           "httpx==0.28.0"
           "PyJWT==2.9.0"
           "pydantic==2.8.2"
+          "python-multipart==0.0.9"
           "pytest==8.3.2"
+          "redis==5.0.8"
+          "stripe==11.3.0"
           "websockets==12.0"
 
       - name: Compile invite and entitlement modules
         run: >-
           python -m py_compile
+          database/account_deletion.py
           database/authority_advisory_lock.py
+          database/content_write_fence.py
+          database/content_write_recovery.py
+          database/content_write_recovery_authority.py
+          database/content_writer_owner.py
+          database/firestore_account_deletion.py
+          database/redis_db.py
+          database/memory_reinterpretations.py
+          routers/action_items.py
+          routers/apps.py
+          routers/chat.py
+          routers/developer.py
+          routers/imports.py
+          routers/integration.py
+          routers/mcp.py
+          routers/mcp_sse.py
+          routers/memories.py
+          routers/pusher.py
+          routers/sync.py
+          routers/transcribe.py
+          routers/wrapped.py
+          routers/workflow.py
+          utils/imports/limitless.py
+          utils/conversations/process_conversation.py
+          utils/other/storage.py
+          database/users.py
           database/ella_provisioning.py
           database/invitation_operator.py
           database/invitations.py
@@ -140,20 +266,67 @@ jobs:
           ella/routers/invites.py
           ella/routers/onboarding.py
           ella/routers/ai_consent.py
+          ella/routers/canonical_events.py
+          ella/services/account_deletion.py
+          ella/services/ai_consent.py
+          ella/services/hermes_cloud_enrichment_outbox.py
+          ella/services/memory_reinterpretation.py
           ella/services/consent_authority.py
           ella/services/invitation_authority.py
           ella/services/provisioning.py
           ella/services/runtime_resolver.py
           ella/services/hermes_cloud_policy.py
           ella/utils/provision_authority.py
+          routers/users.py
+          utils/other/endpoints.py
+          utils/ella/canonical_omi.py
+          scripts/ella_memory_e2e_smoke.py
           scripts/synthetic_invite_admin.py
           scripts/pilot_invite_admin.py
+          scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
+
+      - name: Validate exact changed Python formatting
+        run: >-
+          black --check --line-length 120 --skip-string-normalization
+          database/account_deletion.py
+          database/firestore_account_deletion.py
+          database/redis_db.py
+          database/content_write_fence.py
+          database/content_write_recovery.py
+          database/content_write_recovery_authority.py
+          database/content_writer_owner.py
+          database/memory_reinterpretations.py
+          ella/routers/canonical_events.py
+          ella/services/account_deletion.py
+          ella/services/ai_consent.py
+          ella/services/hermes_cloud_enrichment_outbox.py
+          ella/services/memory_reinterpretation.py
+          scripts/ella_memory_e2e_smoke.py
+          utils/ella/canonical_omi.py
+          tests/unit/test_account_deletion.py
+          tests/unit/test_content_write_fence.py
+          tests/unit/test_durable_worker_deletion_finality.py
+          tests/unit/test_trace_deletion_finality.py
+          tests/unit/test_hermes_cloud_enrichment_outbox.py
+          tests/postgres/test_invitation_redemption_postgres.py
+          scripts/content_writer_recovery.py
+          tests/conftest.py
+          tests/support/__init__.py
+          tests/support/content_writer_owner_nonlinux.py
 
       - name: Run unit and PostgreSQL security tests
         run: |
           collected="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
+              tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
+              tests/unit/test_durable_worker_deletion_finality.py \
+              tests/unit/test_hermes_cloud_enrichment_outbox.py \
+              tests/unit/test_trace_deletion_finality.py \
               tests/unit/test_synthetic_invite_admin.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
@@ -164,10 +337,15 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 139
+          test "$collected" -eq 230
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
+              tests/unit/test_account_deletion.py \
+              tests/unit/test_content_write_fence.py \
+              tests/unit/test_durable_worker_deletion_finality.py \
+              tests/unit/test_hermes_cloud_enrichment_outbox.py \
+              tests/unit/test_trace_deletion_finality.py \
               tests/unit/test_pilot_invite_admin.py \
               tests/unit/test_authority_writer_guard.py \
               tests/unit/test_ella_onboarding_contract.py \
@@ -178,6 +356,70 @@ jobs:
           )"
           required_ids=(
             "tests/unit/test_invitation_redemption.py::test_redeem_rejects_unverified_firebase_email_before_authority_or_database"
+            "tests/unit/test_account_deletion.py::test_firestore_delete_is_idempotent_and_resumes_after_partial_failure"
+            "tests/unit/test_account_deletion.py::test_authenticated_route_delegates_to_the_resumable_deletion_service"
+            "tests/unit/test_account_deletion.py::test_deletion_service_returns_typed_pending_and_preserves_auth_retry"
+            "tests/unit/test_account_deletion.py::test_deletion_service_completes_missing_external_profile_and_is_repeatable"
+            "tests/unit/test_account_deletion.py::test_deletion_service_converts_firestore_and_firebase_failures_to_resumable_state"
+            "tests/unit/test_account_deletion.py::test_deletion_service_never_reports_success_when_routing_trace_purge_is_unavailable"
+            "tests/unit/test_account_deletion.py::test_canonical_ledger_purge_is_resumable_and_precedes_firebase_last"
+            "tests/unit/test_account_deletion.py::test_firebase_delete_lost_ack_converges_only_after_authoritative_absence"
+            "tests/unit/test_account_deletion.py::test_production_route_uses_legacy_resumable_deletion_when_ella_authority_is_explicitly_disabled"
+            "tests/unit/test_account_deletion.py::test_production_route_fails_closed_before_destructive_work_when_enabled_authority_is_unavailable"
+            "tests/unit/test_account_deletion.py::test_retained_firebase_subject_is_fenced_from_authenticated_content_writes"
+            "tests/unit/test_account_deletion.py::test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
+            "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
+            "tests/unit/test_account_deletion.py::test_firestore_inventory_snapshot_covers_every_repository_owned_root"
+            "tests/unit/test_account_deletion.py::test_production_firestore_cleanup_removes_seeded_inventory_and_retains_other_uid"
+            "tests/unit/test_account_deletion.py::test_firestore_owned_collection_purge_is_bounded_across_multiple_batches"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[analytics]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_fails_closed_when_known_inventory_entry_is_omitted[tasks]"
+            "tests/unit/test_account_deletion.py::test_firestore_gate_positive_control_detects_new_uid_linked_top_level_collection"
+            "tests/unit/test_account_deletion.py::test_firestore_api_key_cache_failure_preserves_resumable_key_record"
+            "tests/unit/test_content_write_fence.py::test_expired_registration_never_proves_a_live_writer_absent"
+            "tests/unit/test_content_write_fence.py::test_detached_writer_transfers_child_registration_before_parent_release"
+            "tests/unit/test_content_write_fence.py::test_mounted_limitless_worker_transfers_fence_until_actual_upsert_finishes"
+            "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[consent]"
+            "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[entitlement]"
+            "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact"
+            "tests/unit/test_content_write_fence.py::test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_utilities"
+            "tests/unit/test_content_write_fence.py::test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfenced_uid_writer"
+            "tests/unit/test_content_write_fence.py::test_threaded_mutation_stale_token_is_joined_before_failure"
+            "tests/unit/test_content_write_fence.py::test_threaded_mutation_survives_repeated_cancellation_until_thread_terminal"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_mounted_canonical_route_writes_after_tombstone"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_mounted_canonical_auth_drain_exact_purge_firebase_last_and_retry"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_two_stops_release_enrichment_writer_before_thread_terminal"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_process_restart_uses_root_cli_and_real_kernel_terminal_proof_before_firebase_last"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[host-account_writer_recovery_host_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[boot-account_writer_recovery_boot_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[namespace-account_writer_recovery_pid_namespace_mismatch]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_other_boundary_and_pid_reuse[start-account_writer_recovery_pid_reused]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_stale_cross_uid_ownerless_and_actual_unprivileged_invocation"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_surface_rejects_cross_generation_replacement_after_real_terminal_proof"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_recovery_surface_is_exact_and_idempotent"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_concurrent_different_token_compaction_keeps_only_latest_retry_authority"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_receipt_is_strictly_bounded_across_five_thousand_cycles_and_deletion_converges"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stale_receipt_or_hash_collision_never_releases_a_different_writer"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_pinned_recovery_authority_ignores_hostile_ambient_project_and_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_rejects_emulator_mismatch_and_symlink_before_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_recovery_authority_wrong_receipt_or_credential_project_loads_no_credentials"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_production_recovery_modules_refuse_darwin_before_firestore_calls"
+            "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_retry"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[timeout]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[proposal]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[correction]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_startup_enrichment_worker_is_drained_purged_and_tombstone_denied[True]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_startup_enrichment_worker_is_drained_purged_and_tombstone_denied[False]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_startup_memory_worker_is_drained_purged_and_tombstone_denied[True]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_startup_memory_worker_is_drained_purged_and_tombstone_denied[False]"
+            "tests/unit/test_content_write_fence.py::test_request_fence_covers_streamed_commit_after_route_returns"
+            "tests/unit/test_trace_deletion_finality.py::test_trace_probe_positive_control_reproduces_old_mounted_escape"
+            "tests/unit/test_trace_deletion_finality.py::test_mounted_trace_persistence_is_drained_purged_and_tombstoned"
+            "tests/unit/test_trace_deletion_finality.py::test_trace_reads_require_exact_authenticated_subject"
+            "tests/unit/test_trace_deletion_finality.py::test_concurrent_trace_requests_release_request_lifetimes_before_bounded_pool_progress"
             "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"
             "tests/unit/test_pilot_invite_admin.py::test_scoped_email_interface_keeps_plaintext_out_of_argv_receipts_logs_and_errors"
@@ -194,13 +436,29 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_atomically_quarantines_authority_releases_capacity_and_retries"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_routing_trace_purge_is_exact_repeatable_and_retains_other_users"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_canonical_ledger_positive_control_exact_purge_rollback_and_retry"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_mid_transaction_failure_rolls_back_every_authority_and_capacity_write"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_account_deletion_service_handles_partial_provision_and_repeat_without_operator"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_lost_provider_ack_persists_unproven_attempt_blocks_firebase_and_retry_converges"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_tombstone_trigger_allows_only_monotonic_terminal_proof"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_provider_attempt_direct_writer_cannot_cross_finalization_count_read"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_prerequisite_failure_is_atomic[017_add_provider_attempt_deletion_fence.sql-leaked_relations4]"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
+          test "${#required_ids[@]}" -eq 92
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
           done
           pytest \
             tests/unit/test_invitation_redemption.py \
+            tests/unit/test_account_deletion.py \
+            tests/unit/test_content_write_fence.py \
+            tests/unit/test_durable_worker_deletion_finality.py \
+            tests/unit/test_hermes_cloud_enrichment_outbox.py \
+            tests/unit/test_trace_deletion_finality.py \
             tests/unit/test_synthetic_invite_admin.py \
             tests/unit/test_pilot_invite_admin.py \
             tests/unit/test_authority_writer_guard.py \

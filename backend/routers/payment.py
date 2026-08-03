@@ -156,7 +156,7 @@ def _try_reactivate_subscription(uid: str, target_price_id: str) -> dict | None:
 
 
 @router.get('/v1/payments/available-plans', response_model=AvailablePlansResponse)
-def get_available_plans_endpoint(uid: str = Depends(auth.get_current_user_uid)):
+def get_available_plans_endpoint(uid: str = Depends(auth.get_writable_user_uid)):
     """Get available subscription plans with their price IDs and billing intervals."""
     try:
 
@@ -242,7 +242,7 @@ def get_available_plans_endpoint(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.post('/v1/payments/checkout-session')
-def create_checkout_session_endpoint(request: CreateCheckoutRequest, uid: str = Depends(auth.get_current_user_uid)):
+def create_checkout_session_endpoint(request: CreateCheckoutRequest, uid: str = Depends(auth.get_writable_user_uid)):
     # Check if user can make a new payment
     can_pay, reason = subscription_utils.can_user_make_payment(uid, request.price_id)
     if not can_pay:
@@ -262,7 +262,7 @@ def create_checkout_session_endpoint(request: CreateCheckoutRequest, uid: str = 
 
 
 @router.post('/v1/payments/upgrade-subscription')
-def upgrade_subscription_endpoint(request: UpgradeSubscriptionRequest, uid: str = Depends(auth.get_current_user_uid)):
+def upgrade_subscription_endpoint(request: UpgradeSubscriptionRequest, uid: str = Depends(auth.get_writable_user_uid)):
     """Schedule an upgrade/downgrade to take effect at the end of the current billing period."""
     current_subscription = users_db.get_user_subscription(uid)
 
@@ -346,7 +346,7 @@ def upgrade_subscription_endpoint(request: UpgradeSubscriptionRequest, uid: str 
 
 
 @router.delete('/v1/payments/subscription')
-def cancel_subscription_endpoint(uid: str = Depends(auth.get_current_user_uid)):
+def cancel_subscription_endpoint(uid: str = Depends(auth.get_writable_user_uid)):
     subscription = users_db.get_user_subscription(uid)
     if not subscription.stripe_subscription_id:
         raise HTTPException(status_code=400, detail="No active Stripe subscription found.")
@@ -587,7 +587,7 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
 
 @router.post("/v1/stripe/connect-accounts")
 async def create_connect_account_endpoint(
-    country: str | None = Query(default=None), uid: str = Depends(auth.get_current_user_uid)
+    country: str | None = Query(default=None), uid: str = Depends(auth.get_writable_user_uid)
 ):
     """
     Create a Stripe Connect account and return the account creation response
@@ -614,7 +614,7 @@ def get_supported_countries():
 
 
 @router.get("/v1/stripe/onboarded", tags=['v1', 'stripe'])
-async def check_onboarding_status(uid: str = Depends(auth.get_current_user_uid)):
+async def check_onboarding_status(uid: str = Depends(auth.get_writable_user_uid)):
     """
     Check the onboarding status of a Connect account
     """
@@ -629,7 +629,7 @@ async def check_onboarding_status(uid: str = Depends(auth.get_current_user_uid))
 
 @router.post("/v1/stripe/refresh/{account_id}")
 async def refresh_account_link_endpoint(
-    request: Request, account_id: str, uid: str = Depends(auth.get_current_user_uid)
+    request: Request, account_id: str, uid: str = Depends(auth.get_writable_user_uid)
 ):
     """
     Generate a fresh account link if the previous one expired
@@ -710,7 +710,7 @@ async def stripe_return(account_id: str):
 
 
 @router.post("/v1/paypal/payment-details")
-def save_paypal_payment_details(data: dict, uid: str = Depends(auth.get_current_user_uid)):
+def save_paypal_payment_details(data: dict, uid: str = Depends(auth.get_writable_user_uid)):
     """
     Save PayPal payment details (email and paypal.me link)
     """
@@ -731,7 +731,7 @@ def save_paypal_payment_details(data: dict, uid: str = Depends(auth.get_current_
 
 
 @router.get("/v1/paypal/payment-details")
-def get_paypal_payment_details_endpoint(uid: str = Depends(auth.get_current_user_uid)):
+def get_paypal_payment_details_endpoint(uid: str = Depends(auth.get_writable_user_uid)):
     """
     Get the PayPal payment details for the user
     """
@@ -774,7 +774,7 @@ async def stripe_cancel():
 
 
 @router.post('/v1/payments/customer-portal')
-def create_customer_portal_endpoint(uid: str = Depends(auth.get_current_user_uid)):
+def create_customer_portal_endpoint(uid: str = Depends(auth.get_writable_user_uid)):
     """Create a Stripe Customer Portal session for managing payment methods and subscriptions."""
 
     customer_id = users_db.get_stripe_customer_id(uid)
@@ -817,7 +817,7 @@ async def portal_return():
 
 
 @router.get("/v1/payment-methods/status")
-def get_payment_method_status(uid: str = Depends(auth.get_current_user_uid)):
+def get_payment_method_status(uid: str = Depends(auth.get_writable_user_uid)):
     """Get the statuses of the payment methods for the user"""
     default_payment_method = get_default_payment_method(uid)
 
@@ -834,7 +834,7 @@ def get_payment_method_status(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.post("/v1/payment-methods/default")
-def set_default_payment_method_endpoint(data: dict, uid: str = Depends(auth.get_current_user_uid)):
+def set_default_payment_method_endpoint(data: dict, uid: str = Depends(auth.get_writable_user_uid)):
     """Set the default payment method for the user"""
     method = data.get('method')
     if method not in ['stripe', 'paypal']:
@@ -844,7 +844,7 @@ def set_default_payment_method_endpoint(data: dict, uid: str = Depends(auth.get_
 
 
 @router.get("/v1/apps/{app_id}/subscription")
-def get_app_subscription(app_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_app_subscription(app_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get user's subscription for a specific app"""
     try:
 
@@ -877,7 +877,7 @@ def get_app_subscription(app_id: str, uid: str = Depends(auth.get_current_user_u
 
 
 @router.delete("/v1/apps/{app_id}/subscription")
-def cancel_app_subscription(app_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def cancel_app_subscription(app_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Cancel user's subscription for a specific app"""
     try:
 

@@ -205,6 +205,12 @@ async def lock_or_bootstrap_grant_on_connection(
         owner=owner,
         proof=owner_lock,
     )
+    await authority_advisory_lock.require_user_write_status(
+        conn,
+        owner_lock,
+        user_id=user_id,
+        allowed_statuses=("PENDING", "ACTIVE"),
+    )
     await authority_advisory_lock.require_self_owner_lock(
         conn,
         owner_lock,
@@ -268,6 +274,12 @@ async def synchronize_grant(
                     uid=grant.account_uid,
                     owner=owner,
                     proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    conn,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
                 )
                 row = await conn.fetchrow(
                     """
@@ -448,6 +460,12 @@ async def synchronize_denial(
                     uid=uid,
                     owner=owner,
                     proof=owner_lock,
+                )
+                await authority_advisory_lock.require_user_write_status(
+                    conn,
+                    owner_lock,
+                    user_id=user_id,
+                    allowed_statuses=("PENDING", "ACTIVE"),
                 )
                 row = await conn.fetchrow(
                     """

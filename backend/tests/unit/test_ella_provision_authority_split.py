@@ -29,6 +29,7 @@ LEGACY_URL = "http://100.76.138.56:8200"
 HERMES_URL = APPROVED_HERMES_PROVISION_URL
 LEGACY_TOKEN = "legacy-test-token-distinct"
 HERMES_TOKEN = "hermes-test-token-distinct"
+PROVIDER_IDEMPOTENCY_KEY = "22222222-2222-2222-2222-222222222222"
 BINDING_ENV = "ELLA_TEST_HERMES_PROVISION_AUTHORITY_BINDING"
 
 REJECTION_CASES = (
@@ -243,7 +244,13 @@ def test_real_provision_client_and_coordinator_reject_before_http_or_repository_
     coordinator = ProvisioningCoordinator(ForbiddenRepository())
 
     with pytest.raises(ProvisioningError):
-        asyncio.run(client.provision(_identity(), "hermes-user-v1"))
+        asyncio.run(
+            client.provision(
+                _identity(),
+                "hermes-user-v1",
+                idempotency_key=PROVIDER_IDEMPOTENCY_KEY,
+            )
+        )
     with pytest.raises(ProvisioningError):
         asyncio.run(
             coordinator.ensure_job(
@@ -295,11 +302,20 @@ def test_real_provision_client_posts_only_to_accepted_exact_authority(monkeypatc
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
-    result = asyncio.run(HermesProvisionClient().provision(_identity(), "hermes-user-v1"))
+    result = asyncio.run(
+        HermesProvisionClient().provision(
+            _identity(),
+            "hermes-user-v1",
+            idempotency_key=PROVIDER_IDEMPOTENCY_KEY,
+        )
+    )
 
     assert result == {"mode": "hermes_only", "provisionMode": "hermes_only"}
     assert captured["url"] == f"{APPROVED_HERMES_PROVISION_URL}/provision"
-    assert captured["headers"] == {"Authorization": f"Bearer {HERMES_TOKEN}"}
+    assert captured["headers"] == {
+        "Authorization": f"Bearer {HERMES_TOKEN}",
+        "Idempotency-Key": PROVIDER_IDEMPOTENCY_KEY,
+    }
 
 
 @pytest.mark.parametrize("case", REJECTION_CASES)
@@ -753,6 +769,10 @@ class _RecordingRepository:
         self.job.update(state="provisioning", stage="profile_ready")
         return dict(self.job)
 
+    async def begin_provider_attempt(self, **_kwargs):
+        self._record("begin_provider_attempt")
+        return {"idempotency_key": "22222222-2222-2222-2222-222222222222"}
+
     async def stage_runtime_binding(self, *, uid, binding):
         self._record("stage_runtime_binding")
         self.staged = {**binding, "omi_uid": uid, "revision": 1}
@@ -811,7 +831,13 @@ def test_real_provision_client_revalidates_after_client_entry_before_send(monkey
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
     with pytest.raises(ProvisioningError):
-        asyncio.run(HermesProvisionClient().provision(_identity(), "hermes-user-v1"))
+        asyncio.run(
+            HermesProvisionClient().provision(
+                _identity(),
+                "hermes-user-v1",
+                idempotency_key=PROVIDER_IDEMPOTENCY_KEY,
+            )
+        )
 
     assert sends == []
 
@@ -861,6 +887,7 @@ def test_real_claimed_worker_stops_after_inflight_http_authority_drift(monkeypat
     assert repository.calls == [
         "assert_self_hosted_invite_schema_ready",
         "has_invitation_owned_self_hosted_runtime",
+        "begin_provider_attempt",
     ]
 
 
@@ -1516,7 +1543,13 @@ def test_http_transports_disable_redirects_proxies_and_environment_drift(monkeyp
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
     with pytest.raises(ProvisioningError, match="provision_request_rejected"):
-        asyncio.run(HermesProvisionClient().provision(_identity(), "hermes-user-v1"))
+        asyncio.run(
+            HermesProvisionClient().provision(
+                _identity(),
+                "hermes-user-v1",
+                idempotency_key=PROVIDER_IDEMPOTENCY_KEY,
+            )
+        )
 
     assert captured["follow_redirects"] is False
     assert captured["trust_env"] is False

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from database import content_write_fence
 from database.hermes_cloud_enrichment_outbox import (
     FirestoreHermesCloudEnrichmentOutbox,
 )
@@ -19,9 +20,13 @@ DEFAULT_URL = "http://127.0.0.1:8000" "/v1/ella/internal/hermes-cloud/enrichment
 
 
 class EnrichmentOutboxRepository(Protocol):
+    def peek_next_uid(self, *, scan_limit: int = 50) -> Optional[str]: ...
+
     def claim_next(
         self,
         *,
+        uid: str,
+        writer_token: str,
         lease_seconds: int,
         scan_limit: int = 50,
     ) -> Optional[dict[str, Any]]: ...
@@ -165,38 +170,52 @@ class HermesCloudEnrichmentOutboxWorker:
         self.poll_seconds = poll_seconds
 
     async def run_once(self) -> bool:
-        job = await asyncio.to_thread(
-            self.repository.claim_next,
-            lease_seconds=self.lease_seconds,
-        )
-        if not job:
+        uid = await asyncio.to_thread(self.repository.peek_next_uid)
+        if not uid:
             return False
-        result = await asyncio.to_thread(self.deliver, job)
-        if result.ok:
-            completed = await asyncio.to_thread(
-                self.repository.complete,
-                job_id=job["job_id"],
-                lease_token=job["lease_token"],
-                receipt=result.receipt or {"content_free": True},
-            )
-            if not completed:
-                raise RuntimeError("hermes_cloud_enrichment_lease_lost")
-            return True
-        retry_after = min(
-            900,
-            self.retry_base_seconds * (2 ** min(int(job.get("attempt_count") or 1) - 1, 6)),
-        )
-        failed = await asyncio.to_thread(
-            self.repository.fail,
-            job_id=job["job_id"],
-            lease_token=job["lease_token"],
-            error_code=result.error_code,
-            retryable=result.retryable,
-            retry_after_seconds=retry_after,
-        )
-        if not failed:
-            raise RuntimeError("hermes_cloud_enrichment_lease_lost")
-        return True
+        try:
+            async with content_write_fence.detached_content_write_fence(uid) as writer:
+                job = await content_write_fence.run_admitted_threaded_mutation(
+                    uid,
+                    self.repository.claim_next,
+                    uid=uid,
+                    writer_token=writer.token,
+                    lease_seconds=self.lease_seconds,
+                )
+                if not job:
+                    return False
+                writer.assert_current()
+                result = await content_write_fence.run_admitted_threaded_mutation(uid, self.deliver, job)
+                writer.assert_current()
+                if result.ok:
+                    completed = await content_write_fence.run_admitted_threaded_mutation(
+                        uid,
+                        self.repository.complete,
+                        job_id=job["job_id"],
+                        lease_token=job["lease_token"],
+                        receipt=result.receipt or {"content_free": True},
+                    )
+                    if not completed:
+                        raise RuntimeError("hermes_cloud_enrichment_lease_lost")
+                    return True
+                retry_after = min(
+                    900,
+                    self.retry_base_seconds * (2 ** min(int(job.get("attempt_count") or 1) - 1, 6)),
+                )
+                failed = await content_write_fence.run_admitted_threaded_mutation(
+                    uid,
+                    self.repository.fail,
+                    job_id=job["job_id"],
+                    lease_token=job["lease_token"],
+                    error_code=result.error_code,
+                    retryable=result.retryable,
+                    retry_after_seconds=retry_after,
+                )
+                if not failed:
+                    raise RuntimeError("hermes_cloud_enrichment_lease_lost")
+                return True
+        except content_write_fence.ContentWriteFenceError:
+            return False
 
     async def run_forever(self) -> None:
         while True:
@@ -215,6 +234,22 @@ class HermesCloudEnrichmentOutboxWorker:
 
 
 _worker_task: Optional[asyncio.Task] = None
+_worker_shutdown_task: Optional[asyncio.Task] = None
+
+
+async def _finish_worker_shutdown(worker_task: asyncio.Task) -> None:
+    global _worker_task, _worker_shutdown_task
+    try:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        if worker_task.done() and _worker_task is worker_task:
+            _worker_task = None
+        if _worker_shutdown_task is asyncio.current_task():
+            _worker_shutdown_task = None
 
 
 async def start_worker(
@@ -229,19 +264,33 @@ async def start_worker(
         ).split(",")
         if value.strip()
     }
-    if not selected or (_worker_task and not _worker_task.done()):
+    if not selected:
+        return
+    while _worker_shutdown_task is not None:
+        await asyncio.shield(_worker_shutdown_task)
+    if _worker_task and not _worker_task.done():
         return
     active_worker = worker or HermesCloudEnrichmentOutboxWorker(FirestoreHermesCloudEnrichmentOutbox())
     _worker_task = asyncio.create_task(active_worker.run_forever())
 
 
 async def stop_worker() -> None:
-    global _worker_task
-    if not _worker_task:
-        return
-    _worker_task.cancel()
+    global _worker_shutdown_task
+    shutdown_task = _worker_shutdown_task
+    if shutdown_task is None:
+        worker_task = _worker_task
+        if worker_task is None:
+            return
+        shutdown_task = asyncio.create_task(_finish_worker_shutdown(worker_task))
+        _worker_shutdown_task = shutdown_task
     try:
-        await _worker_task
+        await asyncio.shield(shutdown_task)
     except asyncio.CancelledError:
-        pass
-    _worker_task = None
+        # A caller timeout/cancellation must not cancel the shared join or
+        # clear the worker reference while its durable writer is still live.
+        raise
+    if shutdown_task.cancelled():
+        raise asyncio.CancelledError
+    exception = shutdown_task.exception()
+    if exception is not None:
+        raise exception

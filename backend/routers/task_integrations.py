@@ -182,7 +182,7 @@ class DefaultTaskIntegrationResponse(BaseModel):
 
 
 @router.get("/v1/task-integrations", response_model=TaskIntegrationsResponse, tags=['task-integrations'])
-def get_task_integrations(uid: str = Depends(auth.get_current_user_uid)):
+def get_task_integrations(uid: str = Depends(auth.get_writable_user_uid)):
     """Get all task integration connections for the current user."""
     integrations = users_db.get_task_integrations(uid)
     default_app = users_db.get_default_task_integration(uid)
@@ -191,21 +191,21 @@ def get_task_integrations(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.get("/v1/task-integrations/default", response_model=DefaultTaskIntegrationResponse, tags=['task-integrations'])
-def get_default_task_integration(uid: str = Depends(auth.get_current_user_uid)):
+def get_default_task_integration(uid: str = Depends(auth.get_writable_user_uid)):
     """Get the user's default task integration app."""
     default_app = users_db.get_default_task_integration(uid)
     return DefaultTaskIntegrationResponse(default_app=default_app)
 
 
 @router.put("/v1/task-integrations/default", response_model=DefaultTaskIntegrationResponse, tags=['task-integrations'])
-def set_default_task_integration(request: DefaultTaskIntegrationRequest, uid: str = Depends(auth.get_current_user_uid)):
+def set_default_task_integration(request: DefaultTaskIntegrationRequest, uid: str = Depends(auth.get_writable_user_uid)):
     """Set the user's default task integration app."""
     users_db.set_default_task_integration(uid, request.app_key)
     return DefaultTaskIntegrationResponse(default_app=request.app_key)
 
 
 @router.put("/v1/task-integrations/{app_key}", tags=['task-integrations'])
-def save_task_integration(app_key: str, data: TaskIntegrationData, uid: str = Depends(auth.get_current_user_uid)):
+def save_task_integration(app_key: str, data: TaskIntegrationData, uid: str = Depends(auth.get_writable_user_uid)):
     """Save or update a task integration connection."""
     # Convert Pydantic model to dict, excluding None values
     integration_data = data.model_dump(exclude_none=True)
@@ -216,7 +216,7 @@ def save_task_integration(app_key: str, data: TaskIntegrationData, uid: str = De
 
 
 @router.delete("/v1/task-integrations/{app_key}", status_code=204, tags=['task-integrations'])
-def delete_task_integration(app_key: str, uid: str = Depends(auth.get_current_user_uid)):
+def delete_task_integration(app_key: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Delete a task integration connection."""
     success = users_db.delete_task_integration(uid, app_key)
 
@@ -243,7 +243,7 @@ class OAuthUrlResponse(BaseModel):
 
 
 @router.get("/v1/task-integrations/{app_key}/oauth-url", response_model=OAuthUrlResponse, tags=['task-integrations'])
-def get_oauth_url(app_key: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_oauth_url(app_key: str, uid: str = Depends(auth.get_writable_user_uid)):
     """
     Get OAuth authorization URL for a task integration.
     Frontend opens this URL in browser to start OAuth flow.
@@ -659,7 +659,7 @@ class CreateTaskResponse(BaseModel):
 
 @router.post("/v1/task-integrations/{app_key}/tasks", response_model=CreateTaskResponse, tags=['task-integrations'])
 async def create_task_via_integration(
-    app_key: str, request: CreateTaskRequest, uid: str = Depends(auth.get_current_user_uid)
+    app_key: str, request: CreateTaskRequest, uid: str = Depends(auth.get_writable_user_uid)
 ):
     """Create a task in the specified integration using stored credentials."""
 
@@ -709,7 +709,7 @@ async def create_task_via_integration(
 
 
 @router.get("/v1/task-integrations/asana/workspaces", tags=['task-integrations'])
-async def get_asana_workspaces(uid: str = Depends(auth.get_current_user_uid)):
+async def get_asana_workspaces(uid: str = Depends(auth.get_writable_user_uid)):
     """Get user's Asana workspaces"""
     data = users_db.get_task_integration(uid, 'asana')
 
@@ -749,7 +749,7 @@ async def get_asana_workspaces(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.get("/v1/task-integrations/asana/projects/{workspace_gid}", tags=['task-integrations'])
-async def get_asana_projects(workspace_gid: str, uid: str = Depends(auth.get_current_user_uid)):
+async def get_asana_projects(workspace_gid: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get projects in an Asana workspace"""
     data = users_db.get_task_integration(uid, 'asana')
 
@@ -789,7 +789,7 @@ async def get_asana_projects(workspace_gid: str, uid: str = Depends(auth.get_cur
 
 
 @router.get("/v1/task-integrations/clickup/teams", tags=['task-integrations'])
-async def get_clickup_teams(uid: str = Depends(auth.get_current_user_uid)):
+async def get_clickup_teams(uid: str = Depends(auth.get_writable_user_uid)):
     """Get user's ClickUp teams"""
     data = users_db.get_task_integration(uid, 'clickup')
 
@@ -829,7 +829,7 @@ async def get_clickup_teams(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.get("/v1/task-integrations/clickup/spaces/{team_id}", tags=['task-integrations'])
-async def get_clickup_spaces(team_id: str, uid: str = Depends(auth.get_current_user_uid)):
+async def get_clickup_spaces(team_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get spaces in a ClickUp team"""
     data = users_db.get_task_integration(uid, 'clickup')
 
@@ -869,7 +869,7 @@ async def get_clickup_spaces(team_id: str, uid: str = Depends(auth.get_current_u
 
 
 @router.get("/v1/task-integrations/clickup/lists/{space_id}", tags=['task-integrations'])
-async def get_clickup_lists(space_id: str, uid: str = Depends(auth.get_current_user_uid)):
+async def get_clickup_lists(space_id: str, uid: str = Depends(auth.get_writable_user_uid)):
     """Get lists in a ClickUp space"""
     data = users_db.get_task_integration(uid, 'clickup')
 

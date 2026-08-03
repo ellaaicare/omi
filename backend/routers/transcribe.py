@@ -17,7 +17,7 @@ import opuslib  # type: ignore
 
 import lc3  # lc3py
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from websockets.exceptions import ConnectionClosed
@@ -33,7 +33,7 @@ import database.conversations as conversations_db
 import database.calendar_meetings as calendar_db
 import database.users as user_db
 from database.users import get_user_conversation_lifecycle_preferences, get_user_transcription_preferences
-from database import redis_db
+from database import content_write_fence, redis_db
 from database.redis_db import (
     get_cached_user_geolocation,
     try_acquire_listen_lock,
@@ -76,7 +76,6 @@ from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_k
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
-from utils.other.task import safe_create_task
 from utils.pusher import connect_to_trigger_pusher
 from utils.speaker_identification import detect_speaker_from_text
 from utils.stt.streaming import (
@@ -2030,7 +2029,11 @@ async def _stream_handler(
         if all(chunk is not None for chunk in image_chunks_cache[temp_id]):
             b64_image_data = "".join(image_chunks_cache[temp_id])
             del image_chunks_cache[temp_id]
-            safe_create_task(process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer))
+            await content_write_fence.start_content_writer_task(
+                uid,
+                lambda: process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer),
+                name="transcribe-photo-processing",
+            )
 
     # Initialize decoders based on codec
     opus_decoder = None
@@ -2641,57 +2644,63 @@ async def web_listen_handler(
         return
 
     try:
-        assert_current_ai_consent(uid)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {}
-        await websocket.send_json(
-            {
-                "type": "auth_response",
-                "success": False,
-                "error": detail.get("code", "ai_consent_required"),
-            }
-        )
-        await websocket.close(code=1008, reason="AI consent required")
+        async with content_write_fence.request_content_write_fence(uid):
+            try:
+                assert_current_ai_consent(uid)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                await websocket.send_json(
+                    {
+                        "type": "auth_response",
+                        "success": False,
+                        "error": detail.get("code", "ai_consent_required"),
+                    }
+                )
+                await websocket.close(code=1008, reason="AI consent required")
+                return
+
+            runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
+            if runtime_gate.get("required") and not runtime_gate.get("success"):
+                logging.getLogger(__name__).warning(
+                    "Isolated Ella web listen setup incomplete for uid=%s code=%s",
+                    uid,
+                    runtime_gate.get("error"),
+                )
+                await websocket.send_json(
+                    {
+                        "type": "auth_response",
+                        "success": False,
+                        "error": "ella_setup_incomplete",
+                    }
+                )
+                await websocket.close(code=1013, reason="Ella setup incomplete")
+                return
+
+            # Send success response
+            await websocket.send_json({"type": "auth_response", "success": True})
+            print("web_listen_handler authenticated", uid)
+
+            # Proceed with streaming (websocket already accepted, uid already validated)
+            custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
+            onboarding_mode = onboarding == 'enabled'
+
+            await _stream_handler(
+                websocket,
+                uid,
+                language,
+                sample_rate,
+                codec,
+                channels,
+                include_speech_profile,
+                None,
+                conversation_timeout=conversation_timeout,
+                source=source,
+                custom_stt_mode=custom_stt_mode,
+                onboarding_mode=onboarding_mode,
+                socket_accepted_at=socket_accepted_at,
+            )
+    except content_write_fence.ContentWriteFenceError as exc:
+        await websocket.send_json({"type": "auth_response", "success": False, "error": exc.code})
+        await websocket.close(code=1008, reason="Account content unavailable")
         return
-
-    runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
-    if runtime_gate.get("required") and not runtime_gate.get("success"):
-        logging.getLogger(__name__).warning(
-            "Isolated Ella web listen setup incomplete for uid=%s code=%s",
-            uid,
-            runtime_gate.get("error"),
-        )
-        await websocket.send_json(
-            {
-                "type": "auth_response",
-                "success": False,
-                "error": "ella_setup_incomplete",
-            }
-        )
-        await websocket.close(code=1013, reason="Ella setup incomplete")
-        return
-
-    # Send success response
-    await websocket.send_json({"type": "auth_response", "success": True})
-    print("web_listen_handler authenticated", uid)
-
-    # Proceed with streaming (websocket already accepted, uid already validated)
-    custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
-    onboarding_mode = onboarding == 'enabled'
-
-    await _stream_handler(
-        websocket,
-        uid,
-        language,
-        sample_rate,
-        codec,
-        channels,
-        include_speech_profile,
-        None,
-        conversation_timeout=conversation_timeout,
-        source=source,
-        custom_stt_mode=custom_stt_mode,
-        onboarding_mode=onboarding_mode,
-        socket_accepted_at=socket_accepted_at,
-    )
     print("web_listen_handler ended", uid)

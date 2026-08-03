@@ -172,6 +172,28 @@ def test_entitlement_contract_defaults_are_canary_numbers():
     assert datetime.now(timezone.utc).tzinfo is not None
 
 
+def test_get_pool_uses_real_asyncpg_entrypoint(monkeypatch):
+    pool = object()
+    calls = []
+
+    async def create_pool(**kwargs):
+        calls.append(kwargs)
+        return pool
+
+    monkeypatch.setattr(voice_canary, "_pool", None)
+    monkeypatch.setattr(voice_canary.asyncpg, "create_pool", create_pool)
+    monkeypatch.setenv("ELLA_POSTGRES_DSN", "postgresql://voice-canary.test/authority")
+
+    assert asyncio.run(voice_canary.get_pool()) is pool
+    assert calls == [
+        {
+            "dsn": "postgresql://voice-canary.test/authority",
+            "min_size": 1,
+            "max_size": 10,
+        }
+    ]
+
+
 def test_operator_defaults_are_grok_only_and_have_no_fallback():
     assert voice_canary_admin.DEFAULT_PROVIDERS == ["grok-voice"]
     assert voice_canary_admin.DEFAULT_MODES == ["v4"]

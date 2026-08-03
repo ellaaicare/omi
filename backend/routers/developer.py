@@ -1,4 +1,3 @@
-import threading
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
@@ -10,6 +9,7 @@ import database.conversations as conversations_db
 import database.dev_api_key as dev_api_key_db
 import database.action_items as action_items_db
 import database.users as users_db
+from database import content_write_fence
 
 from models.memories import MemoryCategory, Memory, MemoryDB
 from models.conversation import (
@@ -200,7 +200,12 @@ def create_memory(
 
     # Update personas asynchronously if visibility is public
     if memory.visibility == 'public':
-        threading.Thread(target=update_personas_async, args=(uid,)).start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            update_personas_async,
+            args=(uid,),
+            name="developer-persona-refresh",
+        )
 
     return MemoryResponse(
         id=memory_db.id,
@@ -262,7 +267,12 @@ def create_memories_batch(
 
     # Update personas if any memory is public
     if has_public:
-        threading.Thread(target=update_personas_async, args=(uid,)).start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            update_personas_async,
+            args=(uid,),
+            name="developer-persona-refresh",
+        )
 
     # Prepare response
     created_memories = [

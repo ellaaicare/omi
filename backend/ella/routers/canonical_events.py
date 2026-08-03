@@ -13,13 +13,17 @@ import json
 import hmac
 import logging
 import os
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
+from database import content_write_fence
 from utils.ella.time_context import annotate_event_time, build_time_context
+from utils.other import endpoints as auth
 
 logger = logging.getLogger("ella.canonical_events")
 
@@ -110,24 +114,37 @@ def _completion_can_reinterpret(completion: SessionCompleteIn) -> bool:
     return (source_ref.get("scope_kind") or metadata.get("scope_kind")) == "memory" and can_reinterpret is True
 
 
-def _require_reinterpretation_completion_auth(
-    completion: SessionCompleteIn,
-    authorization: str,
-) -> None:
-    if not _reinterpretation_enabled() or not _completion_can_reinterpret(completion):
-        return
+def _authenticated_canonical_writer(authorization: str) -> Optional[str]:
+    """Return a Firebase subject, or ``None`` for the trusted ledger writer."""
     expected = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "reinterpretation_completion_auth_not_configured"},
-        )
     scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token or not hmac.compare_digest(token.encode(), expected.encode()):
+    if expected and scheme.lower() == "bearer" and token and hmac.compare_digest(token.encode(), expected.encode()):
+        return None
+    return auth.get_authenticated_user_uid(authorization)
+
+
+def _require_canonical_subject(principal_uid: Optional[str], requested_uid: Optional[str]) -> str:
+    if not requested_uid:
+        raise HTTPException(status_code=422, detail={"code": "canonical_event_uid_required"})
+    if principal_uid is not None and requested_uid != principal_uid:
+        raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
+    return requested_uid
+
+
+@asynccontextmanager
+async def _canonical_write_fences(uids: set[str]) -> AsyncIterator[None]:
+    """Hold every exact-subject writer proof through the datastore commit."""
+    try:
+        async with AsyncExitStack() as stack:
+            for uid in sorted(uids):
+                await stack.enter_async_context(content_write_fence.request_content_write_fence(uid))
+            yield
+    except content_write_fence.ContentWriteFenceError as exc:
+        status_code = 403 if exc.code == "account_write_forbidden" else 503
         raise HTTPException(
-            status_code=401,
-            detail={"code": "invalid_reinterpretation_completion_token"},
-        )
+            status_code=status_code,
+            detail={"code": exc.code, "retryable": status_code == 503},
+        ) from exc
 
 
 def _reinterpretation_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -693,7 +710,7 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
     default_store = store or PostgresCanonicalEventStore()
 
     @router.post("/v1/ella/events")
-    async def write_events(batch: CanonicalEventsBatch):
+    async def write_events(batch: CanonicalEventsBatch, request: Request):
         """
         Idempotently write raw canonical events.
 
@@ -702,7 +719,10 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         existing raw text/metadata is never overwritten by summaries,
         corrections, retries, or downstream enrichment.
         """
-        return await default_store.write_batch(batch.events)
+        principal_uid = _authenticated_canonical_writer(request.headers.get("Authorization", ""))
+        event_uids = {_require_canonical_subject(principal_uid, event.uid) for event in batch.events}
+        async with _canonical_write_fences(event_uids):
+            return await default_store.write_batch(batch.events)
 
     @router.post("/v1/ella/sessions/{session_id}/complete")
     async def complete_session(
@@ -711,11 +731,10 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         request: Request,
     ):
         """Record source session completion without converting sessions into OMI objects."""
-        _require_reinterpretation_completion_auth(
-            completion,
-            request.headers.get("Authorization", ""),
-        )
-        return await default_store.complete_session(session_id, completion)
+        principal_uid = _authenticated_canonical_writer(request.headers.get("Authorization", ""))
+        uid = _require_canonical_subject(principal_uid, completion.uid)
+        async with _canonical_write_fences({uid}):
+            return await default_store.complete_session(session_id, completion)
 
     @router.get("/v1/ella/timeline")
     async def read_timeline(
@@ -750,4 +769,7 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
 async def handle_events(request: Request, store: Optional[CanonicalEventStore] = None) -> dict[str, Any]:
     """Direct import helper for backend integration tests or legacy mounting."""
     payload = CanonicalEventsBatch(**(await request.json()))
-    return await (store or PostgresCanonicalEventStore()).write_batch(payload.events)
+    principal_uid = _authenticated_canonical_writer(request.headers.get("Authorization", ""))
+    event_uids = {_require_canonical_subject(principal_uid, event.uid) for event in payload.events}
+    async with _canonical_write_fences(event_uids):
+        return await (store or PostgresCanonicalEventStore()).write_batch(payload.events)
