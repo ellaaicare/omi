@@ -249,8 +249,8 @@ print('Adapters:', list(get_all_adapters().keys()))
 |----------|---------|-------------|
 | `ELLA_ENABLED` | `true` | Master switch for all Ella features |
 | `ELLA_POSTGRES_AUTHORITY_ENABLED` | follows `ELLA_ENABLED` | Explicit account-deletion authority boundary. Set `false` only when Ella PostgreSQL persistence/schema is intentionally absent; enabled database failures remain fail-closed. |
-| `ELLA_CONTENT_WRITE_FENCE_LEASE_SECONDS` | `900` | Renewable Firestore writer lease; bounded to 900 seconds and removed on every request exit. |
-| `ELLA_CONTENT_WRITE_FENCE_ACQUIRE_SECONDS` | `15` | Bounded wait for the distributed content/owner fence. |
+| `ELLA_CONTENT_WRITE_FENCE_LEASE_SECONDS` | `900` | Diagnostic writer-registration horizon. Expiry never proves absence; only explicit release permits deletion completion. |
+| `ELLA_CONTENT_WRITE_FENCE_ACQUIRE_SECONDS` | `15` | Bounded wait for short PostgreSQL admission proof and Firestore writer registration. No pool connection is held across route code. |
 | `ELLA_CONTENT_WRITE_FENCE_DRAIN_SECONDS` | `15` | Bounded deletion drain wait before returning truthful HTTP 202 for pending Firestore cleanup. |
 | `ELLA_N8N_BASE_URL` | `https://n8n.ella-ai-care.com` | n8n webhook base URL |
 | `ELLA_SUMMARY_ENABLED` | `true` | Use n8n for summary generation |
@@ -310,7 +310,13 @@ receipt subcollection; callers cannot submit or select another UID.
   binding, and OMI identity authority and releases any ordinary invitation
   capacity. Firestore cleanup is recursive and retry-safe. A fully completed
   deletion returns a non-identifying receipt; `202 deletion_pending` names only
-  the remaining artifact classes when cleanup must resume. The self-hosted
+  the remaining artifact classes when cleanup must resume. The content fence
+  transfers a separate durable registration to detached import,
+  conversation-processing, persona, vector, and cache workers before their
+  caller returns. Top-level Limitless import-job records are deleted by exact
+  UID with the recursive user tree. Registration timestamps are diagnostic;
+  an unreleased worker keeps deletion pending instead of being assumed dead.
+  The self-hosted
   `:8210` authority currently has no authenticated deprovision operation, so a
   provisioned Hermes profile/Honcho tenancy/registry entry remains disabled and
   requires an operator until that authority can issue a trusted deletion

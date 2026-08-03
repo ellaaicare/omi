@@ -991,89 +991,68 @@ def test_each_production_writer_waits_before_mutation_and_commits_after_release(
     asyncio.run(_run_with_database(scenario))
 
 
-def test_content_request_holds_owner_lock_across_real_commit_and_releases_on_cancellation():
+def test_content_admission_releases_pool_before_same_owner_nested_writers_at_full_capacity():
     async def scenario(pool):
-        uid = "synthetic-content-request-fence"
+        capacity = 6
+        users = []
         async with pool.acquire() as seed:
-            user_id = await seed.fetchval(
-                """
-                INSERT INTO users (omi_uid, email, profile_class, status)
-                VALUES ($1, $2, 'synthetic', 'ACTIVE')
-                RETURNING id
-                """,
-                uid,
-                f"{uid}@example.invalid",
-            )
-        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
-        writer_entered = asyncio.Event()
-        release_writer = asyncio.Event()
+            for index in range(capacity):
+                uid = f"synthetic-content-reentry-{index}"
+                user_id = await seed.fetchval(
+                    """
+                    INSERT INTO users (omi_uid, email, profile_class, status)
+                    VALUES ($1, $2, 'synthetic', 'ACTIVE')
+                    RETURNING id
+                    """,
+                    uid,
+                    f"{uid}@example.invalid",
+                )
+                users.append((uid, user_id))
 
-        async def writer():
-            async with content_write_fence._postgres_owner_fence(uid):
-                writer_entered.set()
-                await release_writer.wait()
+        nested_count = 0
+        nested_lock = asyncio.Lock()
+        all_nested = asyncio.Event()
 
-        writer_task = asyncio.create_task(writer())
-        await asyncio.wait_for(writer_entered.wait(), timeout=5)
+        async def mounted_request(uid, user_id):
+            nonlocal nested_count
+            await content_write_fence._assert_postgres_owner_active(uid)
+            owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+            async with pool.acquire() as nested_connection:
+                async with nested_connection.transaction():
+                    proof = await authority_advisory_lock.acquire_authority_lock(
+                        nested_connection,
+                        owner=owner,
+                    )
+                    assert (
+                        await authority_advisory_lock.verify_self_owner_after_lock(
+                            nested_connection,
+                            uid=uid,
+                            owner=owner,
+                            proof=proof,
+                        )
+                        == user_id
+                    )
+                    async with nested_lock:
+                        nested_count += 1
+                        if nested_count == capacity:
+                            all_nested.set()
+                    await asyncio.wait_for(all_nested.wait(), timeout=5)
 
-        async with pool.acquire() as deletion_connection:
-            deletion_transaction = deletion_connection.transaction()
-            await deletion_transaction.start()
-            deletion_lock = asyncio.create_task(
-                authority_advisory_lock.acquire_authority_lock(deletion_connection, owner=owner)
-            )
-            await _wait_for_advisory_waiter(pool, owner)
-            assert not deletion_lock.done()
-            release_writer.set()
-            await asyncio.wait_for(writer_task, timeout=5)
-            await asyncio.wait_for(deletion_lock, timeout=5)
-            await deletion_connection.execute(
-                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
-                user_id,
-            )
-            await deletion_transaction.commit()
-
-        with pytest.raises(content_write_fence.ContentWriteFenceError) as forbidden:
-            async with content_write_fence._postgres_owner_fence(uid):
-                pass
-        assert forbidden.value.code == "account_write_forbidden"
-
-        cancellation_uid = f"{uid}-cancellation"
-        async with pool.acquire() as seed_cancellation:
-            cancellation_user_id = await seed_cancellation.fetchval(
-                """
-                INSERT INTO users (omi_uid, email, profile_class, status)
-                VALUES ($1, $2, 'synthetic', 'ACTIVE')
-                RETURNING id
-                """,
-                cancellation_uid,
-                f"{cancellation_uid}@example.invalid",
-            )
-        cancellation_owner = authority_advisory_lock.AuthorityOwner.from_values(
-            cancellation_user_id,
-            cancellation_user_id,
+        await asyncio.wait_for(
+            asyncio.gather(*(mounted_request(uid, user_id) for uid, user_id in users)),
+            timeout=10,
         )
-        cancellation_entered = asyncio.Event()
+        assert nested_count == capacity
 
-        async def cancelled_writer():
-            async with content_write_fence._postgres_owner_fence(cancellation_uid):
-                cancellation_entered.set()
-                await asyncio.Event().wait()
-
-        cancelled_task = asyncio.create_task(cancelled_writer())
-        await asyncio.wait_for(cancellation_entered.wait(), timeout=5)
-        cancelled_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await cancelled_task
-
-        async with pool.acquire() as cleanup_probe:
-            cleanup_transaction = cleanup_probe.transaction()
-            await cleanup_transaction.start()
-            await asyncio.wait_for(
-                authority_advisory_lock.acquire_authority_lock(cleanup_probe, owner=cancellation_owner),
-                timeout=5,
+        blocked_uid, blocked_user_id = users[0]
+        async with pool.acquire() as tombstone:
+            await tombstone.execute(
+                "UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1",
+                blocked_user_id,
             )
-            await cleanup_transaction.rollback()
+        with pytest.raises(content_write_fence.ContentWriteFenceError) as forbidden:
+            await content_write_fence._assert_postgres_owner_active(blocked_uid)
+        assert forbidden.value.code == "account_write_forbidden"
 
     asyncio.run(_run_with_database(scenario))
 

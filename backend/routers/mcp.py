@@ -1,5 +1,4 @@
 from datetime import datetime
-import threading
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -8,6 +7,7 @@ from pydantic import BaseModel
 import database.memories as memories_db
 import database.conversations as conversations_db
 import database.users as users_db
+from database import content_write_fence
 
 # from database.redis_db import get_filter_category_items
 # from database.vector_db import query_vectors_by_metadata
@@ -48,7 +48,12 @@ def create_memory(memory: Memory, uid: str = Depends(get_uid_from_mcp_api_key)):
     memory.category = identify_category_for_memory(memory.content)
     memory_db = MemoryDB.from_memory(memory, uid, None, True)
     memories_db.create_memory(uid, memory_db.model_dump())
-    threading.Thread(target=update_personas_async, args=(uid,)).start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        update_personas_async,
+        args=(uid,),
+        name="mcp-persona-refresh",
+    )
     return memory_db
 
 

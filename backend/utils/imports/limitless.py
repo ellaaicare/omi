@@ -16,6 +16,7 @@ from zipfile import ZipFile
 
 import database.import_jobs as import_jobs_db
 import database.conversations as conversations_db
+from database import content_write_fence
 from models.conversation import (
     Conversation,
     ConversationSource,
@@ -200,6 +201,11 @@ def _create_overview_from_transcript(segments: List[TranscriptSegment], max_char
     return overview if overview else "Imported from Limitless"
 
 
+def _update_import_job(job_id: str, uid: str, updates: dict) -> None:
+    content_write_fence.assert_detached_content_writer_current(uid)
+    import_jobs_db.update_import_job(job_id, updates)
+
+
 def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code: str = 'en') -> None:
     """
     Background worker to process a Limitless ZIP export using LIGHT IMPORT mode.
@@ -220,8 +226,9 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
     """
     try:
         # Update status to processing
-        import_jobs_db.update_import_job(
+        _update_import_job(
             job_id,
+            uid,
             {
                 'status': ImportJobStatus.processing.value,
                 'started_at': datetime.now(timezone.utc).isoformat(),
@@ -247,7 +254,7 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
                 print(f"[Limitless Import] First 5 lifelog files: {lifelog_files[:5]}")
 
             total_files = len(lifelog_files)
-            import_jobs_db.update_import_job(job_id, {'total_files': total_files})
+            _update_import_job(job_id, uid, {'total_files': total_files})
 
             if total_files == 0:
                 # Log more details about what we found
@@ -256,8 +263,9 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
                 if md_files:
                     print(f"[Limitless Import] Sample .md files: {md_files[:10]}")
 
-                import_jobs_db.update_import_job(
+                _update_import_job(
                     job_id,
+                    uid,
                     {
                         'status': ImportJobStatus.failed.value,
                         'error': f'No lifelog files found in ZIP. Found {len(all_files)} total entries, {len(md_files)} .md files. Expected files in lifelogs/ folder.',
@@ -281,7 +289,7 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
                     # Skip empty files
                     if not segments:
                         processed_files += 1
-                        import_jobs_db.update_import_job(job_id, {'processed_files': processed_files})
+                        _update_import_job(job_id, uid, {'processed_files': processed_files})
                         continue
 
                     # Calculate finished_at from last segment
@@ -329,6 +337,7 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
                     )
 
                     # Save directly to database (skip all AI processing)
+                    content_write_fence.assert_detached_content_writer_current(uid)
                     conversations_db.upsert_conversation(uid, conversation.dict())
                     conversations_created += 1
 
@@ -341,8 +350,9 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
 
                 # Update progress every 10 files to reduce database writes
                 if processed_files % 10 == 0 or processed_files == total_files:
-                    import_jobs_db.update_import_job(
+                    _update_import_job(
                         job_id,
+                        uid,
                         {
                             'processed_files': processed_files,
                             'conversations_created': conversations_created,
@@ -361,8 +371,9 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
                     # Partial success
                     error_msg = f"{len(errors)} files failed to process"
 
-            import_jobs_db.update_import_job(
+            _update_import_job(
                 job_id,
+                uid,
                 {
                     'status': final_status,
                     'completed_at': datetime.now(timezone.utc).isoformat(),
@@ -390,11 +401,14 @@ def process_limitless_import(job_id: str, uid: str, zip_path: str, language_code
                     data={'type': 'import_failed', 'job_id': job_id},
                 )
 
+    except content_write_fence.ContentWriteFenceError as e:
+        print(f"Import job {job_id} stopped: {e.code}")
     except Exception as e:
         print(f"Import job {job_id} failed: {str(e)}")
         traceback.print_exc()
-        import_jobs_db.update_import_job(
+        _update_import_job(
             job_id,
+            uid,
             {
                 'status': ImportJobStatus.failed.value,
                 'error': str(e),

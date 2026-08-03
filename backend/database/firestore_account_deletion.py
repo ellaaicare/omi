@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from google.cloud.firestore_v1 import FieldFilter
+
 
 def _delete_collection(
     firestore: Any,
@@ -37,8 +39,12 @@ def delete_firestore_user_data(
     batch_size: int = 450,
 ) -> dict[str, Any]:
     """Delete a full document tree; missing/partially deleted trees are success."""
+    deleted = _delete_collection(
+        firestore,
+        firestore.collection("import_jobs").where(filter=FieldFilter("uid", "==", uid)),
+        batch_size=batch_size,
+    )
     user_ref = firestore.collection("users").document(uid)
-    deleted = 0
     for collection_ref in user_ref.collections():
         deleted += _delete_collection(
             firestore,

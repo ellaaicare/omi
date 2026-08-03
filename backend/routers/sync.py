@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from opuslib import Decoder
 from pydub import AudioSegment
 
+from database import content_write_fence
 from database import conversations as conversations_db
 from database import users as users_db
 from database.conversations import get_closest_conversation_to_timestamps, update_conversation_segments
@@ -158,8 +159,11 @@ def precache_conversation_audio_endpoint(
                     print(f"Error in parallel precache: {e}")
         print(f"Completed pre-cache for conversation {conversation_id}")
 
-    thread = threading.Thread(target=_precache_all_parallel, daemon=True)
-    thread.start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        _precache_all_parallel,
+        name=f"audio-precache-{conversation_id}",
+    )
 
     return {"status": "started", "audio_file_count": len(audio_files)}
 
@@ -254,8 +258,11 @@ def get_audio_signed_urls_endpoint(
                     except Exception as e:
                         print(f"Error in parallel cache: {e}")
 
-        thread = threading.Thread(target=_cache_uncached_parallel, daemon=True)
-        thread.start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            _cache_uncached_parallel,
+            name=f"audio-cache-{conversation_id}",
+        )
 
     return {"audio_files": result}
 

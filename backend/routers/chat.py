@@ -1,7 +1,6 @@
 import uuid
 import re
 import base64
-import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
@@ -12,6 +11,7 @@ from multipart.multipart import shutil
 
 import database.chat as chat_db
 import database.conversations as conversations_db
+from database import content_write_fence
 from database.apps import record_app_usage
 from models.app import App, UsageHistoryType
 from models.chat import (
@@ -80,6 +80,7 @@ def send_message(
 
     # Set Ella context for LLM proxy
     from utils.llm.clients import set_ella_context
+
     set_ella_context(uid=uid, task='chat')
 
     if compat_app_id in ['null', '']:
@@ -115,7 +116,12 @@ def send_message(
     chat_db.add_message(uid, message.dict())
 
     # Check for goal progress (background)
-    threading.Thread(target=extract_and_update_goal_progress, args=(uid, data.text)).start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        extract_and_update_goal_progress,
+        args=(uid, data.text),
+        name="chat-goal-progress",
+    )
 
     app = get_available_app_by_id(compat_app_id, uid)
     app = App(**app) if app else None

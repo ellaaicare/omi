@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import os
+import threading
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 import uuid
 
 from google.cloud import firestore
@@ -27,6 +29,10 @@ DEFAULT_DRAIN_SECONDS = 15.0
 _firestore_db: Any = None
 _request_fence_registry: ContextVar[dict[str, Any] | None] = ContextVar(
     "content_write_fence_registry",
+    default=None,
+)
+_detached_writer: ContextVar["DetachedContentWriter | None"] = ContextVar(
+    "detached_content_writer",
     default=None,
 )
 
@@ -110,15 +116,24 @@ def _snapshot_data(snapshot: Any) -> dict[str, Any]:
     return dict(snapshot.to_dict() or {})
 
 
-def _active_writers(data: dict[str, Any], now: datetime) -> dict[str, datetime]:
+def _registered_writers(data: dict[str, Any]) -> dict[str, datetime]:
+    """Return every unreleased writer; timestamps never prove absence.
+
+    A process crash or missed heartbeat must leave deletion pending. Expiry is
+    diagnostic metadata only because a live writer can stall its event loop
+    longer than the configured interval and still reach its datastore commit.
+    """
     writers = data.get("writers")
-    if not isinstance(writers, dict):
+    if writers is None:
         return {}
-    return {
-        token: expires_at
-        for token, expires_at in writers.items()
-        if isinstance(token, str) and isinstance(expires_at, datetime) and expires_at > now
-    }
+    if not isinstance(writers, dict):
+        raise ContentWriteFenceError("account_content_fence_corrupt")
+    registered: dict[str, datetime] = {}
+    for token, expires_at in writers.items():
+        if not isinstance(token, str) or not token or not isinstance(expires_at, datetime):
+            raise ContentWriteFenceError("account_content_fence_corrupt")
+        registered[token] = expires_at
+    return registered
 
 
 def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int) -> None:
@@ -130,7 +145,7 @@ def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int)
         data = _snapshot_data(reference.get(transaction=transaction))
         if data.get("state", ACTIVE) != ACTIVE:
             raise ContentWriteFenceError("account_write_forbidden")
-        writers = _active_writers(data, now)
+        writers = _registered_writers(data)
         writers[token] = now + timedelta(seconds=lease_seconds)
         transaction.set(
             reference,
@@ -144,28 +159,17 @@ def _acquire_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int)
     acquire(db.transaction())
 
 
-def _renew_firestore_writer(db: Any, uid: str, token: str, lease_seconds: int) -> bool:
+def _assert_firestore_writer_current(db: Any, uid: str, token: str) -> None:
     reference = _fence_reference(db, uid)
-    now = datetime.now(timezone.utc)
 
     @firestore.transactional
-    def renew(transaction: Any) -> bool:
+    def assert_current(transaction: Any) -> None:
         data = _snapshot_data(reference.get(transaction=transaction))
-        writers = _active_writers(data, now)
-        if token not in writers or data.get("state", ACTIVE) == TOMBSTONED:
-            return False
-        writers[token] = now + timedelta(seconds=lease_seconds)
-        transaction.set(
-            reference,
-            {
-                "state": data.get("state", ACTIVE),
-                "writers": writers,
-                "updated_at": now,
-            },
-        )
-        return True
+        writers = _registered_writers(data)
+        if token not in writers or data.get("state", ACTIVE) not in {ACTIVE, DRAINING}:
+            raise ContentWriteFenceError("account_write_forbidden")
 
-    return bool(renew(db.transaction()))
+    assert_current(db.transaction())
 
 
 def _release_firestore_writer(db: Any, uid: str, token: str) -> None:
@@ -176,7 +180,7 @@ def _release_firestore_writer(db: Any, uid: str, token: str) -> None:
     def release(transaction: Any) -> None:
         snapshot = reference.get(transaction=transaction)
         data = _snapshot_data(snapshot)
-        writers = _active_writers(data, now)
+        writers = _registered_writers(data)
         writers.pop(token, None)
         state = data.get("state", ACTIVE)
         if state == ACTIVE and not writers:
@@ -205,7 +209,7 @@ def _advance_firestore_tombstone(db: Any, uid: str) -> bool:
         data = _snapshot_data(reference.get(transaction=transaction))
         if data.get("state") == TOMBSTONED:
             return True
-        writers = _active_writers(data, now)
+        writers = _registered_writers(data)
         state = DRAINING if writers else TOMBSTONED
         transaction.set(
             reference,
@@ -231,9 +235,14 @@ async def _finish_even_if_cancelled(awaitable: Any) -> None:
         raise
 
 
-@asynccontextmanager
-async def _postgres_owner_fence(uid: str) -> AsyncIterator[None]:
-    """Hold the shared owner advisory lock and ACTIVE proof through the write."""
+async def _assert_postgres_owner_active(uid: str) -> None:
+    """Briefly serialize admission with deletion, then release the pool slot.
+
+    The Firestore writer registration is acquired only after this check. That
+    ordering means deletion either observes the writer registration and drains
+    it, or tombstones first and makes registration fail. No PostgreSQL
+    connection or advisory lock is held across arbitrary route code.
+    """
     try:
         pool = await voice_canary.get_pool()
         owner_missing = False
@@ -260,27 +269,17 @@ async def _postgres_owner_fence(uid: str) -> AsyncIterator[None]:
                         proof=proof,
                     )
                     status = await connection.fetchval("SELECT status FROM users WHERE id = $1", user_id)
-                    if str(status or "") in {"DELETION_PENDING", "DELETED"}:
+                    if str(status or "") != ACTIVE:
                         raise ContentWriteFenceError("account_write_forbidden")
-                    yield
                 finally:
                     await _finish_even_if_cancelled(transaction.rollback())
                 return
         if owner_missing:
-            yield
+            return
     except ContentWriteFenceError:
         raise
     except Exception as exc:
         raise ContentWriteFenceError("account_authority_unavailable") from exc
-
-
-async def _renew_until_released(db: Any, uid: str, token: str, lease_seconds: int) -> None:
-    interval = max(1.0, lease_seconds / 3)
-    while True:
-        await asyncio.sleep(interval)
-        renewed = await asyncio.to_thread(_renew_firestore_writer, db, uid, token, lease_seconds)
-        if not renewed:
-            return
 
 
 @asynccontextmanager
@@ -302,24 +301,139 @@ async def content_write_fence(uid: str, *, db: Any = None) -> AsyncIterator[str]
         except Exception as exc:
             raise ContentWriteFenceError("account_content_fence_unavailable") from exc
 
-        renew_task = asyncio.create_task(_renew_until_released(firestore_db, uid, token, lease_seconds))
         try:
             yield
         finally:
-            renew_task.cancel()
-            try:
-                await renew_task
-            except asyncio.CancelledError:
-                pass
             await _finish_even_if_cancelled(asyncio.to_thread(_release_firestore_writer, firestore_db, uid, token))
 
     if _authority_enabled():
-        async with _postgres_owner_fence(uid):
-            async with firestore_fence():
-                yield uid
-    else:
-        async with firestore_fence():
-            yield uid
+        await _assert_postgres_owner_active(uid)
+    async with firestore_fence():
+        yield uid
+
+
+@dataclass(frozen=True)
+class DetachedContentWriter:
+    """A writer registration transferred from a request to detached work."""
+
+    uid: str
+    token: str
+    firestore_db: Any
+
+    def assert_current(self) -> None:
+        _assert_firestore_writer_current(self.firestore_db, self.uid, self.token)
+
+    def release(self) -> None:
+        _release_firestore_writer(self.firestore_db, self.uid, self.token)
+
+
+@asynccontextmanager
+async def detached_content_write_fence(uid: str, *, db: Any = None) -> AsyncIterator[DetachedContentWriter]:
+    """Own and bind one writer registration inside a detached async task."""
+    firestore_db = _configured_firestore_db(db)
+    if _authority_enabled():
+        await _assert_postgres_owner_active(uid)
+    writer = DetachedContentWriter(uid=uid, token=uuid.uuid4().hex, firestore_db=firestore_db)
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                _acquire_firestore_writer,
+                firestore_db,
+                uid,
+                writer.token,
+                _lease_seconds(),
+            ),
+            timeout=_acquire_seconds(),
+        )
+    except ContentWriteFenceError:
+        raise
+    except Exception as exc:
+        raise ContentWriteFenceError("account_content_fence_unavailable") from exc
+
+    context_token = _detached_writer.set(writer)
+    try:
+        yield writer
+    finally:
+        _detached_writer.reset(context_token)
+        await _finish_even_if_cancelled(asyncio.to_thread(writer.release))
+
+
+def _prepare_detached_content_writer(uid: str) -> DetachedContentWriter:
+    registry = _request_fence_registry.get()
+    if registry is None or uid not in registry:
+        parent = _detached_writer.get()
+        if parent is None or parent.uid != uid:
+            raise ContentWriteFenceError("account_content_fence_unavailable")
+        parent.assert_current()
+    firestore_db = _configured_firestore_db(None)
+    token = uuid.uuid4().hex
+    _acquire_firestore_writer(firestore_db, uid, token, _lease_seconds())
+    return DetachedContentWriter(uid=uid, token=token, firestore_db=firestore_db)
+
+
+def assert_detached_content_writer_current(uid: str) -> None:
+    """Fail a detached worker at its datastore commit boundary if ownership is lost."""
+    writer = _detached_writer.get()
+    if writer is None or writer.uid != uid:
+        raise ContentWriteFenceError("account_content_fence_unavailable")
+    writer.assert_current()
+
+
+def start_content_writer_thread(
+    uid: str,
+    target: Callable[..., Any],
+    *,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+    name: str | None = None,
+    daemon: bool = True,
+) -> threading.Thread:
+    """Transfer a durable writer registration before starting a raw thread."""
+    writer = _prepare_detached_content_writer(uid)
+
+    def run() -> None:
+        context_token = _detached_writer.set(writer)
+        try:
+            target(*args, **(kwargs or {}))
+        finally:
+            try:
+                writer.release()
+            finally:
+                _detached_writer.reset(context_token)
+
+    thread = threading.Thread(target=run, name=name, daemon=daemon)
+    try:
+        thread.start()
+    except Exception:
+        writer.release()
+        raise
+    return thread
+
+
+async def start_content_writer_task(
+    uid: str,
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    name: str | None = None,
+) -> asyncio.Task[Any]:
+    """Transfer a durable writer registration before starting an async task."""
+    writer = await asyncio.to_thread(_prepare_detached_content_writer, uid)
+
+    async def run() -> Any:
+        context_token = _detached_writer.set(writer)
+        try:
+            return await factory()
+        finally:
+            try:
+                await _finish_even_if_cancelled(asyncio.to_thread(writer.release))
+            finally:
+                _detached_writer.reset(context_token)
+
+    try:
+        return asyncio.create_task(run(), name=name)
+    except Exception:
+        await asyncio.to_thread(writer.release)
+        raise
 
 
 @asynccontextmanager
@@ -366,6 +480,7 @@ class ContentWriteFenceMiddleware:
             try:
                 for manager in reversed(tuple(registry.values())):
                     await _finish_even_if_cancelled(manager.__aexit__(None, None, None))
+                registry.clear()
             finally:
                 _request_fence_registry.reset(context_token)
 

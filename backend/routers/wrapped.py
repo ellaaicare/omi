@@ -4,7 +4,6 @@ Wrapped 2025 API endpoints.
 Provides generation and retrieval of yearly recap data.
 """
 
-import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -12,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import database.wrapped as wrapped_db
+from database import content_write_fence
 from database.wrapped import WrappedStatus
 from utils.other import endpoints as auth
 
@@ -105,8 +105,12 @@ def generate_wrapped(year: int, uid: str = Depends(auth.get_writable_user_uid)):
         if wrapped_db.is_wrapped_stuck(wrapped):
             # Restart stuck job
             wrapped_db.reset_wrapped_for_regeneration(uid, year)
-            thread = threading.Thread(target=_run_wrapped_generation, args=(uid, year))
-            thread.start()
+            content_write_fence.start_content_writer_thread(
+                uid,
+                _run_wrapped_generation,
+                args=(uid, year),
+                name=f"wrapped-{year}",
+            )
             return GenerateWrappedResponse(
                 status=WrappedStatus.PROCESSING,
                 message="Restarting stuck generation...",
@@ -124,8 +128,12 @@ def generate_wrapped(year: int, uid: str = Depends(auth.get_writable_user_uid)):
         wrapped_db.create_wrapped(uid, year)
 
     # Start generation in background
-    thread = threading.Thread(target=_run_wrapped_generation, args=(uid, year))
-    thread.start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        _run_wrapped_generation,
+        args=(uid, year),
+        name=f"wrapped-{year}",
+    )
 
     return GenerateWrappedResponse(
         status=WrappedStatus.PROCESSING,

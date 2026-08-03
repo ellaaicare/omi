@@ -7,10 +7,24 @@ on:
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
+      - "backend/database/firestore_account_deletion.py"
+      - "backend/routers/action_items.py"
       - "backend/routers/apps.py"
+      - "backend/routers/chat.py"
+      - "backend/routers/developer.py"
+      - "backend/routers/imports.py"
       - "backend/routers/integration.py"
+      - "backend/routers/mcp.py"
       - "backend/routers/mcp_sse.py"
+      - "backend/routers/memories.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/sync.py"
+      - "backend/routers/transcribe.py"
+      - "backend/routers/wrapped.py"
       - "backend/routers/workflow.py"
+      - "backend/utils/imports/limitless.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/other/storage.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
@@ -28,7 +42,6 @@ on:
       - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/account_deletion.py"
-      - "backend/database/firestore_account_deletion.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/database/users.py"
       - "backend/routers/users.py"
@@ -62,10 +75,24 @@ on:
       - "backend/database/account_deletion.py"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/content_write_fence.py"
+      - "backend/database/firestore_account_deletion.py"
+      - "backend/routers/action_items.py"
       - "backend/routers/apps.py"
+      - "backend/routers/chat.py"
+      - "backend/routers/developer.py"
+      - "backend/routers/imports.py"
       - "backend/routers/integration.py"
+      - "backend/routers/mcp.py"
       - "backend/routers/mcp_sse.py"
+      - "backend/routers/memories.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/sync.py"
+      - "backend/routers/transcribe.py"
+      - "backend/routers/wrapped.py"
       - "backend/routers/workflow.py"
+      - "backend/utils/imports/limitless.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/other/storage.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
@@ -83,7 +110,6 @@ on:
       - "backend/ella/utils/provision_authority.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/account_deletion.py"
-      - "backend/database/firestore_account_deletion.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/database/users.py"
       - "backend/routers/users.py"
@@ -131,6 +157,10 @@ jobs:
     env:
       ELLA_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/invite_redemption_test
       ENCRYPTION_SECRET: omi_ci_invite_redemption_only
+      FIRESTORE_EMULATOR_HOST: localhost:9999
+      GCLOUD_PROJECT: omi-ci
+      GOOGLE_CLOUD_PROJECT: omi-ci
+      STORAGE_EMULATOR_HOST: http://localhost:4443
     defaults:
       run:
         working-directory: backend
@@ -154,7 +184,10 @@ jobs:
           "httpx==0.28.0"
           "PyJWT==2.9.0"
           "pydantic==2.8.2"
+          "python-multipart==0.0.9"
           "pytest==8.3.2"
+          "redis==5.0.8"
+          "stripe==11.3.0"
           "websockets==12.0"
 
       - name: Compile invite and entitlement modules
@@ -163,11 +196,24 @@ jobs:
           database/account_deletion.py
           database/authority_advisory_lock.py
           database/content_write_fence.py
-          routers/apps.py
-          routers/integration.py
-          routers/mcp_sse.py
-          routers/workflow.py
           database/firestore_account_deletion.py
+          routers/action_items.py
+          routers/apps.py
+          routers/chat.py
+          routers/developer.py
+          routers/imports.py
+          routers/integration.py
+          routers/mcp.py
+          routers/mcp_sse.py
+          routers/memories.py
+          routers/pusher.py
+          routers/sync.py
+          routers/transcribe.py
+          routers/wrapped.py
+          routers/workflow.py
+          utils/imports/limitless.py
+          utils/conversations/process_conversation.py
+          utils/other/storage.py
           database/users.py
           database/ella_provisioning.py
           database/invitation_operator.py
@@ -207,7 +253,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 165
+          test "$collected" -eq 171
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -235,7 +281,13 @@ jobs:
             "tests/unit/test_account_deletion.py::test_explicit_legacy_mode_does_not_probe_optional_ella_authority_for_content_writes"
             "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[True]"
             "tests/unit/test_content_write_fence.py::test_adversarial_production_route_writer_is_drained_before_deletion_reports_complete[False]"
-            "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_uses_scope_holding_dependencies"
+            "tests/unit/test_account_deletion.py::test_firestore_delete_removes_only_owned_top_level_import_jobs_and_retries"
+            "tests/unit/test_content_write_fence.py::test_expired_registration_never_proves_a_live_writer_absent"
+            "tests/unit/test_content_write_fence.py::test_detached_writer_transfers_child_registration_before_parent_release"
+            "tests/unit/test_content_write_fence.py::test_mounted_limitless_worker_transfers_fence_until_actual_upsert_finishes"
+            "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[consent]"
+            "tests/unit/test_content_write_fence.py::test_mounted_nested_database_routes_release_admission_connection_before_handler[entitlement]"
+            "tests/unit/test_content_write_fence.py::test_mounted_authenticated_writer_inventory_and_detached_lifetimes_are_exact"
             "tests/unit/test_content_write_fence.py::test_request_fence_covers_streamed_commit_after_route_returns"
             "tests/unit/test_ella_onboarding_contract.py::test_authority_rejection_precedes_identity_and_repository_side_effects"
             "tests/unit/test_pilot_invite_admin.py::test_self_hosted_admission_uses_verified_email_and_current_policy_without_uid_allowlist"

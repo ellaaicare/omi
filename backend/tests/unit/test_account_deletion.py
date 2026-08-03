@@ -31,11 +31,12 @@ class _Snapshot:
 
 
 class _Document:
-    def __init__(self, name, *, exists=True, children=None):
+    def __init__(self, name, *, exists=True, children=None, data=None):
         self.name = name
         self.exists = exists
         self.deleted = False
         self._children = list(children or ())
+        self.data = dict(data or {})
 
     def get(self):
         return type("DocumentState", (), {"exists": self.exists and not self.deleted})()
@@ -53,6 +54,11 @@ class _Collection:
 
     def limit(self, _batch_size):
         return self
+
+    def where(self, *, filter):
+        return _Collection(
+            [document for document in self.documents if document.data.get(filter.field_path) == filter.value]
+        )
 
     def stream(self):
         return [_Snapshot(document) for document in self.documents if not document.deleted]
@@ -75,13 +81,17 @@ class _Batch:
 
 
 class _Firestore:
-    def __init__(self, user_document):
+    def __init__(self, user_document, *, import_jobs=None):
         self.user_document = user_document
+        self.import_jobs = _Collection(import_jobs)
         self.fail_next_commit = False
 
     def collection(self, name):
-        assert name == "users"
-        return self
+        if name == "users":
+            return self
+        if name == "import_jobs":
+            return self.import_jobs
+        raise AssertionError(name)
 
     def document(self, _uid):
         return self.user_document
@@ -160,6 +170,22 @@ def test_firestore_delete_is_idempotent_and_resumes_after_partial_failure():
     }
     assert replay["status"] == "ok"
     assert replay["documents_deleted"] == 0
+
+
+def test_firestore_delete_removes_only_owned_top_level_import_jobs_and_retries():
+    owned_job = _Document("owned-job", data={"uid": "synthetic-user"})
+    other_job = _Document("other-job", data={"uid": "other-user"})
+    root_document = _Document("user")
+    firestore = _Firestore(root_document, import_jobs=[owned_job, other_job])
+
+    result = delete_firestore_user_data(firestore, "synthetic-user")
+    replay = delete_firestore_user_data(firestore, "synthetic-user")
+
+    assert result["documents_deleted"] == 2
+    assert replay["documents_deleted"] == 0
+    assert owned_job.deleted is True
+    assert other_job.deleted is False
+    assert root_document.deleted is True
 
 
 def test_deletion_service_returns_typed_pending_and_preserves_auth_retry(monkeypatch):

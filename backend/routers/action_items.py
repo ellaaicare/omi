@@ -1,11 +1,11 @@
 import asyncio
-import threading
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, List
 from datetime import datetime, timezone
 
 import database.action_items as action_items_db
+from database import content_write_fence
 from utils.other import endpoints as auth
 from utils.notifications import (
     send_action_item_data_message,
@@ -96,7 +96,11 @@ def create_action_item(request: CreateActionItemRequest, uid: str = Depends(auth
     def _run_auto_sync():
         asyncio.run(auto_sync_action_item(uid, {"id": action_item_id, **action_item_data}))
 
-    threading.Thread(target=_run_auto_sync, daemon=True).start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        _run_auto_sync,
+        name=f"action-item-sync-{action_item_id}",
+    )
 
     return ActionItemResponse(**action_item)
 

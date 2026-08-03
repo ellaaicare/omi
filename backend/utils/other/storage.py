@@ -5,7 +5,6 @@ import os
 import wave
 from typing import List
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -15,7 +14,7 @@ from google.cloud.exceptions import NotFound
 
 from database.redis_db import cache_signed_url, get_cached_signed_url
 from utils import encryption
-from database import users as users_db
+from database import content_write_fence, users as users_db
 
 if os.environ.get('SERVICE_ACCOUNT_JSON'):
     service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
@@ -592,8 +591,11 @@ def get_or_create_merged_audio(
         except Exception as e:
             print(f"Error uploading audio cache: {e}")
 
-    cache_thread = threading.Thread(target=_upload_to_cache, daemon=True)
-    cache_thread.start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        _upload_to_cache,
+        name=f"merged-audio-cache-{conversation_id}-{audio_file_id}",
+    )
 
     return wav_data, False
 
@@ -687,8 +689,11 @@ def precache_conversation_audio(
         with ThreadPoolExecutor(max_workers=4) as executor:
             list(executor.map(_cache_single, audio_files))
 
-    thread = threading.Thread(target=_precache_all, daemon=True)
-    thread.start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        _precache_all,
+        name=f"conversation-audio-precache-{conversation_id}",
+    )
 
 
 # **********************************

@@ -76,7 +76,6 @@ from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_k
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
-from utils.other.task import safe_create_task
 from utils.pusher import connect_to_trigger_pusher
 from utils.speaker_identification import detect_speaker_from_text
 from utils.stt.streaming import (
@@ -2030,7 +2029,11 @@ async def _stream_handler(
         if all(chunk is not None for chunk in image_chunks_cache[temp_id]):
             b64_image_data = "".join(image_chunks_cache[temp_id])
             del image_chunks_cache[temp_id]
-            safe_create_task(process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer))
+            await content_write_fence.start_content_writer_task(
+                uid,
+                lambda: process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer),
+                name="transcribe-photo-processing",
+            )
 
     # Initialize decoders based on codec
     opus_decoder = None

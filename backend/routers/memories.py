@@ -1,11 +1,11 @@
 import logging
-import threading
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 
 import database.memories as memories_db
+from database import content_write_fence
 from database.vector_db import upsert_memory_vector, delete_memory_vector
 from models.memories import MemoryDB, Memory, MemoryCategory
 from utils.apps import update_personas_async
@@ -36,7 +36,12 @@ def create_memory(memory: Memory, uid: str = Depends(auth.get_writable_user_uid)
     upsert_memory_vector(uid, memory_db.id, memory_db.content, memory_db.category.value)
 
     if memory.visibility == 'public':
-        threading.Thread(target=update_personas_async, args=(uid,)).start()
+        content_write_fence.start_content_writer_thread(
+            uid,
+            update_personas_async,
+            args=(uid,),
+            name="memory-persona-refresh",
+        )
     return memory_db
 
 
@@ -103,5 +108,10 @@ def update_memory_visibility(memory_id: str, value: str, uid: str = Depends(auth
     if value not in ['public', 'private']:
         raise HTTPException(status_code=400, detail='Invalid visibility value')
     memories_db.change_memory_visibility(uid, memory_id, value)
-    threading.Thread(target=update_personas_async, args=(uid,)).start()
+    content_write_fence.start_content_writer_thread(
+        uid,
+        update_personas_async,
+        args=(uid,),
+        name="memory-persona-refresh",
+    )
     return {'status': 'ok'}
