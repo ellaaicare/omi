@@ -300,43 +300,46 @@ def test_evaluate_internal_key_reaches_load_context_for_explicit_uid(monkeypatch
     assert response["trace_id"] == "uid-1"
 
 
-def test_production_default_raw_empty_legacy_key_denies_all_authority_paths_before_context(monkeypatch):
+def test_production_default_empty_and_absent_credentials_deny_all_authority_paths_before_context(monkeypatch):
     monkeypatch.delenv("ELLA_ESCALATION_WEBHOOK_KEY", raising=False)
     monkeypatch.delenv("GUARDIAN_WEBHOOK_KEY", raising=False)
     production_escalations = _load_escalations_module("ella_escalations_production_default_under_test")
     assert production_escalations.ESCALATION_WEBHOOK_KEY == ""
+    loaded_uids = []
 
-    async def fail_load_context(_uid):
+    async def fail_load_context(uid):
+        loaded_uids.append(uid)
         raise AssertionError("_load_context must not run for an unconfigured service authority")
 
     monkeypatch.setattr(production_escalations, "_load_context", fail_load_context)
     app = FastAPI()
     app.include_router(production_escalations.router)
 
+    denial_cases = (
+        ("absent", {}, (None, None, None)),
+        ("raw-empty-legacy", {"X-Key": ""}, (None, None, "")),
+        ("whitespace-legacy", {"X-Key": " "}, (None, None, " ")),
+        ("raw-empty-guardian", {"X-Guardian-Key": ""}, ("", None, None)),
+        ("raw-empty-escalation", {"X-Escalation-Key": ""}, (None, "", None)),
+    )
     with TestClient(app) as client:
-        policy_response = client.get(
-            "/v1/ella/escalations/policy",
-            params={"uid": "uid-1"},
-            headers={"X-Key": ""},
-        )
-        markdown_response = client.get(
-            "/v1/ella/escalations/policy.md",
-            params={"uid": "uid-1"},
-            headers={"X-Key": ""},
-        )
-        evaluate_response = client.post(
-            "/v1/ella/escalations/evaluate",
-            headers={"X-Key": ""},
-            json={"uid": "uid-1"},
-        )
+        for case_name, headers, verifier_arguments in denial_cases:
+            for path in ("/v1/ella/escalations/policy", "/v1/ella/escalations/policy.md"):
+                response = client.get(path, params={"uid": "uid-1"}, headers=headers)
+                assert response.status_code == 401, (case_name, path, response.text)
 
-    assert policy_response.status_code == 401
-    assert markdown_response.status_code == 401
-    assert evaluate_response.status_code == 403
+            evaluate_response = client.post(
+                "/v1/ella/escalations/evaluate",
+                headers=headers,
+                json={"uid": "uid-1"},
+            )
+            assert evaluate_response.status_code == 403, (case_name, evaluate_response.text)
 
-    with pytest.raises(HTTPException) as exc:
-        production_escalations._verify_key(None, None, "")
-    assert exc.value.status_code == 403
+            with pytest.raises(HTTPException) as exc:
+                production_escalations._verify_key(*verifier_arguments)
+            assert exc.value.status_code == 403, case_name
+
+    assert loaded_uids == []
 
     monkeypatch.setattr(production_escalations, "ESCALATION_WEBHOOK_KEY", " \t")
     with pytest.raises(HTTPException) as exc:

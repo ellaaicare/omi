@@ -7,6 +7,7 @@ returned plan and report delivery status to trace tables.
 
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -65,7 +66,14 @@ async def _get_pool() -> asyncpg.Pool:
 
 def _has_valid_service_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> bool:
     provided = x_escalation_key or x_guardian_key or key
-    return bool(ESCALATION_WEBHOOK_KEY.strip()) and provided == ESCALATION_WEBHOOK_KEY
+    configured = ESCALATION_WEBHOOK_KEY
+    return bool(
+        configured
+        and configured.strip()
+        and provided
+        and provided.strip()
+        and secrets.compare_digest(provided, configured)
+    )
 
 
 def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:

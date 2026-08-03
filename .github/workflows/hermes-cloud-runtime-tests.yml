@@ -591,7 +591,7 @@ jobs:
             "tests/unit/test_ella_escalations_router_auth.py::test_load_context_allows_identities_phone_override"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_markdown_internal_key_reaches_same_auth_and_context"
             "tests/unit/test_ella_escalations_router_auth.py::test_evaluate_internal_key_reaches_load_context_for_explicit_uid"
-            "tests/unit/test_ella_escalations_router_auth.py::test_production_default_raw_empty_legacy_key_denies_all_authority_paths_before_context"
+            "tests/unit/test_ella_escalations_router_auth.py::test_production_default_empty_and_absent_credentials_deny_all_authority_paths_before_context"
           )
           for required_id in "${required_escalation_auth_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$escalation_auth_ids"
