@@ -299,7 +299,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 194
+          test "$collected" -eq 198
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -341,12 +341,16 @@ jobs:
             "tests/unit/test_content_write_fence.py::test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_utilities"
             "tests/unit/test_content_write_fence.py::test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfenced_uid_writer"
             "tests/unit/test_content_write_fence.py::test_threaded_mutation_stale_token_is_joined_before_failure"
+            "tests/unit/test_content_write_fence.py::test_threaded_mutation_survives_repeated_cancellation_until_thread_terminal"
             "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_mounted_canonical_route_writes_after_tombstone"
             "tests/unit/test_durable_worker_deletion_finality.py::test_mounted_canonical_auth_drain_exact_purge_firebase_last_and_retry"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_two_stops_release_enrichment_writer_before_thread_terminal"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_process_restart_retains_orphan_token_until_exact_terminal_proof_recovery"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[timeout]"
-            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_proposal_thread_before_deletion"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[proposal]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[correction]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_startup_enrichment_worker_is_drained_purged_and_tombstone_denied[True]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_startup_enrichment_worker_is_drained_purged_and_tombstone_denied[False]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_startup_memory_worker_is_drained_purged_and_tombstone_denied[True]"
@@ -382,7 +386,7 @@ jobs:
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_prerequisite_failure_is_atomic[017_add_provider_attempt_deletion_fence.sql-leaked_relations4]"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
-          test "${#required_ids[@]}" -eq 65
+          test "${#required_ids[@]}" -eq 69
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
           done

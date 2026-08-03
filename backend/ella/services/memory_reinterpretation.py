@@ -703,6 +703,22 @@ class MemoryReinterpretationWorker:
 
 
 _worker_task: Optional[asyncio.Task] = None
+_worker_shutdown_task: Optional[asyncio.Task] = None
+
+
+async def _finish_worker_shutdown(worker_task: asyncio.Task) -> None:
+    global _worker_task, _worker_shutdown_task
+    try:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        if worker_task.done() and _worker_task is worker_task:
+            _worker_task = None
+        if _worker_shutdown_task is asyncio.current_task():
+            _worker_shutdown_task = None
 
 
 def worker_enabled() -> bool:
@@ -750,18 +766,32 @@ async def run_worker_loop(
 
 async def start_worker(worker: MemoryReinterpretationWorker) -> None:
     global _worker_task
-    if not worker_enabled() or (_worker_task and not _worker_task.done()):
+    if not worker_enabled():
+        return
+    while _worker_shutdown_task is not None:
+        await asyncio.shield(_worker_shutdown_task)
+    if _worker_task and not _worker_task.done():
         return
     _worker_task = asyncio.create_task(run_worker_loop(worker))
 
 
 async def stop_worker() -> None:
-    global _worker_task
-    if _worker_task is None:
-        return
-    _worker_task.cancel()
+    global _worker_shutdown_task
+    shutdown_task = _worker_shutdown_task
+    if shutdown_task is None:
+        worker_task = _worker_task
+        if worker_task is None:
+            return
+        shutdown_task = asyncio.create_task(_finish_worker_shutdown(worker_task))
+        _worker_shutdown_task = shutdown_task
     try:
-        await _worker_task
+        await asyncio.shield(shutdown_task)
     except asyncio.CancelledError:
-        pass
-    _worker_task = None
+        # A caller timeout/cancellation must not cancel the shared join or
+        # clear the worker reference while its durable writer is still live.
+        raise
+    if shutdown_task.cancelled():
+        raise asyncio.CancelledError
+    exception = shutdown_task.exception()
+    if exception is not None:
+        raise exception

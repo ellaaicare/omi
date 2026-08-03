@@ -541,12 +541,16 @@ jobs:
             "tests/unit/test_content_write_fence.py::test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_utilities"
             "tests/unit/test_content_write_fence.py::test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfenced_uid_writer"
             "tests/unit/test_content_write_fence.py::test_threaded_mutation_stale_token_is_joined_before_failure"
+            "tests/unit/test_content_write_fence.py::test_threaded_mutation_survives_repeated_cancellation_until_thread_terminal"
             "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_mounted_canonical_route_writes_after_tombstone"
             "tests/unit/test_durable_worker_deletion_finality.py::test_mounted_canonical_auth_drain_exact_purge_firebase_last_and_retry"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_positive_control_legacy_two_stops_release_enrichment_writer_before_thread_terminal"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_process_restart_retains_orphan_token_until_exact_terminal_proof_recovery"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[success]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[error]"
             "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_enrichment_thread_before_deletion[timeout]"
-            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_proposal_thread_before_deletion"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[proposal]"
+            "tests/unit/test_durable_worker_deletion_finality.py::test_stop_worker_joins_actual_memory_thread_before_deletion[correction]"
             "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_stale_claim_fails_closed_at_external_delivery_boundary"
             "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_claim_complete_fail_and_retry"
             "tests/unit/test_hermes_cloud_enrichment_outbox.py::test_firestore_repository_rejects_post_tombstone_enqueue"
@@ -580,7 +584,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_deletion_tombstone_serializes_inflight_provider_writer_and_quarantines_photon_immediately"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
-          test "${#required_ids[@]}" -eq 58
+          test "${#required_ids[@]}" -eq 62
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_account_deletion.py \
@@ -604,7 +608,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 556
+          test "$collected" -eq 560
           pytest \
             tests/unit/test_account_deletion.py \
             tests/unit/test_content_write_fence.py \

@@ -148,6 +148,11 @@ def _registered_writers(data: dict[str, Any]) -> dict[str, datetime]:
     A process crash or missed heartbeat must leave deletion pending. Expiry is
     diagnostic metadata only because a live writer can stall its event loop
     longer than the configured interval and still reach its datastore commit.
+    Orphan recovery is exact-token and out-of-band: only after the process
+    supervisor proves the owning process has exited may its recorded tokens be
+    released transactionally, followed by the ordinary deletion retry. A
+    process exit is terminal proof because its ``to_thread`` threads cannot
+    survive it; a lease timestamp alone is never that proof.
     """
     writers = data.get("writers")
     if writers is None:
@@ -252,13 +257,45 @@ def _advance_firestore_tombstone(db: Any, uid: str) -> bool:
     return bool(advance(db.transaction()))
 
 
+async def _await_task_terminal(task: asyncio.Task[Any]) -> Any:
+    """Join one task without allowing caller cancellation to cancel it.
+
+    ``asyncio.shield`` only protects the await during which it is used.  A
+    caller may be cancelled repeatedly while a synchronous ``to_thread``
+    operation is still running, so every wait must remain shielded.  The first
+    caller cancellation is propagated only after the child has a terminal
+    result and its exception (if any) has been retrieved.
+    """
+    caller = asyncio.current_task()
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if caller is not None and caller.cancelling():
+                cancellation = cancellation or exc
+                continue
+            # The shielded child cancelled itself and is therefore terminal.
+            break
+        except BaseException:
+            # The child is terminal. Retrieve and propagate its exact outcome
+            # below, unless caller cancellation has precedence.
+            break
+
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
 async def _finish_even_if_cancelled(awaitable: Any) -> None:
     task = asyncio.create_task(awaitable)
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+    await _await_task_terminal(task)
 
 
 async def _assert_postgres_owner_active(uid: str) -> None:
@@ -425,16 +462,7 @@ async def finish_admitted_content_mutation(uid: str, awaitable: Awaitable[Any]) 
     """
     assert_content_writer_admitted(uid)
     task = asyncio.create_task(awaitable)
-    try:
-        result = await asyncio.shield(task)
-    except asyncio.CancelledError:
-        try:
-            await task
-        except Exception:
-            # The durable job/lease remains the resumable outcome. Shutdown
-            # cancellation is still propagated only after the mutation ended.
-            pass
-        raise
+    result = await _await_task_terminal(task)
     assert_content_writer_admitted(uid)
     return result
 

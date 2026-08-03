@@ -190,6 +190,40 @@ def test_threaded_mutation_stale_token_is_joined_before_failure(monkeypatch, fen
     asyncio.run(scenario())
 
 
+def test_threaded_mutation_survives_repeated_cancellation_until_thread_terminal(monkeypatch, fence_environment):
+    entered = threading.Event()
+    release = threading.Event()
+    terminal = threading.Event()
+
+    async def assert_postgres_active(_uid):
+        return None
+
+    def mutate():
+        entered.set()
+        assert release.wait(3)
+        terminal.set()
+
+    monkeypatch.setattr(content_write_fence, "_assert_postgres_owner_active", assert_postgres_active)
+
+    async def scenario():
+        async with content_write_fence.detached_content_write_fence(UID) as writer:
+            operation = asyncio.create_task(content_write_fence.run_admitted_threaded_mutation(UID, mutate))
+            assert await asyncio.to_thread(entered.wait, 2)
+            for _ in range(6):
+                operation.cancel()
+                await asyncio.sleep(0)
+                assert not operation.done()
+                assert writer.token in _fence_state(fence_environment)["writers"]
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+            assert terminal.is_set()
+
+    asyncio.run(scenario())
+    assert _fence_state(fence_environment) is None
+
+
 def _load_production_delete_route():
     path = Path(__file__).resolve().parents[2] / "routers" / "users.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -334,12 +368,12 @@ def test_backend_mutation_and_raw_launch_inventory_covers_startup_services_and_u
         snapshot,
         digest,
         counts={
-            "launches": 188,
+            "launches": 190,
             "mutations": 229,
             "protected_mutations": 136,
             "raw_uid_mutations": 0,
         },
-        expected_digest="fa3f77dfd53a40a08ae365824de91d14b111fc258ac70898989c83c4522ccd53",
+        expected_digest="65caf3f77c7821fde6808fad43839e16f83023394b87b5ef49bcd37b41bd8963",
     )
     assert any(
         item.startswith("ella/services/hermes_cloud_enrichment_outbox.py:start_worker:create_task:")
@@ -361,7 +395,7 @@ def test_backend_inventory_positive_controls_reject_startup_raw_task_and_unfence
     backend = Path(__file__).resolve().parents[2]
     baseline, baseline_digest = _deterministic_backend_inventory(backend)
     expected_counts = {
-        "launches": 188,
+        "launches": 190,
         "mutations": 229,
         "protected_mutations": 136,
         "raw_uid_mutations": 0,

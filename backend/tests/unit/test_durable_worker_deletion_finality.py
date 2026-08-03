@@ -55,7 +55,7 @@ from ella.services import hermes_cloud_enrichment_outbox as enrichment_service
 from ella.services import memory_reinterpretation as reinterpretation_service
 from ella.services import proposal_ingest
 from ella.services.hermes_cloud_enrichment_outbox import DeliveryResult, HermesCloudEnrichmentOutboxWorker
-from ella.services.memory_reinterpretation import MemoryReinterpretationWorker, ReinterpretationPlan
+from ella.services.memory_reinterpretation import ApplyResult, MemoryReinterpretationWorker, ReinterpretationPlan
 
 UID = "startup-worker-delete-user"
 OTHER_UID = "startup-worker-retained-user"
@@ -628,6 +628,153 @@ def test_startup_memory_worker_is_drained_purged_and_tombstone_denied(
     assert hermes.calls == calls_before
 
 
+def test_positive_control_legacy_two_stops_release_enrichment_writer_before_thread_terminal(
+    monkeypatch,
+    deletion_fence,
+):
+    """Preserve Iris's exact old ordering as a mounted positive control."""
+    del deletion_fence
+    repository = _EnrichmentOutbox()
+    delivery_entered = threading.Event()
+    release_delivery = threading.Event()
+    thread_terminal = threading.Event()
+    order = []
+
+    def deliver(_job):
+        order.append("thread-entered")
+        delivery_entered.set()
+        assert release_delivery.wait(5)
+        order.append("thread-terminal")
+        thread_terminal.set()
+        return DeliveryResult(True, receipt={"content_free": True})
+
+    async def legacy_finish_admitted_content_mutation(uid, awaitable):
+        content_write_fence.assert_content_writer_admitted(uid)
+        task = asyncio.create_task(awaitable)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except Exception:
+                pass
+            raise
+
+    async def legacy_stop_worker():
+        worker_task = enrichment_service._worker_task
+        if worker_task is None:
+            return
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+        enrichment_service._worker_task = None
+
+    monkeypatch.setattr(
+        content_write_fence,
+        "finish_admitted_content_mutation",
+        legacy_finish_admitted_content_mutation,
+    )
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS", UID)
+    monkeypatch.setattr(enrichment_service, "_worker_task", None)
+    monkeypatch.setattr(enrichment_service, "_worker_shutdown_task", None)
+    worker = HermesCloudEnrichmentOutboxWorker(repository, deliver=deliver, poll_seconds=0.01)
+
+    async def purge_memory(_uid):
+        return 0
+
+    app = _deletion_app(
+        monkeypatch,
+        authority_enabled=True,
+        delete_firestore=lambda uid: (order.append("purge"), repository.purge(uid)),
+        delete_firebase=lambda _uid: order.append("firebase"),
+        purge_memory=purge_memory,
+    )
+
+    async def scenario():
+        await enrichment_service.start_worker(worker)
+        assert await asyncio.to_thread(delivery_entered.wait, 3)
+        first_stop = asyncio.create_task(legacy_stop_worker())
+        await asyncio.sleep(0)
+        second_stop = asyncio.create_task(legacy_stop_worker())
+        await asyncio.wait_for(asyncio.gather(first_stop, second_stop), 3)
+        assert not thread_terminal.is_set()
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            deleted = await client.delete("/v1/users/delete-account")
+            assert deleted.status_code == 200
+
+        release_delivery.set()
+        assert await asyncio.to_thread(thread_terminal.wait, 3)
+
+    asyncio.run(scenario())
+    assert order == ["thread-entered", "purge", "firebase", "thread-terminal"]
+
+
+async def _cancel_two_coalesced_stops(service):
+    first_stop = asyncio.create_task(service.stop_worker())
+    while service._worker_shutdown_task is None:
+        await asyncio.sleep(0)
+    shared_shutdown = service._worker_shutdown_task
+    second_stop = asyncio.create_task(service.stop_worker())
+    await asyncio.sleep(0)
+    assert service._worker_shutdown_task is shared_shutdown
+
+    first_stop.cancel()
+    first_stop.cancel()
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(second_stop, 0.05)
+
+    assert service._worker_shutdown_task is shared_shutdown
+    assert not shared_shutdown.done()
+    return shared_shutdown
+
+
+def test_process_restart_retains_orphan_token_until_exact_terminal_proof_recovery(monkeypatch, deletion_fence):
+    token = "terminated-process-writer-token"
+    content_write_fence._acquire_firestore_writer(deletion_fence, UID, token, 1)
+    order = []
+
+    async def purge_memory(_uid):
+        return 0
+
+    app = _deletion_app(
+        monkeypatch,
+        authority_enabled=True,
+        delete_firestore=lambda _uid: order.append("purge"),
+        delete_firebase=lambda _uid: order.append("firebase"),
+        purge_memory=purge_memory,
+    )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            first_process = await client.delete("/v1/users/delete-account")
+            assert first_process.status_code == 202
+            state = content_write_fence._snapshot_data(content_write_fence._fence_reference(deletion_fence, UID).get())
+            assert state["state"] == content_write_fence.DRAINING
+            assert token in state["writers"]
+
+            # A new process sees the same durable blocker. Neither restart nor
+            # lease expiry is absence proof, so the retry remains resumable.
+            restarted_process = await client.delete("/v1/users/delete-account")
+            assert restarted_process.status_code == 202
+            assert order == []
+
+            old_process_terminal = True  # supplied by the process supervisor
+            assert old_process_terminal
+            content_write_fence._release_firestore_writer(deletion_fence, UID, token)
+
+            converged = await client.delete("/v1/users/delete-account")
+            assert converged.status_code == 200
+
+    asyncio.run(scenario())
+    assert order == ["purge", "firebase"]
+
+
 @pytest.mark.parametrize("terminal", ["success", "error", "timeout"])
 def test_stop_worker_joins_actual_enrichment_thread_before_deletion(monkeypatch, deletion_fence, terminal):
     del deletion_fence
@@ -661,6 +808,7 @@ def test_stop_worker_joins_actual_enrichment_thread_before_deletion(monkeypatch,
     )
     monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS", UID)
     monkeypatch.setattr(enrichment_service, "_worker_task", None)
+    monkeypatch.setattr(enrichment_service, "_worker_shutdown_task", None)
 
     async def start():
         await enrichment_service.start_worker(worker)
@@ -676,18 +824,21 @@ def test_stop_worker_joins_actual_enrichment_thread_before_deletion(monkeypatch,
         assert enrichment_service._worker_task is first_task
         assert await asyncio.to_thread(delivery_entered.wait, 3)
 
-        shutdown = asyncio.create_task(app.router.shutdown())
-        await asyncio.sleep(0.05)
-        assert not shutdown.done()
+        shared_shutdown = await _cancel_two_coalesced_stops(enrichment_service)
+        assert enrichment_service._worker_task is first_task
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             pending = await client.delete("/v1/users/delete-account")
             assert pending.status_code == 202
             assert "firebase-delete" not in order
             assert repository.jobs["target"]["status"] == "running"
+            assert enrichment_service._worker_shutdown_task is shared_shutdown
 
             release_delivery.set()
-            await asyncio.wait_for(shutdown, 3)
+            await asyncio.wait_for(enrichment_service.stop_worker(), 3)
+            assert shared_shutdown.done()
             assert enrichment_service._worker_task is None
+            assert enrichment_service._worker_shutdown_task is None
+            await enrichment_service.stop_worker()
             completed = await client.delete("/v1/users/delete-account")
             assert completed.status_code == 200
 
@@ -698,17 +849,34 @@ def test_stop_worker_joins_actual_enrichment_thread_before_deletion(monkeypatch,
     assert order.index("enrichment-purge") < order.index("firebase-delete")
 
 
-def test_stop_worker_joins_actual_memory_proposal_thread_before_deletion(monkeypatch, deletion_fence):
+@pytest.mark.parametrize("mutation_kind", ["proposal", "correction"])
+def test_stop_worker_joins_actual_memory_thread_before_deletion(monkeypatch, deletion_fence, mutation_kind):
     del deletion_fence
     repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
     target = asyncio.run(_seed_reinterpretation(repository, UID))
     retained = asyncio.run(_seed_reinterpretation(repository, OTHER_UID, completed=True))
-    proposal_entered = threading.Event()
-    release_proposal = threading.Event()
+    mutation_entered = threading.Event()
+    release_mutation = threading.Event()
     order = []
 
-    class AmbiguousHermes:
+    class HeldPlanHermes:
         async def propose(self, **_kwargs):
+            if mutation_kind == "correction":
+                return ReinterpretationPlan(
+                    outcome="proposals",
+                    proposals=[
+                        {
+                            "kind": "factual_correction",
+                            "certainty": "confirmed",
+                            "correction_text": "The remembered detail is corrected.",
+                            "evidence_event_ids": [f"event-{UID}"],
+                            "evidence_quote": "The remembered detail is corrected.",
+                            "corrected_summary": {
+                                "overview": "[Ella] The remembered detail is corrected.",
+                            },
+                        }
+                    ],
+                )
             return ReinterpretationPlan(
                 outcome="proposals",
                 proposals=[
@@ -729,18 +897,33 @@ def test_stop_worker_joins_actual_memory_proposal_thread_before_deletion(monkeyp
         }
 
     def create_proposal(**_kwargs):
-        order.append("proposal-entered")
-        proposal_entered.set()
-        assert release_proposal.wait(5)
-        order.append("proposal-returned")
+        order.append("proposal-thread-entered")
+        mutation_entered.set()
+        assert release_mutation.wait(5)
+        order.append("proposal-thread-terminal")
         return {"proposal": {"proposal_id": "proposal-after-cancel"}}
 
+    def apply_correction():
+        order.append("correction-thread-entered")
+        mutation_entered.set()
+        assert release_mutation.wait(5)
+        order.append("correction-thread-terminal")
+        return ApplyResult(
+            correction_id="correction-after-cancel",
+            active_summary_version_id=f"corrected-version-{UID}",
+        )
+
+    async def correction_writer(**_kwargs):
+        return await content_write_fence.run_admitted_threaded_mutation(UID, apply_correction)
+
     monkeypatch.setattr(proposal_ingest, "create_proposal", create_proposal)
+    worker_kwargs = {"correction_writer": correction_writer} if mutation_kind == "correction" else {}
     worker = MemoryReinterpretationWorker(
         repository,
-        hermes_client=AmbiguousHermes(),
+        hermes_client=HeldPlanHermes(),
         conversation_loader=conversation_loader,
         lease_seconds=30,
+        **worker_kwargs,
     )
 
     async def purge_memory(uid):
@@ -761,6 +944,7 @@ def test_stop_worker_joins_actual_memory_proposal_thread_before_deletion(monkeyp
     monkeypatch.setenv("ELLA_MEMORY_REINTERPRETATION_WORKER_ENABLED", "true")
     monkeypatch.setenv("ELLA_MEMORY_REINTERPRETATION_IDLE_SECONDS", "0.01")
     monkeypatch.setattr(reinterpretation_service, "_worker_task", None)
+    monkeypatch.setattr(reinterpretation_service, "_worker_shutdown_task", None)
 
     async def start():
         await reinterpretation_service.start_worker(worker)
@@ -774,25 +958,28 @@ def test_stop_worker_joins_actual_memory_proposal_thread_before_deletion(monkeyp
         assert first_task is not None
         await reinterpretation_service.start_worker(worker)
         assert reinterpretation_service._worker_task is first_task
-        assert await asyncio.to_thread(proposal_entered.wait, 3)
+        assert await asyncio.to_thread(mutation_entered.wait, 3)
 
-        shutdown = asyncio.create_task(app.router.shutdown())
-        await asyncio.sleep(0.05)
-        assert not shutdown.done()
+        shared_shutdown = await _cancel_two_coalesced_stops(reinterpretation_service)
+        assert reinterpretation_service._worker_task is first_task
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             pending = await client.delete("/v1/users/delete-account")
             assert pending.status_code == 202
             assert "firebase-delete" not in order
             assert repository.jobs[target["id"]]["status"] == "running"
+            assert reinterpretation_service._worker_shutdown_task is shared_shutdown
 
-            release_proposal.set()
-            await asyncio.wait_for(shutdown, 3)
+            release_mutation.set()
+            await asyncio.wait_for(reinterpretation_service.stop_worker(), 3)
+            assert shared_shutdown.done()
             assert reinterpretation_service._worker_task is None
+            assert reinterpretation_service._worker_shutdown_task is None
+            await reinterpretation_service.stop_worker()
             completed = await client.delete("/v1/users/delete-account")
             assert completed.status_code == 200
 
     asyncio.run(scenario())
     assert target["id"] not in repository.jobs
     assert repository.jobs[retained["id"]]["uid"] == OTHER_UID
-    assert order.index("proposal-returned") < order.index("memory-purge")
+    assert order.index(f"{mutation_kind}-thread-terminal") < order.index("memory-purge")
     assert order.index("memory-purge") < order.index("firebase-delete")
