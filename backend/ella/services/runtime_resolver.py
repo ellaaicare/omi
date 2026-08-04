@@ -16,6 +16,12 @@ from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
 )
+from database.honcho_attestation import (
+    ATTESTATION_VERSION,
+    HonchoAttestationError,
+    observed_runtime_fields,
+    verify_persisted_attestation,
+)
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
@@ -376,19 +382,41 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
 
             honcho_isolation = health_receipt.get("honcho_isolation")
             expected_honcho_config = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/honcho.json")
-            expected_honcho_values = {
-                "validated": True,
-                "profile": profile_name,
-                "config_path": expected_honcho_config,
-                "workspace": str(binding.get("honcho_workspace") or ""),
-                "observed_peer_id": str(binding.get("observed_peer") or ""),
-                "observer_peer_id": str(binding.get("observer_peer") or ""),
-                "hermesProfile": profile_name,
+            attestation = honcho_isolation.get("attestation") if isinstance(honcho_isolation, dict) else None
+            if not isinstance(attestation, dict):
+                raise ProvisioningError("honcho_attestation_evidence_malformed", retryable=False)
+            expected_challenge = {
+                "version": ATTESTATION_VERSION,
+                "nonce": attestation.get("nonce"),
+                "issued_at": attestation.get("issued_at"),
+                "expires_at": attestation.get("expires_at"),
+                "firebase_uid": uid,
+                "account_owner_id": str(binding.get("account_user_id") or ""),
+                "runtime_target_id": str(binding.get("attestation_runtime_target_id") or ""),
+                "binding_id": str(binding.get("id") or ""),
+                "job_id": str(attestation.get("job_id") or ""),
             }
-            if not isinstance(honcho_isolation, dict):
-                raise ProvisioningError("honcho_runtime_proof_missing", retryable=False)
-            if any(honcho_isolation.get(key) != value for key, value in expected_honcho_values.items()):
-                raise ProvisioningError("honcho_runtime_proof_mismatch", retryable=False)
+            try:
+                verify_persisted_attestation(
+                    honcho_isolation,
+                    expected_challenge=expected_challenge,
+                    observed=observed_runtime_fields(
+                        profile_name=profile_name,
+                        config_path=expected_honcho_config,
+                        workspace_root=workspace_root,
+                        honcho_workspace=str(binding.get("honcho_workspace") or ""),
+                        observed_peer_id=str(binding.get("observed_peer") or ""),
+                        observer_peer_id=str(binding.get("observer_peer") or ""),
+                        gateway_port=gateway_port,
+                        gateway_target=gateway_url,
+                        credential_ref=str(binding.get("credential_ref") or ""),
+                        agent_id=agent_id,
+                        service_label=str(binding.get("service_label") or ""),
+                    ),
+                )
+            except (HonchoAttestationError, TypeError, ValueError) as exc:
+                code = exc.code if isinstance(exc, HonchoAttestationError) else "honcho_attestation_readback_mismatch"
+                raise ProvisioningError(code, retryable=False) from exc
         else:
             expected_model = str(binding.get("agent_id") or "")
             consent_authority_epoch = ""

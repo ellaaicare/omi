@@ -11,6 +11,7 @@ import math
 import os
 import posixpath
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -18,6 +19,12 @@ from urllib.parse import urlparse
 import httpx
 
 from database import voice_canary as voice_canary_db
+from database.honcho_attestation import (
+    HonchoAttestationError,
+    create_challenge,
+    observed_runtime_fields,
+    verify_attestation,
+)
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
@@ -390,6 +397,7 @@ class HermesProvisionClient:
         identity: VerifiedIdentity,
         target_schema_version: str,
         *,
+        attestation_challenge: dict[str, Any],
         authority_snapshot: ProvisionAuthoritySnapshot | None = None,
     ) -> dict[str, Any]:
         entry_snapshot = self.snapshot_authority(authority_snapshot)
@@ -410,6 +418,7 @@ class HermesProvisionClient:
                     "timezone": identity.timezone,
                     "hermes_only": True,
                     "targetSchemaVersion": target_schema_version,
+                    "honchoAttestationChallenge": attestation_challenge,
                 }
                 authority = self.resolve_authority(payload_authority.snapshot())
                 send_snapshot = authority.snapshot()
@@ -455,7 +464,10 @@ class HermesProvisionClient:
 def extract_runtime_binding(
     result: dict[str, Any],
     uid: str,
+    *,
+    expected_attestation_challenge: dict[str, Any],
     expected_template_version: Optional[str] = None,
+    now: int | None = None,
 ) -> dict[str, Any]:
     raw = result.get("runtimeBinding") or result.get("runtime_binding")
     if not isinstance(raw, dict):
@@ -470,16 +482,15 @@ def extract_runtime_binding(
     service_label = raw.get("serviceLabel") or raw.get("service_label")
     credential_ref = raw.get("credentialRef") or raw.get("credential_ref")
     health_state = str(raw.get("healthState") or raw.get("health_state") or "").lower()
-    health_receipt = raw.get("healthReceipt") or raw.get("health_receipt") or {}
-    if not isinstance(health_receipt, dict):
+    provider_health_receipt = raw.get("healthReceipt") or raw.get("health_receipt") or {}
+    if not isinstance(provider_health_receipt, dict):
         raise ProvisioningError("invalid_health_receipt", retryable=True)
-    health_receipt = dict(health_receipt)
     smoke_values = []
     for source, key in (
         (raw, "smokePassed"),
         (raw, "smoke_passed"),
-        (health_receipt, "smokePassed"),
-        (health_receipt, "smoke_passed"),
+        (provider_health_receipt, "smokePassed"),
+        (provider_health_receipt, "smoke_passed"),
     ):
         if key in source:
             smoke_values.append(source[key])
@@ -567,13 +578,6 @@ def extract_runtime_binding(
     if proof_mismatch:
         raise ProvisioningError("honcho_runtime_proof_mismatch", retryable=False)
 
-    health_receipt["honcho_isolation"] = {
-        "validated": True,
-        "profile": profile_name,
-        "config_path": expected_honcho_config,
-        **expected_target,
-    }
-
     try:
         parsed_port = int(gateway_port)
     except (TypeError, ValueError) as exc:
@@ -582,6 +586,41 @@ def extract_runtime_binding(
     if not 1024 <= parsed_port <= 65535 or urlparse(gateway_url).port != parsed_port:
         raise ProvisioningError("gateway_port_mismatch", retryable=False)
     validate_gateway_credential_ref(str(credential_ref))
+
+    attestation = result.get("honchoAttestation") or result.get("honcho_attestation")
+    verified_at = int(time.time() if now is None else now)
+    try:
+        verified_attestation = verify_attestation(
+            attestation,
+            expected_challenge=expected_attestation_challenge,
+            observed=observed_runtime_fields(
+                profile_name=profile_name,
+                config_path=expected_honcho_config,
+                workspace_root=str(workspace_root),
+                honcho_workspace=str(honcho_workspace),
+                observed_peer_id=str(observed_peer),
+                observer_peer_id=str(observer_peer),
+                gateway_port=parsed_port,
+                gateway_target=gateway_url,
+                credential_ref=str(credential_ref),
+                agent_id=agent_id,
+                service_label=str(service_label),
+            ),
+            now=verified_at,
+            require_fresh=True,
+        )
+    except HonchoAttestationError as exc:
+        raise ProvisioningError(
+            exc.code,
+            retryable=exc.code == "honcho_attestation_key_unavailable",
+        ) from exc
+    health_receipt = {
+        "smoke_passed": True,
+        "honcho_isolation": {
+            "attestation": verified_attestation,
+            "verified_at": verified_at,
+        },
+    }
 
     template_version = str(raw.get("templateVersion") or DEFAULT_TEMPLATE_VERSION)
     if expected_template_version and template_version != expected_template_version:
@@ -605,6 +644,7 @@ def extract_runtime_binding(
         "voice_policy_version": str(raw.get("voicePolicyVersion") or DEFAULT_VOICE_POLICY_VERSION),
         "health_state": "healthy",
         "health_receipt": health_receipt,
+        "binding_id": str(expected_attestation_challenge["binding_id"]),
     }
 
 
@@ -876,18 +916,50 @@ class ProvisioningCoordinator:
                 raise ProvisioningError("invitation_authority_required", retryable=False)
             if not self_hosted_required and not legacy_required:
                 raise ProvisioningError("provisioning_disabled", retryable=False)
+            account_owner_id = str((invitation_admission or {}).get("user_id") or job.get("user_id") or "").strip()
+            runtime_target_id = str(
+                (invitation_admission or {}).get("attestation_runtime_target_id") or f"job:{job['id']}"
+            ).strip()
+            if not account_owner_id or not runtime_target_id:
+                raise ProvisioningError("honcho_attestation_context_incomplete", retryable=False)
+            binding_id = await self._repository_call(
+                authority_snapshot,
+                self.repository.prepare_runtime_binding_identity,
+                uid=identity.uid,
+                provider="hermes",
+                role="user",
+            )
+            try:
+                attestation_challenge = create_challenge(
+                    firebase_uid=identity.uid,
+                    account_owner_id=account_owner_id,
+                    runtime_target_id=runtime_target_id,
+                    binding_id=str(binding_id),
+                    job_id=str(job["id"]),
+                )
+            except HonchoAttestationError as exc:
+                raise ProvisioningError(
+                    exc.code,
+                    retryable=exc.code == "honcho_attestation_key_unavailable",
+                ) from exc
             if isinstance(self.client, HermesProvisionClient):
                 result = await self.client.provision(
                     identity,
                     str(job["target_schema_version"]),
+                    attestation_challenge=attestation_challenge,
                     authority_snapshot=authority_snapshot,
                 )
                 self.client.resolve_authority(authority_snapshot)
             else:
-                result = await self.client.provision(identity, str(job["target_schema_version"]))
+                result = await self.client.provision(
+                    identity,
+                    str(job["target_schema_version"]),
+                    attestation_challenge=attestation_challenge,
+                )
             binding_data = extract_runtime_binding(
                 result,
                 identity.uid,
+                expected_attestation_challenge=attestation_challenge,
                 expected_template_version=str(job["target_schema_version"]),
             )
             binding = await self._repository_call(

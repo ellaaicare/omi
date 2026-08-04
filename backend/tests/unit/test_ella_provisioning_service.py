@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import uuid
 
 import pytest
@@ -8,6 +9,7 @@ from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_PROVIDER,
     SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
+from database.honcho_attestation import calculate_signature, create_challenge, observed_runtime_fields
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
@@ -44,6 +46,7 @@ from ella.services.runtime_resolver import (
 def _job(**overrides):
     value = {
         "id": uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        "user_id": uuid.UUID("22222222-2222-2222-2222-222222222222"),
         "target_schema_version": "hermes-user-v1",
         "state": "pending",
         "stage": "identity_ready",
@@ -53,7 +56,47 @@ def _job(**overrides):
     return value
 
 
-def _runtime_receipt(profile_name="omi-user-a"):
+def _attestation_challenge(uid="user-a"):
+    challenge = create_challenge(
+        firebase_uid=uid,
+        account_owner_id="22222222-2222-2222-2222-222222222222",
+        runtime_target_id="33333333-3333-3333-3333-333333333333",
+        binding_id="44444444-4444-4444-4444-444444444444",
+        job_id="11111111-1111-1111-1111-111111111111",
+        now=1_700_000_000,
+    )
+    challenge["nonce"] = "unit_test_nonce_abcdefghijklmnopqrstuvwxyz012345"
+    return challenge
+
+
+def _attach_attestation(receipt, challenge):
+    if "runtimeBinding" not in receipt:
+        return receipt
+    raw = receipt["runtimeBinding"]
+    profile_name = raw["profileName"]
+    profiles_root = "/Users/ellaai/.hermes/profiles"
+    attestation = {
+        **challenge,
+        **observed_runtime_fields(
+            profile_name=profile_name,
+            config_path=f"{profiles_root}/{profile_name}/honcho.json",
+            workspace_root=raw["workspaceRoot"],
+            honcho_workspace=raw["honcho"]["workspace"],
+            observed_peer_id=raw["honcho"]["observedPeer"],
+            observer_peer_id=raw["honcho"]["observerPeer"],
+            gateway_port=raw["gatewayPort"],
+            gateway_target=raw["internalGatewayUrl"],
+            credential_ref=raw["credentialRef"],
+            agent_id=raw["agentId"],
+            service_label=raw["serviceLabel"],
+        ),
+    }
+    attestation["signature"] = calculate_signature(attestation)
+    receipt["honchoAttestation"] = attestation
+    return receipt
+
+
+def _runtime_receipt(profile_name="omi-user-a", challenge=None):
     profiles_root = "/Users/ellaai/.hermes/profiles"
     honcho_target = {
         "workspace": "honcho-user-a",
@@ -62,7 +105,7 @@ def _runtime_receipt(profile_name="omi-user-a"):
         "hermesProfile": profile_name,
     }
     honcho_config_path = f"{profiles_root}/{profile_name}/honcho.json"
-    return {
+    receipt = {
         "mode": "hermes_only",
         "provisionMode": "hermes_only",
         "honchoProfileMap": {
@@ -103,11 +146,29 @@ def _runtime_receipt(profile_name="omi-user-a"):
             },
         },
     }
+    return _attach_attestation(receipt, challenge or _attestation_challenge())
+
+
+def _extract(receipt, uid="user-a", *, challenge=None, expected_template_version=None, now=1_700_000_001):
+    return extract_runtime_binding(
+        receipt,
+        uid,
+        expected_attestation_challenge=challenge or _attestation_challenge(uid),
+        expected_template_version=expected_template_version,
+        now=now,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _honcho_attestation_key(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", "unit-test-attestation-key-32-bytes-minimum")
 
 
 def _self_hosted_admission(uid: str):
     return {
         "omi_uid": uid,
+        "user_id": "22222222-2222-2222-2222-222222222222",
+        "attestation_runtime_target_id": "33333333-3333-3333-3333-333333333333",
         "consent_policy_version": CURRENT_POLICY_VERSION,
         "consent_processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
         "consent_scope_version": CURRENT_SCOPE_VERSION,
@@ -193,8 +254,21 @@ class FakeRepository:
         )
         return dict(self.job)
 
+    async def prepare_runtime_binding_identity(self, *, uid, provider, role):
+        del uid, provider, role
+        return "44444444-4444-4444-4444-444444444444"
+
     async def stage_runtime_binding(self, *, uid, binding):
-        self.staged = dict(binding, omi_uid=uid, revision=1, active=False)
+        self.staged = dict(
+            binding,
+            id=binding["binding_id"],
+            omi_uid=uid,
+            account_user_id="22222222-2222-2222-2222-222222222222",
+            profile_user_id="22222222-2222-2222-2222-222222222222",
+            attestation_runtime_target_id="33333333-3333-3333-3333-333333333333",
+            revision=1,
+            active=False,
+        )
         return self.staged
 
     async def activate_runtime_binding(
@@ -220,9 +294,9 @@ class FakeProvisionClient:
         self.result = result
         self.calls = []
 
-    async def provision(self, identity, target_schema_version):
-        self.calls.append((identity, target_schema_version))
-        return self.result
+    async def provision(self, identity, target_schema_version, *, attestation_challenge):
+        self.calls.append((identity, target_schema_version, attestation_challenge))
+        return _attach_attestation(copy.deepcopy(self.result), attestation_challenge)
 
 
 class _FakeDocument:
@@ -548,65 +622,69 @@ def test_runtime_receipt_rejects_non_hermes_and_plato_cross_user(monkeypatch):
     non_hermes = _runtime_receipt()
     non_hermes["runtimeBinding"]["provider"] = "openclaw"
     with pytest.raises(ProvisioningError, match="invalid_runtime_provider"):
-        extract_runtime_binding(non_hermes, "user-a")
+        _extract(non_hermes)
 
     monkeypatch.setenv("ELLA_PLATO_UID", "plato-owner")
     with pytest.raises(ProvisioningError, match="plato_binding_forbidden"):
-        extract_runtime_binding(_runtime_receipt("plato-eval"), "user-a")
-    assert extract_runtime_binding(_runtime_receipt("plato-eval"), "plato-owner")["profile_name"] == "plato-eval"
+        _extract(_runtime_receipt("plato-eval"))
+    plato_challenge = _attestation_challenge("plato-owner")
+    assert (
+        _extract(
+            _runtime_receipt("plato-eval", plato_challenge),
+            "plato-owner",
+            challenge=plato_challenge,
+        )["profile_name"]
+        == "plato-eval"
+    )
 
 
 def test_runtime_receipt_requires_owned_workspace_port_and_honcho():
     wrong_workspace = _runtime_receipt()
     wrong_workspace["runtimeBinding"]["workspaceRoot"] = "/Users/ellaai/.hermes/profiles/plato-eval/workspace"
     with pytest.raises(ProvisioningError, match="workspace_ownership_mismatch"):
-        extract_runtime_binding(wrong_workspace, "user-a")
+        _extract(wrong_workspace)
 
     wrong_port = _runtime_receipt()
     wrong_port["runtimeBinding"]["gatewayPort"] = 8702
     with pytest.raises(ProvisioningError, match="gateway_port_mismatch"):
-        extract_runtime_binding(wrong_port, "user-a")
+        _extract(wrong_port)
 
     no_honcho = _runtime_receipt()
     no_honcho["runtimeBinding"]["honcho"] = {}
     with pytest.raises(ProvisioningError, match="honcho_receipt_incomplete"):
-        extract_runtime_binding(no_honcho, "user-a")
+        _extract(no_honcho)
 
     no_runtime_proof = _runtime_receipt()
     no_runtime_proof.pop("honchoProfileMap")
     with pytest.raises(ProvisioningError, match="honcho_runtime_proof_incomplete"):
-        extract_runtime_binding(no_runtime_proof, "user-a")
+        _extract(no_runtime_proof)
 
     wrong_runtime_proof = _runtime_receipt()
     wrong_runtime_proof["provisioningReceipt"]["honcho"]["validation"][
         "configPath"
     ] = "/Users/ellaai/.hermes/profiles/plato-eval/honcho.json"
     with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
-        extract_runtime_binding(wrong_runtime_proof, "user-a")
+        _extract(wrong_runtime_proof)
 
     unvalidated_runtime_proof = _runtime_receipt()
     unvalidated_runtime_proof["provisioningReceipt"]["honcho"]["validation"]["ok"] = False
     with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
-        extract_runtime_binding(unvalidated_runtime_proof, "user-a")
+        _extract(unvalidated_runtime_proof)
 
     cross_tenant_runtime_proof = _runtime_receipt()
     cross_tenant_runtime_proof["honchoProfileMap"]["target"]["workspace"] = "plato-workspace"
     with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
-        extract_runtime_binding(cross_tenant_runtime_proof, "user-a")
+        _extract(cross_tenant_runtime_proof)
 
     wrong_peer_runtime_proof = _runtime_receipt()
     wrong_peer_runtime_proof["provisioningReceipt"]["honcho"]["validation"]["target"][
         "observer_peer_id"
     ] = "plato-observer"
     with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
-        extract_runtime_binding(wrong_peer_runtime_proof, "user-a")
+        _extract(wrong_peer_runtime_proof)
 
     with pytest.raises(ProvisioningError, match="runtime_template_version_mismatch"):
-        extract_runtime_binding(
-            _runtime_receipt(),
-            "user-a",
-            expected_template_version="hermes-user-v2",
-        )
+        _extract(_runtime_receipt(), expected_template_version="hermes-user-v2")
 
 
 @pytest.mark.parametrize("invalid_value", [False, "false", "0", 0, 1, None])
@@ -615,7 +693,7 @@ def test_runtime_receipt_requires_strict_boolean_smoke_evidence(invalid_value):
     receipt["runtimeBinding"]["smokePassed"] = invalid_value
 
     with pytest.raises(ProvisioningError, match="runtime_smoke_incomplete"):
-        extract_runtime_binding(receipt, "user-a")
+        _extract(receipt)
 
 
 def test_runtime_receipt_rejects_conflicting_smoke_evidence():
@@ -623,7 +701,7 @@ def test_runtime_receipt_rejects_conflicting_smoke_evidence():
     receipt["runtimeBinding"]["healthReceipt"]["smoke_passed"] = False
 
     with pytest.raises(ProvisioningError, match="runtime_smoke_incomplete"):
-        extract_runtime_binding(receipt, "user-a")
+        _extract(receipt)
 
 
 def test_runtime_receipt_rejects_conflicting_camel_case_health_smoke_evidence():
@@ -631,12 +709,91 @@ def test_runtime_receipt_rejects_conflicting_camel_case_health_smoke_evidence():
     receipt["runtimeBinding"]["healthReceipt"]["smokePassed"] = False
 
     with pytest.raises(ProvisioningError, match="runtime_smoke_incomplete"):
-        extract_runtime_binding(receipt, "user-a")
+        _extract(receipt)
+
+
+def test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs():
+    tenant_a_challenge = _attestation_challenge("user-a")
+    receipt = _runtime_receipt(challenge=tenant_a_challenge)
+    binding = _extract(receipt, challenge=tenant_a_challenge)
+    evidence = binding["health_receipt"]["honcho_isolation"]
+    attestation = evidence["attestation"]
+    assert attestation["firebase_uid"] == "user-a"
+    assert attestation["account_owner_id"] == "22222222-2222-2222-2222-222222222222"
+    assert attestation["gateway_port"] == 8701
+    assert attestation["binding_id"] == "44444444-4444-4444-4444-444444444444"
+    assert attestation["job_id"] == "11111111-1111-1111-1111-111111111111"
+    assert "config_path_sha256" in attestation
+    assert "/Users/ellaai/.hermes/profiles" not in str(evidence)
+    assert "internalGatewayUrl" not in str(evidence)
+    assert "credentialRef" not in str(evidence)
+
+    tenant_b_challenge = _attestation_challenge("tenant-b")
+    with pytest.raises(ProvisioningError, match="honcho_attestation_context_mismatch"):
+        _extract(receipt, "tenant-b", challenge=tenant_b_challenge)
+
+    for field, replacement in (
+        ("runtime_target_id", "target-swapped"),
+        ("binding_id", "55555555-5555-5555-5555-555555555555"),
+        ("job_id", "66666666-6666-6666-6666-666666666666"),
+    ):
+        swapped = dict(tenant_a_challenge, **{field: replacement})
+        with pytest.raises(ProvisioningError, match="honcho_attestation_context_mismatch"):
+            _extract(receipt, challenge=swapped)
+
+    port_swap = copy.deepcopy(receipt)
+    port_swap["runtimeBinding"]["gatewayPort"] = 8702
+    port_swap["runtimeBinding"]["internalGatewayUrl"] = "http://100.76.138.56:8702"
+    with pytest.raises(ProvisioningError, match="honcho_attestation_readback_mismatch"):
+        _extract(port_swap, challenge=tenant_a_challenge)
+
+    with pytest.raises(ProvisioningError, match="honcho_attestation_stale"):
+        _extract(receipt, challenge=tenant_a_challenge, now=tenant_a_challenge["expires_at"] + 1)
+
+    partial = copy.deepcopy(receipt)
+    partial["honchoAttestation"].pop("nonce")
+    with pytest.raises(ProvisioningError, match="honcho_attestation_malformed"):
+        _extract(partial, challenge=tenant_a_challenge)
+
+    malformed_nonce_challenge = dict(tenant_a_challenge, nonce="short")
+    with pytest.raises(ProvisioningError, match="honcho_attestation_freshness_invalid"):
+        _extract(
+            _runtime_receipt(challenge=malformed_nonce_challenge),
+            challenge=malformed_nonce_challenge,
+        )
+
+    forged = copy.deepcopy(receipt)
+    forged["honchoAttestation"]["signature"] = "0" * 64
+    with pytest.raises(ProvisioningError, match="honcho_attestation_integrity_invalid"):
+        _extract(forged, challenge=tenant_a_challenge)
+
+
+def test_missing_attestation_key_fails_before_provisioner_or_binding_write(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    for invalid_key in (None, "short", " unit-test-attestation-key-32-bytes-minimum"):
+        if invalid_key is None:
+            monkeypatch.delenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY")
+        else:
+            monkeypatch.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", invalid_key)
+        repository = FakeRepository()
+        client = FakeProvisionClient({"mode": "hermes_only", "provisionMode": "hermes_only"})
+        identity = VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles")
+
+        asyncio.run(
+            ProvisioningCoordinator(repository, client).process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=identity,
+            )
+        )
+
+        assert client.calls == []
+        assert repository.staged is None
+        assert repository.job["error_code"] == "honcho_attestation_key_unavailable"
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "secret-value")
-    binding = extract_runtime_binding(_runtime_receipt(), "user-a")
+    binding = _extract(_runtime_receipt())
     binding.update(omi_uid="user-a", active=True, revision=4)
     runtime = runtime_from_binding(binding, "user-a")
     assert runtime.profile_name == "omi-user-a"
@@ -655,12 +812,14 @@ def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
 
 def test_invitation_runtime_requires_persisted_profile_local_honcho_proof(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "secret-value")
-    binding = extract_runtime_binding(_runtime_receipt(), "user-a")
+    binding = _extract(_runtime_receipt())
     binding.update(
+        id="44444444-4444-4444-4444-444444444444",
         omi_uid="user-a",
         active=True,
         revision=4,
         runtime_target_id="target-a",
+        attestation_runtime_target_id="33333333-3333-3333-3333-333333333333",
         runtime_target_mode="hermes-chat",
         target_policy_version=CURRENT_POLICY_VERSION,
         target_processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
@@ -673,14 +832,13 @@ def test_invitation_runtime_requires_persisted_profile_local_honcho_proof(monkey
     assert runtime_from_binding(binding, "user-a").profile_name == "omi-user-a"
 
     missing = dict(binding, health_receipt={"smoke_passed": True})
-    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_missing"):
+    with pytest.raises(ProvisioningError, match="honcho_attestation_evidence_malformed"):
         runtime_from_binding(missing, "user-a")
 
-    mismatched_receipt = dict(binding["health_receipt"])
-    mismatched_proof = dict(mismatched_receipt["honcho_isolation"], workspace="plato-workspace")
-    mismatched_receipt["honcho_isolation"] = mismatched_proof
+    mismatched_receipt = copy.deepcopy(binding["health_receipt"])
+    mismatched_receipt["honcho_isolation"]["attestation"]["honcho_workspace"] = "plato-workspace"
     mismatched = dict(binding, health_receipt=mismatched_receipt)
-    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
+    with pytest.raises(ProvisioningError, match="honcho_attestation_readback_mismatch"):
         runtime_from_binding(mismatched, "user-a")
 
 
@@ -793,7 +951,9 @@ def test_successful_provision_stages_then_activates_binding(monkeypatch):
             "timezone_name": "America/Los_Angeles",
         }
     ]
-    assert client.calls == [(identity, "hermes-user-v1")]
+    assert len(client.calls) == 1
+    assert client.calls[0][:2] == (identity, "hermes-user-v1")
+    assert client.calls[0][2]["firebase_uid"] == identity.uid
 
 
 def test_legacy_8210_receipt_cannot_activate(monkeypatch):

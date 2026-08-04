@@ -28,13 +28,24 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
   disclose, or require Honcho Cloud on the Cloud route.
 - Legacy retained Plato/Honcho paths remain separate and must not be modified by
   the Cloud target migration.
-- Invitation-owned self-hosted Hermes is usable only when the provisioning
-  receipt proves the profile-local `<profile>/honcho.json` path and its
-  read-back workspace/peer mapping. Database `honcho_workspace` fields alone
-  are not runtime authority. The profile must not be `plato-eval`, and its
-  workspace plus gateway port remain profile-owned and unique.
-- Existing invitation bindings without the persisted `honcho_isolation` proof
-  fail closed. Re-provision them through the reviewed provider path; do not
+- Invitation-owned self-hosted Hermes is usable only with a
+  `honcho-isolation-v2` HMAC attestation. OMI creates a 120-second nonce
+  challenge binding the exact Firebase UID, internal account owner,
+  invitation-target family, binding id, and provisioning job id. The
+  provisioner must read the profile-local `<profile>/honcho.json` and sign the
+  complete fixed-schema response: challenge fields, profile/config-path hash,
+  workspace-root hash, Honcho workspace and both peer ids, gateway port and
+  target hash, credential-reference hash, agent id, and service label. OMI
+  verifies freshness, exact context, readback, and integrity before staging,
+  again inside the activation transaction, and again inside each invitation
+  resolution transaction. Database strings or mutually agreeing unsigned
+  response objects are not runtime authority.
+- The provisioner and OMI must receive the same separately scoped
+  `ELLA_HERMES_PROVISION_ATTESTATION_KEY` (minimum 32 bytes). Missing, padded,
+  malformed, stale, partial, or incorrectly signed evidence fails closed. This
+  source contract requires provisioner support before rollout.
+- Existing invitation bindings without the persisted v2 attestation fail
+  closed. Re-provision them through the reviewed provider path; do not
   synthesize or backfill the proof from database values.
 - `ai-data-processors-v7` is immutable historical consent. Cloud target traffic
   requires `ai-data-processors-v8`, `managed-cloud-internal-pilot-v2`, and the

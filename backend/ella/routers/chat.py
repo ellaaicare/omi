@@ -548,45 +548,28 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
     _start = _time.time()
 
     if not OPENCLAW_GATEWAY_TOKEN:
-        print(f"[FLOW:CHAT-L4] ERROR provider=openclaw token_missing=true uid={uid}", flush=True)
+        print("[FLOW:CHAT-L4] error=token_missing", flush=True)
         yield "data: Error: OPENCLAW_GATEWAY_TOKEN not configured\n\n"
         return
 
     # Dynamic agent resolution with tracing
     _l4_trace = RouteTrace()
-    _l4_trace.endpoint = "/v1/ella/chat/stream -> Level 4"
-    _l4_trace.uid = uid
+    del client_info
+    _l4_trace.endpoint_class = "chat"
+    _l4_trace.method = "POST"
     _l4_trace.debug_level = 4
-    if client_info:
-        _l4_trace.client_type = client_info.get("type", "")
-        _l4_trace.client_version = client_info.get("version", "")
-        _l4_trace.client_ip = client_info.get("ip", "")
-        _l4_trace.client_route = client_info.get("route", "")
-        _l4_trace.client_headers = client_info.get("headers", {})
 
     resolved = await resolve_user_routing(uid)
     if resolved and resolved.get("routing"):
         agent_id = resolved["routing"]["agentId"]
         gateway_url = resolved["routing"]["gatewayUrl"]
         session_key = resolved["routing"]["sessionKey"]
-        _l4_trace.resolved_agent = agent_id
-        _l4_trace.resolved_gateway = gateway_url
-        _l4_trace.resolved_session_key = session_key
-        _l4_trace.resolve_source = "database"
-        print(
-            f"[FLOW:CHAT-L4] provider=openclaw uid={uid} agent={agent_id} gateway={gateway_url} source=database",
-            flush=True,
-        )
+        print("[FLOW:CHAT-L4] routing=database", flush=True)
     else:
         agent_id = "main"
         gateway_url = OPENCLAW_URL
         session_key = f"ella:{uid}"
-        _l4_trace.resolved_agent = "main (FALLBACK)"
-        _l4_trace.resolved_gateway = gateway_url
-        _l4_trace.resolved_session_key = session_key
-        _l4_trace.resolve_source = "fallback"
-        _l4_trace.notes.append("WARNING: No cluster found, using fallback")
-        print(f"[FLOW:CHAT-L4] provider=openclaw uid={uid} agent=main source=FALLBACK (no cluster)", flush=True)
+        print("[FLOW:CHAT-L4] routing=fallback", flush=True)
 
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
@@ -610,10 +593,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
             }
         )
     else:
-        print(
-            f"[FLOW:CHAT-L4] uid={uid} canonical_context=empty fallback=openclaw_session_history_migration",
-            flush=True,
-        )
+        print("[FLOW:CHAT-L4] canonical_context=empty", flush=True)
     if temporal_context:
         messages.append(
             {
@@ -664,10 +644,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         _elapsed = int((_time.time() - _start) * 1000)
 
         if response.status_code != 200:
-            print(
-                f"[FLOW:CHAT-L4] ERROR provider=openclaw agent={agent_id} status={response.status_code} latency={_elapsed}ms keepalives={keepalive_count}",
-                flush=True,
-            )
+            print(f"[FLOW:CHAT-L4] error=provider_status latency_ms={_elapsed}", flush=True)
             yield f"data: Error: OpenClaw returned {response.status_code}\n\n"
             return
 
@@ -678,17 +655,11 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         # Strip <think>...</think> blocks that some reasoning models include
         reply = re.sub(r'<think>.*?</think>\s*', '', reply, flags=re.DOTALL).strip()
 
-        _l4_trace.openclaw_status = response.status_code
-        _l4_trace.openclaw_latency_ms = _elapsed
         _l4_trace.total_latency_ms = _elapsed
         _l4_trace.response_status = 200
         record_trace(_l4_trace)
 
-        reply_preview = reply[:80] if reply else "(empty)"
-        print(
-            f"[FLOW:CHAT-L4] OK provider=openclaw agent={agent_id} uid={uid} latency={_elapsed}ms keepalives={keepalive_count} reply={reply_preview}",
-            flush=True,
-        )
+        print(f"[FLOW:CHAT-L4] status=ok latency_ms={_elapsed} keepalives={keepalive_count}", flush=True)
 
         # Emit in OMI format: data: <text> then done: <base64 json>
         encoded_reply = reply.replace(chr(10), '__CRLF__')
@@ -714,12 +685,12 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
 
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
-        print(f"[FLOW:CHAT-L4] TIMEOUT provider=openclaw agent={agent_id} latency={_elapsed}ms", flush=True)
+        print(f"[FLOW:CHAT-L4] error=timeout latency_ms={_elapsed}", flush=True)
         yield "data: Error: OpenClaw request timed out\n\n"
-    except Exception as e:
+    except Exception:
         _elapsed = int((_time.time() - _start) * 1000)
-        print(f"[FLOW:CHAT-L4] ERROR provider=openclaw agent={agent_id} error={e} latency={_elapsed}ms", flush=True)
-        yield f"data: Error: {str(e)}\n\n"
+        print(f"[FLOW:CHAT-L4] error=unexpected latency_ms={_elapsed}", flush=True)
+        yield "data: Error: OpenClaw request failed\n\n"
 
 
 async def _stream_hermes_chat(
@@ -1076,33 +1047,21 @@ async def ella_chat_stream(
     debug_level = _resolve_debug_level(x_ella_debug_level)
 
     # Comprehensive flow entry log
-    client_ip = raw_request.client.host if raw_request.client else "unknown"
     client_type = x_ella_client_type or "unknown"
     print(
-        f"[FLOW:CHAT] uid={uid} level={debug_level} client={client_type} ip={client_ip} msg_len={len(request.message)}",
+        f"[FLOW:CHAT] level={debug_level} client={client_type} request_received=true",
         flush=True,
     )
 
     # Create routing trace
     trace = RouteTrace()
-    trace.endpoint = "/v1/ella/chat/stream"
+    trace.endpoint_class = "chat"
     trace.method = "POST"
-    trace.client_ip = client_ip
-    trace.client_type = x_ella_client_type or ""
-    trace.client_version = x_ella_client_version or ""
-    trace.client_route = x_ella_route or ""
-    trace.uid = uid
     trace.debug_level = debug_level
-    trace.notes.append(f"message_length={len(request.message)}")
     client_sent_at = _parse_client_sent_at(request.client_sent_at)
     turn_id = _canonical_turn_id(uid, request, client_sent_at)
-    trace.notes.append(f"canonical_turn_id={turn_id}")
-    # Capture all X-Ella-* headers for debugging
-    trace.client_headers = {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")}
 
     if CHAT_PLATFORM == "hermes" or runtime is not None:
-        trace.resolved_agent = runtime.agent_id if runtime else HERMES_AGENT_ID
-        trace.resolve_source = "isolated_runtime_binding" if runtime else "hermes_platform"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         stream = (
@@ -1127,7 +1086,6 @@ async def ella_chat_stream(
                     "version": x_ella_client_version or "",
                     "ip": raw_request.client.host if raw_request.client else "",
                     "route": x_ella_route or "",
-                    "headers": trace.client_headers,
                 },
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
@@ -1140,8 +1098,6 @@ async def ella_chat_stream(
         )
 
     if debug_level == 1:
-        trace.resolved_agent = "N/A (ACK)"
-        trace.resolve_source = "level_1_ack"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
@@ -1150,8 +1106,6 @@ async def ella_chat_stream(
         )
 
     if debug_level == 2:
-        trace.resolved_agent = "grok-direct"
-        trace.resolve_source = "level_2_grok"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
@@ -1160,8 +1114,6 @@ async def ella_chat_stream(
         )
 
     if debug_level == 3:
-        trace.resolved_agent = "n8n-webhook"
-        trace.resolve_source = "level_3_n8n"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
@@ -1170,7 +1122,7 @@ async def ella_chat_stream(
         )
 
     if debug_level == 4:
-        # L4 traces are recorded inside _stream_level_4_openclaw with full resolution data
+        # L4 records the same fixed, content-free trace schema after completion.
         return StreamingResponse(
             _stream_level_4_openclaw(
                 request.message,
@@ -1178,18 +1130,13 @@ async def ella_chat_stream(
                 {
                     "type": x_ella_client_type or "",
                     "version": x_ella_client_version or "",
-                    "ip": raw_request.client.host if raw_request.client else "",
-                    "route": x_ella_route or "",
-                    "headers": {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")},
                 },
             ),
             media_type="text/event-stream",
         )
 
     # Level 0 (production): Direct Grok call as default production path
-    print(f"[FLOW:CHAT-L0] uid={uid} production path -> grok direct", flush=True)
-    trace.resolved_agent = "grok-direct (level 0)"
-    trace.resolve_source = "level_0_production"
+    print("[FLOW:CHAT-L0] route=grok_direct", flush=True)
     trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
     record_trace(trace)
     return StreamingResponse(

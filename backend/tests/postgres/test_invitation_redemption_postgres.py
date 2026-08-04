@@ -21,6 +21,7 @@ from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
 )
+from database.honcho_attestation import calculate_signature, create_challenge, observed_runtime_fields
 from database.runtime_targets import RuntimeTargetLineage, SELF_HOSTED_RUNTIME_MODEL
 from ella.services import ai_consent
 from ella.services import consent_authority, invitation_authority
@@ -90,6 +91,12 @@ pytestmark = pytest.mark.skipif(
     not TEST_DSN,
     reason="ELLA_TEST_POSTGRES_DSN is required for invitation PostgreSQL tests",
 )
+
+
+@pytest.fixture(autouse=True)
+def _honcho_attestation_key(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", "postgres-attestation-key-32-bytes-minimum")
+
 
 BASE_PROVISIONING_SCHEMA = """
 CREATE TABLE users (
@@ -494,6 +501,61 @@ def _local_runtime_binding(uid: str, *, port: int = 18701) -> dict:
     }
 
 
+async def _stage_attested_local_binding(
+    repository: EllaProvisioningRepository,
+    pool: asyncpg.Pool,
+    uid: str,
+    *,
+    port: int = 18701,
+) -> dict:
+    binding = _local_runtime_binding(uid, port=port)
+    binding_id = await repository.prepare_runtime_binding_identity(uid=uid, provider="hermes", role="user")
+    admission = await repository.get_self_hosted_invitation_admission(uid)
+    assert admission is not None
+    job_id = uuid.uuid4()
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO ella_provisioning_jobs (
+                id, user_id, target_schema_version, state, stage, retryable
+            ) VALUES ($1, $2, $3, 'provisioning', 'smoke_passed', TRUE)
+            """,
+            job_id,
+            admission["user_id"],
+            binding["template_version"],
+        )
+    challenge = create_challenge(
+        firebase_uid=uid,
+        account_owner_id=str(admission["user_id"]),
+        runtime_target_id=str(admission["attestation_runtime_target_id"]),
+        binding_id=binding_id,
+        job_id=str(job_id),
+    )
+    attestation = {
+        **challenge,
+        **observed_runtime_fields(
+            profile_name=binding["profile_name"],
+            config_path=f"/Users/ellaai/.hermes/profiles/{binding['profile_name']}/honcho.json",
+            workspace_root=binding["workspace_root"],
+            honcho_workspace=binding["honcho_workspace"],
+            observed_peer_id=binding["observed_peer"],
+            observer_peer_id=binding["observer_peer"],
+            gateway_port=binding["gateway_port"],
+            gateway_target=binding["internal_gateway_url"],
+            credential_ref=binding["credential_ref"],
+            agent_id=binding["agent_id"],
+            service_label=binding["service_label"],
+        ),
+    }
+    attestation["signature"] = calculate_signature(attestation)
+    binding["binding_id"] = binding_id
+    binding["health_receipt"] = {
+        "smoke_passed": True,
+        "honcho_isolation": {"attestation": attestation, "verified_at": challenge["issued_at"]},
+    }
+    return await repository.stage_runtime_binding(uid=uid, binding=binding)
+
+
 def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically():
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "firebase-self-hosted-one"
@@ -583,19 +645,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert admission["consent_authority_epoch"] == admission["current_authority_epoch"]
         assert admission["runtime_target_entitlement_revision"] == admission["revision"] == 2
 
-        staged = await repository.stage_runtime_binding(
-            uid=uid,
-            binding={
-                "provider": "hermes",
-                "agent_id": "hermes-pilot-one",
-                "profile_name": "ella-pilot-one",
-                "template_version": "hermes-user-v1",
-                "model_policy_version": "self-hosted-pilot-v1",
-                "voice_policy_version": "ella-voice-v1",
-                "health_state": "healthy",
-                "health_receipt": {"content_free": True},
-            },
-        )
+        staged = await _stage_attested_local_binding(repository, pool, uid)
         activated = await repository.activate_runtime_binding(
             uid=uid,
             provider="hermes",
@@ -1163,7 +1213,7 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
         await _redeem_self_hosted(uid, email, "HJKM-3456")
         await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
         repository = EllaProvisioningRepository(pool)
-        staged = await repository.stage_runtime_binding(uid=uid, binding=_local_runtime_binding(uid))
+        staged = await _stage_attested_local_binding(repository, pool, uid)
         await repository.activate_runtime_binding(
             uid=uid,
             provider="hermes",
@@ -1390,6 +1440,120 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
     asyncio.run(_run_with_database(scenario))
 
 
+def test_self_hosted_activation_rejects_tampered_attestation_before_publication(monkeypatch):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "attestation-activation-tamper"
+        email = "attestation-activation-tamper@example.test"
+        await pilot_invite_admin._issue_invitation(
+            code="PQRS-3456",
+            code_file_existed=False,
+            code_file_ref_hmac="7" * 64,
+            kind="ordinary",
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        await _redeem_self_hosted(uid, email, "PQRS-3456")
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        staged = await _stage_attested_local_binding(repository, pool, uid)
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET health_receipt = jsonb_set(
+                    health_receipt,
+                    '{honcho_isolation,attestation,firebase_uid}',
+                    to_jsonb('replayed-tenant'::text)
+                )
+                WHERE id = $1
+                """,
+                staged["id"],
+            )
+
+        with pytest.raises(RuntimePoolClaimError, match="honcho_attestation_context_mismatch"):
+            await repository.activate_runtime_binding(
+                uid=uid,
+                provider="hermes",
+                require_invitation_target=True,
+                authority_lineage=_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT
+                    (SELECT active FROM ella_runtime_bindings WHERE id = $1) AS active,
+                    (SELECT COUNT(*) FROM ella_runtime_targets WHERE runtime_binding_id = $1) AS published_targets
+                """,
+                staged["id"],
+            )
+        assert tuple(state.values()) == (False, 0)
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction(monkeypatch):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "attestation-resolution-tamper"
+        email = "attestation-resolution-tamper@example.test"
+        await pilot_invite_admin._issue_invitation(
+            code="QRST-3456",
+            code_file_existed=False,
+            code_file_ref_hmac="8" * 64,
+            kind="ordinary",
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        await _redeem_self_hosted(uid, email, "QRST-3456")
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        staged = await _stage_attested_local_binding(repository, pool, uid)
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET health_receipt = jsonb_set(
+                    health_receipt,
+                    '{honcho_isolation,attestation,signature}',
+                    to_jsonb(repeat('0', 64))
+                )
+                WHERE id = $1
+                """,
+                staged["id"],
+            )
+
+        with pytest.raises(RuntimePoolClaimError, match="honcho_attestation_integrity_invalid"):
+            await repository.resolve_active_runtime(
+                uid,
+                template_version="hermes-user-v1",
+                target_mode="hermes-chat",
+                required_provider="hermes",
+                authority_lineage=_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkeypatch):
     async def scenario(pool: asyncpg.Pool) -> None:
         users = (
@@ -1411,10 +1575,7 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
             await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
 
         repository = EllaProvisioningRepository(pool)
-        staged = await repository.stage_runtime_binding(
-            uid=users[0][0],
-            binding=_local_runtime_binding(users[0][0]),
-        )
+        staged = await _stage_attested_local_binding(repository, pool, users[0][0])
         activated = await repository.activate_runtime_binding(
             uid=users[0][0],
             provider="hermes",
@@ -1569,10 +1730,7 @@ def test_self_hosted_consent_authority_change_invalidates_runtime(
         await _redeem_self_hosted(uid, email, code)
         await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
         repository = EllaProvisioningRepository(pool)
-        activated = await repository.stage_runtime_binding(
-            uid=uid,
-            binding=_local_runtime_binding(uid),
-        )
+        activated = await _stage_attested_local_binding(repository, pool, uid)
         await repository.activate_runtime_binding(
             uid=uid,
             provider="hermes",
@@ -1650,10 +1808,29 @@ def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypat
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def provision(self, identity, target_schema_version):
+        async def provision(self, identity, target_schema_version, *, attestation_challenge):
             del identity, target_schema_version
             self.started.set()
             await self.release.wait()
+            raw = self.receipt["runtimeBinding"]
+            attestation = {
+                **attestation_challenge,
+                **observed_runtime_fields(
+                    profile_name=raw["profileName"],
+                    config_path=self.receipt["honchoProfileMap"]["honchoConfigPath"],
+                    workspace_root=raw["workspaceRoot"],
+                    honcho_workspace=raw["honcho"]["workspace"],
+                    observed_peer_id=raw["honcho"]["observedPeer"],
+                    observer_peer_id=raw["honcho"]["observerPeer"],
+                    gateway_port=raw["gatewayPort"],
+                    gateway_target=raw["internalGatewayUrl"],
+                    credential_ref=raw["credentialRef"],
+                    agent_id=raw["agentId"],
+                    service_label=raw["serviceLabel"],
+                ),
+            }
+            attestation["signature"] = calculate_signature(attestation)
+            self.receipt["honchoAttestation"] = attestation
             return self.receipt
 
     async def scenario(pool: asyncpg.Pool) -> None:

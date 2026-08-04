@@ -1,13 +1,34 @@
 import ast
 import asyncio
+import inspect
+import sys
+import textwrap
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+for module_name in (
+    "database._client",
+    "database.conversations",
+    "database.memories",
+    "database.users",
+    "database.ella_contacts",
+    "utils.notifications",
+    "utils.other.storage",
+):
+    sys.modules.setdefault(module_name, MagicMock(db=MagicMock()))
+sys.modules.setdefault("websockets", MagicMock())
+
+import ella
 from ella.routers import canonical_events, chat, resolve, trace
+from scripts import ella_memory_e2e_smoke
 from utils.ella import exact_firebase_auth
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -164,14 +185,6 @@ def test_canonical_service_validates_every_identity_and_preserves_internal_sync(
 
 def test_trace_routes_default_off_and_never_return_runtime_coordinates(monkeypatch):
     monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", _verify_firebase)
-    trace._traces.clear()
-    private = trace.RouteTrace()
-    private.uid = "uid-a"
-    private.endpoint = "/v1/ella/chat/stream"
-    private.resolved_gateway = "http://private-gateway.invalid"
-    private.resolved_session_key = "private-session"
-    private.client_headers = {"authorization": "private-token"}
-    trace._traces.appendleft(private)
     app = FastAPI()
     app.include_router(trace.router)
     client = TestClient(app)
@@ -197,10 +210,7 @@ def test_trace_routes_default_off_and_never_return_runtime_coordinates(monkeypat
         headers={"Authorization": "Bearer token-a"},
     )
     assert own.status_code == 200
-    serialized = own.text
-    assert "private-gateway" not in serialized
-    assert "private-session" not in serialized
-    assert "private-token" not in serialized
+    assert own.json() == {"source": "disabled", "count": 0, "total": 0, "traces": []}
 
 
 def test_client_trace_uses_authenticated_uid_and_discards_caller_runtime_material(monkeypatch):
@@ -240,12 +250,113 @@ def test_client_trace_uses_authenticated_uid_and_discards_caller_runtime_materia
         json=payload,
     )
     assert accepted.status_code == 200
+    assert accepted.json()["retained"] is False
     assert len(recorded) == 1
-    assert recorded[0].uid == "uid-a"
-    assert recorded[0].resolved_gateway == ""
-    assert recorded[0].resolved_session_key == ""
-    assert recorded[0].client_headers == {}
-    assert recorded[0].notes == ["client-telemetry"]
+    assert set(recorded[0].to_dict()) == {
+        "traceId",
+        "endpointClass",
+        "method",
+        "debugLevel",
+        "responseStatus",
+        "totalLatencyMs",
+        "hasError",
+    }
+    serialized = str(recorded[0].to_dict())
+    for sensitive in (
+        "uid-a",
+        "caller-selected",
+        "resolvedGateway",
+        "sessionKey",
+        "headers",
+        "notes",
+    ):
+        assert sensitive not in serialized
+
+
+def test_trace_recording_is_synchronous_content_free_and_never_persists(monkeypatch):
+    messages = []
+    monkeypatch.setattr(trace.logger, "info", lambda *args: messages.append(args))
+
+    class ForbiddenLoop:
+        def create_task(self, *_args, **_kwargs):
+            raise AssertionError("trace recording must not enqueue detached work")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: ForbiddenLoop())
+    event = trace.RouteTrace()
+    event.endpoint_class = "chat"
+    event.method = "POST"
+    event.response_status = 200
+    event.total_latency_ms = 12
+    trace.record_trace(event)
+
+    assert len(messages) == 1
+    serialized = str(messages)
+    for sensitive in (
+        "private-gateway",
+        "private-session",
+        "private-token",
+        "X-Ella-Route",
+        "medical-note",
+    ):
+        assert sensitive not in serialized
+    assert not hasattr(trace, "_persist_trace")
+    assert "INSERT INTO routing_traces" not in (_BACKEND / "ella" / "routers" / "trace.py").read_text(encoding="utf-8")
+
+
+def test_authenticated_chat_and_legacy_level4_cannot_record_caller_or_runtime_material(monkeypatch):
+    recorded = []
+
+    async def isolated_runtime(*_args, **_kwargs):
+        return SimpleNamespace(provider="hermes", agent_id="private-agent")
+
+    async def stream(*_args, **_kwargs):
+        yield "done: content-free\n\n"
+
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", isolated_runtime)
+    monkeypatch.setattr(chat, "_stream_hermes_chat", stream)
+    monkeypatch.setattr(chat, "record_trace", recorded.append)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/ella/chat/stream",
+            "headers": [(b"x-ella-private", b"private-token")],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    response = asyncio.run(
+        chat.ella_chat_stream(
+            chat.EllaChatRequest(uid="uid-a", message="medical-note"),
+            request,
+            authenticated_uid="uid-a",
+            x_ella_client_type="ios",
+            x_ella_client_version="private-version",
+            x_ella_route="private-route",
+        )
+    )
+
+    assert response.status_code == 200
+    assert len(recorded) == 1
+    serialized = str(recorded[0].to_dict())
+    for sensitive in (
+        "uid-a",
+        "medical-note",
+        "private-token",
+        "private-version",
+        "private-route",
+        "private-agent",
+    ):
+        assert sensitive not in serialized
+    level4_source = inspect.getsource(chat._stream_level_4_openclaw)
+    for forbidden_field in (
+        "client_headers",
+        "client_route",
+        "resolved_gateway",
+        "resolved_session_key",
+        "resolved_agent",
+        ".notes",
+    ):
+        assert forbidden_field not in level4_source
 
 
 def test_unbound_non_owner_chat_fails_before_trace_or_provider(monkeypatch):
@@ -367,62 +478,295 @@ def test_legacy_routing_is_never_returned_for_non_owner_without_binding(monkeypa
     assert "/owner/workspace" not in serialized
 
 
-def _decorated_routes(path: Path):
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    routes = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
-                continue
-            if decorator.func.attr not in {"get", "post", "put", "patch", "delete"} or not decorator.args:
-                continue
-            route = decorator.args[0]
-            if not isinstance(route, ast.Constant) or not isinstance(route.value, str):
-                continue
-            has_dependency = any(
-                isinstance(default, ast.Call) and isinstance(default.func, ast.Name) and default.func.id == "Depends"
-                for default in [*node.args.defaults, *node.args.kw_defaults]
-                if default is not None
-            )
-            has_dependency = has_dependency or any(
-                keyword.arg == "dependencies"
-                and any(
-                    isinstance(item, ast.Call) and isinstance(item.func, ast.Name) and item.func.id == "Depends"
-                    for item in (keyword.value.elts if isinstance(keyword.value, (ast.List, ast.Tuple)) else [])
-                )
-                for keyword in decorator.keywords
-            )
-            has_dependency = has_dependency or any(
-                isinstance(call.func, ast.Name) and call.func.id == "authenticate_voice_proxy_request"
-                for call in ast.walk(node)
-                if isinstance(call, ast.Call)
-            )
-            routes.append((decorator.func.attr.upper(), route.value, node.name, has_dependency))
-    return routes
+def _run_real_smoke_seed(monkeypatch, *, canonical_identity="uid-a"):
+    monkeypatch.setenv("ELLA_EVENT_LEDGER_TOKEN", "ledger-service-test")
+    store = RecordingCanonicalStore()
+    app = FastAPI()
+    app.include_router(canonical_events.create_canonical_events_router(store))
+    client = TestClient(app)
+    args = ella_memory_e2e_smoke.parse_args(
+        [
+            "--uid",
+            "uid-a",
+            "--canonical-identity",
+            canonical_identity,
+            "--mcp-canonical-identity",
+            "plato",
+            "--seed-multichannel",
+        ]
+    )
+    smoke = ella_memory_e2e_smoke.MemorySmoke(args)
+
+    def mounted_request(method, url, payload=None, headers=None):
+        response = client.request(method, url.removeprefix(smoke.backend_url), json=payload, headers=headers)
+        return response.json(), 1
+
+    monkeypatch.setattr(ella_memory_e2e_smoke, "_json_request", mounted_request)
+    monkeypatch.setattr(
+        smoke,
+        "search_memory",
+        lambda *_args, **_kwargs: [
+            {"channel": event.channel, "text": event.text} for batch in store.writes for event in batch
+        ],
+    )
+    return smoke, store
 
 
-def test_affected_router_inventory_has_no_unclassified_authority_boundary():
-    modules = {
-        "canonical_events.py": set(),
-        "callbacks.py": {("GET", "/health"), ("GET", "/caregiver-dashboard-data")},
-        "trace.py": set(),
-        "debug_metadata.py": set(),
-        "chat.py": set(),
-        "resolve.py": set(),
-        "voice.py": {("GET", "/config")},
-    }
-    inventory = []
-    for module_name, approved_public in modules.items():
-        routes = _decorated_routes(_BACKEND / "ella" / "routers" / module_name)
-        assert routes, module_name
-        inventory.extend((module_name, *route) for route in routes)
-        for method, path, function_name, has_dependency in routes:
-            assert has_dependency or (method, path) in approved_public, (
-                module_name,
-                method,
-                path,
-                function_name,
-            )
-    assert len(inventory) >= 40
+def test_real_smoke_multichannel_payload_uses_exact_uid_with_ledger_authority(monkeypatch):
+    defaults = ella_memory_e2e_smoke.parse_args(["--uid", "uid-a", "--seed-multichannel"])
+    assert defaults.canonical_identity == defaults.uid
+    assert defaults.mcp_canonical_identity == "plato"
+
+    smoke, store = _run_real_smoke_seed(monkeypatch)
+    smoke.seed_multichannel_events()
+    assert len(store.writes) == 1
+    assert len(store.writes[0]) == 3
+    assert {event.uid for event in store.writes[0]} == {"uid-a"}
+    assert {event.canonical_identity for event in store.writes[0]} == {"uid-a"}
+
+
+def test_real_smoke_multichannel_identity_mismatch_has_zero_writes(monkeypatch):
+    smoke, store = _run_real_smoke_seed(monkeypatch, canonical_identity="uid-b")
+    with pytest.raises(ella_memory_e2e_smoke.SmokeFailure, match="multi-channel event write failed"):
+        smoke.seed_multichannel_events()
+    assert store.writes == []
+
+
+def _authority_id(callable_object):
+    return f"{callable_object.__module__}:{callable_object.__qualname__}"
+
+
+def _contract(endpoint, *dependencies, manual=None):
+    return endpoint, tuple(dependencies), manual
+
+
+MOUNTED_ROUTE_CONTRACT = {
+    ("callbacks", "PATCH", "/v1/ella/conversation/{conversation_id}/summary"): _contract(
+        "update_conversation_summary", "ella.routers.callbacks:require_callback_service"
+    ),
+    ("callbacks", "GET", "/v1/ella/conversations/enrichment/reconcile-candidates"): _contract(
+        "list_enrichment_reconcile_candidates", "ella.routers.callbacks:require_callback_service"
+    ),
+    ("callbacks", "GET", "/v1/ella/conversation/{conversation_id}/data"): _contract(
+        "get_conversation_data", "ella.routers.callbacks:require_callback_service"
+    ),
+    ("callbacks", "GET", "/v1/ella/health"): _contract("ella_health", manual="public_minimal_health"),
+    ("callbacks", "POST", "/v1/ella/notification"): _contract(
+        "ella_notification", "ella.routers.callbacks:require_callback_service"
+    ),
+    ("callbacks", "POST", "/v1/ella/emergency"): _contract(
+        "ella_emergency", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "POST", "/v1/ella/daily-summary"): _contract(
+        "ella_daily_summary", "ella.routers.callbacks:require_callback_service"
+    ),
+    ("callbacks", "POST", "/v1/ella/emergency-contact"): _contract(
+        "create_emergency_contact", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "GET", "/v1/ella/emergency-contacts/{uid}"): _contract(
+        "list_emergency_contacts", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "PUT", "/v1/ella/emergency-contact/{contact_id}"): _contract(
+        "update_emergency_contact", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "DELETE", "/v1/ella/emergency-contact/{contact_id}"): _contract(
+        "delete_emergency_contact", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "GET", "/v1/ella/caregiver-dashboard-data"): _contract(
+        "caregiver_dashboard_data", manual="validate_dashboard_token"
+    ),
+    ("callbacks", "POST", "/v1/ella/generate-dashboard-token"): _contract(
+        "generate_dashboard_token_endpoint", "ella.routers.callbacks:require_caregiver_service"
+    ),
+    ("chat", "POST", "/v1/ella/chat/stream"): _contract(
+        "ella_chat_stream", "ella.services.ai_consent:require_current_ai_consent"
+    ),
+    ("chat", "GET", "/v1/ella/chat/history"): _contract(
+        "ella_chat_history", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("resolve", "GET", "/v1/ella/resolve"): _contract(
+        "resolve_endpoint", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("resolve", "GET", "/v1/ella/chat/history/{agent_id}"): _contract(
+        "proxy_chat_history", "utils.other.endpoints:get_current_user_uid"
+    ),
+    ("trace", "POST", "/v1/ella/debug/client-trace"): _contract(
+        "ingest_client_trace", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("trace", "GET", "/v1/ella/debug/traces"): _contract(
+        "get_traces",
+        "utils.ella.exact_firebase_auth:get_exact_firebase_uid",
+        "ella.routers.trace:_require_debug_reads_enabled",
+    ),
+    ("trace", "GET", "/v1/ella/debug/trace/{uid}"): _contract(
+        "get_user_traces",
+        "utils.ella.exact_firebase_auth:get_exact_firebase_uid",
+        "ella.routers.trace:_require_debug_reads_enabled",
+    ),
+    ("trace", "GET", "/v1/ella/debug/stats"): _contract(
+        "trace_stats",
+        "utils.ella.exact_firebase_auth:get_exact_firebase_uid",
+        "ella.routers.trace:_require_debug_reads_enabled",
+    ),
+    ("trace", "GET", "/v1/ella/debug/status"): _contract(
+        "debug_status",
+        "utils.ella.exact_firebase_auth:get_exact_firebase_uid",
+        "ella.routers.trace:_require_debug_reads_enabled",
+    ),
+    ("trace", "GET", "/v1/ella/debug/console"): _contract(
+        "debug_console",
+        "utils.ella.exact_firebase_auth:get_exact_firebase_uid",
+        "ella.routers.trace:_require_debug_reads_enabled",
+    ),
+    ("debug_metadata", "GET", "/v1/ella/debug/conversations/metadata"): _contract(
+        "list_conversation_metadata", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("debug_metadata", "GET", "/v1/ella/debug/conversations/{conversation_id}/metadata"): _contract(
+        "read_conversation_metadata", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("canonical_events", "POST", "/v1/ella/events"): _contract(
+        "write_events", "ella.routers.canonical_events:_canonical_event_authority"
+    ),
+    ("canonical_events", "POST", "/v1/ella/sessions/{session_id}/complete"): _contract(
+        "complete_session",
+        "ella.routers.canonical_events:_canonical_event_authority",
+    ),
+    ("canonical_events", "GET", "/v1/ella/timeline"): _contract(
+        "read_timeline", "ella.routers.canonical_events:_canonical_event_authority"
+    ),
+    ("voice", "GET", "/v1/voice/providers"): _contract(
+        "get_voice_providers", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("voice", "POST", "/v1/voice/session"): _contract(
+        "create_voice_session", "ella.services.ai_consent:require_current_ai_consent"
+    ),
+    ("voice", "GET", "/v1/voice/entitlement"): _contract(
+        "get_voice_entitlement", "utils.other.endpoints:get_current_user_uid"
+    ),
+    ("voice", "POST", "/v1/voice/canary/accept"): _contract(
+        "accept_voice_canary_session", manual="authenticate_voice_proxy_request"
+    ),
+    ("voice", "POST", "/v1/voice/canary/heartbeat"): _contract(
+        "heartbeat_voice_canary_session", manual="authenticate_voice_proxy_request"
+    ),
+    ("voice", "POST", "/v1/voice/canary/complete"): _contract(
+        "complete_voice_canary_session", manual="authenticate_voice_proxy_request"
+    ),
+    ("voice", "GET", "/v1/voice/config"): _contract("get_voice_config", manual="public_static_config"),
+    ("voice", "POST", "/v1/voice/tts"): _contract(
+        "synthesize_speech", "ella.services.ai_consent:require_current_ai_consent_or_internal_tts"
+    ),
+    ("voice", "GET", "/v1/voice/health"): _contract(
+        "voice_health", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("voice", "POST", "/v1/voice/context"): _contract("get_voice_context", manual="authenticate_voice_proxy_request"),
+    ("voice", "POST", "/v1/voice/tool"): _contract("execute_voice_tool", manual="authenticate_voice_proxy_request"),
+    ("voice", "POST", "/v1/voice/search-omi"): _contract(
+        "search_omi_conversations", manual="authenticate_voice_proxy_request"
+    ),
+    ("voice", "POST", "/v1/voice/search"): _contract("unified_search", manual="authenticate_voice_proxy_request"),
+    ("voice", "GET", "/v1/entitlement"): _contract(
+        "get_voice_entitlement", "utils.other.endpoints:get_current_user_uid"
+    ),
+}
+
+MANUAL_AUTHORITY_CONTRACT = {
+    "validate_dashboard_token": "ella.routers.callbacks:validate_dashboard_token",
+    "authenticate_voice_proxy_request": "ella.routers.voice:authenticate_voice_proxy_request",
+}
+
+
+def _direct_call_names(endpoint):
+    tree = ast.parse(textwrap.dedent(inspect.getsource(endpoint)))
+    return {node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+
+
+def _mounted_affected_routes(monkeypatch):
+    monkeypatch.setattr(ella, "ELLA_VOICE_V2_ENABLED", True)
+    monkeypatch.setattr(ella, "ELLA_GUARDIAN_ENABLED", False)
+    monkeypatch.setattr(ella, "ELLA_TESTING_ENABLED", False)
+    app = FastAPI()
+    ella._register_routers(app)
+    affected_modules = {f"ella.routers.{name}" for name in {key[0] for key in MOUNTED_ROUTE_CONTRACT}}
+    return [
+        route for route in app.routes if isinstance(route, APIRoute) and route.endpoint.__module__ in affected_modules
+    ]
+
+
+def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicates(monkeypatch):
+    routes = _mounted_affected_routes(monkeypatch)
+    actual = []
+    path_methods = []
+    for route in routes:
+        module = route.endpoint.__module__.removeprefix("ella.routers.")
+        for method in sorted(route.methods or ()):
+            key = (module, method, route.path)
+            actual.append(key)
+            path_methods.append((method, route.path))
+            assert key in MOUNTED_ROUTE_CONTRACT, key
+            endpoint_name, dependencies, manual = MOUNTED_ROUTE_CONTRACT[key]
+            assert route.endpoint.__name__ == endpoint_name
+            assert tuple(_authority_id(item.call) for item in route.dependant.dependencies) == dependencies
+            if manual in {"public_minimal_health", "public_static_config"}:
+                assert dependencies == ()
+            elif manual:
+                assert manual in _direct_call_names(route.endpoint)
+                assert _authority_id(route.endpoint.__globals__[manual]) == MANUAL_AUTHORITY_CONTRACT[manual]
+            else:
+                assert dependencies, f"unclassified authority: {key}"
+
+    assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 42
+    assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
+
+
+def _background_boundaries():
+    boundaries = Counter()
+    for module in {key[0] for key in MOUNTED_ROUTE_CONTRACT}:
+        tree = ast.parse((_BACKEND / "ella" / "routers" / f"{module}.py").read_text(encoding="utf-8"))
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            kind = None
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                "create_task",
+                "to_thread",
+                "add_task",
+                "Thread",
+            }:
+                prefix = node.func.value.id if isinstance(node.func.value, ast.Name) else ""
+                kind = f"{prefix}.{node.func.attr}".lstrip(".")
+            elif isinstance(node.func, ast.Name) and node.func.id in {"create_task", "to_thread", "Thread"}:
+                kind = node.func.id
+            if kind is None:
+                continue
+            parent = node
+            function_name = "<module>"
+            while parent in parents:
+                parent = parents[parent]
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    function_name = parent.name
+                    break
+            boundaries[(module, function_name, kind)] += 1
+    return boundaries
+
+
+def test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task():
+    assert _background_boundaries() == Counter(
+        {
+            ("chat", "_stream_level_4_openclaw", "asyncio.create_task"): 1,
+            ("voice", "_resolve_voice_honcho_binding", "asyncio.to_thread"): 1,
+            ("voice", "_resolve_voice_memory_scope", "asyncio.to_thread"): 1,
+            ("voice", "heartbeat_voice_canary_session", "asyncio.create_task"): 1,
+            ("voice", "get_voice_context", "asyncio.create_task"): 6,
+        }
+    )
+    chat_source = (_BACKEND / "ella" / "routers" / "chat.py").read_text(encoding="utf-8")
+    assert "task.result()" in chat_source
+    trace_source = (_BACKEND / "ella" / "routers" / "trace.py").read_text(encoding="utf-8")
+    assert "create_task" not in trace_source
+    assert "INSERT INTO routing_traces" not in trace_source

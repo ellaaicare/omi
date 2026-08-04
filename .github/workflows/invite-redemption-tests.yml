@@ -6,6 +6,7 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/ella_provisioning.py"
+      - "backend/database/honcho_attestation.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
@@ -46,6 +47,7 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/ella_provisioning.py"
+      - "backend/database/honcho_attestation.py"
       - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
@@ -132,6 +134,7 @@ jobs:
           python -m py_compile
           database/authority_advisory_lock.py
           database/ella_provisioning.py
+          database/honcho_attestation.py
           database/invitation_operator.py
           database/invitations.py
           database/managed_cloud_consent.py
@@ -164,7 +167,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 141
+          test "$collected" -eq 145
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -186,6 +189,8 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_invitation_admission_precedes_identity_and_job_writes"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_authority_drift_blocks_before_provider_call"
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
+            "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
+            "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
@@ -194,6 +199,8 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review_is_separate"
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicate_or_orphan"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_activation_rejects_tampered_attestation_before_publication"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"

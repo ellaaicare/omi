@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from database.honcho_attestation import calculate_signature, create_challenge, observed_runtime_fields
 from ella.services import provisioning
 from ella.services.provisioning import (
     HermesProvisionClient,
@@ -30,6 +31,22 @@ HERMES_URL = APPROVED_HERMES_PROVISION_URL
 LEGACY_TOKEN = "legacy-test-token-distinct"
 HERMES_TOKEN = "hermes-test-token-distinct"
 BINDING_ENV = "ELLA_TEST_HERMES_PROVISION_AUTHORITY_BINDING"
+
+
+@pytest.fixture(autouse=True)
+def _honcho_attestation_key(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", "authority-attestation-key-32-bytes-minimum")
+
+
+def _attestation_challenge(uid="boundary-user-secret"):
+    return create_challenge(
+        firebase_uid=uid,
+        account_owner_id="22222222-2222-2222-2222-222222222222",
+        runtime_target_id="33333333-3333-3333-3333-333333333333",
+        binding_id="44444444-4444-4444-4444-444444444444",
+        job_id="11111111-1111-1111-1111-111111111111",
+    )
+
 
 REJECTION_CASES = (
     "missing_url",
@@ -243,7 +260,13 @@ def test_real_provision_client_and_coordinator_reject_before_http_or_repository_
     coordinator = ProvisioningCoordinator(ForbiddenRepository())
 
     with pytest.raises(ProvisioningError):
-        asyncio.run(client.provision(_identity(), "hermes-user-v1"))
+        asyncio.run(
+            client.provision(
+                _identity(),
+                "hermes-user-v1",
+                attestation_challenge=_attestation_challenge(),
+            )
+        )
     with pytest.raises(ProvisioningError):
         asyncio.run(
             coordinator.ensure_job(
@@ -295,7 +318,13 @@ def test_real_provision_client_posts_only_to_accepted_exact_authority(monkeypatc
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
-    result = asyncio.run(HermesProvisionClient().provision(_identity(), "hermes-user-v1"))
+    result = asyncio.run(
+        HermesProvisionClient().provision(
+            _identity(),
+            "hermes-user-v1",
+            attestation_challenge=_attestation_challenge(),
+        )
+    )
 
     assert result == {"mode": "hermes_only", "provisionMode": "hermes_only"}
     assert captured["url"] == f"{APPROVED_HERMES_PROVISION_URL}/provision"
@@ -666,7 +695,7 @@ def _drift_authority(monkeypatch, case):
         raise AssertionError(case)
 
 
-def _runtime_receipt():
+def _runtime_receipt(challenge=None):
     profile = "omi-boundary-user-secret"
     honcho_target = {
         "workspace": "honcho-boundary",
@@ -675,7 +704,7 @@ def _runtime_receipt():
         "hermesProfile": profile,
     }
     honcho_config_path = f"/Users/ellaai/.hermes/profiles/{profile}/honcho.json"
-    return {
+    receipt = {
         "mode": "hermes_only",
         "provisionMode": "hermes_only",
         "honchoProfileMap": {
@@ -714,6 +743,27 @@ def _runtime_receipt():
             },
         },
     }
+    if challenge is not None:
+        raw = receipt["runtimeBinding"]
+        attestation = {
+            **challenge,
+            **observed_runtime_fields(
+                profile_name=raw["profileName"],
+                config_path=honcho_config_path,
+                workspace_root=raw["workspaceRoot"],
+                honcho_workspace=raw["honcho"]["workspace"],
+                observed_peer_id=raw["honcho"]["observedPeer"],
+                observer_peer_id=raw["honcho"]["observerPeer"],
+                gateway_port=raw["gatewayPort"],
+                gateway_target=raw["internalGatewayUrl"],
+                credential_ref=raw["credentialRef"],
+                agent_id=raw["agentId"],
+                service_label=raw["serviceLabel"],
+            ),
+        }
+        attestation["signature"] = calculate_signature(attestation)
+        receipt["honchoAttestation"] = attestation
+    return receipt
 
 
 class _RecordingRepository:
@@ -723,6 +773,7 @@ class _RecordingRepository:
         self.invitation_owned = invitation_owned
         self.job = {
             "id": "11111111-1111-1111-1111-111111111111",
+            "user_id": "22222222-2222-2222-2222-222222222222",
             "target_schema_version": "hermes-user-v1",
             "state": "pending",
             "stage": "identity_ready",
@@ -747,6 +798,8 @@ class _RecordingRepository:
         self._record("get_self_hosted_invitation_admission")
         return {
             "omi_uid": _uid,
+            "user_id": "22222222-2222-2222-2222-222222222222",
+            "attestation_runtime_target_id": "33333333-3333-3333-3333-333333333333",
             "consent_policy_version": provisioning.CURRENT_POLICY_VERSION,
             "consent_processor_set_hash": provisioning.CURRENT_PROCESSOR_SET_HASH,
             "consent_scope_version": provisioning.CURRENT_SCOPE_VERSION,
@@ -780,6 +833,11 @@ class _RecordingRepository:
         self._record("stage_runtime_binding")
         self.staged = {**binding, "omi_uid": uid, "revision": 1}
         return self.staged
+
+    async def prepare_runtime_binding_identity(self, *, uid, provider, role):
+        del uid, provider, role
+        self._record("prepare_runtime_binding_identity")
+        return "44444444-4444-4444-4444-444444444444"
 
     async def update_job(self, **kwargs):
         self._record("update_job")
@@ -834,7 +892,13 @@ def test_real_provision_client_revalidates_after_client_entry_before_send(monkey
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
     with pytest.raises(ProvisioningError):
-        asyncio.run(HermesProvisionClient().provision(_identity(), "hermes-user-v1"))
+        asyncio.run(
+            HermesProvisionClient().provision(
+                _identity(),
+                "hermes-user-v1",
+                attestation_challenge=_attestation_challenge(),
+            )
+        )
 
     assert sends == []
 
@@ -884,6 +948,7 @@ def test_real_claimed_worker_stops_after_inflight_http_authority_drift(monkeypat
     assert repository.calls == [
         "assert_self_hosted_invite_schema_ready",
         "has_invitation_owned_self_hosted_runtime",
+        "prepare_runtime_binding_identity",
     ]
 
 
@@ -910,9 +975,11 @@ def test_claimed_worker_rechecks_before_every_post_http_mutation(
     class Response:
         status_code = 200
 
-        @staticmethod
-        def json():
-            return _runtime_receipt()
+        def __init__(self, challenge):
+            self.challenge = challenge
+
+        def json(self):
+            return _runtime_receipt(self.challenge)
 
     class AsyncClient:
         def __init__(self, *_args, **_kwargs):
@@ -924,8 +991,8 @@ def test_claimed_worker_rechecks_before_every_post_http_mutation(
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, *_args, **_kwargs):
-            return Response()
+        async def post(self, *_args, **kwargs):
+            return Response(kwargs["json"]["honchoAttestationChallenge"])
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
     repository = _RecordingRepository()
@@ -1539,7 +1606,13 @@ def test_http_transports_disable_redirects_proxies_and_environment_drift(monkeyp
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
     with pytest.raises(ProvisioningError, match="provision_request_rejected"):
-        asyncio.run(HermesProvisionClient().provision(_identity(), "hermes-user-v1"))
+        asyncio.run(
+            HermesProvisionClient().provision(
+                _identity(),
+                "hermes-user-v1",
+                attestation_challenge=_attestation_challenge(),
+            )
+        )
 
     assert captured["follow_redirects"] is False
     assert captured["trust_env"] is False
