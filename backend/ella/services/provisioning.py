@@ -473,6 +473,7 @@ def extract_runtime_binding(
     health_receipt = raw.get("healthReceipt") or raw.get("health_receipt") or {}
     if not isinstance(health_receipt, dict):
         raise ProvisioningError("invalid_health_receipt", retryable=True)
+    health_receipt = dict(health_receipt)
     smoke_values = []
     for source, key in (
         (raw, "smokePassed"),
@@ -509,6 +510,69 @@ def extract_runtime_binding(
     expected_workspace = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/workspace")
     if posixpath.normpath(str(workspace_root)) != expected_workspace:
         raise ProvisioningError("workspace_ownership_mismatch", retryable=False)
+    expected_honcho_config = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/honcho.json")
+
+    profile_map = result.get("honchoProfileMap") or result.get("honcho_profile_map")
+    provisioning_receipt = result.get("provisioningReceipt") or result.get("provisioning_receipt")
+    receipt_honcho = provisioning_receipt.get("honcho") if isinstance(provisioning_receipt, dict) else None
+    validation = receipt_honcho.get("validation") if isinstance(receipt_honcho, dict) else None
+    profile_map_target = profile_map.get("target") if isinstance(profile_map, dict) else None
+    validation_target = validation.get("target") if isinstance(validation, dict) else None
+    if not all(
+        [
+            isinstance(profile_map, dict),
+            isinstance(profile_map_target, dict),
+            isinstance(validation, dict),
+            isinstance(validation_target, dict),
+        ]
+    ):
+        raise ProvisioningError("honcho_runtime_proof_incomplete", retryable=True)
+
+    config_paths = (
+        profile_map.get("honchoConfigPath") or profile_map.get("honcho_config_path"),
+        validation.get("configPath") or validation.get("config_path"),
+    )
+    expected_target = {
+        "workspace": str(honcho_workspace),
+        "observed_peer_id": str(observed_peer),
+        "observer_peer_id": str(observer_peer),
+        "hermesProfile": profile_name,
+    }
+    target_fields = {
+        "workspace": ("workspace",),
+        "observed_peer_id": ("observed_peer_id", "observedPeer", "peerName"),
+        "observer_peer_id": ("observer_peer_id", "observerPeer", "aiPeer"),
+        "hermesProfile": ("hermesProfile", "hermes_profile", "profile"),
+    }
+
+    def target_value(target: dict[str, Any], keys: tuple[str, ...]) -> str:
+        return str(next((target.get(key) for key in keys if target.get(key) is not None), ""))
+
+    proof_mismatch = (
+        profile_map.get("status") != "ok"
+        or validation.get("ok") is not True
+        or validation.get("mapped") is not True
+        or str(validation.get("profile") or "") != profile_name
+        or any(posixpath.normpath(str(path or "")) != expected_honcho_config for path in config_paths)
+        or any(
+            target_value(profile_map_target, target_fields[field]) != expected
+            for field, expected in expected_target.items()
+        )
+        or any(
+            target_value(validation_target, target_fields[field]) != expected
+            for field, expected in expected_target.items()
+            if field != "hermesProfile"
+        )
+    )
+    if proof_mismatch:
+        raise ProvisioningError("honcho_runtime_proof_mismatch", retryable=False)
+
+    health_receipt["honcho_isolation"] = {
+        "validated": True,
+        "profile": profile_name,
+        "config_path": expected_honcho_config,
+        **expected_target,
+    }
 
     try:
         parsed_port = int(gateway_port)

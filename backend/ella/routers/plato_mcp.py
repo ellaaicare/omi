@@ -37,6 +37,7 @@ from ella.services.mcp_identity import validate_mcp_session_token
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_surface_prompt
 from ella.utils.provision_authority import ProvisionAuthorityError, legacy_provision_authority
+from utils.ella.canonical_auth import canonical_event_service_headers
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
 
 logger = logging.getLogger("ella.plato_mcp")
@@ -570,7 +571,7 @@ async def _fetch_canonical_timeline(limit: int, channels: list[str], since: Opti
         params["since"] = since
     params["timezone"] = _plato_timezone()
     async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(timeline_url, params=params)
+        response = await client.get(timeline_url, params=params, headers=canonical_event_service_headers())
     if response.status_code != 200:
         raise RuntimeError(f"timeline_http_{response.status_code}")
     payload = response.json()

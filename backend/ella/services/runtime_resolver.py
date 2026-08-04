@@ -58,6 +58,13 @@ def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
     )
 
 
+def retained_owner_uid_configured(uid: Optional[str]) -> bool:
+    """Return true only for the explicit retained-owner subject."""
+    candidate = uid if isinstance(uid, str) else ""
+    owner_uid = os.getenv("ELLA_PLATO_UID", "").strip()
+    return bool(candidate and owner_uid and hmac.compare_digest(candidate, owner_uid))
+
+
 async def runtime_authority_enabled(
     uid: Optional[str] = None,
     *,
@@ -241,6 +248,15 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     if profile_name == "plato-eval" and uid != plato_uid:
         raise ProvisioningError("plato_binding_forbidden", retryable=False)
 
+    health_receipt = binding.get("health_receipt") or {}
+    if isinstance(health_receipt, str):
+        try:
+            health_receipt = json.loads(health_receipt)
+        except json.JSONDecodeError:
+            health_receipt = {}
+    if not isinstance(health_receipt, dict):
+        health_receipt = {}
+
     if provider == "hermes_cloud":
         if any(
             binding.get(field)
@@ -284,12 +300,6 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
             photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
         )
-        health_receipt = binding.get("health_receipt") or {}
-        if isinstance(health_receipt, str):
-            try:
-                health_receipt = json.loads(health_receipt)
-            except json.JSONDecodeError:
-                health_receipt = {}
         stored_lineage = RuntimeTargetLineage(
             policy_version=str(
                 binding.get("target_policy_version")
@@ -363,6 +373,22 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
                     retryable=False,
                 ) from exc
             expected_model = SELF_HOSTED_RUNTIME_MODEL
+
+            honcho_isolation = health_receipt.get("honcho_isolation")
+            expected_honcho_config = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/honcho.json")
+            expected_honcho_values = {
+                "validated": True,
+                "profile": profile_name,
+                "config_path": expected_honcho_config,
+                "workspace": str(binding.get("honcho_workspace") or ""),
+                "observed_peer_id": str(binding.get("observed_peer") or ""),
+                "observer_peer_id": str(binding.get("observer_peer") or ""),
+                "hermesProfile": profile_name,
+            }
+            if not isinstance(honcho_isolation, dict):
+                raise ProvisioningError("honcho_runtime_proof_missing", retryable=False)
+            if any(honcho_isolation.get(key) != value for key, value in expected_honcho_values.items()):
+                raise ProvisioningError("honcho_runtime_proof_mismatch", retryable=False)
         else:
             expected_model = str(binding.get("agent_id") or "")
             consent_authority_epoch = ""

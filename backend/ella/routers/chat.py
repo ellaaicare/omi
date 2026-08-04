@@ -49,6 +49,7 @@ from ella.services.runtime_resolver import (
     IsolatedRuntime,
     revalidate_runtime_authority,
     resolve_isolated_runtime,
+    retained_owner_uid_configured,
     runtime_authority_identity,
     runtime_authority_enabled,
 )
@@ -72,10 +73,10 @@ XAI_CHAT_MODEL = os.getenv("ELLA_GROK_CHAT_MODEL", "grok-3-mini")
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "http://100.67.113.120:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 CHAT_PLATFORM = os.getenv("ELLA_CHAT_PLATFORM", "hermes").strip().lower()
-HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642").rstrip("/")
+HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "").strip().rstrip("/")
 HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
-HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
+HERMES_MODEL = os.getenv("HERMES_MODEL", "").strip()
 HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
 HERMES_CHAT_SESSION_SCOPE = os.getenv("ELLA_CHAT_HERMES_SESSION_SCOPE", "canonical").strip().lower()
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
@@ -97,6 +98,11 @@ ELLA_SYSTEM_PROMPT = (
     "Keep responses concise and easy to understand. "
     "If someone seems confused or distressed, respond with extra gentleness and reassurance."
 )
+
+
+def _retained_owner_chat_configured(uid: str) -> bool:
+    """Permit the legacy retained route only with an explicit owner and full config."""
+    return bool(retained_owner_uid_configured(uid) and HERMES_GATEWAY_URL and HERMES_GATEWAY_TOKEN and HERMES_MODEL)
 
 
 def _hermes_chat_memory_key(uid: str) -> str:
@@ -727,6 +733,9 @@ async def _stream_hermes_chat(
 ):
     """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
     _start = _time.time()
+    if runtime is None and not _retained_owner_chat_configured(uid):
+        yield "data: Error: hermes_runtime_required\n\n"
+        return
     if runtime is None and await runtime_authority_enabled(uid):
         yield "data: Error: isolated runtime required\n\n"
         return
@@ -1060,6 +1069,9 @@ async def ella_chat_stream(
         runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-chat")
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+
+    if runtime is None and not _retained_owner_chat_configured(uid):
+        raise HTTPException(status_code=409, detail={"code": "hermes_runtime_required"})
 
     debug_level = _resolve_debug_level(x_ella_debug_level)
 

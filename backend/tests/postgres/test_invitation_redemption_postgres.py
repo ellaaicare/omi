@@ -459,6 +459,9 @@ def _self_hosted_grant(uid: str) -> managed_cloud_consent.ManagedCloudGrant:
 
 def _local_runtime_binding(uid: str, *, port: int = 18701) -> dict:
     profile_name = f"ella-{uid}"[:63]
+    honcho_workspace = f"honcho-{uid}"[:63]
+    observed_peer = f"observed-{uid}"[:63]
+    observer_peer = f"observer-{uid}"[:63]
     return {
         "provider": "hermes",
         "agent_id": f"hermes-{uid}"[:63],
@@ -468,14 +471,26 @@ def _local_runtime_binding(uid: str, *, port: int = 18701) -> dict:
         "gateway_port": port,
         "service_label": f"com.ella.hermes.{profile_name}"[:255],
         "credential_ref": "env:HERMES_API_SERVER_KEY",
-        "honcho_workspace": f"honcho-{uid}"[:63],
-        "observed_peer": f"observed-{uid}"[:63],
-        "observer_peer": f"observer-{uid}"[:63],
+        "honcho_workspace": honcho_workspace,
+        "observed_peer": observed_peer,
+        "observer_peer": observer_peer,
         "template_version": "hermes-user-v1",
         "model_policy_version": "self-hosted-pilot-v1",
         "voice_policy_version": "ella-voice-v1",
         "health_state": "healthy",
-        "health_receipt": {"content_free": True, "smoke_passed": True},
+        "health_receipt": {
+            "content_free": True,
+            "smoke_passed": True,
+            "honcho_isolation": {
+                "validated": True,
+                "profile": profile_name,
+                "config_path": f"/Users/ellaai/.hermes/profiles/{profile_name}/honcho.json",
+                "workspace": honcho_workspace,
+                "observed_peer_id": observed_peer,
+                "observer_peer_id": observer_peer,
+                "hermesProfile": profile_name,
+            },
+        },
     }
 
 
@@ -1672,19 +1687,44 @@ def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypat
                 "SELECT version FROM ella_invitations WHERE id = $1::uuid",
                 issued["receipt_id"],
             )
+        runtime_binding = _local_runtime_binding(uid)
+        profile_name = runtime_binding["profile_name"]
+        honcho_config_path = f"/Users/ellaai/.hermes/profiles/{profile_name}/honcho.json"
+        honcho_target = {
+            "workspace": runtime_binding["honcho_workspace"],
+            "observed_peer_id": runtime_binding["observed_peer"],
+            "observer_peer_id": runtime_binding["observer_peer"],
+            "hermesProfile": profile_name,
+        }
         client = ControlledProvisionClient(
             {
                 "mode": "hermes_only",
                 "provisionMode": "hermes_only",
+                "honchoProfileMap": {
+                    "status": "ok",
+                    "honchoConfigPath": honcho_config_path,
+                    "target": honcho_target,
+                },
+                "provisioningReceipt": {
+                    "honcho": {
+                        "validation": {
+                            "ok": True,
+                            "mapped": True,
+                            "profile": profile_name,
+                            "configPath": honcho_config_path,
+                            "target": honcho_target,
+                        }
+                    }
+                },
                 "runtimeBinding": {
-                    **_local_runtime_binding(uid),
-                    "profileName": _local_runtime_binding(uid)["profile_name"],
-                    "agentId": _local_runtime_binding(uid)["agent_id"],
-                    "workspaceRoot": _local_runtime_binding(uid)["workspace_root"],
-                    "internalGatewayUrl": _local_runtime_binding(uid)["internal_gateway_url"],
-                    "gatewayPort": _local_runtime_binding(uid)["gateway_port"],
-                    "serviceLabel": _local_runtime_binding(uid)["service_label"],
-                    "credentialRef": _local_runtime_binding(uid)["credential_ref"],
+                    **runtime_binding,
+                    "profileName": runtime_binding["profile_name"],
+                    "agentId": runtime_binding["agent_id"],
+                    "workspaceRoot": runtime_binding["workspace_root"],
+                    "internalGatewayUrl": runtime_binding["internal_gateway_url"],
+                    "gatewayPort": runtime_binding["gateway_port"],
+                    "serviceLabel": runtime_binding["service_label"],
+                    "credentialRef": runtime_binding["credential_ref"],
                     "healthState": "healthy",
                     "smokePassed": True,
                     "healthReceipt": {"content_free": True, "smoke_passed": True},
@@ -1692,9 +1732,9 @@ def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypat
                     "modelPolicyVersion": "self-hosted-pilot-v1",
                     "voicePolicyVersion": "ella-voice-v1",
                     "honcho": {
-                        "workspace": _local_runtime_binding(uid)["honcho_workspace"],
-                        "observedPeer": _local_runtime_binding(uid)["observed_peer"],
-                        "observerPeer": _local_runtime_binding(uid)["observer_peer"],
+                        "workspace": runtime_binding["honcho_workspace"],
+                        "observedPeer": runtime_binding["observed_peer"],
+                        "observerPeer": runtime_binding["observer_peer"],
                     },
                 },
             }

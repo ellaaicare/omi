@@ -234,7 +234,15 @@ class MemorySmoke:
                     "metadata": {"test": "ella_memory_e2e_smoke", "synthetic": True, "phrase": phrase},
                 }
             )
-        response, elapsed = _json_request("POST", self.backend_url + "/v1/ella/events", {"events": batch})
+        ledger_token = _env("ELLA_EVENT_LEDGER_TOKEN")
+        if not ledger_token:
+            raise SmokeFailure("ELLA_EVENT_LEDGER_TOKEN is required for canonical event ingestion")
+        response, elapsed = _json_request(
+            "POST",
+            self.backend_url + "/v1/ella/events",
+            {"events": batch},
+            {"X-Ella-Event-Ledger-Key": ledger_token},
+        )
         self.metrics["write_multichannel_events_ms"] = elapsed
         self.artifacts["multichannel_write"] = response
         if response.get("ok") is not True:

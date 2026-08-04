@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import requests
+from utils.ella.canonical_auth import canonical_event_service_headers
 
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
@@ -200,7 +201,7 @@ def write_omi_canonical_event(
     response = requests.post(
         CANONICAL_EVENTS_URL,
         json={"events": [event]},
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **canonical_event_service_headers()},
         timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
     )
     elapsed_ms = int((time.time() - started) * 1000)

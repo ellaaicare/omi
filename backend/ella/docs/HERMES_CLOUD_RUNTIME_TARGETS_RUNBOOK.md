@@ -1,7 +1,7 @@
 # Hermes Cloud Runtime Targets — Flags-Off Deploy Runbook
 
 Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
-`ellaaicare/ella-ai#1123`.
+`ellaaicare/ella-ai#1123`, `ellaaicare/ella-ai#1182`.
 
 ## Source contract
 
@@ -28,6 +28,14 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
   disclose, or require Honcho Cloud on the Cloud route.
 - Legacy retained Plato/Honcho paths remain separate and must not be modified by
   the Cloud target migration.
+- Invitation-owned self-hosted Hermes is usable only when the provisioning
+  receipt proves the profile-local `<profile>/honcho.json` path and its
+  read-back workspace/peer mapping. Database `honcho_workspace` fields alone
+  are not runtime authority. The profile must not be `plato-eval`, and its
+  workspace plus gateway port remain profile-owned and unique.
+- Existing invitation bindings without the persisted `honcho_isolation` proof
+  fail closed. Re-provision them through the reviewed provider path; do not
+  synthesize or backfill the proof from database values.
 - `ai-data-processors-v7` is immutable historical consent. Cloud target traffic
   requires `ai-data-processors-v8`, `managed-cloud-internal-pilot-v2`, and the
   current processor/scope hashes.

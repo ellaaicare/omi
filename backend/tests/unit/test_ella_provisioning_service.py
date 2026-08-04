@@ -34,6 +34,7 @@ from ella.services.provisioning import (
 )
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
+    retained_owner_uid_configured,
     runtime_authority_enabled,
     runtime_bindings_enabled,
     runtime_from_binding,
@@ -53,9 +54,33 @@ def _job(**overrides):
 
 
 def _runtime_receipt(profile_name="omi-user-a"):
+    profiles_root = "/Users/ellaai/.hermes/profiles"
+    honcho_target = {
+        "workspace": "honcho-user-a",
+        "observed_peer_id": "user-a",
+        "observer_peer_id": "ella-user-a",
+        "hermesProfile": profile_name,
+    }
+    honcho_config_path = f"{profiles_root}/{profile_name}/honcho.json"
     return {
         "mode": "hermes_only",
         "provisionMode": "hermes_only",
+        "honchoProfileMap": {
+            "status": "ok",
+            "honchoConfigPath": honcho_config_path,
+            "target": honcho_target,
+        },
+        "provisioningReceipt": {
+            "honcho": {
+                "validation": {
+                    "ok": True,
+                    "mapped": True,
+                    "profile": profile_name,
+                    "configPath": honcho_config_path,
+                    "target": honcho_target,
+                }
+            }
+        },
         "runtimeBinding": {
             "provider": "hermes",
             "profileName": profile_name,
@@ -494,6 +519,15 @@ def test_gateway_credentials_are_server_env_references_only(monkeypatch):
             resolve_gateway_credential(invalid)
 
 
+def test_retained_owner_identity_is_exact_and_requires_server_configuration(monkeypatch):
+    monkeypatch.delenv("ELLA_PLATO_UID", raising=False)
+    assert retained_owner_uid_configured("owner-uid") is False
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-uid")
+    assert retained_owner_uid_configured("owner-uid") is True
+    assert retained_owner_uid_configured("OWNER-UID") is False
+    assert retained_owner_uid_configured(" owner-uid ") is False
+
+
 def test_internal_gateway_is_limited_to_loopback_tailnet_or_allowlist(monkeypatch):
     assert validate_internal_gateway_url("http://127.0.0.1:8701") == "http://127.0.0.1:8701"
     assert validate_internal_gateway_url("http://100.76.138.56:8701/") == "http://100.76.138.56:8701"
@@ -537,6 +571,35 @@ def test_runtime_receipt_requires_owned_workspace_port_and_honcho():
     no_honcho["runtimeBinding"]["honcho"] = {}
     with pytest.raises(ProvisioningError, match="honcho_receipt_incomplete"):
         extract_runtime_binding(no_honcho, "user-a")
+
+    no_runtime_proof = _runtime_receipt()
+    no_runtime_proof.pop("honchoProfileMap")
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_incomplete"):
+        extract_runtime_binding(no_runtime_proof, "user-a")
+
+    wrong_runtime_proof = _runtime_receipt()
+    wrong_runtime_proof["provisioningReceipt"]["honcho"]["validation"][
+        "configPath"
+    ] = "/Users/ellaai/.hermes/profiles/plato-eval/honcho.json"
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
+        extract_runtime_binding(wrong_runtime_proof, "user-a")
+
+    unvalidated_runtime_proof = _runtime_receipt()
+    unvalidated_runtime_proof["provisioningReceipt"]["honcho"]["validation"]["ok"] = False
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
+        extract_runtime_binding(unvalidated_runtime_proof, "user-a")
+
+    cross_tenant_runtime_proof = _runtime_receipt()
+    cross_tenant_runtime_proof["honchoProfileMap"]["target"]["workspace"] = "plato-workspace"
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
+        extract_runtime_binding(cross_tenant_runtime_proof, "user-a")
+
+    wrong_peer_runtime_proof = _runtime_receipt()
+    wrong_peer_runtime_proof["provisioningReceipt"]["honcho"]["validation"]["target"][
+        "observer_peer_id"
+    ] = "plato-observer"
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
+        extract_runtime_binding(wrong_peer_runtime_proof, "user-a")
 
     with pytest.raises(ProvisioningError, match="runtime_template_version_mismatch"):
         extract_runtime_binding(
@@ -588,6 +651,37 @@ def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
     invalid_workspace = dict(binding, workspace_root="/Users/ellaai/.hermes/profiles/another-user/workspace")
     with pytest.raises(ProvisioningError, match="workspace_ownership_mismatch"):
         runtime_from_binding(invalid_workspace, "user-a")
+
+
+def test_invitation_runtime_requires_persisted_profile_local_honcho_proof(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "secret-value")
+    binding = extract_runtime_binding(_runtime_receipt(), "user-a")
+    binding.update(
+        omi_uid="user-a",
+        active=True,
+        revision=4,
+        runtime_target_id="target-a",
+        runtime_target_mode="hermes-chat",
+        target_policy_version=CURRENT_POLICY_VERSION,
+        target_processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+        target_scope_version=CURRENT_SCOPE_VERSION,
+        target_scope_hash=CURRENT_SCOPE_HASH,
+        consent_authority_epoch="11111111-1111-1111-1111-111111111111",
+        account_user_id="22222222-2222-2222-2222-222222222222",
+        profile_user_id="22222222-2222-2222-2222-222222222222",
+    )
+    assert runtime_from_binding(binding, "user-a").profile_name == "omi-user-a"
+
+    missing = dict(binding, health_receipt={"smoke_passed": True})
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_missing"):
+        runtime_from_binding(missing, "user-a")
+
+    mismatched_receipt = dict(binding["health_receipt"])
+    mismatched_proof = dict(mismatched_receipt["honcho_isolation"], workspace="plato-workspace")
+    mismatched_receipt["honcho_isolation"] = mismatched_proof
+    mismatched = dict(binding, health_receipt=mismatched_receipt)
+    with pytest.raises(ProvisioningError, match="honcho_runtime_proof_mismatch"):
+        runtime_from_binding(mismatched, "user-a")
 
 
 def test_disabled_provisioning_stays_retryable_and_can_resume(monkeypatch):

@@ -26,6 +26,7 @@ on:
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
       - "backend/ella/routers/canonical_events.py"
+      - "backend/ella/routers/debug_metadata.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/escalations.py"
@@ -36,6 +37,7 @@ on:
       - "backend/ella/routers/plato_mcp.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
+      - "backend/ella/routers/trace.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_broker_client.py"
       - "backend/ella/services/hermes_broker_prototype.py"
@@ -71,15 +73,20 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
+      - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/canonical_auth.py"
+      - "backend/utils/ella/canonical_context.py"
+      - "backend/utils/ella/canonical_omi.py"
       - "backend/utils/ella/exact_firebase_auth.py"
       - "backend/utils/ella/scanner.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
@@ -104,6 +111,8 @@ on:
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_debug_metadata.py"
+      - "backend/tests/unit/test_ella_incident_1182_*.py"
       - "backend/tests/unit/test_ella_escalations_router_auth.py"
       - "backend/tests/unit/test_ella_reviewed_route_integration.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
@@ -143,6 +152,7 @@ on:
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
       - "backend/ella/routers/canonical_events.py"
+      - "backend/ella/routers/debug_metadata.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/escalations.py"
@@ -153,6 +163,7 @@ on:
       - "backend/ella/routers/plato_mcp.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
+      - "backend/ella/routers/trace.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_broker_client.py"
       - "backend/ella/services/hermes_broker_prototype.py"
@@ -188,15 +199,20 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
+      - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/canonical_auth.py"
+      - "backend/utils/ella/canonical_context.py"
+      - "backend/utils/ella/canonical_omi.py"
       - "backend/utils/ella/exact_firebase_auth.py"
       - "backend/utils/ella/scanner.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
@@ -221,6 +237,8 @@ on:
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_debug_metadata.py"
+      - "backend/tests/unit/test_ella_incident_1182_*.py"
       - "backend/tests/unit/test_ella_escalations_router_auth.py"
       - "backend/tests/unit/test_ella_reviewed_route_integration.py"
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
@@ -303,6 +321,8 @@ jobs:
           routers/users.py
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
+          ella/routers/canonical_events.py
+          ella/routers/debug_metadata.py
           ella/routers/ai_consent.py
           ella/routers/chat.py
           ella/routers/escalations.py
@@ -313,6 +333,8 @@ jobs:
           ella/routers/observer.py
           ella/routers/plato_mcp.py
           ella/routers/resolve.py
+          ella/routers/trace.py
+          ella/routers/voice.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
           ella/services/hermes_broker_client.py
@@ -338,12 +360,16 @@ jobs:
           ella/utils/identity_sync.py
           ella/utils/provision_authority.py
           scripts/hermes_cloud_pool_admin.py
+          scripts/ella_memory_e2e_smoke.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_product_fit_canary.py
           scripts/pilot_invite_admin.py
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
           utils/ella/postprocess.py
+          utils/ella/canonical_auth.py
+          utils/ella/canonical_context.py
+          utils/ella/canonical_omi.py
           utils/ella/exact_firebase_auth.py
           utils/ella/scanner.py
           utils/ella/scanner_keyterms.py
@@ -358,9 +384,11 @@ jobs:
           database/runtime_targets.py database/voice_canary.py
           routers/users.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
-          ella/routers/ai_consent.py ella/routers/chat.py ella/routers/escalations.py
+          ella/routers/ai_consent.py ella/routers/canonical_events.py ella/routers/chat.py
+          ella/routers/debug_metadata.py ella/routers/escalations.py
           ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
+          ella/routers/trace.py
           ella/services/hermes_cloud_policy.py
           ella/services/hermes_broker_client.py
           ella/services/hermes_broker_prototype.py
@@ -373,9 +401,12 @@ jobs:
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
           ella/utils/auto_provision.py ella/utils/identity_sync.py
-          ella/utils/provision_authority.py utils/ella/exact_firebase_auth.py
+          ella/utils/provision_authority.py
+          utils/ella/canonical_auth.py utils/ella/canonical_context.py
+          utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py
           utils/ella/scanner.py utils/ella/scanner_keyterms.py
           scripts/voice_canary_admin.py
+          scripts/ella_memory_e2e_smoke.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_authority_advisory_lock.py
@@ -383,6 +414,10 @@ jobs:
           tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_canonical_context.py
+          tests/unit/test_ella_debug_metadata.py
+          tests/unit/test_ella_incident_1182_callback_auth.py
+          tests/unit/test_ella_incident_1182_route_isolation.py
+          tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py
           tests/unit/test_ella_escalations_router_auth.py
           tests/unit/test_ella_guardian_delivery.py
           tests/unit/test_ella_reviewed_route_integration.py
@@ -412,7 +447,48 @@ jobs:
           tests/postgres/test_invitation_redemption_postgres.py
           tests/postgres/test_runtime_migration_atomicity_postgres.py
           &&
+          black --check --line-length 120 --skip-string-normalization
+          --line-ranges 900-925 --line-ranges 1555-1585
+          ella/routers/voice.py
+          &&
           python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
+
+      - name: Run incident 1182 mounted-route exploit controls
+        run: |
+          set -euo pipefail
+          incident_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_ella_incident_1182_route_isolation.py \
+              tests/unit/test_ella_incident_1182_callback_auth.py \
+              tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py |
+              sed '/^$/d'
+          )"
+          required_incident_ids=(
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_canonical_routes_reject_unauthenticated_and_cross_owner_before_store"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_canonical_service_validates_every_identity_and_preserves_internal_sync"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_trace_routes_default_off_and_never_return_runtime_coordinates"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_client_trace_uses_authenticated_uid_and_discards_caller_runtime_material"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_unbound_non_owner_chat_fails_before_trace_or_provider"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_retained_owner_chat_requires_exact_subject_and_complete_server_configuration"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_legacy_routing_is_never_returned_for_non_owner_without_binding"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_affected_router_inventory_has_no_unclassified_authority_boundary"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_internal_callback_service_fails_closed_and_positive_control_is_scoped"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_token_generation_requires_two_distinct_configured_secrets"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_dashboard_signing_has_no_source_fallback"
+            "tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py::test_voice_diagnostics_require_exact_firebase_bearer"
+          )
+          for required_id in "${required_incident_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$incident_ids"
+          done
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 14
+          pytest \
+            tests/unit/test_ella_incident_1182_route_isolation.py \
+            tests/unit/test_ella_incident_1182_callback_auth.py \
+            tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+            -v | tee /tmp/incident-1182-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/incident-1182-pytest.log
 
       - name: Run Hermes Cloud and isolation failure-path tests
         run: |
@@ -461,6 +537,9 @@ jobs:
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_provider"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_authority_denials_precede_provider_setup[invitation_runtime_fallback_enabled]"
+            "tests/unit/test_ella_provisioning_service.py::test_runtime_receipt_requires_owned_workspace_port_and_honcho"
+            "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
+            "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
@@ -484,7 +563,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 492
+          test "$collected" -eq 494
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

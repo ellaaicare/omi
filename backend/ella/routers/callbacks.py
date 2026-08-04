@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 import database.conversations as conversations_db
@@ -58,6 +58,7 @@ from ella.services.summary_writeback import (
 )
 from utils.notifications import send_notification
 from utils.ella.canonical_omi import write_omi_canonical_event
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.other.storage import storage_client
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,29 @@ OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
 PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
+CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
+CAREGIVER_SERVICE_HEADER = "X-Ella-Caregiver-Service-Key"
+
+
+def _require_service_key(provided: Optional[str], *, env_name: str, service: str) -> str:
+    configured = os.getenv(env_name, "").strip()
+    if not configured:
+        raise HTTPException(status_code=503, detail={"code": f"{service}_service_auth_not_configured"})
+    if not provided or not secrets.compare_digest(provided, configured):
+        raise HTTPException(status_code=403, detail={"code": f"invalid_{service}_service_credential"})
+    return service
+
+
+def require_callback_service(
+    service_key: Optional[str] = Header(default=None, alias=CALLBACK_SERVICE_HEADER),
+) -> str:
+    return _require_service_key(service_key, env_name="ELLA_CALLBACK_SERVICE_KEY", service="ella_callback")
+
+
+def require_caregiver_service(
+    service_key: Optional[str] = Header(default=None, alias=CAREGIVER_SERVICE_HEADER),
+) -> str:
+    return _require_service_key(service_key, env_name="ELLA_CAREGIVER_SERVICE_KEY", service="ella_caregiver")
 
 
 # ============================================================================
@@ -335,6 +359,7 @@ async def update_conversation_summary(
     conversation_id: str,
     update: ConversationSummaryUpdate,
     uid: str = None,
+    _service: str = Depends(require_callback_service),
 ):
     """
     Update the structured summary of an OMI conversation.
@@ -386,6 +411,7 @@ async def list_enrichment_reconcile_candidates(
     uid: Optional[str] = None,
     lookback_minutes: int = 180,
     limit: int = 25,
+    _service: str = Depends(require_callback_service),
 ):
     """
     Internal helper for n8n reconciliation.
@@ -462,6 +488,7 @@ def _structured_field(structured, key: str):
 async def get_conversation_data(
     conversation_id: str,
     uid: Optional[str] = None,
+    _service: str = Depends(require_callback_service),
 ):
     """
     Fetch conversation data used by the reprocessing pipeline when re-firing the
@@ -534,6 +561,7 @@ def _structured_field(structured, key: str):
 async def get_conversation_data(
     conversation_id: str,
     uid: Optional[str] = None,
+    _service: str = Depends(require_callback_service),
 ):
     """
     Fetch conversation data used by the reprocessing pipeline when re-firing the
@@ -593,27 +621,14 @@ async def get_conversation_data(
 @router.get("/health")
 async def ella_health():
     """Health check for Ella callback endpoints."""
-    return {
-        "status": "ok",
-        "service": "ella-callbacks",
-        "endpoints": [
-            "/v1/ella/notification",
-            "/v1/ella/emergency",
-            "/v1/ella/emergency-contact",
-            "/v1/ella/emergency-contacts/{uid}",
-            "/v1/ella/daily-summary",
-            "/v1/ella/caregiver-dashboard-data",
-            "/v1/ella/generate-dashboard-token",
-            "# Caregiver CRUD: n8n.ella-ai-care.com/webhook/caregiver-*",
-            "/v1/ella/chat/stream",
-            "/v1/ella/conversation/{id}/data",
-            "/v1/ella/health",
-        ],
-    }
+    return {"status": "ok", "service": "ella-callbacks"}
 
 
 @router.post("/notification", response_model=NotificationResponse)
-async def ella_notification(request: NotificationRequest):
+async def ella_notification(
+    request: NotificationRequest,
+    _service: str = Depends(require_callback_service),
+):
     """
     Send push notification to user with optional TTS audio.
 
@@ -714,7 +729,10 @@ class EmergencyResponse(BaseModel):
 
 
 @router.post("/emergency", response_model=EmergencyResponse)
-async def ella_emergency(request: EmergencyRequest):
+async def ella_emergency(
+    request: EmergencyRequest,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
     """
     Emergency alert endpoint. Called by the iOS app when the elder taps
     the emergency button.
@@ -728,6 +746,9 @@ async def ella_emergency(request: EmergencyRequest):
     - Without Twilio: push notification only (still useful)
     - With Twilio: push + SMS + voice call via n8n workflow
     """
+    uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Emergency alert")
+    request.uid = uid
+
     alert_id = f"emg-{uuid.uuid4().hex[:12]}"
     timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -849,7 +870,10 @@ class DailySummaryResponse(BaseModel):
 
 
 @router.post("/daily-summary", response_model=DailySummaryResponse)
-async def ella_daily_summary(request: DailySummaryRequest):
+async def ella_daily_summary(
+    request: DailySummaryRequest,
+    _service: str = Depends(require_callback_service),
+):
     """
     Trigger daily summary generation for a user's caregivers.
 
@@ -954,25 +978,39 @@ class EmergencyContactOut(BaseModel):
 
 
 @router.post("/emergency-contact", response_model=EmergencyContactOut, status_code=201)
-async def create_emergency_contact(request: EmergencyContactCreate):
+async def create_emergency_contact(
+    request: EmergencyContactCreate,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
     """Add an emergency contact for a user."""
+    uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Emergency contact")
     data = request.model_dump()
+    data["uid"] = uid
     data['permissions'] = request.permissions.model_dump()
-    result = create_contact(request.uid, data)
-    logger.info(f"[Ella] Contact created: uid={request.uid}, contact_id={result['id']}, name={request.name}")
+    result = create_contact(uid, data)
+    logger.info("[Ella] Contact created")
     return EmergencyContactOut(**result)
 
 
 @router.get("/emergency-contacts/{uid}", response_model=List[EmergencyContactOut])
-async def list_emergency_contacts(uid: str):
+async def list_emergency_contacts(
+    uid: str,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
     """List all emergency contacts for a user."""
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Emergency contacts")
     contacts = get_contacts(uid)
-    logger.info(f"[Ella] Contacts listed: uid={uid}, count={len(contacts)}")
+    logger.info("[Ella] Contacts listed count=%s", len(contacts))
     return [EmergencyContactOut(**c) for c in contacts]
 
 
 @router.put("/emergency-contact/{contact_id}", response_model=EmergencyContactOut)
-async def update_emergency_contact(contact_id: str, request: EmergencyContactUpdate, uid: str = ""):
+async def update_emergency_contact(
+    contact_id: str,
+    request: EmergencyContactUpdate,
+    uid: str = "",
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
     """
     Update an emergency contact. Pass uid as a query parameter.
 
@@ -980,6 +1018,7 @@ async def update_emergency_contact(contact_id: str, request: EmergencyContactUpd
     """
     if not uid:
         raise HTTPException(status_code=422, detail="uid query parameter is required")
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Emergency contact")
 
     existing = get_contact(uid, contact_id)
     if not existing:
@@ -990,12 +1029,16 @@ async def update_emergency_contact(contact_id: str, request: EmergencyContactUpd
         update_data['permissions'] = request.permissions.model_dump()
 
     result = update_contact(uid, contact_id, update_data)
-    logger.info(f"[Ella] Contact updated: uid={uid}, contact_id={contact_id}")
+    logger.info("[Ella] Contact updated")
     return EmergencyContactOut(**result)
 
 
 @router.delete("/emergency-contact/{contact_id}", status_code=204)
-async def delete_emergency_contact(contact_id: str, uid: str = ""):
+async def delete_emergency_contact(
+    contact_id: str,
+    uid: str = "",
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
     """
     Remove an emergency contact. Pass uid as a query parameter.
 
@@ -1003,19 +1046,25 @@ async def delete_emergency_contact(contact_id: str, uid: str = ""):
     """
     if not uid:
         raise HTTPException(status_code=422, detail="uid query parameter is required")
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Emergency contact")
 
     deleted = delete_contact(uid, contact_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    logger.info(f"[Ella] Contact deleted: uid={uid}, contact_id={contact_id}")
+    logger.info("[Ella] Contact deleted")
 
 
 # ============================================================================
 # Caregiver Dashboard Token Helpers
 # ============================================================================
 
-DASHBOARD_SECRET = os.getenv("ELLA_DASHBOARD_SECRET", "ella-dashboard-dev-secret")
+
+def _dashboard_secret() -> str:
+    secret = os.getenv("ELLA_DASHBOARD_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail={"code": "caregiver_dashboard_auth_not_configured"})
+    return secret
 
 
 def generate_dashboard_token(caregiver_id: str, user_id: str, omi_uid: str, hours_valid: int = 24) -> str:
@@ -1025,12 +1074,13 @@ def generate_dashboard_token(caregiver_id: str, user_id: str, omi_uid: str, hour
     """
     expiry = int((datetime.now(timezone.utc) + timedelta(hours=hours_valid)).timestamp())
     payload = f"{caregiver_id}.{omi_uid}.{expiry}"
-    signature = hmac.new(DASHBOARD_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    signature = hmac.new(_dashboard_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{payload}.{signature}"
 
 
 def validate_dashboard_token(token: str) -> Optional[dict]:
     """Validate and decode a dashboard token. Returns dict with caregiver_id, omi_uid, or None."""
+    dashboard_secret = _dashboard_secret()
     parts = token.split(".")
     if len(parts) != 4:
         return None
@@ -1046,7 +1096,7 @@ def validate_dashboard_token(token: str) -> Optional[dict]:
         return None
 
     payload = f"{caregiver_id}.{omi_uid}.{expiry_str}"
-    expected_sig = hmac.new(DASHBOARD_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    expected_sig = hmac.new(dashboard_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
 
     if not hmac.compare_digest(signature, expected_sig):
         return None
@@ -1179,7 +1229,11 @@ async def caregiver_dashboard_data(token: str, date: Optional[str] = None):
 
 
 @router.post("/generate-dashboard-token")
-async def generate_dashboard_token_endpoint(uid: str, caregiver_id: str):
+async def generate_dashboard_token_endpoint(
+    uid: str,
+    caregiver_id: str,
+    _service: str = Depends(require_caregiver_service),
+):
     """
     Generate a dashboard token for a caregiver. Called by n8n workflows
     when composing daily summary emails.
@@ -1190,7 +1244,7 @@ async def generate_dashboard_token_endpoint(uid: str, caregiver_id: str):
     token = generate_dashboard_token(caregiver_id=caregiver_id, user_id=uid, omi_uid=uid, hours_valid=24)
     dashboard_url = f"https://ella-ai-care.com/dashboard/?token={token}"
 
-    logger.info(f"[Ella] Dashboard token generated: uid={uid}, caregiver={caregiver_id}")
+    logger.info("[Ella] Dashboard token generated")
 
     return {"token": token, "dashboard_url": dashboard_url, "expires_in_hours": 24}
 

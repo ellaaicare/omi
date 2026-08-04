@@ -68,6 +68,7 @@ from ella.services.voice_honcho import (
     search_voice_honcho,
 )
 from utils.ella.canonical_context import fetch_canonical_timeline
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 # JWT handling
@@ -904,7 +905,7 @@ def create_session_token(
 
 
 @router.get("/providers")
-async def get_voice_providers():
+async def get_voice_providers(_authenticated_uid: str = Depends(get_exact_firebase_uid)):
     """
     List available voice providers for iOS settings toggle.
 
@@ -1565,27 +1566,9 @@ async def synthesize_speech(
 
 
 @router.get("/health")
-async def voice_health():
-    """Health check for voice endpoints."""
-    v2v_status = {
-        pid: {
-            "available": info["key_check"](),
-            "default_mode": info["default_mode"],
-        }
-        for pid, info in V2V_PROVIDERS.items()
-    }
-
-    return {
-        "status": "ok",
-        "service": "ella-voice",
-        "voice_endpoint": ELLA_VOICE_ENDPOINT,
-        "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_providers": ["elevenlabs", "fish-audio", "kokoro", "inworld", "xai-tts"],
-        "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
-        "tts_xai_configured": bool(XAI_API_KEY),
-        "tts_local_url": ELLA_TTS_URL,
-        "v2v_providers": v2v_status,
-    }
+async def voice_health(_authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    """Return minimal authenticated health; provider diagnostics stay private."""
+    return {"status": "ok", "service": "ella-voice"}
 
 
 # ============================================================================

@@ -668,9 +668,32 @@ def _drift_authority(monkeypatch, case):
 
 def _runtime_receipt():
     profile = "omi-boundary-user-secret"
+    honcho_target = {
+        "workspace": "honcho-boundary",
+        "observed_peer_id": "boundary",
+        "observer_peer_id": "ella-boundary",
+        "hermesProfile": profile,
+    }
+    honcho_config_path = f"/Users/ellaai/.hermes/profiles/{profile}/honcho.json"
     return {
         "mode": "hermes_only",
         "provisionMode": "hermes_only",
+        "honchoProfileMap": {
+            "status": "ok",
+            "honchoConfigPath": honcho_config_path,
+            "target": honcho_target,
+        },
+        "provisioningReceipt": {
+            "honcho": {
+                "validation": {
+                    "ok": True,
+                    "mapped": True,
+                    "profile": profile,
+                    "configPath": honcho_config_path,
+                    "target": honcho_target,
+                }
+            }
+        },
         "runtimeBinding": {
             "provider": "hermes",
             "profileName": profile,
