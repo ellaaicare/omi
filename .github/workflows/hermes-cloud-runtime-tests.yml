@@ -49,6 +49,7 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/consent_authority.py"
+      - "backend/ella/services/correction_honcho_contract.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/memory_reinterpretation.py"
@@ -176,6 +177,7 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/consent_authority.py"
+      - "backend/ella/services/correction_honcho_contract.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/memory_reinterpretation.py"
@@ -340,6 +342,7 @@ jobs:
           ella/routers/voice.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
+          ella/services/correction_honcho_contract.py
           ella/services/hermes_broker_client.py
           ella/services/hermes_broker_prototype.py
           ella/services/hermes_cloud.py
@@ -399,6 +402,7 @@ jobs:
           ella/services/hermes_cloud_staged_attestation.py
           ella/services/hermes_cloud_runtime.py
           ella/services/consent_authority.py ella/services/invitation_authority.py
+          ella/services/correction_honcho_contract.py
           ella/services/memory_reinterpretation.py
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
@@ -464,6 +468,9 @@ jobs:
               tests/unit/test_ella_incident_1182_route_isolation.py \
               tests/unit/test_ella_incident_1182_callback_auth.py \
               tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+              tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases \
+              tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness \
+              tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract \
               tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source \
               tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload \
               tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
@@ -497,6 +504,9 @@ jobs:
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_token_generation_requires_two_distinct_configured_secrets"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_dashboard_signing_has_no_source_fallback"
             "tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py::test_voice_diagnostics_require_exact_firebase_bearer"
+            "tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases"
+            "tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness"
+            "tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
@@ -512,11 +522,14 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 32
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 35
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
             tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+            tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases \
+            tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness \
+            tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract \
             tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source \
             tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload \
             tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
@@ -579,6 +592,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_runtime_receipt_requires_owned_workspace_port_and_honcho"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases"
+            "tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness"
+            "tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
@@ -619,7 +635,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 510
+          test "$collected" -eq 513
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

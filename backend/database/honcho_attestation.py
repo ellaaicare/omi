@@ -102,7 +102,7 @@ def retain_authority_credential(
     comma_separated: bool = False,
 ) -> str | None:
     """Register a value that a live consumer retains, without exposing it."""
-    if not value:
+    if not value or not value.strip():
         return value
     candidates = {value, value.strip()}
     if comma_separated:
@@ -112,8 +112,8 @@ def retain_authority_credential(
     return value
 
 
-def authority_credential(*environment_names: str, strip: bool = True, default: str = "") -> str:
-    """Resolve and register one runtime authority through the separation contract."""
+def authority_credential(*environment_names: str, strip: bool = True, default: str | None = "") -> str | None:
+    """Resolve the first present environment name, including an explicit empty value."""
     for name in environment_names:
         if not is_authority_credential_environment_name(name):
             raise ValueError("invalid_authority_credential_reference")
@@ -121,9 +121,10 @@ def authority_credential(*environment_names: str, strip: bool = True, default: s
             continue
         value = os.environ[name]
         effective = value.strip() if strip else value
-        if effective or default:
-            retain_authority_credential(effective, comma_separated=name.endswith(("_KEYS", "_TOKENS")))
-            return effective
+        retain_authority_credential(effective, comma_separated=name.endswith(("_KEYS", "_TOKENS")))
+        return effective
+    if default is None:
+        return None
     effective_default = default.strip() if strip else default
     retain_authority_credential(effective_default)
     return effective_default

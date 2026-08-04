@@ -45,7 +45,11 @@ HONCHO_FACT_WRITE_TRANSPORT = os.getenv("ELLA_CORRECTION_HONCHO_FACT_WRITE_TRANS
 HONCHO_BASE_URL = (
     os.getenv("ELLA_CORRECTION_HONCHO_BASE_URL") or os.getenv("HONCHO_BASE_URL") or "http://127.0.0.1:8320"
 ).rstrip("/")
-HONCHO_API_KEY = authority_credential("ELLA_CORRECTION_HONCHO_API_KEY", "HONCHO_API_KEY", strip=False)
+# This legacy chain is truthiness-based; unlike presence-sensitive pairs, an
+# explicitly empty correction key intentionally permits the shared fallback.
+HONCHO_API_KEY = authority_credential("ELLA_CORRECTION_HONCHO_API_KEY", strip=False) or authority_credential(
+    "HONCHO_API_KEY", strip=False
+)
 HONCHO_WORKSPACE = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE") or os.getenv("HONCHO_WORKSPACE") or ""
 HONCHO_WORKSPACE_PREFIX = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE_PREFIX", "ella-correction-facts")
 HONCHO_OBSERVER_PEER_ID = (

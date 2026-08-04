@@ -167,7 +167,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 157
+          test "$collected" -eq 160
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -191,6 +191,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases"
+            "tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness"
+            "tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"

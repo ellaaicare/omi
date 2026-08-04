@@ -544,85 +544,152 @@ def test_attestation_key_separation_tracks_runtime_credential_lookups_from_sourc
             )
 
 
-def test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload():
-    backend_root = Path(__file__).resolve().parents[2]
-    credential_name = re.compile(
-        r"^(?!(?:ELLA_HERMES_PROVISION_ATTESTATION_KEY)$)[A-Z][A-Z0-9_]*(?:_KEYS?|_TOKENS?|_SECRET|_PASSWORD)$"
-    )
+_RETAINED_AUTHORITY_ENVIRONMENT_NAME = re.compile(
+    r"^(?!(?:ELLA_HERMES_PROVISION_ATTESTATION_KEY)$)[A-Z][A-Z0-9_]*(?:_KEYS?|_TOKENS?|_SECRET|_PASSWORD)$"
+)
 
-    def raw_credential_call(node, *, os_aliases, environ_aliases, getenv_aliases):
-        candidate = None
-        if isinstance(node, ast.Call) and node.args:
-            function = node.func
-            direct_getenv = isinstance(function, ast.Name) and function.id in getenv_aliases
-            qualified_getenv = (
-                isinstance(function, ast.Attribute)
-                and function.attr == "getenv"
-                and isinstance(function.value, ast.Name)
-                and function.value.id in os_aliases
-            )
-            environ_get = (
-                isinstance(function, ast.Attribute)
-                and function.attr == "get"
-                and (
-                    (isinstance(function.value, ast.Name) and function.value.id in environ_aliases)
-                    or (
-                        isinstance(function.value, ast.Attribute)
-                        and function.value.attr == "environ"
-                        and isinstance(function.value.value, ast.Name)
-                        and function.value.value.id in os_aliases
-                    )
-                )
-            )
-            if direct_getenv or qualified_getenv or environ_get:
-                candidate = node.args[0]
-        elif isinstance(node, ast.Subscript):
-            is_environment = (
-                isinstance(node.value, ast.Name)
-                and node.value.id in environ_aliases
-                or (
-                    isinstance(node.value, ast.Attribute)
-                    and node.value.attr == "environ"
-                    and isinstance(node.value.value, ast.Name)
-                    and node.value.value.id in os_aliases
-                )
-            )
-            if is_environment:
-                candidate = node.slice
-        if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str):
-            return candidate.value if credential_name.fullmatch(candidate.value) else None
+
+def _environment_expression_kind(node, *, os_aliases, environ_aliases, getenv_aliases):
+    if isinstance(node, ast.Name):
+        if node.id in os_aliases:
+            return "os"
+        if node.id in environ_aliases:
+            return "environ"
+        if node.id in getenv_aliases:
+            return "getenv"
         return None
+    if isinstance(node, ast.Attribute):
+        owner_kind = _environment_expression_kind(
+            node.value,
+            os_aliases=os_aliases,
+            environ_aliases=environ_aliases,
+            getenv_aliases=getenv_aliases,
+        )
+        if owner_kind == "os" and node.attr == "environ":
+            return "environ"
+        if owner_kind == "os" and node.attr == "getenv":
+            return "getenv"
+        if owner_kind == "environ" and node.attr == "get":
+            return "getenv"
+        return None
+    if not isinstance(node, ast.Call):
+        return None
+    if isinstance(node.func, ast.Name) and node.func.id == "__import__" and node.args:
+        module_name = node.args[0]
+        if isinstance(module_name, ast.Constant) and module_name.value == "os":
+            return "os"
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "import_module" and node.args:
+        module_name = node.args[0]
+        if isinstance(module_name, ast.Constant) and module_name.value == "os":
+            return "os"
+    if not (isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2):
+        return None
+    owner_kind = _environment_expression_kind(
+        node.args[0],
+        os_aliases=os_aliases,
+        environ_aliases=environ_aliases,
+        getenv_aliases=getenv_aliases,
+    )
+    attribute = node.args[1]
+    if not isinstance(attribute, ast.Constant) or not isinstance(attribute.value, str):
+        return None
+    if owner_kind == "os" and attribute.value == "environ":
+        return "environ"
+    if owner_kind == "os" and attribute.value == "getenv":
+        return "getenv"
+    if owner_kind == "environ" and attribute.value == "get":
+        return "getenv"
+    return None
 
+
+def _assignment_alias_pairs(target, value):
+    if isinstance(target, ast.Name):
+        return [(target.id, value)]
+    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+        pairs = []
+        for child_target, child_value in zip(target.elts, value.elts):
+            pairs.extend(_assignment_alias_pairs(child_target, child_value))
+        return pairs
+    return []
+
+
+def _environment_aliases(source_tree):
+    os_aliases = set()
+    environ_aliases = set()
+    getenv_aliases = set()
+    for node in ast.walk(source_tree):
+        if isinstance(node, ast.Import):
+            os_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "os")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            environ_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "environ")
+            getenv_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "getenv")
+
+    assignments = []
+    for node in ast.walk(source_tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                assignments.extend(_assignment_alias_pairs(target, node.value))
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            assignments.extend(_assignment_alias_pairs(node.target, node.value))
+
+    changed = True
+    while changed:
+        changed = False
+        for name, value in assignments:
+            kind = _environment_expression_kind(
+                value,
+                os_aliases=os_aliases,
+                environ_aliases=environ_aliases,
+                getenv_aliases=getenv_aliases,
+            )
+            target_set = {"os": os_aliases, "environ": environ_aliases, "getenv": getenv_aliases}.get(kind)
+            if target_set is not None and name not in target_set:
+                target_set.add(name)
+                changed = True
+    return os_aliases, environ_aliases, getenv_aliases
+
+
+def _raw_credential_call(node, *, os_aliases, environ_aliases, getenv_aliases):
+    candidate = None
+    if isinstance(node, ast.Call) and node.args:
+        if (
+            _environment_expression_kind(
+                node.func,
+                os_aliases=os_aliases,
+                environ_aliases=environ_aliases,
+                getenv_aliases=getenv_aliases,
+            )
+            == "getenv"
+        ):
+            candidate = node.args[0]
+    elif isinstance(node, ast.Subscript):
+        if (
+            _environment_expression_kind(
+                node.value,
+                os_aliases=os_aliases,
+                environ_aliases=environ_aliases,
+                getenv_aliases=getenv_aliases,
+            )
+            == "environ"
+        ):
+            candidate = node.slice
+    if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str):
+        if _RETAINED_AUTHORITY_ENVIRONMENT_NAME.fullmatch(candidate.value):
+            return candidate.value
+    return None
+
+
+def _raw_retained_authorities(backend_root):
     raw_retained = []
-    for relative_root in ("database", "ella", "utils/ella"):
+    for relative_root in ("database", "ella", "routers", "utils/ella"):
         for source_path in (backend_root / relative_root).rglob("*.py"):
             if source_path.name == "honcho_attestation.py":
                 continue
             source_tree = ast.parse(source_path.read_text(encoding="utf-8"))
-            os_aliases = {
-                alias.asname or alias.name
-                for node in source_tree.body
-                if isinstance(node, ast.Import)
-                for alias in node.names
-                if alias.name == "os"
-            }
-            environ_aliases = {
-                alias.asname or alias.name
-                for node in source_tree.body
-                if isinstance(node, ast.ImportFrom) and node.module == "os"
-                for alias in node.names
-                if alias.name == "environ"
-            }
-            getenv_aliases = {
-                alias.asname or alias.name
-                for node in source_tree.body
-                if isinstance(node, ast.ImportFrom) and node.module == "os"
-                for alias in node.names
-                if alias.name == "getenv"
-            }
+            os_aliases, environ_aliases, getenv_aliases = _environment_aliases(source_tree)
             parents = {child: parent for parent in ast.walk(source_tree) for child in ast.iter_child_nodes(parent)}
             for node in ast.walk(source_tree):
-                environment_name = raw_credential_call(
+                environment_name = _raw_credential_call(
                     node,
                     os_aliases=os_aliases,
                     environ_aliases=environ_aliases,
@@ -673,8 +740,399 @@ def test_attestation_key_separation_retains_real_honcho_consumer_authorities_aft
                 retained_config_factory = scope.name == "from_env"
                 if assigns_retained_attribute or assigns_global or persistent_factory or retained_config_factory:
                     raw_retained.append((source_path.relative_to(backend_root), node.lineno, environment_name))
+    return raw_retained
 
-    assert raw_retained == []
+
+def _assert_no_raw_retained_authorities(backend_root):
+    raw_retained = _raw_retained_authorities(backend_root)
+    locations = ", ".join(f"{path}:{line}" for path, line, _name in raw_retained)
+    assert raw_retained == [], f"raw retained authority at {locations}"
+
+
+def test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases(tmp_path):
+    backend_root = tmp_path / "backend"
+    fixtures = {
+        Path("routers/announcements.py"): "import os\n" + "\n" * 23 + 'ADMIN_KEY = os.getenv("ADMIN_KEY", "")\n',
+        Path("ella/routers/chat.py"): "import os\n" + "\n" * 68 + 'XAI_API_KEY = os.getenv("XAI_API_KEY", "")\n',
+        Path("database/dynamic_alias.py"): (
+            "import os as system\n"
+            "environment = system.environ\n"
+            "read_environment = environment.get\n"
+            'DATABASE_PASSWORD = read_environment("DATABASE_PASSWORD", "")\n'
+        ),
+        Path("utils/ella/imported_alias.py"): (
+            "from os import environ as imported_environment, getenv as imported_getenv\n"
+            "environment = imported_environment\n"
+            "read_environment = imported_getenv\n"
+            'API_SERVER_KEY = read_environment("API_SERVER_KEY", "")\n'
+            'PROVISION_API_TOKEN = environment["PROVISION_API_TOKEN"]\n'
+        ),
+        Path("routers/getattr_alias.py"): (
+            "import os\n"
+            'read_environment = getattr(os, "getenv")\n'
+            'WORKFLOW_API_KEY = read_environment("WORKFLOW_API_KEY", "")\n'
+        ),
+    }
+    for relative_path, source in fixtures.items():
+        source_path = backend_root / relative_path
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(source, encoding="utf-8")
+
+    findings = {(path.as_posix(), line) for path, line, _name in _raw_retained_authorities(backend_root)}
+    assert findings == {
+        ("database/dynamic_alias.py", 4),
+        ("ella/routers/chat.py", 70),
+        ("routers/announcements.py", 25),
+        ("routers/getattr_alias.py", 3),
+        ("utils/ella/imported_alias.py", 4),
+        ("utils/ella/imported_alias.py", 5),
+    }
+    with pytest.raises(AssertionError) as failure:
+        _assert_no_raw_retained_authorities(backend_root)
+    assert "routers/announcements.py:25" in str(failure.value)
+    assert "ella/routers/chat.py:70" in str(failure.value)
+
+
+def test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness():
+    backend_root = Path(__file__).resolve().parents[2]
+    probe = """
+import asyncio
+import importlib
+import json
+import os
+import sys
+import types
+from unittest.mock import MagicMock
+
+module_name, callsite, expected = sys.argv[1:]
+fallback = "synthetic-fallback-authority-value"
+
+fake_stripe = types.ModuleType("stripe")
+fake_stripe.Subscription = types.SimpleNamespace()
+sys.modules["stripe"] = fake_stripe
+fake_redis = types.ModuleType("redis")
+fake_redis.Redis = lambda **kwargs: object()
+sys.modules["redis"] = fake_redis
+fake_conversations = types.ModuleType("database.conversations")
+fake_conversations._decrypt_conversation_data = lambda value: value
+sys.modules["database.conversations"] = fake_conversations
+if callsite == "callbacks-provision":
+    for dependency in (
+        "database._client",
+        "database.memories",
+        "database.users",
+        "database.ella_contacts",
+        "utils.notifications",
+        "utils.other.endpoints",
+        "utils.other.storage",
+        "ella.config",
+    ):
+        sys.modules[dependency] = MagicMock()
+
+module = importlib.import_module(module_name)
+captured = {}
+
+class Response:
+    status_code = 200
+    text = ""
+
+    def json(self):
+        if callsite == "callbacks-provision":
+            return {"internal_assessment": {"risk_level": "none"}}
+        return {"choices": [{"message": {"content": "ok"}}], "answer": "ok", "confidence": "high", "sources": []}
+
+    def raise_for_status(self):
+        return None
+
+class Client:
+    def __init__(self, *args, **kwargs):
+        captured["constructed"] = True
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def post(self, url, *, headers, json):
+        captured["headers"] = headers
+        return Response()
+
+    async def get(self, url, *, headers):
+        captured["headers"] = headers
+        return Response()
+
+module.httpx.AsyncClient = Client
+
+if callsite == "chat-hermes":
+    assert module.HERMES_GATEWAY_TOKEN == expected, "authority selection mismatch"
+    asyncio.run(module._hermes_nonstream_completion([], "synthetic-session"))
+    assert captured.get("headers", {}).get("Authorization") == f"Bearer {expected}", "outbound header mismatch"
+elif callsite == "voice-memory":
+    assert module.HERMES_VOICE_MEMORY_TOKEN == expected, "authority selection mismatch"
+    asyncio.run(module._search_voice_memory_pack("synthetic-user", "hello", 1))
+    if expected:
+        assert captured.get("headers", {}).get("Authorization") == f"Bearer {expected}", "outbound header mismatch"
+    else:
+        assert captured == {}, "empty authority reached outbound transport"
+elif callsite == "callbacks-provision":
+    assert module.PROVISION_API_KEY == expected, "authority selection mismatch"
+
+    async def authority_enabled(_uid=None):
+        return False
+
+    async def resolve_agent(_uid):
+        return "synthetic-agent"
+
+    module.runtime_authority_enabled = authority_enabled
+    module._resolve_agent_id_for_uid = resolve_agent
+    asyncio.run(module._fetch_internal_assessment("synthetic-user", "synthetic-conversation"))
+    expected_headers = {"Authorization": f"Bearer {expected}"} if expected else {}
+    assert captured.get("headers") == expected_headers, "outbound header mismatch"
+elif callsite == "resolve-provision":
+    assert module.PROVISION_API_KEY == expected, "authority selection mismatch"
+
+    async def get_pool():
+        return object()
+
+    async def no_runtime(*args, **kwargs):
+        return None
+
+    async def owned_routing(_uid):
+        return {"routing": {"agentId": "synthetic-agent"}}
+
+    module._get_pool = get_pool
+    module.EllaProvisioningRepository = lambda _pool: object()
+    module.resolve_isolated_runtime = no_runtime
+    module.resolve_user_routing = owned_routing
+    asyncio.run(module.proxy_chat_history("synthetic-agent", authenticated_uid="synthetic-user"))
+    assert captured.get("headers") == {"x-api-key": expected}, "outbound header mismatch"
+elif callsite == "resolve-hermes":
+    assert module.HERMES_GATEWAY_TOKEN == expected, "authority selection mismatch"
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "name": "Synthetic",
+                "omi_uid": "synthetic-user",
+                "status": "active",
+                "guardian_mode": False,
+                "timezone": "UTC",
+                "conditions": [],
+                "medications": [],
+                "agents": {"workspace": "synthetic", "userAgentId": "synthetic-agent"},
+                "cluster_status": "active",
+            }
+
+    async def get_pool():
+        return Pool()
+
+    async def no_runtime(*args, **kwargs):
+        return None
+
+    module._get_pool = get_pool
+    module.resolve_isolated_runtime = no_runtime
+    module.retained_owner_uid_configured = lambda _uid: True
+    routing = asyncio.run(module.resolve_user_routing("synthetic-user"))["routing"]
+    if expected:
+        assert routing.get("platform") == "hermes", "Hermes routing not selected"
+        assert routing.get("token") == expected, "routing authority mismatch"
+    else:
+        assert routing.get("platform") != "hermes", "empty authority enabled Hermes routing"
+        assert fallback not in json.dumps(routing), "fallback authority escaped empty suppression"
+elif callsite == "correction-honcho":
+    assert module.HONCHO_API_KEY == expected, "authority selection mismatch"
+    expected_headers = {"Content-Type": "application/json"}
+    if expected:
+        expected_headers["Authorization"] = f"Bearer {expected}"
+    assert module._honcho_headers(module.HONCHO_API_KEY) == expected_headers, "outbound header mismatch"
+elif callsite == "scanner-provision":
+    async def authority_enabled(_uid=None):
+        return False
+
+    module.runtime_authority_enabled = authority_enabled
+    asyncio.run(module._fetch_scanner_tuning("synthetic-agent", "synthetic-user"))
+    expected_headers = {"Authorization": f"Bearer {expected}"} if expected else {}
+    assert captured.get("headers") == expected_headers, "outbound header mismatch"
+else:
+    raise AssertionError("unknown provider-free authority probe")
+"""
+    presence_callsites = (
+        ("ella.routers.chat", "chat-hermes", "HERMES_API_SERVER_KEY", ("API_SERVER_KEY",)),
+        ("ella.routers.voice", "voice-memory", "HERMES_VOICE_MEMORY_TOKEN", ("ELLA_PROVISION_API_TOKEN",)),
+        ("ella.routers.callbacks", "callbacks-provision", "ELLA_PROVISION_API_KEY", ("ELLA_PROVISION_API_TOKEN",)),
+        ("ella.routers.resolve", "resolve-provision", "ELLA_PROVISION_API_KEY", ("ELLA_PROVISION_API_TOKEN",)),
+        ("ella.routers.resolve", "resolve-hermes", "HERMES_API_SERVER_KEY", ("API_SERVER_KEY",)),
+    )
+    truthy_callsites = (
+        (
+            "ella.services.correction_honcho_contract",
+            "correction-honcho",
+            "ELLA_CORRECTION_HONCHO_API_KEY",
+            ("HONCHO_API_KEY",),
+        ),
+        (
+            "utils.ella.scanner_keyterms",
+            "scanner-provision",
+            "ELLA_PROVISION_API_TOKEN",
+            ("ELLA_PROVISION_API_KEY", "PROVISION_API_TOKEN"),
+        ),
+    )
+
+    for module_name, callsite, primary_name, fallback_names in presence_callsites + truthy_callsites:
+        uses_truthiness = (module_name, callsite, primary_name, fallback_names) in truthy_callsites
+        scenarios = [
+            (
+                "explicit-empty",
+                "",
+                "synthetic-fallback-authority-value" if uses_truthiness else "",
+                "synthetic-fallback-authority-value",
+            ),
+            ("absent-primary", None, "synthetic-fallback-authority-value", "synthetic-fallback-authority-value"),
+            (
+                "nonempty-primary",
+                "synthetic-primary-authority-value",
+                "synthetic-primary-authority-value",
+                "synthetic-fallback-authority-value",
+            ),
+            (
+                "surrounding-whitespace",
+                "  synthetic-primary-authority-value  ",
+                "  synthetic-primary-authority-value  ",
+                "synthetic-fallback-authority-value",
+            ),
+            ("whitespace-only", "   ", "   ", "synthetic-fallback-authority-value"),
+        ]
+        if len(fallback_names) > 1:
+            scenarios.append(("empty-secondary", None, "synthetic-tertiary-authority-value", ""))
+        for scenario, primary_value, expected, first_fallback_value in scenarios:
+            environment = {
+                name: value
+                for name, value in os.environ.items()
+                if not _RETAINED_AUTHORITY_ENVIRONMENT_NAME.fullmatch(name)
+                and name != "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
+            }
+            environment.update(
+                {
+                    "PYTHONPATH": str(backend_root),
+                    "ENCRYPTION_SECRET": "synthetic-distinct-encryption-authority-000000000001",
+                    "FIRESTORE_EMULATOR_HOST": "127.0.0.1:8080",
+                    "GOOGLE_CLOUD_PROJECT": "synthetic-local",
+                    "HERMES_GATEWAY_URL": "http://synthetic.invalid",
+                    "HERMES_GATEWAY_PUBLIC_URL": "http://synthetic.invalid",
+                    "HERMES_VOICE_MEMORY_URL": "http://synthetic.invalid",
+                    "HERMES_MODEL": "synthetic-model",
+                    "ELLA_CHAT_PLATFORM": "hermes",
+                }
+            )
+            if primary_value is not None:
+                environment[primary_name] = primary_value
+            for index, fallback_name in enumerate(fallback_names):
+                environment[fallback_name] = (
+                    first_fallback_value if index == 0 else "synthetic-tertiary-authority-value"
+                )
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, module_name, callsite, expected],
+                cwd=backend_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert completed.returncode == 0, f"provider-free authority probe failed for {callsite}:{scenario}"
+            assert completed.stdout == ""
+            assert completed.stderr == ""
+
+
+def test_authority_credential_presence_optional_none_and_redacted_separation_contract():
+    backend_root = Path(__file__).resolve().parents[2]
+    probe = """
+import os
+import sys
+
+mode = sys.argv[1]
+primary = "SYNTHETIC_PRIMARY_API_KEY"
+fallback = "SYNTHETIC_FALLBACK_API_KEY"
+selected = "synthetic-selected-authority-value"
+unselected = "synthetic-unselected-authority-value"
+
+from database.honcho_attestation import HonchoAttestationError, authority_credential, create_challenge
+
+def challenge():
+    return create_challenge(
+        firebase_uid="synthetic-user",
+        account_owner_id="synthetic-owner",
+        runtime_target_id="synthetic-target",
+        binding_id="synthetic-binding",
+        job_id="synthetic-job",
+    )
+
+if mode == "empty-suppresses":
+    os.environ[primary] = ""
+    os.environ[fallback] = unselected
+    assert authority_credential(primary, fallback) == "", "presence contract mismatch"
+    os.environ[fallback] = "synthetic-current-authority-value"
+    os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = unselected
+    challenge()
+elif mode == "absent-fallback":
+    os.environ.pop(primary, None)
+    os.environ[fallback] = selected
+    assert authority_credential(primary, fallback) == selected, "presence contract mismatch"
+    os.environ[fallback] = "synthetic-current-authority-value"
+    os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = selected
+    try:
+        challenge()
+    except HonchoAttestationError as exc:
+        assert str(exc) == "honcho_attestation_key_conflict", "non-fixed separation error"
+    else:
+        raise AssertionError("selected authority was not retained")
+elif mode == "whitespace":
+    os.environ[primary] = "   "
+    os.environ[fallback] = unselected
+    assert authority_credential(primary, fallback) == "", "stripped whitespace contract mismatch"
+    assert authority_credential(primary, fallback, strip=False) == "   ", "raw whitespace contract mismatch"
+elif mode == "optional-none":
+    os.environ.pop(primary, None)
+    assert authority_credential(primary, default=None) is None, "optional default contract mismatch"
+elif mode == "redacted-error":
+    secret_name = "synthetic-lowercase-secret-name"
+    secret_value = "synthetic-secret-value-that-must-not-leak"
+    try:
+        authority_credential(secret_name, default=secret_value)
+    except ValueError as exc:
+        assert str(exc) == "invalid_authority_credential_reference", "non-fixed validation error"
+        assert secret_name not in str(exc) and secret_value not in str(exc), "authority detail leaked"
+    else:
+        raise AssertionError("invalid authority name accepted")
+else:
+    raise AssertionError("unknown authority contract probe")
+"""
+    for mode in ("empty-suppresses", "absent-fallback", "whitespace", "optional-none", "redacted-error"):
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not _RETAINED_AUTHORITY_ENVIRONMENT_NAME.fullmatch(name)
+            and name != "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
+        }
+        environment["PYTHONPATH"] = str(backend_root)
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, mode],
+            cwd=backend_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"authority contract probe failed for {mode}"
+        assert completed.stdout == ""
+        assert completed.stderr == ""
+
+
+def test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload():
+    backend_root = Path(__file__).resolve().parents[2]
+    credential_name = _RETAINED_AUTHORITY_ENVIRONMENT_NAME
+    _assert_no_raw_retained_authorities(backend_root)
 
     probe = """
 import asyncio

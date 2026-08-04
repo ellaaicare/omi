@@ -84,11 +84,13 @@ def _provision_url(uid: str = "", *, isolated: bool = False) -> str:
 def _provision_token(uid: str = "", *, isolated: bool = False) -> str:
     if uid and isolated:
         return authority_credential("ELLA_HERMES_PROVISION_API_TOKEN", strip=False)
-    return authority_credential(
-        "ELLA_PROVISION_API_TOKEN",
-        "ELLA_PROVISION_API_KEY",
-        "PROVISION_API_TOKEN",
-        strip=False,
+    # Preserve the legacy truthy fallback chain while registering only the
+    # nonempty credential that is actually selected for the outbound request.
+    return (
+        authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
+        or authority_credential("ELLA_PROVISION_API_KEY", strip=False)
+        or authority_credential("PROVISION_API_TOKEN", strip=False)
+        or ""
     )
 
 
