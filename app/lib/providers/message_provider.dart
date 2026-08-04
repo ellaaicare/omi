@@ -860,11 +860,15 @@ class MessageProvider extends ChangeNotifier {
       try {
         bool firstChunkRecieved = false;
         _lastStreamFailure = null;
-        await for (var chunk in _voiceChatStreamSender(
-          [file],
-          expectedAuthenticatedUid: lease.uid,
-          exactAuthority: lease,
-        )) {
+        final chunks = await collectTerminalMessageChunks(
+          _voiceChatStreamSender(
+            [file],
+            expectedAuthenticatedUid: lease.uid,
+            exactAuthority: lease,
+          ),
+        );
+        if (!_canCommit(lease, operationGeneration)) return;
+        for (final chunk in chunks) {
           if (!_canCommit(lease, operationGeneration)) return;
           if (!firstChunkRecieved &&
               [
@@ -998,7 +1002,9 @@ class MessageProvider extends ChangeNotifier {
                 expectedAuthenticatedUid: lease.uid,
                 exactAuthority: lease,
               );
-        await for (var chunk in stream) {
+        final chunks = await collectTerminalMessageChunks(stream);
+        if (!_canCommit(lease, operationGeneration)) return;
+        for (final chunk in chunks) {
           if (!_canCommit(lease, operationGeneration)) return;
           if (chunk.type == MessageChunkType.think) {
             message.thinkings.add(chunk.text);

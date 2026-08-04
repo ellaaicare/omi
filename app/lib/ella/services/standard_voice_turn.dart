@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
@@ -54,11 +55,15 @@ class StandardVoiceTurnCoordinator {
     try {
       if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
       final replyBuffer = StringBuffer();
-      await for (final chunk in streamSender(
-        transcript,
-        expectedAuthenticatedUid: authority.uid,
-        exactAuthority: authority,
-      )) {
+      final chunks = await collectTerminalMessageChunks(
+        streamSender(
+          transcript,
+          expectedAuthenticatedUid: authority.uid,
+          exactAuthority: authority,
+        ),
+      );
+      if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
+      for (final chunk in chunks) {
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         if (chunk.type == MessageChunkType.data) {
           replyBuffer.write(chunk.text);
@@ -112,6 +117,7 @@ class StandardVoiceTurnCoordinator {
       return StandardVoiceTurnResult(reply: reply);
     } on ClientApiFailure catch (failure) {
       if (audioPath != null) await ElevenLabsTts.discardSynthesizedFile(audioPath);
+      if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
       return StandardVoiceTurnResult(reply: '', failure: failure);
     } on ExactAccountAuthorityChangedException {
       if (audioPath != null) await ElevenLabsTts.discardSynthesizedFile(audioPath);

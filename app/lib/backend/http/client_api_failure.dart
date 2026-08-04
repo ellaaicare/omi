@@ -11,6 +11,7 @@ enum ClientApiFailureKind {
   accountChanged,
   featureUnavailable,
   unavailable,
+  incompleteStream,
   invalidResponse,
 }
 

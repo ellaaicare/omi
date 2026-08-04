@@ -92,6 +92,54 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   return null;
 }
 
+Future<List<ServerMessageChunk>> collectTerminalMessageChunks(Stream<ServerMessageChunk> stream) async {
+  final chunks = await stream.toList();
+  if (chunks.any((chunk) => chunk.type == MessageChunkType.error)) {
+    throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+  }
+  final doneCount = chunks.where((chunk) => chunk.type == MessageChunkType.done).length;
+  if (chunks.isEmpty || chunks.last.type != MessageChunkType.done || doneCount != 1) {
+    throw const ClientApiFailure(ClientApiFailureKind.incompleteStream, retryable: true);
+  }
+  return chunks;
+}
+
+Stream<ServerMessageChunk> _parseTerminalMessageStream(
+  Stream<String> lines,
+  String messageId, {
+  bool skipComments = false,
+}) async* {
+  final pending = <ServerMessageChunk>[];
+  var completed = false;
+  await for (final line in lines) {
+    if (skipComments && line.startsWith(':')) continue;
+
+    ServerMessageChunk? chunk;
+    try {
+      chunk = parseMessageChunk(line, messageId);
+    } on ClientApiFailure {
+      rethrow;
+    } catch (_) {
+      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+    }
+    if (chunk == null) {
+      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+    }
+    pending.add(chunk);
+    if (chunk.type == MessageChunkType.done) {
+      completed = true;
+      break;
+    }
+  }
+
+  if (!completed) {
+    throw const ClientApiFailure(ClientApiFailureKind.incompleteStream, retryable: true);
+  }
+  for (final chunk in pending) {
+    yield chunk;
+  }
+}
+
 Stream<ServerMessageChunk> sendMessageStreamServer(
   String text, {
   String? appId,
@@ -109,19 +157,15 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
 
   var messageId = "1000"; // Default new message
 
-  await for (var line in makeStreamingApiCall(
-    url: url,
-    body: jsonEncode({'text': text, 'file_ids': filesId}),
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
-  )) {
-    var messageChunk = parseMessageChunk(line, messageId);
-    if (messageChunk != null) {
-      yield messageChunk;
-    } else {
-      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
-    }
-  }
+  yield* _parseTerminalMessageStream(
+    makeStreamingApiCall(
+      url: url,
+      body: jsonEncode({'text': text, 'file_ids': filesId}),
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    ),
+    messageId,
+  );
 }
 
 /// Send a chat message via the Ella endpoint (/v1/ella/chat/stream).
@@ -153,28 +197,22 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   final requestClientMessageId = clientMessageId ?? '';
   final requestClientSentAt = clientSentAt?.toUtc().toIso8601String() ?? '';
 
-  await for (var line in makeStreamingApiCall(
-    url: url,
-    headers: headers,
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
-    body: jsonEncode({
-      'message': text,
-      'conversation_id': '',
-      'client_message_id': requestClientMessageId,
-      'client_sent_at': requestClientSentAt,
-    }),
-  )) {
-    // Skip SSE comment lines (keep-alives from backend while waiting for LLM)
-    if (line.startsWith(':')) continue;
-
-    var messageChunk = parseMessageChunk(line, messageId);
-    if (messageChunk != null) {
-      yield messageChunk;
-    } else {
-      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
-    }
-  }
+  yield* _parseTerminalMessageStream(
+    makeStreamingApiCall(
+      url: url,
+      headers: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+      body: jsonEncode({
+        'message': text,
+        'conversation_id': '',
+        'client_message_id': requestClientMessageId,
+        'client_sent_at': requestClientSentAt,
+      }),
+    ),
+    messageId,
+    skipComments: true,
+  );
 }
 
 Future<ServerMessage> getInitialAppMessage(String? appId) {
@@ -204,20 +242,16 @@ Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
   }
   var messageId = "1000"; // Default new message
 
-  await for (var line in makeMultipartStreamingApiCall(
-    url: '${Env.apiBaseUrl}v2/voice-messages',
-    files: files,
-    fields: language != null ? {'language': language} : {},
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
-  )) {
-    var messageChunk = parseMessageChunk(line, messageId);
-    if (messageChunk != null) {
-      yield messageChunk;
-    } else {
-      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
-    }
-  }
+  yield* _parseTerminalMessageStream(
+    makeMultipartStreamingApiCall(
+      url: '${Env.apiBaseUrl}v2/voice-messages',
+      files: files,
+      fields: language != null ? {'language': language} : {},
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    ),
+    messageId,
+  );
 }
 
 Future<List<MessageFile>?> uploadFilesServer(

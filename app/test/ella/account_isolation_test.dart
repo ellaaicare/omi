@@ -246,6 +246,39 @@ void main() {
     expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.workspaceRequired);
   });
 
+  test('premature chat EOF cannot render cache or haptically present partial assistant content', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    var haptics = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'HapticFeedback.vibrate') haptics++;
+        return null;
+      },
+    );
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+        yield ServerMessageChunk('partial-a', 'must never appear', MessageChunkType.data);
+      },
+    );
+
+    await provider.sendMessageStreamToServer('private question');
+
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.incompleteStream);
+    expect(haptics, 0);
+  });
+
   test('account switch during voice streaming cannot mutate or persist under the next account', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     await _grantAuthority(prefs, 'uid-a');
@@ -273,6 +306,35 @@ void main() {
 
     expect(provider.messages, isEmpty);
     expect(prefs.cachedMessages, isEmpty);
+  });
+
+  test('premature voice EOF cannot render cache or announce partial assistant content', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    var firstChunks = 0;
+    final audioFile = File('${Directory.systemTemp.path}/ella-voice-incomplete-test.bin');
+    addTearDown(() async {
+      if (await audioFile.exists()) await audioFile.delete();
+    });
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      voiceTempFileSaver: (bytes, startTime, frameSize) async => audioFile..writeAsBytesSync([1, 2, 3]),
+      voiceChatStreamSender: (files, {expectedAuthenticatedUid, exactAuthority}) async* {
+        yield ServerMessageChunk('partial-a', 'must never appear', MessageChunkType.data);
+      },
+    );
+
+    await provider.sendVoiceMessageStreamToServer(
+      [
+        [1, 2, 3],
+      ],
+      onFirstChunkRecived: () => firstChunks++,
+    );
+
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.incompleteStream);
+    expect(firstChunks, 0);
   });
 
   test('account switch during conversation reprocessing cannot persist account A result under B', () async {
@@ -772,8 +834,7 @@ void main() {
     StandardVoiceTurnResult? result;
     final provider = MessageProvider(activeAuthority: () => _activeAuthority('uid-a', () => current));
     final coordinator = StandardVoiceTurnCoordinator(
-      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) =>
-          Stream.value(ServerMessageChunk('reply-a', 'Account A reply', MessageChunkType.data)),
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) => _completedVoiceStream('Account A reply'),
       synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) {
         synthesisStarted.complete();
         return releaseSynthesis.future;
@@ -820,8 +881,7 @@ void main() {
     StandardVoiceTurnResult? result;
     final provider = MessageProvider(activeAuthority: () => _activeAuthority('uid-a', () => true));
     final coordinator = StandardVoiceTurnCoordinator(
-      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) =>
-          Stream.value(ServerMessageChunk('reply-a', 'Current reply', MessageChunkType.data)),
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) => _completedVoiceStream('Current reply'),
       synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async => audio.path,
     );
 
@@ -881,6 +941,41 @@ void main() {
     expect(result.failure?.kind, ClientApiFailureKind.workspaceRequired);
     expect(result.reply, isEmpty);
     expect(commits, 0);
+    expect(syntheses, 0);
+    expect(playbacks, 0);
+  });
+
+  test('premature standard voice EOF is never committed synthesized or spoken', () async {
+    var commits = 0;
+    var replies = 0;
+    var syntheses = 0;
+    var playbacks = 0;
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+        yield ServerMessageChunk('partial-a', 'must never be spoken', MessageChunkType.data);
+      },
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async {
+        syntheses++;
+        return null;
+      },
+    );
+
+    final result = await coordinator.run(
+      transcript: 'private question',
+      authority: _activeAuthority('uid-a', () => true),
+      commitMessages: (_, __) {
+        commits++;
+        return true;
+      },
+      onReplyReady: (_) => replies++,
+      playFile: (_) async => playbacks++,
+      speakOnDevice: (_) async => playbacks++,
+    );
+
+    expect(result.failure?.kind, ClientApiFailureKind.incompleteStream);
+    expect(result.reply, isEmpty);
+    expect(commits, 0);
+    expect(replies, 0);
     expect(syntheses, 0);
     expect(playbacks, 0);
   });
@@ -1323,6 +1418,14 @@ ServerMessage _voiceMessage(String id, String text, MessageSender sender) => Ser
       const [],
       fromVoice: true,
     );
+
+Stream<ServerMessageChunk> _completedVoiceStream(String text) {
+  final message = _voiceMessage('reply-a', text, MessageSender.ai);
+  return Stream.fromIterable([
+    ServerMessageChunk(message.id, text, MessageChunkType.data),
+    ServerMessageChunk(message.id, text, MessageChunkType.done, message: message),
+  ]);
+}
 
 class _DelayedDiscoverer implements DeviceDiscoverer {
   _DelayedDiscoverer(this._stop);

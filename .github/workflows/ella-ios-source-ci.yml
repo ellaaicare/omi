@@ -22,6 +22,11 @@ on:
       - backend/tests/unit/test_guardian_notification_delivery.py
       - .github/workflows/ella-ios-source-ci.yml
   workflow_dispatch:
+    inputs:
+      immutable_base_sha:
+        description: Immutable ancestor SHA used for the complete source-stack diff
+        required: true
+        type: string
 
 concurrency:
   group: ella-ios-source-ci-${{ github.event.pull_request.number || github.ref }}
@@ -68,15 +73,28 @@ jobs:
 
       - name: Diff and signing artifact scan
         working-directory: .
+        env:
+          ELLA_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ELLA_DISPATCH_BASE_SHA: ${{ inputs.immutable_base_sha }}
         run: |
           set -euo pipefail
 
-          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-            base_ref="origin/${GITHUB_BASE_REF}"
-            git fetch --no-tags --prune origin "${GITHUB_BASE_REF}"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="${ELLA_PR_BASE_SHA}"
           else
-            base_ref="HEAD~1"
+            base_ref="${ELLA_DISPATCH_BASE_SHA}"
           fi
+
+          [[ "$base_ref" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character immutable base SHA." >&2
+            exit 1
+          }
+          git cat-file -e "${base_ref}^{commit}"
+          git merge-base --is-ancestor "$base_ref" HEAD || {
+            echo "Source CI base $base_ref is not an ancestor of HEAD $(git rev-parse HEAD)." >&2
+            exit 1
+          }
+          printf '%s\n' "$base_ref" > /tmp/ella-ios-source-ci-base-ref.txt
 
           git diff --check "${base_ref}...HEAD"
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
@@ -101,11 +119,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-            base_ref="origin/${GITHUB_BASE_REF}"
-          else
-            base_ref="HEAD~1"
-          fi
+          base_ref="$(cat /tmp/ella-ios-source-ci-base-ref.txt)"
 
           git diff --unified=0 "${base_ref}...HEAD" > /tmp/ella-ios-source-ci.diff
           secret_patterns='(-----BEGIN ((RSA|DSA|EC|OPENSSH) )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{36,}|sk-(live|test)-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})'
