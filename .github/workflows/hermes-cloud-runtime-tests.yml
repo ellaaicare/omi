@@ -465,6 +465,7 @@ jobs:
               tests/unit/test_ella_incident_1182_callback_auth.py \
               tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
               tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source \
+              tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload \
               tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
               tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes \
               tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write \
@@ -497,6 +498,7 @@ jobs:
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_dashboard_signing_has_no_source_fallback"
             "tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py::test_voice_diagnostics_require_exact_firebase_bearer"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
             "tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes"
             "tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write"
@@ -510,12 +512,13 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 31
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 32
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
             tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
             tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source \
+            tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload \
             tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
             tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes \
             tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write \
@@ -577,6 +580,7 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
             "tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes"
             "tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write"
@@ -615,7 +619,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 509
+          test "$collected" -eq 510
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

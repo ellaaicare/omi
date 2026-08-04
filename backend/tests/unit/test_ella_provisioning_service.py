@@ -1,7 +1,10 @@
 import ast
 import asyncio
 import copy
+import os
 import re
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -539,6 +542,95 @@ def test_attestation_key_separation_tracks_runtime_credential_lookups_from_sourc
                 binding_id="binding-a",
                 job_id="job-a",
             )
+
+
+def test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload():
+    backend_root = Path(__file__).resolve().parents[2]
+    probe = """
+import importlib
+import os
+import sys
+
+module_name, environment_name, attribute_name, header_mode = sys.argv[1:]
+retained = "synthetic-retained-honcho-authority-value-A"
+replacement = "synthetic-current-honcho-authority-value-B"
+os.environ[environment_name] = retained
+module = importlib.import_module(module_name)
+os.environ[environment_name] = replacement
+
+if header_mode == "correction":
+    would_send_retained = module._honcho_headers(getattr(module, attribute_name)).get("Authorization") == (
+        f"Bearer {retained}"
+    )
+elif header_mode == "voice":
+    would_send_retained = module._headers().get("Authorization") == f"Bearer {retained}"
+else:
+    captured = {}
+
+    class SyntheticResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def synthetic_urlopen(request, *, timeout):
+        captured["authorization"] = request.get_header("Authorization")
+        return SyntheticResponse()
+
+    module.urlopen = synthetic_urlopen
+    module._safe_json_url("https://synthetic.invalid/profile-map")
+    would_send_retained = captured.get("authorization") == f"Bearer {retained}"
+assert would_send_retained
+
+os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = retained
+from database.honcho_attestation import HonchoAttestationError, create_challenge
+
+try:
+    create_challenge(
+        firebase_uid="synthetic-user",
+        account_owner_id="synthetic-owner",
+        runtime_target_id="synthetic-target",
+        binding_id="synthetic-binding",
+        job_id="synthetic-job",
+    )
+except HonchoAttestationError as exc:
+    assert exc.code == "honcho_attestation_key_conflict"
+else:
+    raise AssertionError("retained Honcho authority was hidden by environment reload")
+"""
+    consumers = (
+        (
+            "ella.services.correction_honcho_contract",
+            "ELLA_CORRECTION_HONCHO_API_KEY",
+            "HONCHO_API_KEY",
+            "correction",
+        ),
+        ("ella.services.voice_honcho", "ELLA_VOICE_HONCHO_API_KEY", "HONCHO_API_KEY", "voice"),
+        (
+            "ella.services.correction_honcho_contract",
+            "ELLA_CORRECTION_HONCHO_PROFILE_MAP_TOKEN",
+            "HONCHO_PROFILE_MAP_URL_TOKEN",
+            "cached",
+        ),
+    )
+    for module_name, environment_name, attribute_name, header_mode in consumers:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(backend_root)
+        environment.setdefault("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+        environment.setdefault("GOOGLE_CLOUD_PROJECT", "synthetic-local")
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, module_name, environment_name, attribute_name, header_mode],
+            cwd=backend_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"retained authority protection failed for {module_name}:{attribute_name}"
 
 
 def test_attestation_window_covers_max_slow_response_and_rejects_invalid_config(monkeypatch):

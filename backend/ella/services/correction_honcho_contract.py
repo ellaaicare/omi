@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 import httpx
 from pydantic import BaseModel, Field
 
+from database.honcho_attestation import authority_credential
 from ella.services import proposal_ingest
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 
@@ -44,7 +45,7 @@ HONCHO_FACT_WRITE_TRANSPORT = os.getenv("ELLA_CORRECTION_HONCHO_FACT_WRITE_TRANS
 HONCHO_BASE_URL = (
     os.getenv("ELLA_CORRECTION_HONCHO_BASE_URL") or os.getenv("HONCHO_BASE_URL") or "http://127.0.0.1:8320"
 ).rstrip("/")
-HONCHO_API_KEY = os.getenv("ELLA_CORRECTION_HONCHO_API_KEY") or os.getenv("HONCHO_API_KEY") or ""
+HONCHO_API_KEY = authority_credential("ELLA_CORRECTION_HONCHO_API_KEY", "HONCHO_API_KEY", strip=False)
 HONCHO_WORKSPACE = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE") or os.getenv("HONCHO_WORKSPACE") or ""
 HONCHO_WORKSPACE_PREFIX = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE_PREFIX", "ella-correction-facts")
 HONCHO_OBSERVER_PEER_ID = (
@@ -56,7 +57,7 @@ HONCHO_OBSERVED_PEER_ID = (
 HONCHO_PROFILE_MAP_JSON = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_JSON", "")
 HONCHO_PROFILE_MAP_PATH = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_PATH", "")
 HONCHO_PROFILE_MAP_URL = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_URL", "")
-HONCHO_PROFILE_MAP_URL_TOKEN = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_TOKEN", "")
+HONCHO_PROFILE_MAP_URL_TOKEN = authority_credential("ELLA_CORRECTION_HONCHO_PROFILE_MAP_TOKEN", strip=False)
 HONCHO_PROFILE_MAP_URL_TTL_SECONDS = float(os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_URL_TTL_SECONDS", "30"))
 HONCHO_PROFILE_CONFIG_PATH = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_CONFIG_PATH", "")
 HONCHO_PROFILE_UID = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_UID", "")
@@ -239,9 +240,7 @@ def _target_from_profile_map_data(uid: str, data: Any) -> dict[str, str] | None:
         for entry in data:
             if not isinstance(entry, dict):
                 continue
-            entry_uid = str(
-                entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or ""
-            ).strip()
+            entry_uid = str(entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or "").strip()
             if entry_uid != uid:
                 continue
             target = _profile_target_from_entry(entry)
@@ -310,9 +309,7 @@ def resolve_companion_honcho_target(
     return (
         {
             "workspace": target["workspace"],
-            "observer_peer_id": _honcho_resource_id(
-                target.get("observer_peer_id") or "ella-correction-observer"
-            ),
+            "observer_peer_id": _honcho_resource_id(target.get("observer_peer_id") or "ella-correction-observer"),
             "observed_peer_id": target["observed_peer_id"],
             "source": target.get("source") or "companion_profile",
         },
