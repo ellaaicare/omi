@@ -126,6 +126,7 @@ jobs:
           "httpx==0.28.0"
           "PyJWT==2.9.0"
           "pydantic==2.8.2"
+          "python-multipart==0.0.9"
           "pytest==8.3.2"
           "websockets==12.0"
 
@@ -154,6 +155,8 @@ jobs:
 
       - name: Run unit and PostgreSQL security tests
         run: |
+          set -euo pipefail
+
           collected="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
