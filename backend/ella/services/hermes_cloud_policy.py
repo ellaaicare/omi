@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from database.honcho_attestation import authority_credential, retain_authority_credential
 from database.runtime_targets import RuntimeTargetLineage
 from ella.services import ai_consent
 from ella.services.runtime_errors import ProvisioningError
@@ -224,7 +225,9 @@ class ApprovedRuntimeManifestStore:
         reader: Callable[[Path], str] = lambda path: path.read_text(encoding="utf-8"),
     ):
         self.path = path or os.getenv("ELLA_HERMES_CLOUD_APPROVED_MANIFEST_PATH", "")
-        self.signing_key = signing_key or os.getenv("ELLA_HERMES_CLOUD_APPROVAL_SIGNING_KEY", "")
+        self.signing_key = retain_authority_credential(signing_key) or authority_credential(
+            "ELLA_HERMES_CLOUD_APPROVAL_SIGNING_KEY", strip=False
+        )
         self.reader = reader
 
     def load(self) -> ApprovedRuntimeManifest:

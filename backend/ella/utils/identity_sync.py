@@ -47,6 +47,7 @@ try:
 except ImportError:  # pragma: no cover - the synchronous helper remains stdlib-only
     httpx = None
 
+from database.honcho_attestation import authority_credential
 from ella.utils.provision_authority import (
     ProvisionAuthorityError,
     ProvisionAuthoritySnapshot,
@@ -60,7 +61,7 @@ logger = logging.getLogger("ella.identity_sync")
 POSTGRES_HOST = os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1")
 POSTGRES_PORT = int(os.getenv("ELLA_POSTGRES_PORT", "5433"))
 POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.getenv("ELLA_POSTGRES_PASSWORD", "postgres")
+POSTGRES_PASSWORD = authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False)
 POSTGRES_DB = os.getenv("ELLA_POSTGRES_DB", "ella_ai")
 
 STATE_FILE = Path(os.getenv("IDENTITY_SYNC_STATE_FILE", os.path.expanduser("~/.ella-identity-sync-state.json")))

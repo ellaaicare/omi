@@ -96,16 +96,14 @@ VOICE_CANARY_ENFORCEMENT_ENABLED = os.getenv(
     "ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED",
     "true",
 ).strip().lower() in {"1", "true", "yes", "on"}
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+ELEVENLABS_API_KEY = authority_credential("ELEVENLABS_API_KEY", strip=False)
+XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_TTS_VOICE_ID = os.getenv("XAI_TTS_VOICE_ID", "eve")
 XAI_TTS_LANGUAGE = os.getenv("XAI_TTS_LANGUAGE", "en")
 XAI_TTS_OPTIMIZE_STREAMING_LATENCY = int(os.getenv("XAI_TTS_OPTIMIZE_STREAMING_LATENCY", "1"))
-INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
+INWORLD_API_KEY = authority_credential("INWORLD_API_KEY", strip=False)
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 ELLA_KOKORO_TTS_URL = os.getenv("ELLA_KOKORO_TTS_URL", "http://100.76.138.56:8931")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
@@ -423,7 +421,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=2,
             max_size=10,

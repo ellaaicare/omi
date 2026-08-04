@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ella", tags=["ella-chat"])
 
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_CHAT_MODEL = os.getenv("ELLA_GROK_CHAT_MODEL", "grok-3-mini")
 

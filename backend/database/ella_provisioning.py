@@ -18,6 +18,7 @@ from database import voice_canary as voice_canary_db
 from database.honcho_attestation import (
     ATTESTATION_VERSION,
     HonchoAttestationError,
+    authority_credential,
     observed_runtime_fields,
     verify_persisted_attestation,
 )
@@ -336,7 +337,7 @@ async def get_pool() -> asyncpg.Pool:
             host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
             port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
             user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
             min_size=1,
             max_size=10,

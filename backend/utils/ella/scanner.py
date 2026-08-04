@@ -15,6 +15,8 @@ from typing import List, Optional
 
 import requests
 
+from database.honcho_attestation import authority_credential
+
 from .config import ELLA_CONFIG
 
 GUARDIAN_TRACE_LOG_URL = os.getenv(
@@ -24,10 +26,10 @@ GUARDIAN_TRACE_LOG_URL = os.getenv(
 ELLA_POSTGRES_HOST = os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1")
 ELLA_POSTGRES_PORT = int(os.getenv("ELLA_POSTGRES_PORT", "5433"))
 ELLA_POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
-ELLA_POSTGRES_PASSWORD = os.getenv("ELLA_POSTGRES_PASSWORD", "postgres")
+ELLA_POSTGRES_PASSWORD = authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False)
 ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
 GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
-GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "")
+GUARDIAN_WEBHOOK_KEY = authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
 GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
     "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
     "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",

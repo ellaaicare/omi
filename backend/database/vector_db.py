@@ -7,13 +7,14 @@ from typing import List, Optional
 
 from pinecone import Pinecone
 
+from database.honcho_attestation import authority_credential
 from models.conversation import Conversation
 from utils.llm.clients import embeddings
 
 logger = logging.getLogger(__name__)
 
-if os.getenv('PINECONE_API_KEY') is not None:
-    pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY', ''))
+if 'PINECONE_API_KEY' in os.environ:
+    pc = Pinecone(api_key=authority_credential('PINECONE_API_KEY', strip=False))
     index = pc.Index(os.getenv('PINECONE_INDEX_NAME', ''))
 else:
     index = None

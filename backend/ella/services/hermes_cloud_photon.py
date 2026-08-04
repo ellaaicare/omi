@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
+from database.honcho_attestation import authority_credential, retain_authority_credential
 from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER
 from ella.routers.canonical_events import CanonicalEventStore
 from ella.services.hermes_cloud import HermesCloudClient
@@ -87,18 +88,18 @@ class PhotonAdapterConfig:
 
     @classmethod
     def from_env(cls) -> "PhotonAdapterConfig":
-        synthetic_message_keys = frozenset(
-            item.strip().lower()
-            for item in os.getenv(
-                "ELLA_HERMES_CLOUD_PHOTON_SYNTHETIC_MESSAGE_KEYS",
-                "",
-            ).split(",")
-            if item.strip()
+        raw_synthetic_message_keys = authority_credential(
+            "ELLA_HERMES_CLOUD_PHOTON_SYNTHETIC_MESSAGE_KEYS", strip=False
         )
+        synthetic_message_keys = frozenset(
+            item.strip().lower() for item in raw_synthetic_message_keys.split(",") if item.strip()
+        )
+        for synthetic_message_key in synthetic_message_keys:
+            retain_authority_credential(synthetic_message_key)
         return cls(
             enabled=os.getenv("ELLA_HERMES_CLOUD_PHOTON_ENABLED", "false").strip().lower() in TRUE_VALUES,
             internal_owner_uid=os.getenv("ELLA_HERMES_CLOUD_PHOTON_INTERNAL_OWNER_UID", "").strip(),
-            identity_hmac_key=os.getenv("ELLA_HERMES_CLOUD_PHOTON_IDENTITY_HMAC_KEY", ""),
+            identity_hmac_key=authority_credential("ELLA_HERMES_CLOUD_PHOTON_IDENTITY_HMAC_KEY", strip=False),
             approved_policy_commit_sha=os.getenv("ELLA_HERMES_CLOUD_PHOTON_APPROVED_POLICY_SHA", "").strip().lower(),
             command_tier_version=os.getenv(
                 "ELLA_HERMES_CLOUD_PHOTON_COMMAND_TIER_VERSION",

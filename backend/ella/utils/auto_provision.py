@@ -17,6 +17,7 @@ from typing import Optional
 import asyncpg
 import httpx
 
+from database.honcho_attestation import authority_credential
 from ella.utils.provision_authority import (
     ProvisionAuthorityError,
     ProvisionAuthoritySnapshot,
@@ -70,7 +71,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=2,
             max_size=10,

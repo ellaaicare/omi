@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from ella.routers.resolve import resolve_user_routing
 from database import app_settings as app_settings_db
 from database.ella_provisioning import EllaProvisioningRepository
+from database.honcho_attestation import authority_credential
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.hermes_cloud import HermesCloudClient
@@ -75,7 +76,7 @@ alerts_router = APIRouter(prefix="/v1/ella", tags=["Guardian Mode"])
 
 AUDIO_BASE_DIR = "/var/www/ella-ai-care.com/audio"
 AUDIO_PUBLIC_URL = "https://ella-ai-care.com/audio"
-GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "")
+GUARDIAN_WEBHOOK_KEY = authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
 SMTP_FROM = os.getenv("ELLA_SMTP_FROM", "guardian@ella-ai-care.com")
 N8N_GUARDIAN_DELIVER_WEBHOOK = os.getenv(
     "N8N_GUARDIAN_DELIVER_WEBHOOK",
@@ -83,14 +84,14 @@ N8N_GUARDIAN_DELIVER_WEBHOOK = os.getenv(
 )
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 ELLA_INTERNAL_VOICE_TTS_URL = os.getenv("ELLA_INTERNAL_VOICE_TTS_URL", "http://127.0.0.1:8000/v1/voice/tts")
-ELLA_INTERNAL_VOICE_TTS_TOKEN = os.getenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", "")
+ELLA_INTERNAL_VOICE_TTS_TOKEN = authority_credential("ELLA_INTERNAL_VOICE_TTS_TOKEN", strip=False)
 
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
 
 # Provision API for chat history lookups
 _PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-_PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+_PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 _GUARDIAN_CONTEXT_CHANNELS = [
     channel.strip()
     for channel in os.getenv("ELLA_GUARDIAN_CANONICAL_CHANNELS", ",".join(DEFAULT_CONTEXT_CHANNELS)).split(",")
@@ -98,8 +99,8 @@ _GUARDIAN_CONTEXT_CHANNELS = [
 ]
 
 # LLM settings for consolidator — prefers OpenRouter, falls back to XAI direct
-_OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
-_LLM_API_KEY = _OPENROUTER_KEY or os.getenv("XAI_API_KEY", "")
+_OPENROUTER_KEY = authority_credential("OPENROUTER_API_KEY", strip=False)
+_LLM_API_KEY = _OPENROUTER_KEY or authority_credential("XAI_API_KEY", strip=False)
 _LLM_API_BASE = "https://openrouter.ai/api/v1" if _OPENROUTER_KEY else "https://api.x.ai/v1"
 _LLM_MODEL = "x-ai/grok-4.1-fast" if _OPENROUTER_KEY else "grok-4-1-fast-non-reasoning"
 _GUARDIAN_CLOUD_TARGET_MODE = "hermes-cloud-guardian"
@@ -169,7 +170,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=2,
             max_size=10,

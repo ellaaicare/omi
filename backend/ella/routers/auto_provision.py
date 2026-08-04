@@ -21,6 +21,7 @@ import asyncpg
 import httpx
 
 from database.ella_provisioning import EllaProvisioningRepository
+from database.honcho_attestation import authority_credential
 from ella.services import runtime_resolver
 from ella.services.provisioning import ProvisioningError
 
@@ -30,9 +31,9 @@ logger = logging.getLogger("ella.auto_provision")
 _pool: Optional[asyncpg.Pool] = None
 
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 OPENCLAW_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
 
 
 def _slugify(s: str) -> str:
@@ -48,7 +49,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=2,
             max_size=10,

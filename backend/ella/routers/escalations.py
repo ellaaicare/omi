@@ -17,6 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from utils.other import endpoints as auth_endpoints
 
+from database.honcho_attestation import authority_credential
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
@@ -28,9 +29,10 @@ from ella.services.escalation_policy import (
 
 router = APIRouter(prefix="/v1/ella/escalations", tags=["Ella Escalations"])
 
-ESCALATION_WEBHOOK_KEY = os.getenv(
-    "ELLA_ESCALATION_WEBHOOK_KEY",
-    os.getenv("GUARDIAN_WEBHOOK_KEY", ""),
+ESCALATION_WEBHOOK_KEY = (
+    authority_credential("ELLA_ESCALATION_WEBHOOK_KEY", strip=False)
+    if "ELLA_ESCALATION_WEBHOOK_KEY" in os.environ
+    else authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
 )
 
 _pool: Optional[asyncpg.Pool] = None
@@ -56,7 +58,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=1,
             max_size=5,

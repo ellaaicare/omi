@@ -476,7 +476,7 @@ def test_attestation_key_separation_tracks_runtime_credential_lookups_from_sourc
         )
 
     discovered = set()
-    for relative_root in ("database", "ella", "utils/ella"):
+    for relative_root in ("database", "ella", "routers", "utils/ella"):
         for source_path in (backend_root / relative_root).rglob("*.py"):
             if source_path.name == "honcho_attestation.py":
                 continue
@@ -546,27 +546,206 @@ def test_attestation_key_separation_tracks_runtime_credential_lookups_from_sourc
 
 def test_attestation_key_separation_retains_real_honcho_consumer_authorities_after_env_reload():
     backend_root = Path(__file__).resolve().parents[2]
+    credential_name = re.compile(
+        r"^(?!(?:ELLA_HERMES_PROVISION_ATTESTATION_KEY)$)[A-Z][A-Z0-9_]*(?:_KEYS?|_TOKENS?|_SECRET|_PASSWORD)$"
+    )
+
+    def raw_credential_call(node, *, os_aliases, environ_aliases, getenv_aliases):
+        candidate = None
+        if isinstance(node, ast.Call) and node.args:
+            function = node.func
+            direct_getenv = isinstance(function, ast.Name) and function.id in getenv_aliases
+            qualified_getenv = (
+                isinstance(function, ast.Attribute)
+                and function.attr == "getenv"
+                and isinstance(function.value, ast.Name)
+                and function.value.id in os_aliases
+            )
+            environ_get = (
+                isinstance(function, ast.Attribute)
+                and function.attr == "get"
+                and (
+                    (isinstance(function.value, ast.Name) and function.value.id in environ_aliases)
+                    or (
+                        isinstance(function.value, ast.Attribute)
+                        and function.value.attr == "environ"
+                        and isinstance(function.value.value, ast.Name)
+                        and function.value.value.id in os_aliases
+                    )
+                )
+            )
+            if direct_getenv or qualified_getenv or environ_get:
+                candidate = node.args[0]
+        elif isinstance(node, ast.Subscript):
+            is_environment = (
+                isinstance(node.value, ast.Name)
+                and node.value.id in environ_aliases
+                or (
+                    isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "environ"
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id in os_aliases
+                )
+            )
+            if is_environment:
+                candidate = node.slice
+        if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str):
+            return candidate.value if credential_name.fullmatch(candidate.value) else None
+        return None
+
+    raw_retained = []
+    for relative_root in ("database", "ella", "utils/ella"):
+        for source_path in (backend_root / relative_root).rglob("*.py"):
+            if source_path.name == "honcho_attestation.py":
+                continue
+            source_tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            os_aliases = {
+                alias.asname or alias.name
+                for node in source_tree.body
+                if isinstance(node, ast.Import)
+                for alias in node.names
+                if alias.name == "os"
+            }
+            environ_aliases = {
+                alias.asname or alias.name
+                for node in source_tree.body
+                if isinstance(node, ast.ImportFrom) and node.module == "os"
+                for alias in node.names
+                if alias.name == "environ"
+            }
+            getenv_aliases = {
+                alias.asname or alias.name
+                for node in source_tree.body
+                if isinstance(node, ast.ImportFrom) and node.module == "os"
+                for alias in node.names
+                if alias.name == "getenv"
+            }
+            parents = {child: parent for parent in ast.walk(source_tree) for child in ast.iter_child_nodes(parent)}
+            for node in ast.walk(source_tree):
+                environment_name = raw_credential_call(
+                    node,
+                    os_aliases=os_aliases,
+                    environ_aliases=environ_aliases,
+                    getenv_aliases=getenv_aliases,
+                )
+                if not environment_name:
+                    continue
+                ancestors = []
+                current = node
+                while current in parents:
+                    current = parents[current]
+                    ancestors.append(current)
+                    if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+                        break
+                scope = ancestors[-1]
+                statement = next(
+                    (item for item in ancestors if isinstance(item, (ast.Assign, ast.AnnAssign, ast.Return))),
+                    None,
+                )
+                if isinstance(scope, ast.Module):
+                    value = statement.value if isinstance(statement, (ast.Assign, ast.AnnAssign)) else None
+                    if not isinstance(value, ast.Compare):
+                        raw_retained.append((source_path.relative_to(backend_root), node.lineno, environment_name))
+                    continue
+                if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                global_names = {name for item in scope.body if isinstance(item, ast.Global) for name in item.names}
+                assigned_targets = []
+                if isinstance(statement, ast.Assign):
+                    assigned_targets = statement.targets
+                elif isinstance(statement, ast.AnnAssign):
+                    assigned_targets = [statement.target]
+                assigns_retained_attribute = any(isinstance(target, ast.Attribute) for target in assigned_targets)
+                assigns_global = any(
+                    isinstance(target, ast.Name) and target.id in global_names for target in assigned_targets
+                )
+                persistent_factory = any(
+                    isinstance(item, ast.Call)
+                    and (
+                        (
+                            isinstance(item.func, ast.Attribute)
+                            and item.func.attr in {"create_pool", "Redis", "Pinecone"}
+                        )
+                        or (isinstance(item.func, ast.Name) and item.func.id in {"Redis", "Pinecone"})
+                    )
+                    for item in ancestors
+                )
+                retained_config_factory = scope.name == "from_env"
+                if assigns_retained_attribute or assigns_global or persistent_factory or retained_config_factory:
+                    raw_retained.append((source_path.relative_to(backend_root), node.lineno, environment_name))
+
+    assert raw_retained == []
+
     probe = """
+import asyncio
 import importlib
+import json
 import os
 import sys
+import types
 
-module_name, environment_name, attribute_name, header_mode = sys.argv[1:]
+module_name, environment_name, mode = sys.argv[1:]
 retained = "synthetic-retained-honcho-authority-value-A"
 replacement = "synthetic-current-honcho-authority-value-B"
-os.environ[environment_name] = retained
+attestation = retained.lower() if mode == "photon-comma" else retained
+initial = f" {retained} " if mode == "chat-xai-whitespace" else retained
+if mode == "photon-comma":
+    initial = f"{'a' * 64},{retained},{'b' * 64}"
+if mode in {"guardian-tts", "guardian-service"}:
+    os.environ.setdefault("GUARDIAN_WEBHOOK_KEY", "synthetic-distinct-guardian-service-key-000001")
+if mode == "guardian-xai":
+    os.environ.pop("OPENROUTER_API_KEY", None)
+os.environ[environment_name] = initial
+
+captured = {}
+if mode.startswith("voice-"):
+    fake_stripe = types.ModuleType("stripe")
+    fake_stripe.Subscription = types.SimpleNamespace()
+    sys.modules["stripe"] = fake_stripe
+    fake_redis = types.ModuleType("redis")
+    fake_redis.Redis = lambda **kwargs: object()
+    sys.modules["redis"] = fake_redis
+    fake_conversations = types.ModuleType("database.conversations")
+    fake_conversations._decrypt_conversation_data = lambda value: value
+    sys.modules["database.conversations"] = fake_conversations
+elif mode == "redis":
+    fake_redis = types.ModuleType("redis")
+    fake_redis.Redis = lambda **kwargs: captured.update(kwargs) or object()
+    sys.modules["redis"] = fake_redis
+elif mode == "pinecone":
+    class SyntheticPinecone:
+        def __init__(self, *, api_key):
+            captured["api_key"] = api_key
+
+        def Index(self, name):
+            return object()
+
+    fake_pinecone = types.ModuleType("pinecone")
+    fake_pinecone.Pinecone = SyntheticPinecone
+    sys.modules["pinecone"] = fake_pinecone
+    fake_models = types.ModuleType("models")
+    fake_conversation = types.ModuleType("models.conversation")
+    fake_conversation.Conversation = object
+    fake_models.conversation = fake_conversation
+    sys.modules["models"] = fake_models
+    sys.modules["models.conversation"] = fake_conversation
+    fake_llm = types.ModuleType("utils.llm.clients")
+    fake_llm.embeddings = object()
+    sys.modules["utils.llm.clients"] = fake_llm
+
 module = importlib.import_module(module_name)
+retained_object = None
+if mode == "policy-signing":
+    retained_object = module.ApprovedRuntimeManifestStore(path="/synthetic", signing_key=None)
+elif mode in {"photon-identity", "photon-comma"}:
+    retained_object = module.PhotonAdapterConfig.from_env()
 os.environ[environment_name] = replacement
 
-if header_mode == "correction":
-    would_send_retained = module._honcho_headers(getattr(module, attribute_name)).get("Authorization") == (
-        f"Bearer {retained}"
-    )
-elif header_mode == "voice":
+if mode == "correction":
+    would_send_retained = module._honcho_headers(module.HONCHO_API_KEY).get("Authorization") == f"Bearer {retained}"
+elif mode == "voice-honcho":
     would_send_retained = module._headers().get("Authorization") == f"Bearer {retained}"
-else:
-    captured = {}
-
+elif mode == "profile-map":
     class SyntheticResponse:
         def __enter__(self):
             return self
@@ -584,8 +763,469 @@ else:
     module.urlopen = synthetic_urlopen
     module._safe_json_url("https://synthetic.invalid/profile-map")
     would_send_retained = captured.get("authorization") == f"Bearer {retained}"
+elif mode in {"auto-provision", "auto-gateway"}:
+    class SyntheticPool:
+        async def fetchrow(self, *args):
+            return {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "cluster_id": None,
+                "name": "Synthetic",
+                "email": None,
+                "timezone": "UTC",
+                "conditions": [],
+                "medications": [],
+                "identities": {},
+            }
+
+        async def execute(self, query, *args):
+            captured["cluster"] = json.loads(args[1])
+
+    async def synthetic_pool():
+        return SyntheticPool()
+
+    async def disabled(uid):
+        return False
+
+    class SyntheticProvisionResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"provisionedAt": "2026-01-01T00:00:00Z"}
+
+    class SyntheticAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            captured["authorization"] = kwargs["headers"].get("Authorization")
+            return SyntheticProvisionResponse()
+
+    module._get_pool = synthetic_pool
+    module.runtime_resolver.runtime_authority_enabled = disabled
+    module.httpx.AsyncClient = SyntheticAsyncClient
+    result = asyncio.run(module.auto_provision_user("synthetic-user"))
+    assert result["success"] is True
+    would_send_retained = (
+        captured.get("authorization") == f"Bearer {retained}"
+        if mode == "auto-provision"
+        else captured.get("cluster", {}).get("gatewayToken") == retained
+    )
+elif mode in {"chat-xai", "chat-xai-whitespace"}:
+    class SyntheticStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_lines(self):
+            if False:
+                yield ""
+
+    class SyntheticAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, *args, **kwargs):
+            captured["authorization"] = kwargs["headers"]["Authorization"]
+            return SyntheticStreamResponse()
+
+    module.httpx.AsyncClient = SyntheticAsyncClient
+
+    async def consume():
+        async for _ in module._stream_level_2_grok("hello"):
+            pass
+
+    asyncio.run(consume())
+    would_send_retained = captured.get("authorization") == f"Bearer {initial}"
+elif mode == "guardian-service":
+    module._verify_key(initial, None)
+    would_send_retained = True
+elif mode == "guardian-provision":
+    async def no_timeline(*args, **kwargs):
+        return []
+
+    async def disabled(uid):
+        return False
+
+    async def resolved(uid):
+        return {"routing": {"agentId": "ella-synthetic"}}
+
+    class SyntheticResponse:
+        status_code = 200
+
+        def json(self):
+            return {"messages": []}
+
+    class SyntheticAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, *args, **kwargs):
+            captured["authorization"] = kwargs["headers"].get("Authorization")
+            return SyntheticResponse()
+
+    module.fetch_canonical_timeline = no_timeline
+    module.runtime_authority_enabled = disabled
+    module.resolve_user_routing = resolved
+    module.httpx.AsyncClient = SyntheticAsyncClient
+    asyncio.run(module._get_recent_chat_turns("synthetic-user"))
+    would_send_retained = captured.get("authorization") == f"Bearer {retained}"
+elif mode in {"guardian-openrouter", "guardian-xai"}:
+    async def disabled(uid):
+        return False
+
+    class SyntheticResponse:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class SyntheticAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            captured["authorization"] = kwargs["headers"]["Authorization"]
+            return SyntheticResponse()
+
+    module.assert_current_ai_consent = lambda uid: None
+    module.runtime_authority_enabled = disabled
+    module.httpx.AsyncClient = SyntheticAsyncClient
+    asyncio.run(module._consolidate_queue("synthetic-user", [{"message": "one"}], [], []))
+    would_send_retained = captured.get("authorization") == f"Bearer {retained}"
+elif mode == "guardian-tts":
+    class SyntheticResponse:
+        status_code = 200
+        content = b"audio"
+        headers = {"content-type": "audio/mpeg"}
+
+    class SyntheticAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            captured["token"] = kwargs["headers"].get("X-Ella-Internal-Token")
+            return SyntheticResponse()
+
+    module.app_settings_db.get_voice_settings = lambda uid: {}
+    module.build_effective_voice_settings = lambda uid, settings: {
+        "effective_voice_settings": {"voice_mode": "v3-rich", "fallback_used": False}
+    }
+    module._guardian_tts_candidates = lambda effective, requested: ["elevenlabs"]
+    module.httpx.AsyncClient = SyntheticAsyncClient
+    request = module.SynthesizeRequest(uid="synthetic-user", text="hello")
+    asyncio.run(module.synthesize_audio(request, "synthetic-distinct-guardian-service-key-000001", None))
+    would_send_retained = captured.get("token") == retained
+elif mode in {"voice-xai", "voice-inworld", "voice-elevenlabs"}:
+    class SyntheticResponse:
+        status_code = 200
+        content = b"audio"
+        headers = {"content-type": "audio/mpeg"}
+        text = '{"result":{"audioContent":"YXVkaW8="}}'
+
+    class SyntheticAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            captured["headers"] = kwargs["headers"]
+            return SyntheticResponse()
+
+    module.httpx.AsyncClient = SyntheticAsyncClient
+    provider = {"voice-xai": "xai-tts", "voice-inworld": "inworld", "voice-elevenlabs": "elevenlabs"}[mode]
+    asyncio.run(module.synthesize_speech(module.TtsRequest(text="hello"), provider))
+    headers = captured["headers"]
+    actual = headers.get("Authorization") if mode != "voice-elevenlabs" else headers.get("xi-api-key")
+    expected = f"Bearer {retained}" if mode == "voice-xai" else f"Basic {retained}"
+    if mode == "voice-elevenlabs":
+        expected = retained
+    would_send_retained = actual == expected
+elif mode == "escalation":
+    would_send_retained = module._has_valid_service_key(None, retained, None)
+elif mode == "scanner":
+    module.requests.post = lambda *args, **kwargs: captured.update(kwargs["headers"])
+    module._log_trace_event("trace", "user", "stage", "ok")
+    would_send_retained = captured.get("X-Guardian-Key") == retained
+elif mode == "scanner-db":
+    class SyntheticCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, *args):
+            pass
+
+        def fetchone(self):
+            return ("off",)
+
+    class SyntheticConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def cursor(self):
+            return SyntheticCursor()
+
+        def close(self):
+            pass
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_psycopg2.connect = lambda **kwargs: captured.update(kwargs) or SyntheticConnection()
+    sys.modules["psycopg2"] = fake_psycopg2
+    module._insert_wake_ack_direct(
+        "synthetic-user",
+        "synthetic-trace",
+        {"id": "item", "url": "https://synthetic.invalid/audio", "metadata": {}},
+    )
+    would_send_retained = captured.get("password") == retained
+elif mode == "redis":
+    would_send_retained = captured.get("password") == retained
+elif mode == "pinecone":
+    would_send_retained = captured.get("api_key") == retained
+elif mode == "policy-signing":
+    would_send_retained = retained_object.signing_key == retained
+elif mode == "photon-identity":
+    expected = __import__("hmac").new(
+        retained.encode(), b"scope\x1fidentity", __import__("hashlib").sha256
+    ).hexdigest()
+    would_send_retained = retained_object.opaque_key("scope", "identity") == expected
+elif mode == "photon-comma":
+    would_send_retained = retained.lower() in retained_object.synthetic_message_keys
+else:
+    raise AssertionError("unknown retained-authority probe")
 assert would_send_retained
 
+os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = attestation
+from database.honcho_attestation import HonchoAttestationError, create_challenge
+
+try:
+    create_challenge(
+        firebase_uid="synthetic-user",
+        account_owner_id="synthetic-owner",
+        runtime_target_id="synthetic-target",
+        binding_id="synthetic-binding",
+        job_id="synthetic-job",
+    )
+except HonchoAttestationError as exc:
+    assert exc.code == "honcho_attestation_key_conflict"
+else:
+    raise AssertionError("retained authority was hidden by environment reload")
+"""
+    consumers = (
+        ("ella.services.correction_honcho_contract", "ELLA_CORRECTION_HONCHO_API_KEY", "correction"),
+        ("ella.services.correction_honcho_contract", "HONCHO_API_KEY", "correction"),
+        ("ella.services.voice_honcho", "ELLA_VOICE_HONCHO_API_KEY", "voice-honcho"),
+        ("ella.services.voice_honcho", "HONCHO_API_KEY", "voice-honcho"),
+        ("ella.services.correction_honcho_contract", "ELLA_CORRECTION_HONCHO_PROFILE_MAP_TOKEN", "profile-map"),
+        ("ella.routers.auto_provision", "ELLA_PROVISION_API_TOKEN", "auto-provision"),
+        ("ella.routers.auto_provision", "OPENCLAW_GATEWAY_TOKEN", "auto-gateway"),
+        ("ella.routers.chat", "XAI_API_KEY", "chat-xai"),
+        ("ella.routers.chat", "XAI_API_KEY", "chat-xai-whitespace"),
+        ("ella.routers.guardian", "GUARDIAN_WEBHOOK_KEY", "guardian-service"),
+        ("ella.routers.guardian", "ELLA_INTERNAL_VOICE_TTS_TOKEN", "guardian-tts"),
+        ("ella.routers.guardian", "ELLA_PROVISION_API_TOKEN", "guardian-provision"),
+        ("ella.routers.guardian", "OPENROUTER_API_KEY", "guardian-openrouter"),
+        ("ella.routers.guardian", "XAI_API_KEY", "guardian-xai"),
+        ("ella.routers.voice", "XAI_API_KEY", "voice-xai"),
+        ("ella.routers.voice", "INWORLD_API_KEY", "voice-inworld"),
+        ("ella.routers.voice", "ELEVENLABS_API_KEY", "voice-elevenlabs"),
+        ("ella.routers.escalations", "ELLA_ESCALATION_WEBHOOK_KEY", "escalation"),
+        ("ella.routers.escalations", "GUARDIAN_WEBHOOK_KEY", "escalation"),
+        ("utils.ella.scanner", "GUARDIAN_WEBHOOK_KEY", "scanner"),
+        ("utils.ella.scanner", "ELLA_POSTGRES_PASSWORD", "scanner-db"),
+        ("database.redis_db", "REDIS_DB_PASSWORD", "redis"),
+        ("database.vector_db", "PINECONE_API_KEY", "pinecone"),
+        ("ella.services.hermes_cloud_policy", "ELLA_HERMES_CLOUD_APPROVAL_SIGNING_KEY", "policy-signing"),
+        ("ella.services.hermes_cloud_photon", "ELLA_HERMES_CLOUD_PHOTON_IDENTITY_HMAC_KEY", "photon-identity"),
+        ("ella.services.hermes_cloud_photon", "ELLA_HERMES_CLOUD_PHOTON_SYNTHETIC_MESSAGE_KEYS", "photon-comma"),
+    )
+    for module_name, environment_name, mode in consumers:
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not credential_name.fullmatch(name) and name != "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
+        }
+        environment["PYTHONPATH"] = str(backend_root)
+        environment["ENCRYPTION_SECRET"] = "synthetic-distinct-encryption-authority-000000000001"
+        environment.setdefault("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+        environment.setdefault("GOOGLE_CLOUD_PROJECT", "synthetic-local")
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, module_name, environment_name, mode],
+            cwd=backend_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"retained authority protection failed for {module_name}:{mode}"
+
+    explicit_empty_probe = """
+import importlib
+import os
+import sys
+
+module_name, primary_name, fallback_name = sys.argv[1:]
+retained = "synthetic-unselected-fallback-authority-value-A"
+os.environ[primary_name] = ""
+os.environ[fallback_name] = retained
+module = importlib.import_module(module_name)
+configured = module.HONCHO_API_KEY if module_name.endswith("voice_honcho") else module.ESCALATION_WEBHOOK_KEY
+assert configured == ""
+if module_name.endswith("voice_honcho"):
+    raise SystemExit(0)
+os.environ[fallback_name] = "synthetic-current-fallback-authority-value-B"
+os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = retained
+from database.honcho_attestation import create_challenge
+
+create_challenge(
+    firebase_uid="synthetic-user",
+    account_owner_id="synthetic-owner",
+    runtime_target_id="synthetic-target",
+    binding_id="synthetic-binding",
+    job_id="synthetic-job",
+)
+"""
+    for module_name, primary_name, fallback_name in (
+        ("ella.services.voice_honcho", "ELLA_VOICE_HONCHO_API_KEY", "HONCHO_API_KEY"),
+        ("ella.routers.escalations", "ELLA_ESCALATION_WEBHOOK_KEY", "GUARDIAN_WEBHOOK_KEY"),
+    ):
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not credential_name.fullmatch(name) and name != "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
+        }
+        environment["PYTHONPATH"] = str(backend_root)
+        environment["ENCRYPTION_SECRET"] = "synthetic-distinct-encryption-authority-000000000001"
+        environment["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
+        environment["GOOGLE_CLOUD_PROJECT"] = "synthetic-local"
+        completed = subprocess.run(
+            [sys.executable, "-c", explicit_empty_probe, module_name, primary_name, fallback_name],
+            cwd=backend_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"primary presence semantics changed for {module_name}"
+
+    pool_probe = """
+import asyncio
+import importlib
+import os
+import sys
+import types
+
+module_name, getter_name, mode = sys.argv[1:]
+retained = "synthetic-retained-postgres-authority-value-A"
+replacement = "synthetic-current-postgres-authority-value-B"
+os.environ.pop("ELLA_POSTGRES_DSN", None)
+if mode == "dsn":
+    os.environ["ELLA_POSTGRES_DSN"] = retained
+else:
+    os.environ["ELLA_POSTGRES_PASSWORD"] = retained
+
+if module_name in {"ella.routers.callbacks", "ella.routers.voice"}:
+    fake_stripe = types.ModuleType("stripe")
+    fake_stripe.Subscription = types.SimpleNamespace()
+    sys.modules["stripe"] = fake_stripe
+    fake_redis = types.ModuleType("redis")
+    fake_redis.Redis = lambda **kwargs: object()
+    sys.modules["redis"] = fake_redis
+if module_name == "ella.routers.callbacks":
+    for dependency in ("database.conversations", "database.memories", "database.users"):
+        sys.modules[dependency] = types.ModuleType(dependency)
+    fake_database_client = types.ModuleType("database._client")
+    fake_database_client.db = object()
+    sys.modules["database._client"] = fake_database_client
+    fake_conversation_model = types.ModuleType("models.conversation")
+    fake_conversation_model.CategoryEnum = str
+    sys.modules["models.conversation"] = fake_conversation_model
+    fake_contacts = types.ModuleType("database.ella_contacts")
+    for name in ("create_contact", "delete_contact", "get_contact", "get_contacts", "update_contact"):
+        setattr(fake_contacts, name, lambda *args, **kwargs: None)
+    sys.modules["database.ella_contacts"] = fake_contacts
+    fake_config = types.ModuleType("ella.config")
+    fake_config.ELLA_CONFIG = object()
+    sys.modules["ella.config"] = fake_config
+    fake_sanitizer = types.ModuleType("ella.services.summary_sanitizer")
+    fake_sanitizer.SummarySanitizationError = type("SummarySanitizationError", (Exception,), {})
+    sys.modules["ella.services.summary_sanitizer"] = fake_sanitizer
+    fake_writeback = types.ModuleType("ella.services.summary_writeback")
+    fake_writeback.ConversationSummaryNotFoundError = type("ConversationSummaryNotFoundError", (Exception,), {})
+    fake_writeback.InvalidConversationSummaryCategoryError = type(
+        "InvalidConversationSummaryCategoryError", (Exception,), {}
+    )
+    fake_writeback.write_conversation_summary = lambda *args, **kwargs: None
+    sys.modules["ella.services.summary_writeback"] = fake_writeback
+    fake_notifications = types.ModuleType("utils.notifications")
+    fake_notifications.send_notification = lambda *args, **kwargs: None
+    sys.modules["utils.notifications"] = fake_notifications
+    fake_canonical_omi = types.ModuleType("utils.ella.canonical_omi")
+    fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
+    sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
+    fake_exact_auth = types.ModuleType("utils.ella.exact_firebase_auth")
+    fake_exact_auth.get_exact_firebase_uid = lambda *args, **kwargs: None
+    fake_exact_auth.require_matching_firebase_uid = lambda *args, **kwargs: None
+    sys.modules["utils.ella.exact_firebase_auth"] = fake_exact_auth
+    fake_storage = types.ModuleType("utils.other.storage")
+    fake_storage.storage_client = object()
+    sys.modules["utils.other.storage"] = fake_storage
+if module_name == "ella.routers.voice":
+    fake_conversations = types.ModuleType("database.conversations")
+    fake_conversations._decrypt_conversation_data = lambda value: value
+    sys.modules["database.conversations"] = fake_conversations
+
+module = importlib.import_module(module_name)
+captured = {}
+
+async def synthetic_create_pool(*args, **kwargs):
+    captured.update(kwargs)
+    return object()
+
+module.asyncpg.create_pool = synthetic_create_pool
+asyncio.run(getattr(module, getter_name)())
+assert captured.get("dsn" if mode == "dsn" else "password") == retained
+if mode == "dsn":
+    os.environ["ELLA_POSTGRES_DSN"] = replacement
+else:
+    os.environ["ELLA_POSTGRES_PASSWORD"] = replacement
 os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = retained
 from database.honcho_attestation import HonchoAttestationError, create_challenge
 
@@ -600,37 +1240,121 @@ try:
 except HonchoAttestationError as exc:
     assert exc.code == "honcho_attestation_key_conflict"
 else:
-    raise AssertionError("retained Honcho authority was hidden by environment reload")
+    raise AssertionError("retained pool authority was hidden by environment reload")
 """
-    consumers = (
-        (
-            "ella.services.correction_honcho_contract",
-            "ELLA_CORRECTION_HONCHO_API_KEY",
-            "HONCHO_API_KEY",
-            "correction",
-        ),
-        ("ella.services.voice_honcho", "ELLA_VOICE_HONCHO_API_KEY", "HONCHO_API_KEY", "voice"),
-        (
-            "ella.services.correction_honcho_contract",
-            "ELLA_CORRECTION_HONCHO_PROFILE_MAP_TOKEN",
-            "HONCHO_PROFILE_MAP_URL_TOKEN",
-            "cached",
-        ),
+    pool_consumers = (
+        ("database.ella_provisioning", "get_pool", "password"),
+        ("database.voice_canary", "get_pool", "password"),
+        ("database.voice_canary", "get_pool", "dsn"),
+        ("ella.routers.auto_provision", "_get_pool", "password"),
+        ("ella.routers.callbacks", "_get_resolve_pool", "password"),
+        ("ella.routers.canonical_events", "_get_pool", "password"),
+        ("ella.routers.escalations", "_get_pool", "password"),
+        ("ella.routers.guardian", "_get_pool", "password"),
+        ("ella.routers.resolve", "_get_pool", "password"),
+        ("ella.routers.voice", "_get_pool", "password"),
+        ("ella.services.observer_logs", "_get_pool", "password"),
+        ("ella.utils.auto_provision", "_get_pool", "password"),
+        ("utils.ella.scanner_keyterms", "_get_pool", "password"),
     )
-    for module_name, environment_name, attribute_name, header_mode in consumers:
-        environment = os.environ.copy()
+    for module_name, getter_name, mode in pool_consumers:
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not credential_name.fullmatch(name)
+            and name not in {"ELLA_HERMES_PROVISION_ATTESTATION_KEY", "ELLA_POSTGRES_DSN"}
+        }
         environment["PYTHONPATH"] = str(backend_root)
-        environment.setdefault("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
-        environment.setdefault("GOOGLE_CLOUD_PROJECT", "synthetic-local")
+        environment["ENCRYPTION_SECRET"] = "synthetic-distinct-encryption-authority-000000000001"
+        environment["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
+        environment["GOOGLE_CLOUD_PROJECT"] = "synthetic-local"
         completed = subprocess.run(
-            [sys.executable, "-c", probe, module_name, environment_name, attribute_name, header_mode],
+            [sys.executable, "-c", pool_probe, module_name, getter_name, mode],
             cwd=backend_root,
             env=environment,
             capture_output=True,
             text=True,
             check=False,
         )
-        assert completed.returncode == 0, f"retained authority protection failed for {module_name}:{attribute_name}"
+        assert completed.returncode == 0, f"retained pool authority protection failed for {module_name}:{mode}"
+
+    retained_value_probe = """
+import importlib
+import os
+import sys
+import types
+
+module_name, mode = sys.argv[1:]
+retained = "synthetic-retained-injected-authority-value-A"
+replacement = "synthetic-current-injected-authority-value-B"
+captured = {}
+if mode == "identity-db":
+    extras = types.ModuleType("psycopg2.extras")
+    extras.RealDictCursor = object
+    driver = types.ModuleType("psycopg2")
+    driver.__path__ = []
+    driver.extras = extras
+
+    class SyntheticCursor:
+        description = []
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, *args): pass
+        def fetchall(self): return []
+
+    class SyntheticConnection:
+        def cursor(self, **kwargs): return SyntheticCursor()
+        def close(self): pass
+
+    driver.connect = lambda **kwargs: captured.update(kwargs) or SyntheticConnection()
+    sys.modules["psycopg2"] = driver
+    sys.modules["psycopg2.extras"] = extras
+    os.environ["ELLA_POSTGRES_PASSWORD"] = retained
+
+module = importlib.import_module(module_name)
+if mode == "identity-db":
+    module._get_changed_users("2026-01-01T00:00:00Z")
+    assert captured.get("password") == retained
+    os.environ["ELLA_POSTGRES_PASSWORD"] = replacement
+else:
+    store = module.ApprovedRuntimeManifestStore(path="/synthetic", signing_key=retained)
+    assert store.signing_key == retained
+    os.environ["ELLA_HERMES_CLOUD_APPROVAL_SIGNING_KEY"] = replacement
+os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"] = retained
+from database.honcho_attestation import HonchoAttestationError, create_challenge
+
+try:
+    create_challenge(
+        firebase_uid="synthetic-user",
+        account_owner_id="synthetic-owner",
+        runtime_target_id="synthetic-target",
+        binding_id="synthetic-binding",
+        job_id="synthetic-job",
+    )
+except HonchoAttestationError as exc:
+    assert exc.code == "honcho_attestation_key_conflict"
+else:
+    raise AssertionError("retained non-environment authority was hidden")
+"""
+    for module_name, mode in (
+        ("ella.utils.identity_sync", "identity-db"),
+        ("ella.services.hermes_cloud_policy", "policy-injected"),
+    ):
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not credential_name.fullmatch(name) and name != "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
+        }
+        environment["PYTHONPATH"] = str(backend_root)
+        completed = subprocess.run(
+            [sys.executable, "-c", retained_value_probe, module_name, mode],
+            cwd=backend_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"retained injected authority protection failed for {module_name}:{mode}"
 
 
 def test_attestation_window_covers_max_slow_response_and_rejects_invalid_config(monkeypatch):
