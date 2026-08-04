@@ -1,14 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
-import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
@@ -16,42 +18,65 @@ import 'package:omi/utils/platform/platform_manager.dart';
 
 /// Build Ella-specific debug headers for routing observability (Issue #216).
 /// Backend trace.py captures these to correlate client requests with server routing decisions.
-Map<String, String> _ellaDebugHeaders({required String routeSource, String? expectedUid}) {
-  final uid = expectedUid ?? SharedPreferencesUtil().uid;
+Map<String, String> _ellaDebugHeaders({required String routeSource}) {
   return {
     'X-Ella-Client': 'ios-app',
     'X-Ella-Client-Version': PlatformManager.instance.appVersion,
     'X-Ella-Route-Source': routeSource,
-    if (!isHermesProvisioningGateEnabled) 'X-Ella-Session-Key': 'ella:$uid',
-    if (!isHermesProvisioningGateEnabled) 'X-TTS-Provider': SharedPreferencesUtil().ttsProvider,
   };
 }
 
-/// Fetch chat history from the VPS proxy endpoint.
-/// Returns messages in chronological order (oldest first), or empty list on failure.
-Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
-  if (SharedPreferencesUtil().demoMode) {
-    return DemoFixtures.chatMessages();
-  }
+typedef EllaChatHistoryTransport = Future<http.Response?> Function({
+  required String url,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
 
-  try {
-    final uid = SharedPreferencesUtil().uid;
-    final query = <String, String>{
-      'limit': '$limit',
-      if (!isHermesProvisioningGateEnabled) 'uid': uid,
-    };
-    final url = Uri.parse('${Env.apiBaseUrl}v1/ella/chat/history').replace(queryParameters: query).toString();
-    final response = await makeApiCall(
+Future<http.Response?> _defaultHistoryTransport({
+  required String url,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    makeApiCall(
       url: url,
       headers: _ellaDebugHeaders(routeSource: 'chat-history'),
       method: 'GET',
       body: '',
       timeout: const Duration(seconds: 10),
+      requireAuthCheck: true,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+/// Fetch chat history from the VPS proxy endpoint.
+/// Returns messages in chronological order (oldest first). A failed read is
+/// distinct from a verified empty history so callers can preserve their cache.
+Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
+  int limit = 50,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaChatHistoryTransport? transport,
+}) async {
+  if (SharedPreferencesUtil().demoMode) {
+    return EllaServiceResult.success(DemoFixtures.chatMessages());
+  }
+
+  try {
+    final query = <String, String>{'limit': '$limit'};
+    final url = Uri.parse('${Env.apiBaseUrl}v1/ella/chat/history').replace(queryParameters: query).toString();
+    final response = await (transport ?? _defaultHistoryTransport)(
+      url: url,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
     );
 
     if (response == null || response.statusCode != 200) {
       Logger.debug('[EllaChat] History fetch failed: ${response?.statusCode}');
-      return [];
+      return EllaServiceResult.failure(
+        response == null
+            ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+            : ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body),
+      );
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -88,10 +113,14 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
     // API returns newest first; reverse for chronological UI order
     result.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
-    return result;
+    return EllaServiceResult.success(result);
+  } on ClientApiFailure catch (failure) {
+    return EllaServiceResult.failure(failure);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
   } catch (e) {
     Logger.debug('[EllaChat] History fetch error: $e');
-    return [];
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
   }
 }
 
@@ -106,7 +135,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     Logger.debug('[EllaChat] Blocked chat stream without AI consent');
-    return;
+    throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
   }
   if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
     throw ExactAccountAuthorityChangedException('Exact account authority changed before Ella chat');
@@ -120,7 +149,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(
 
   yield* sendEllaMessageStream(
     text,
-    headers: _ellaDebugHeaders(routeSource: 'proxy-canonical', expectedUid: expectedAuthenticatedUid),
+    headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
     clientMessageId: const Uuid().v4(),
     clientSentAt: DateTime.now().toUtc(),
     expectedAuthenticatedUid: expectedAuthenticatedUid,

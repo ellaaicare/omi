@@ -11,6 +11,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
@@ -36,15 +37,20 @@ import 'package:omi/utils/streaming_text_coalescer.dart';
 bool get _isEllaApp => true;
 
 typedef ChatAppsRetriever = Future<List<App>> Function();
-typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(String text);
-typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(List<File> files);
+typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(
+  String text, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+});
+typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(
+  List<File> files, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+});
 typedef VoiceTempFileSaver = Future<File> Function(List<List<int>> audioBytes, int startTime, int frameSize);
 typedef AttachmentFilePicker = Future<List<File>> Function(int remainingSlots);
 typedef MessageFileUploader = Future<List<MessageFile>?> Function(
-  List<File> files,
-  String? appId,
-  ExactAccountAuthorityVerifier exactAuthority,
-);
+    List<File> files, String? appId, ExactAccountAuthorityVerifier exactAuthority);
 typedef AskAiStreamSender = Stream<ServerMessageChunk> Function(
   String message,
   List<String>? fileIds,
@@ -125,6 +131,10 @@ class MessageProvider extends ChangeNotifier {
   bool showTypingIndicator = false;
   bool sendingMessage = false;
   double aiStreamProgress = 1.0;
+  ClientApiFailure? _lastStreamFailure;
+
+  ClientApiFailure? get lastStreamFailure => _lastStreamFailure;
+  bool get requiresClientUpdate => _lastStreamFailure?.kind == ClientApiFailureKind.updateRequired;
 
   String firstTimeLoadingText = '';
 
@@ -158,6 +168,7 @@ class MessageProvider extends ChangeNotifier {
     showTypingIndicator = false;
     sendingMessage = false;
     aiStreamProgress = 1.0;
+    _lastStreamFailure = null;
     firstTimeLoadingText = '';
     chatApps = [];
     isLoadingChatApps = false;
@@ -205,6 +216,17 @@ class MessageProvider extends ChangeNotifier {
 
   bool _canCommit(EllaAccountCommitLease lease, int generation) =>
       generation == _operationGeneration && lease.isCurrent;
+
+  void _setStreamFailure(ClientApiFailure failure) {
+    _lastStreamFailure = failure;
+    notifyListeners();
+  }
+
+  void _discardAssistantAt(int index) {
+    if (index >= 0 && index < messages.length && messages[index].sender == MessageSender.ai) {
+      messages.removeAt(index);
+    }
+  }
 
   void setChatApps(List<App> apps) {
     chatApps = apps;
@@ -467,9 +489,7 @@ class MessageProvider extends ChangeNotifier {
     } catch (e) {
       Logger.debug('🖼️ General exception during image picking: $e');
       if (_canCommit(lease, generation)) {
-        AppSnackbar.showSnackbarError(
-          l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.',
-        );
+        AppSnackbar.showSnackbarError(l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.');
       }
     } finally {
       lease.close();
@@ -626,12 +646,22 @@ class MessageProvider extends ChangeNotifier {
 
         // Always try to rehydrate from server so a bad local/demo cache from a
         // previous TestFlight cannot mask the real account timeline.
-        final history = await fetchEllaChatHistory(limit: 50);
+        final historyResult = await fetchEllaChatHistory(
+          limit: 50,
+          expectedAuthenticatedUid: lease.uid,
+          exactAuthority: lease,
+        );
         if (!_canCommit(lease, generation)) return;
-        if (history.isNotEmpty) {
+        if (historyResult.isFailure) {
+          _setStreamFailure(
+            historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
+          );
+        } else {
+          _lastStreamFailure = null;
+          final history = historyResult.value ?? const <ServerMessage>[];
           messages = history;
           SharedPreferencesUtil().cachedMessages = messages;
-          setHasCachedMessages(true);
+          setHasCachedMessages(messages.isNotEmpty);
         }
         messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
         setLoadingMessages(false);
@@ -776,9 +806,10 @@ class MessageProvider extends ChangeNotifier {
     MessageProtectedOperation operation,
   ) {
     if (!operation.isCurrent) return false;
-    final additions = [userMessage, assistantMessage]
-        .where((message) => messages.firstWhereOrNull((existing) => existing.id == message.id) == null)
-        .toList();
+    final additions = [
+      userMessage,
+      assistantMessage,
+    ].where((message) => messages.firstWhereOrNull((existing) => existing.id == message.id) == null).toList();
     if (additions.isEmpty) return true;
     messages.addAll(additions);
     if (!operation.isCurrent) {
@@ -828,7 +859,12 @@ class MessageProvider extends ChangeNotifier {
 
       try {
         bool firstChunkRecieved = false;
-        await for (var chunk in _voiceChatStreamSender([file])) {
+        _lastStreamFailure = null;
+        await for (var chunk in _voiceChatStreamSender(
+          [file],
+          expectedAuthenticatedUid: lease.uid,
+          exactAuthority: lease,
+        )) {
           if (!_canCommit(lease, operationGeneration)) return;
           if (!firstChunkRecieved &&
               [
@@ -884,15 +920,17 @@ class MessageProvider extends ChangeNotifier {
           }
 
           if (chunk.type == MessageChunkType.error) {
-            message.text = chunk.text;
-            notifyListeners();
-            continue;
+            throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
           }
         }
-      } catch (e) {
+      } on ClientApiFailure catch (failure) {
         if (!_canCommit(lease, operationGeneration)) return;
-        message.text = ServerMessageChunk.failedMessage().text;
-        notifyListeners();
+        _discardAssistantAt(aiIndex);
+        _setStreamFailure(failure);
+      } catch (_) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        _discardAssistantAt(aiIndex);
+        _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
       }
 
       if (_canCommit(lease, operationGeneration)) setShowTypingIndicator(false);
@@ -917,6 +955,7 @@ class MessageProvider extends ChangeNotifier {
       }
       if (!_canCommit(lease, operationGeneration)) return;
       aiStreamProgress = 0.0;
+      _lastStreamFailure = null;
       setShowTypingIndicator(true);
       var currentAppId = appProvider?.selectedChatAppId;
       if (currentAppId == 'no_selected') {
@@ -951,8 +990,14 @@ class MessageProvider extends ChangeNotifier {
         // Ella uses its own simple chat endpoint; OMI uses the graph chat
         final isEllaApp = _isEllaApp; // TODO: replace with flavor check
         var stream = isEllaApp
-            ? _ellaChatStreamSender(text)
-            : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
+            ? _ellaChatStreamSender(text, expectedAuthenticatedUid: lease.uid, exactAuthority: lease)
+            : sendMessageStreamServer(
+                text,
+                appId: currentAppId,
+                filesId: fileIds,
+                expectedAuthenticatedUid: lease.uid,
+                exactAuthority: lease,
+              );
         await for (var chunk in stream) {
           if (!_canCommit(lease, operationGeneration)) return;
           if (chunk.type == MessageChunkType.think) {
@@ -983,15 +1028,17 @@ class MessageProvider extends ChangeNotifier {
           }
 
           if (chunk.type == MessageChunkType.error) {
-            message.text = chunk.text;
-            notifyListeners();
-            continue;
+            throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
           }
         }
-      } catch (e) {
+      } on ClientApiFailure catch (failure) {
         if (!_canCommit(lease, operationGeneration)) return;
-        message.text = ServerMessageChunk.failedMessage().text;
-        notifyListeners();
+        _discardAssistantAt(aiIndex);
+        _setStreamFailure(failure);
+      } catch (_) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        _discardAssistantAt(aiIndex);
+        _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
       } finally {
         if (_canCommit(lease, operationGeneration)) {
           aiStreamProgress = 1.0;
@@ -1026,11 +1073,7 @@ class MessageProvider extends ChangeNotifier {
     return appProvider?.apps.firstWhereOrNull((p) => p.id == appId);
   }
 
-  Future<void> _emitAskAiChunk(
-    Map<String, dynamic> chunk,
-    EllaAccountCommitLease lease,
-    int generation,
-  ) async {
+  Future<void> _emitAskAiChunk(Map<String, dynamic> chunk, EllaAccountCommitLease lease, int generation) async {
     if (!_canCommit(lease, generation)) return;
     final sink = _askAiResponseSink;
     if (sink != null) {
@@ -1069,10 +1112,11 @@ class MessageProvider extends ChangeNotifier {
               fileIds = uploadedFilesResult.map((f) => f.id).toList();
             } else {
               final l10n = MyApp.navigatorKey.currentContext?.l10n;
-              await _emitAskAiChunk({
-                'type': 'error',
-                'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.',
-              }, lease, generation);
+              await _emitAskAiChunk(
+                {'type': 'error', 'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.'},
+                lease,
+                generation,
+              );
               return;
             }
           }
@@ -1090,15 +1134,16 @@ class MessageProvider extends ChangeNotifier {
             }
             await _emitAskAiChunk(chunkMap, lease, generation);
           }
-        } catch (e) {
+        } on ClientApiFailure catch (failure) {
           if (!_canCommit(lease, generation)) return;
-          final failedChunk = ServerMessageChunk.failedMessage();
-          final chunkMap = {
-            'type': failedChunk.type.toString().split('.').last,
-            'text': failedChunk.text,
-            'messageId': failedChunk.messageId,
-          };
-          await _emitAskAiChunk(chunkMap, lease, generation);
+          await _emitAskAiChunk({'type': 'failure', 'failureKind': failure.kind.name}, lease, generation);
+        } catch (_) {
+          if (!_canCommit(lease, generation)) return;
+          await _emitAskAiChunk(
+            {'type': 'failure', 'failureKind': ClientApiFailureKind.unavailable.name},
+            lease,
+            generation,
+          );
         } finally {
           lease.close();
         }

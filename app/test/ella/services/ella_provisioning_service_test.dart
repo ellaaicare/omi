@@ -246,6 +246,21 @@ void main() {
     expect(transport.statusCalls, 0);
   });
 
+  test('HTTP 426 is a hard update gate and never enters Home authority', () async {
+    final transport = _FakeTransport(
+      ensureResponses: const [EllaProvisioningResponse(statusCode: 426)],
+    );
+    final provider = EllaProvisioningProvider(transport: transport);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+
+    expect(provider.state, EllaProvisioningState.blocked);
+    expect(provider.errorCode, 'upgrade_required');
+    expect(provider.isOperational, isFalse);
+    expect(transport.ensureCalls, 1);
+    expect(transport.statusCalls, 0);
+  });
+
   test('duplicate starts for one account share a single ensure request', () async {
     final transport = _DeferredEnsureTransport();
     final provider = EllaProvisioningProvider(transport: transport);

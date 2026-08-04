@@ -148,7 +148,10 @@ class _FCMNotificationService implements NotificationInterface {
     if (token == null) return;
     String timeZone = await getTimeZone();
     if (FirebaseAuth.instance.currentUser != null && token.isNotEmpty) {
-      await saveFcmTokenServer(token: token, timeZone: timeZone);
+      final registration = await saveFcmTokenServer(token: token, timeZone: timeZone);
+      if (!registration.isReady) {
+        throw StateError('Notification token registration is pending retry');
+      }
 
       try {
         await IntercomManager.instance.sendTokenToIntercom(token);

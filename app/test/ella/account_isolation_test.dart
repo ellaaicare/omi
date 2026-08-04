@@ -12,6 +12,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/http/http_pool_manager.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
@@ -209,7 +210,7 @@ void main() {
     final started = Completer<void>();
     final provider = MessageProvider(
       activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
-      ellaChatStreamSender: (text) {
+      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) {
         started.complete();
         return controller.stream;
       },
@@ -227,6 +228,24 @@ void main() {
     expect(prefs.cachedMessages, isEmpty);
   });
 
+  test('typed backend failure is never rendered or persisted as Ella content', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+        throw const ClientApiFailure(ClientApiFailureKind.workspaceRequired);
+      },
+    );
+
+    await provider.sendMessageStreamToServer('private question');
+
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.workspaceRequired);
+  });
+
   test('account switch during voice streaming cannot mutate or persist under the next account', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     await _grantAuthority(prefs, 'uid-a');
@@ -236,7 +255,7 @@ void main() {
       activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
       voiceTempFileSaver: (bytes, startTime, frameSize) async =>
           File('${Directory.systemTemp.path}/ella-voice-authority-test.bin')..writeAsBytesSync([1, 2, 3]),
-      voiceChatStreamSender: (files) {
+      voiceChatStreamSender: (files, {expectedAuthenticatedUid, exactAuthority}) {
         started.complete();
         return controller.stream;
       },
@@ -710,23 +729,20 @@ void main() {
       },
     );
 
-    final pending = provider.runProtectedOperationAtEntry(
-      (operation) async {
-        result = await coordinator.run(
-          transcript: 'Account A private question',
-          authority: operation.exactAuthority,
-          commitMessages: (transcript, reply) => provider.addVoiceMessagesForProtectedOperation(
-            _voiceMessage('user-a', transcript, MessageSender.human),
-            _voiceMessage('assistant-a', reply, MessageSender.ai),
-            operation,
-          ),
-          onReplyReady: (_) {},
-          playFile: (_) async => playbacks++,
-          speakOnDevice: (_) async => playbacks++,
-        );
-      },
-      onInvalidated: () => invalidations++,
-    );
+    final pending = provider.runProtectedOperationAtEntry((operation) async {
+      result = await coordinator.run(
+        transcript: 'Account A private question',
+        authority: operation.exactAuthority,
+        commitMessages: (transcript, reply) => provider.addVoiceMessagesForProtectedOperation(
+          _voiceMessage('user-a', transcript, MessageSender.human),
+          _voiceMessage('assistant-a', reply, MessageSender.ai),
+          operation,
+        ),
+        onReplyReady: (_) {},
+        playFile: (_) async => playbacks++,
+        speakOnDevice: (_) async => playbacks++,
+      );
+    }, onInvalidated: () => invalidations++);
     await streamStarted.future;
     current = false;
     prefs.uid = 'uid-b';
@@ -832,6 +848,41 @@ void main() {
     expect(provider.messages.map((message) => message.text), ['Current question', 'Current reply']);
     expect(prefs.cachedMessages.map((message) => message.text), ['Current question', 'Current reply']);
     expect(playbacks, 1);
+  });
+
+  test('typed backend failure is never committed or spoken by standard voice', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    var commits = 0;
+    var syntheses = 0;
+    var playbacks = 0;
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+        throw const ClientApiFailure(ClientApiFailureKind.workspaceRequired);
+      },
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async {
+        syntheses++;
+        return null;
+      },
+    );
+
+    final result = await coordinator.run(
+      transcript: 'private question',
+      authority: _activeAuthority('uid-a', () => true),
+      commitMessages: (_, __) {
+        commits++;
+        return true;
+      },
+      onReplyReady: (_) {},
+      playFile: (_) async => playbacks++,
+      speakOnDevice: (_) async => playbacks++,
+    );
+
+    expect(result.failure?.kind, ClientApiFailureKind.workspaceRequired);
+    expect(result.reply, isEmpty);
+    expect(commits, 0);
+    expect(syntheses, 0);
+    expect(playbacks, 0);
   });
 
   test('real TTS HTTP path aborts before file creation when exact authority changes during response', () async {

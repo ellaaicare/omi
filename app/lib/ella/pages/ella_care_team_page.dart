@@ -19,6 +19,7 @@ class EllaCareTeamPage extends StatefulWidget {
 class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBindingObserver {
   List<Caregiver> _caregivers = [];
   bool _loading = true;
+  bool _loadFailed = false;
   static const int _maxCaregivers = 5;
 
   @override
@@ -43,17 +44,21 @@ class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBinding
 
   Future<void> _loadCaregivers() async {
     try {
-      final caregivers = await caregiver_api.getCaregivers();
+      final result = await caregiver_api.getCaregivers();
       if (mounted) {
         setState(() {
-          _caregivers = caregivers;
+          if (result.isSuccess) _caregivers = result.value ?? const [];
+          _loadFailed = result.isFailure;
           _loading = false;
         });
       }
     } catch (e) {
       Logger.debug('Failed to load caregivers: $e');
       if (mounted) {
-        setState(() => _loading = false);
+        setState(() {
+          _loading = false;
+          _loadFailed = true;
+        });
       }
     }
   }
@@ -77,13 +82,29 @@ class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBinding
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
-          : RefreshIndicator(
-              onRefresh: _loadCaregivers,
-              color: EllaColors.primary,
-              child: _caregivers.isEmpty ? _buildEmptyState(context) : _buildCaregiverList(context),
-            ),
+          : _loadFailed
+              ? _buildUnavailableState(context)
+              : RefreshIndicator(
+                  onRefresh: _loadCaregivers,
+                  color: EllaColors.primary,
+                  child: _caregivers.isEmpty ? _buildEmptyState(context) : _buildCaregiverList(context),
+                ),
     );
   }
+
+  Widget _buildUnavailableState(BuildContext context) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(context.l10n.ellaSafetyDataUnavailable, textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              TextButton(onPressed: _loadCaregivers, child: Text(context.l10n.retry)),
+            ],
+          ),
+        ),
+      );
 
   Widget _buildEmptyState(BuildContext context) {
     return ListView(
@@ -129,21 +150,21 @@ class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBinding
           ),
         ),
         const SizedBox(height: 16),
-        ..._caregivers.map((caregiver) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: EllaCaregiverRow(
-                caregiver: caregiver,
-                onTap: () async {
-                  await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => EllaCaregiverDetailPage(caregiver: caregiver),
-                    ),
-                  );
-                  _loadCaregivers();
-                },
-              ),
-            )),
+        ..._caregivers.map(
+          (caregiver) => Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: EllaCaregiverRow(
+              caregiver: caregiver,
+              onTap: () async {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => EllaCaregiverDetailPage(caregiver: caregiver)),
+                );
+                _loadCaregivers();
+              },
+            ),
+          ),
+        ),
         const SizedBox(height: 8),
         if (_caregivers.length < _maxCaregivers) _buildAddButton(context),
         const SizedBox(height: 16),
@@ -165,10 +186,7 @@ class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBinding
       label: 'Add family member to your care team',
       child: InkWell(
         onTap: () async {
-          await Navigator.push(
-            context,
-            MaterialPageRoute(builder: (context) => const EllaAddCaregiverPage()),
-          );
+          await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaAddCaregiverPage()));
           _loadCaregivers();
         },
         borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
@@ -181,11 +199,7 @@ class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBinding
           child: Center(
             child: Text(
               '+ ${context.l10n.ellaAddFamilyMember}',
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                color: EllaColors.textPrimary,
-              ),
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
             ),
           ),
         ),

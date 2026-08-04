@@ -8,6 +8,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
@@ -323,6 +324,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                   ),
                                 ),
                 ),
+                if (provider.lastStreamFailure != null) _ClientFailureBanner(failure: provider.lastStreamFailure!),
                 // Send message area - fixed at bottom
                 Container(
                   margin: const EdgeInsets.only(top: 10),
@@ -333,15 +335,15 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   child: Consumer2<HomeProvider, VoiceRecorderProvider>(
                     builder: (context, home, voiceRecorderProvider, child) {
                       bool shouldShowSendButton(MessageProvider p) {
-                        return !p.sendingMessage && !voiceRecorderProvider.isActive;
+                        return !p.requiresClientUpdate && !p.sendingMessage && !voiceRecorderProvider.isActive;
                       }
 
                       bool shouldShowVoiceRecorderButton() {
-                        return !voiceRecorderProvider.isActive;
+                        return !provider.requiresClientUpdate && !voiceRecorderProvider.isActive;
                       }
 
                       bool shouldShowMenuButton() {
-                        return !voiceRecorderProvider.isActive;
+                        return !provider.requiresClientUpdate && !voiceRecorderProvider.isActive;
                       }
 
                       return Column(
@@ -571,7 +573,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                                     ),
                                                   ),
                                                   child: TextField(
-                                                    enabled: true,
+                                                    enabled: !provider.requiresClientUpdate,
                                                     controller: textController,
                                                     focusNode: textFieldFocusNode,
                                                     obscureText: false,
@@ -1337,5 +1339,50 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
   Widget _buildDivider() {
     return Container(height: 0.5, color: EllaColors.bgTertiary, margin: const EdgeInsets.symmetric(horizontal: 20));
+  }
+}
+
+class _ClientFailureBanner extends StatelessWidget {
+  const _ClientFailureBanner({required this.failure});
+
+  final ClientApiFailure failure;
+
+  @override
+  Widget build(BuildContext context) {
+    final (title, body) = switch (failure.kind) {
+      ClientApiFailureKind.updateRequired => (
+          context.l10n.ellaClientUpdateRequiredTitle,
+          context.l10n.ellaClientUpdateRequiredBody,
+        ),
+      ClientApiFailureKind.workspaceRequired => (
+          context.l10n.ellaWorkspaceUnavailableTitle,
+          context.l10n.ellaWorkspaceUnavailableBody,
+        ),
+      _ => (context.l10n.ellaChatUnavailableTitle, context.l10n.ellaChatUnavailableBody),
+    };
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: EllaColors.bgSecondary,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: EllaColors.textDisabled),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
+            ),
+            const SizedBox(height: 4),
+            Text(body, style: const TextStyle(color: EllaColors.textTertiary)),
+          ],
+        ),
+      ),
+    );
   }
 }

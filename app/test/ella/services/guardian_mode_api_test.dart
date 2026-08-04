@@ -90,7 +90,8 @@ void main() {
     );
 
     expect(calls, 1);
-    expect(result?.twoTierState?.isOff, isTrue);
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.twoTierState?.isOff, isTrue);
   });
 
   test('mode write carries no caller-selected uid and rejects stale authority before transport', () async {
@@ -115,7 +116,7 @@ void main() {
       },
     );
 
-    expect(enabled, isTrue);
+    expect(enabled.isSuccess, isTrue);
     expect(requestBody, {
       'override': null,
       'features': ['ACTIVE_SUPPORT']
@@ -140,7 +141,7 @@ void main() {
       },
     );
 
-    expect(staleResult, isFalse);
+    expect(staleResult.isFailure, isTrue);
     expect(staleTransportCalls, 0);
   });
 }

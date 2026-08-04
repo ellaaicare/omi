@@ -1,0 +1,130 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:omi/backend/http/api/messages.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
+import 'package:omi/backend/http/http_pool_manager.dart';
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_chat_service.dart';
+import 'package:omi/env/env.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
+
+class _TestEnv implements EnvFields {
+  @override
+  String? get apiBaseUrl => 'https://api.ella.test/';
+  @override
+  String? get googleClientId => null;
+  @override
+  String? get googleClientSecret => null;
+  @override
+  String? get googleMapsApiKey => null;
+  @override
+  String? get growthbookApiKey => null;
+  @override
+  String? get intercomAndroidApiKey => null;
+  @override
+  String? get intercomAppId => null;
+  @override
+  String? get intercomIOSApiKey => null;
+  @override
+  String? get mixpanelProjectToken => null;
+  @override
+  String? get openAIAPIKey => null;
+  @override
+  bool? get useAuthCustomToken => false;
+  @override
+  bool? get useWebAuth => false;
+}
+
+class _CurrentAuthority implements ExactAccountAuthorityVerifier {
+  const _CurrentAuthority(this.uid);
+
+  @override
+  final String uid;
+
+  @override
+  bool isExactCurrent() => true;
+}
+
+class _InspectingClient extends http.BaseClient {
+  _InspectingClient(this.handler);
+
+  final Future<http.StreamedResponse> Function(http.BaseRequest request) handler;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) => handler(request);
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  Env.init(_TestEnv());
+  PlatformManager.initializeForTesting();
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({'uid': 'uid-a'});
+    await SharedPreferencesUtil.init();
+  });
+
+  test('Ella stream sends no caller-selected UID or legacy session authority', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.authToken = 'test-bearer';
+    preferences.tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-a',
+      serverDecidedAt: '2026-08-04T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    HttpPoolManager.instance.replaceClientForTesting(
+      _InspectingClient((request) async {
+        final body = jsonDecode(await request.finalize().bytesToString()) as Map<String, dynamic>;
+        expect(body, isNot(contains('uid')));
+        expect(request.headers, isNot(contains('X-Ella-Session-Key')));
+        expect(request.headers, isNot(contains('X-TTS-Provider')));
+        expect(request.headers['authorization'], 'Bearer test-bearer');
+        return http.StreamedResponse(Stream.value(utf8.encode('{"detail":"provider_unavailable"}')), 503);
+      }),
+    );
+
+    await expectLater(
+      sendEllaMessageStream('hello').toList(),
+      throwsA(
+        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable),
+      ),
+    );
+  });
+
+  test('history uses the first-party owner-bound route and preserves failed state', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        final uri = Uri.parse(url);
+        expect(uri.path, '/v1/ella/chat/history');
+        expect(uri.queryParameters, {'limit': '50'});
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        return http.Response('{"detail":"upgrade_required"}', 426);
+      },
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.value, isNull);
+    expect(result.failure?.kind, ClientApiFailureKind.updateRequired);
+  });
+}

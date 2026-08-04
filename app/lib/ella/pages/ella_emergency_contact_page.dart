@@ -18,6 +18,7 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
   List<Caregiver> _caregivers = [];
   String? _emergencyContactId;
   bool _loading = true;
+  bool _loadFailed = false;
 
   @override
   void initState() {
@@ -31,14 +32,20 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
       final emergencyId = await caregiver_api.getEmergencyContactId();
       if (mounted) {
         setState(() {
-          _caregivers = caregivers;
-          _emergencyContactId = emergencyId;
+          if (caregivers.isSuccess) _caregivers = caregivers.value ?? const [];
+          if (emergencyId.isSuccess) _emergencyContactId = emergencyId.value;
+          _loadFailed = caregivers.isFailure || emergencyId.isFailure;
           _loading = false;
         });
       }
     } catch (e) {
       Logger.debug('Failed to load emergency contact data: $e');
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _loadFailed = true;
+        });
+      }
     }
   }
 
@@ -56,9 +63,7 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
     } catch (_) {
       if (mounted) {
         setState(() => _emergencyContactId = previousId);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)));
       }
     }
   }
@@ -82,9 +87,23 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
-          : _caregivers.isEmpty
-              ? _buildEmptyState(context)
-              : _buildContactList(context),
+          : _loadFailed
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(context.l10n.ellaSafetyDataUnavailable, textAlign: TextAlign.center),
+                        const SizedBox(height: 16),
+                        TextButton(onPressed: _loadData, child: Text(context.l10n.retry)),
+                      ],
+                    ),
+                  ),
+                )
+              : _caregivers.isEmpty
+                  ? _buildEmptyState(context)
+                  : _buildContactList(context),
     );
   }
 
@@ -118,10 +137,7 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
             label: 'Add family member to your care team',
             child: InkWell(
               onTap: () async {
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const EllaAddCaregiverPage()),
-                );
+                await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaAddCaregiverPage()));
                 _loadData();
               },
               borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
@@ -177,9 +193,7 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
                   decoration: BoxDecoration(
                     color: EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-                    border: isSelected
-                        ? Border.all(color: EllaColors.primary, width: 2)
-                        : null,
+                    border: isSelected ? Border.all(color: EllaColors.primary, width: 2) : null,
                   ),
                   child: Row(
                     children: [

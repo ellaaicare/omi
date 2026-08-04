@@ -52,6 +52,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   String? _emergencyContactId;
   String _appVersion = '';
   GuardianModeInfo? _guardianMode;
+  bool _safetyDataVerified = false;
   int _versionTapCount = 0;
   bool _developerUnlocked = false;
 
@@ -77,14 +78,15 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
         caregiver_api.getEmergencyContactId(),
         guardian_api.getGuardianMode(),
       ]);
-      final caregivers = results[0] as List<Caregiver>;
-      final emergencyId = results[1] as String?;
-      final guardianMode = results[2] as GuardianModeInfo?;
+      final caregiversResult = results[0] as dynamic;
+      final emergencyResult = results[1] as dynamic;
+      final guardianResult = results[2] as dynamic;
       if (mounted) {
         setState(() {
-          _caregivers = caregivers;
-          _emergencyContactId = emergencyId;
-          if (guardianMode != null) _guardianMode = guardianMode;
+          _safetyDataVerified = caregiversResult.isSuccess && emergencyResult.isSuccess && guardianResult.isSuccess;
+          if (caregiversResult.isSuccess) _caregivers = caregiversResult.value as List<Caregiver>? ?? const [];
+          if (emergencyResult.isSuccess) _emergencyContactId = emergencyResult.value as String?;
+          if (guardianResult.isSuccess) _guardianMode = guardianResult.value as GuardianModeInfo?;
         });
       }
     } catch (e) {
@@ -112,6 +114,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   }
 
   String _emergencyContactSubtitle() {
+    if (!_safetyDataVerified) return context.l10n.ellaSafetyDataUnavailable;
     if (_caregivers.isEmpty || _emergencyContactId == null) {
       return context.l10n.ellaEmergencyContactNotSetUp;
     }
@@ -124,6 +127,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   }
 
   String _caregiverCountSubtitle() {
+    if (!_safetyDataVerified) return context.l10n.ellaSafetyDataUnavailable;
     if (_caregivers.isEmpty) return context.l10n.ellaFamilyCaregiversNotSetUp;
     return context.l10n.ellaFamilyCaregiversSubtitle(_caregivers.length);
   }
