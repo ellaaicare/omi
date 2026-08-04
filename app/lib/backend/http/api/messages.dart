@@ -1,19 +1,16 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
-import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/other/string_utils.dart';
 
-Future<List<ServerMessage>> getMessagesServer({
-  String? appId,
-  bool dropdownSelected = false,
-}) async {
+Future<List<ServerMessage>> getMessagesServer({String? appId, bool dropdownSelected = false}) async {
   if (appId == 'no_selected') appId = null;
   // TODO: Add pagination
   var response = await makeApiCall(
@@ -61,20 +58,15 @@ Future<List<ServerMessage>> clearChatServer({String? appId}) async {
 }
 
 ServerMessageChunk? parseMessageChunk(String line, String messageId) {
+  final failure = ClientApiFailure.fromStreamLine(line);
+  if (failure != null) throw failure;
+
   if (line.startsWith('think: ')) {
-    return ServerMessageChunk(
-      messageId,
-      line.substring(7).replaceAll("__CRLF__", "\n"),
-      MessageChunkType.think,
-    );
+    return ServerMessageChunk(messageId, line.substring(7).replaceAll("__CRLF__", "\n"), MessageChunkType.think);
   }
 
   if (line.startsWith('data: ')) {
-    return ServerMessageChunk(
-      messageId,
-      line.substring(6).replaceAll("__CRLF__", "\n"),
-      MessageChunkType.data,
-    );
+    return ServerMessageChunk(messageId, line.substring(6).replaceAll("__CRLF__", "\n"), MessageChunkType.data);
   }
 
   if (line.startsWith('done: ')) {
@@ -100,6 +92,54 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   return null;
 }
 
+Future<List<ServerMessageChunk>> collectTerminalMessageChunks(Stream<ServerMessageChunk> stream) async {
+  final chunks = await stream.toList();
+  if (chunks.any((chunk) => chunk.type == MessageChunkType.error)) {
+    throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+  }
+  final doneCount = chunks.where((chunk) => chunk.type == MessageChunkType.done).length;
+  if (chunks.isEmpty || chunks.last.type != MessageChunkType.done || doneCount != 1) {
+    throw const ClientApiFailure(ClientApiFailureKind.incompleteStream, retryable: true);
+  }
+  return chunks;
+}
+
+Stream<ServerMessageChunk> _parseTerminalMessageStream(
+  Stream<String> lines,
+  String messageId, {
+  bool skipComments = false,
+}) async* {
+  final pending = <ServerMessageChunk>[];
+  var completed = false;
+  await for (final line in lines) {
+    if (skipComments && line.startsWith(':')) continue;
+
+    ServerMessageChunk? chunk;
+    try {
+      chunk = parseMessageChunk(line, messageId);
+    } on ClientApiFailure {
+      rethrow;
+    } catch (_) {
+      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+    }
+    if (chunk == null) {
+      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+    }
+    pending.add(chunk);
+    if (chunk.type == MessageChunkType.done) {
+      completed = true;
+      break;
+    }
+  }
+
+  if (!completed) {
+    throw const ClientApiFailure(ClientApiFailureKind.incompleteStream, retryable: true);
+  }
+  for (final chunk in pending) {
+    yield chunk;
+  }
+}
+
 Stream<ServerMessageChunk> sendMessageStreamServer(
   String text, {
   String? appId,
@@ -107,7 +147,9 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
-  if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
+  }
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/messages';
@@ -115,20 +157,15 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
 
   var messageId = "1000"; // Default new message
 
-  await for (var line in makeStreamingApiCall(
-    url: url,
-    body: jsonEncode({'text': text, 'file_ids': filesId}),
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
-  )) {
-    var messageChunk = parseMessageChunk(line, messageId);
-    if (messageChunk != null) {
-      yield messageChunk;
-    } else {
-      yield ServerMessageChunk.failedMessage();
-      return;
-    }
-  }
+  yield* _parseTerminalMessageStream(
+    makeStreamingApiCall(
+      url: url,
+      body: jsonEncode({'text': text, 'file_ids': filesId}),
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    ),
+    messageId,
+  );
 }
 
 /// Send a chat message via the Ella endpoint (/v1/ella/chat/stream).
@@ -142,12 +179,17 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
-  if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
+  }
   if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
     throw ExactAccountAuthorityChangedException('Exact account authority changed before Ella stream assembly');
   }
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
-  var uid = expectedAuthenticatedUid ?? exactAuthority?.uid ?? SharedPreferencesUtil().uid;
+  final uid = expectedAuthenticatedUid ?? exactAuthority?.uid ?? SharedPreferencesUtil().uid;
+  if (uid.isEmpty) {
+    throw const ClientApiFailure(ClientApiFailureKind.authenticationRequired);
+  }
   if (exactAuthority != null && exactAuthority.uid != uid) {
     throw StateError('Ella stream UID does not match exact account authority');
   }
@@ -155,30 +197,22 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   final requestClientMessageId = clientMessageId ?? '';
   final requestClientSentAt = clientSentAt?.toUtc().toIso8601String() ?? '';
 
-  await for (var line in makeStreamingApiCall(
-    url: url,
-    headers: headers,
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
-    body: jsonEncode({
-      if (!isHermesProvisioningGateEnabled) 'uid': uid,
-      'message': text,
-      'conversation_id': '',
-      'client_message_id': requestClientMessageId,
-      'client_sent_at': requestClientSentAt,
-    }),
-  )) {
-    // Skip SSE comment lines (keep-alives from backend while waiting for LLM)
-    if (line.startsWith(':')) continue;
-
-    var messageChunk = parseMessageChunk(line, messageId);
-    if (messageChunk != null) {
-      yield messageChunk;
-    } else {
-      yield ServerMessageChunk.failedMessage();
-      return;
-    }
-  }
+  yield* _parseTerminalMessageStream(
+    makeStreamingApiCall(
+      url: url,
+      headers: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+      body: jsonEncode({
+        'message': text,
+        'conversation_id': '',
+        'client_message_id': requestClientMessageId,
+        'client_sent_at': requestClientSentAt,
+      }),
+    ),
+    messageId,
+    skipComments: true,
+  );
 }
 
 Future<ServerMessage> getInitialAppMessage(String? appId) {
@@ -200,23 +234,24 @@ Future<ServerMessage> getInitialAppMessage(String? appId) {
 Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
   List<File> files, {
   String? language,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
-  if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
+  }
   var messageId = "1000"; // Default new message
 
-  await for (var line in makeMultipartStreamingApiCall(
-    url: '${Env.apiBaseUrl}v2/voice-messages',
-    files: files,
-    fields: language != null ? {'language': language} : {},
-  )) {
-    var messageChunk = parseMessageChunk(line, messageId);
-    if (messageChunk != null) {
-      yield messageChunk;
-    } else {
-      yield ServerMessageChunk.failedMessage();
-      return;
-    }
-  }
+  yield* _parseTerminalMessageStream(
+    makeMultipartStreamingApiCall(
+      url: '${Env.apiBaseUrl}v2/voice-messages',
+      files: files,
+      fields: language != null ? {'language': language} : {},
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    ),
+    messageId,
+  );
 }
 
 Future<List<MessageFile>?> uploadFilesServer(
@@ -226,7 +261,7 @@ Future<List<MessageFile>?> uploadFilesServer(
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
-    throw StateError('AI consent is required before file upload');
+    throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
   }
   var url = '${Env.apiBaseUrl}v2/files?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
@@ -242,21 +277,18 @@ Future<List<MessageFile>?> uploadFilesServer(
     );
 
     if (response.statusCode == 200) {
-      Logger.debug(
-        'uploadFileServer response body: ${jsonDecode(response.body)}',
-      );
       return MessageFile.fromJsonList(jsonDecode(response.body));
     } else {
-      Logger.debug(
-        'Failed to upload file. Status code: ${response.statusCode} ${response.body}',
-      );
-      throw Exception(
-        'Failed to upload file. Status code: ${response.statusCode}',
-      );
+      Logger.debug('Failed to upload file. Status code: ${response.statusCode}');
+      throw ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body);
     }
+  } on ClientApiFailure {
+    rethrow;
+  } on ExactAccountAuthorityChangedException {
+    throw const ClientApiFailure(ClientApiFailureKind.accountChanged);
   } catch (e) {
     Logger.debug('An error occurred uploadFileServer: $e');
-    throw Exception('An error occurred uploadFileServer: $e');
+    throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
   }
 }
 
@@ -273,12 +305,9 @@ Future reportMessageServer(String messageId) async {
   }
 }
 
-Future<String> transcribeVoiceMessage(
-  File audioFile, {
-  String? language,
-}) async {
+Future<String> transcribeVoiceMessage(File audioFile, {String? language}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
-    throw StateError('AI consent is required before audio transcription');
+    throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
   }
   try {
     var response = await makeMultipartApiCall(
@@ -291,13 +320,15 @@ Future<String> transcribeVoiceMessage(
       final data = jsonDecode(response.body);
       return data['transcript'] ?? '';
     } else {
-      Logger.debug(
-        'Failed to transcribe voice message: ${response.statusCode} ${response.body}',
-      );
-      throw Exception('Failed to transcribe voice message');
+      Logger.debug('Failed to transcribe voice message: ${response.statusCode}');
+      throw ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body);
     }
+  } on ClientApiFailure {
+    rethrow;
+  } on ExactAccountAuthorityChangedException {
+    throw const ClientApiFailure(ClientApiFailureKind.accountChanged);
   } catch (e) {
     Logger.debug('Error transcribing voice message: $e');
-    throw Exception('Error transcribing voice message: $e');
+    throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
   }
 }

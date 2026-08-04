@@ -91,6 +91,7 @@ class TodayPageState extends State<TodayPage> {
   bool _isLoading = true;
   bool _isReading = false;
   bool _whispersOn = false;
+  bool _whispersVerified = false;
   bool _updatingWhispers = false;
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
@@ -134,11 +135,16 @@ class TodayPageState extends State<TodayPage> {
 
   Future<void> _loadWhisperState() async {
     if (!_guardianAvailable) return;
-    final info = await (widget.guardianModeLoader?.call() ?? guardian_api.getGuardianMode());
-    if (info == null) {
+    final injectedInfo = widget.guardianModeLoader == null ? null : await widget.guardianModeLoader!.call();
+    final result = widget.guardianModeLoader == null ? await guardian_api.getGuardianMode() : null;
+    final info = result?.value ?? injectedInfo;
+    if (info == null || result?.isFailure == true) {
       await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
       if (!mounted) return;
-      setState(() => _whispersOn = false);
+      setState(() {
+        _whispersOn = false;
+        _whispersVerified = false;
+      });
       return;
     }
     if (!mounted) return;
@@ -155,7 +161,10 @@ class TodayPageState extends State<TodayPage> {
           guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
     }
     if (!mounted) return;
-    setState(() => _whispersOn = enabled);
+    setState(() {
+      _whispersOn = enabled;
+      _whispersVerified = true;
+    });
   }
 
   void scrollToTop() {
@@ -191,7 +200,11 @@ class TodayPageState extends State<TodayPage> {
       if (!enabled) {
         await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
       }
-      success = await (widget.guardianModeSetter?.call(state) ?? guardian_api.setGuardianModeTwoTier(state));
+      if (widget.guardianModeSetter != null) {
+        success = await widget.guardianModeSetter!(state);
+      } else {
+        success = (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
+      }
       if (success && enabled) {
         await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
       }
@@ -209,9 +222,7 @@ class TodayPageState extends State<TodayPage> {
       if (!success) _whispersOn = false;
     });
     if (!success) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
     }
   }
 
@@ -323,16 +334,18 @@ class TodayPageState extends State<TodayPage> {
                 key: const Key('guardian-whispers-control'),
                 child: _WhisperPill(
                   enabled: _whispersOn,
+                  verified: _whispersVerified,
                   live: isLive,
                   updating: _updatingWhispers,
                   onChanged: _setWhispers,
                   onOpenLive: () => _openLiveView(capture, conversations),
                 ),
               ),
-              _SeeWhispersLink(
-                onTap: () =>
-                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
-              ),
+              if (_whispersVerified)
+                _SeeWhispersLink(
+                  onTap: () =>
+                      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+                ),
             ],
             const SizedBox(height: EllaSizes.cardGap),
             if (memoriesLoading)
@@ -512,6 +525,7 @@ class _DailyNoteCard extends StatelessWidget {
 class _WhisperPill extends StatelessWidget {
   const _WhisperPill({
     required this.enabled,
+    required this.verified,
     required this.live,
     required this.updating,
     required this.onChanged,
@@ -519,6 +533,7 @@ class _WhisperPill extends StatelessWidget {
   });
 
   final bool enabled;
+  final bool verified;
   final bool live;
   final bool updating;
   final ValueChanged<bool> onChanged;
@@ -526,8 +541,8 @@ class _WhisperPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final lead = whisperStatusLead(enabled);
-    final rest = whisperStatusDetail(enabled);
+    final lead = verified ? whisperStatusLead(enabled) : context.l10n.todayWhispersUnavailable;
+    final rest = verified ? whisperStatusDetail(enabled) : '';
     return EllaCardSurface(
       borderRadius: live ? 24 : EllaSizes.radiusCircular,
       child: Padding(
@@ -540,7 +555,7 @@ class _WhisperPill extends StatelessWidget {
               constraints: const BoxConstraints(minHeight: 40),
               child: Row(
                 children: [
-                  EllaBreathingDot(active: enabled, live: live),
+                  EllaBreathingDot(active: verified && enabled, live: verified && live),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text.rich(
@@ -551,7 +566,7 @@ class _WhisperPill extends StatelessWidget {
                             text: lead,
                             style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
-                          if (!enabled) TextSpan(text: rest),
+                          if (verified && !enabled) TextSpan(text: rest),
                         ],
                       ),
                     ),
@@ -567,7 +582,7 @@ class _WhisperPill extends StatelessWidget {
                           )
                         : Switch(
                             value: enabled,
-                            onChanged: onChanged,
+                            onChanged: verified ? onChanged : null,
                             activeTrackColor: EllaColors.tealDeep,
                             activeThumbColor: EllaColors.paper,
                             inactiveTrackColor: EllaColors.cardDeep,

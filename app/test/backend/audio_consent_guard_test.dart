@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 
@@ -15,7 +16,12 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
 
-    await expectLater(transcribeVoiceMessage(File('unused.wav')), throwsStateError);
+    await expectLater(
+      transcribeVoiceMessage(File('unused.wav')),
+      throwsA(
+        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
+      ),
+    );
     await expectLater(syncLocalFiles([File('unused.wav')]), throwsStateError);
     expect(await ElevenLabsTts.synthesize('This must stay on device.'), isNull);
   });

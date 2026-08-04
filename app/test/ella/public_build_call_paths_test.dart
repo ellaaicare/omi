@@ -305,7 +305,7 @@ void main() {
       modeCalls++;
       return http.Response('{}', 200);
     });
-    expect(await guardian_api.getGuardianMode(guardianAllowed: false), isNull);
+    expect((await guardian_api.getGuardianMode(guardianAllowed: false)).isFailure, isTrue);
     expect(await guardian_api.getGuardianPresets(guardianAllowed: false, client: client), isEmpty);
     expect(modeCalls, 0);
 

@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:omi/backend/http/api/messages.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
@@ -17,11 +19,17 @@ typedef StandardVoiceSynthesizer = Future<String?> Function(
 });
 
 class StandardVoiceTurnResult {
-  const StandardVoiceTurnResult({required this.reply, this.discarded = false, this.usedOnDeviceTts = false});
+  const StandardVoiceTurnResult({
+    required this.reply,
+    this.discarded = false,
+    this.usedOnDeviceTts = false,
+    this.failure,
+  });
 
   final String reply;
   final bool discarded;
   final bool usedOnDeviceTts;
+  final ClientApiFailure? failure;
 }
 
 /// Runs one non-V2V voice turn under one exact UID + authority generation.
@@ -47,11 +55,15 @@ class StandardVoiceTurnCoordinator {
     try {
       if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
       final replyBuffer = StringBuffer();
-      await for (final chunk in streamSender(
-        transcript,
-        expectedAuthenticatedUid: authority.uid,
-        exactAuthority: authority,
-      )) {
+      final chunks = await collectTerminalMessageChunks(
+        streamSender(
+          transcript,
+          expectedAuthenticatedUid: authority.uid,
+          exactAuthority: authority,
+        ),
+      );
+      if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
+      for (final chunk in chunks) {
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         if (chunk.type == MessageChunkType.data) {
           replyBuffer.write(chunk.text);
@@ -59,6 +71,8 @@ class StandardVoiceTurnCoordinator {
           replyBuffer
             ..clear()
             ..write(chunk.message!.text);
+        } else if (chunk.type == MessageChunkType.error) {
+          throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
         }
       }
 
@@ -74,11 +88,7 @@ class StandardVoiceTurnCoordinator {
 
       final boundedReply = reply.length > 500 ? reply.substring(0, 500) : reply;
       final ttsText = prepareTtsText?.call(boundedReply) ?? boundedReply;
-      audioPath = await synthesizer(
-        ttsText,
-        expectedAuthenticatedUid: authority.uid,
-        exactAuthority: authority,
-      );
+      audioPath = await synthesizer(ttsText, expectedAuthenticatedUid: authority.uid, exactAuthority: authority);
       if (!authority.isExactCurrent()) {
         if (audioPath != null) await ElevenLabsTts.discardSynthesizedFile(audioPath);
         return const StandardVoiceTurnResult(reply: '', discarded: true);
@@ -105,6 +115,10 @@ class StandardVoiceTurnCoordinator {
         return const StandardVoiceTurnResult(reply: '', discarded: true);
       }
       return StandardVoiceTurnResult(reply: reply);
+    } on ClientApiFailure catch (failure) {
+      if (audioPath != null) await ElevenLabsTts.discardSynthesizedFile(audioPath);
+      if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
+      return StandardVoiceTurnResult(reply: '', failure: failure);
     } on ExactAccountAuthorityChangedException {
       if (audioPath != null) await ElevenLabsTts.discardSynthesizedFile(audioPath);
       return const StandardVoiceTurnResult(reply: '', discarded: true);

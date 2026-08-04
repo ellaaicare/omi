@@ -210,6 +210,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
       final blocked = response.statusCode == 401 ||
           response.statusCode == 403 ||
           response.statusCode == 409 ||
+          response.statusCode == 426 ||
           (nextReceipt?.state == EllaProvisioningState.blocked && nextReceipt?.retryable != true);
       _setFailure(code, blocked: blocked);
       if (_shouldPoll) _schedulePoll(generation, _backoffDelay);

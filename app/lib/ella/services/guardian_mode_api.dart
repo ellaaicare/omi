@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
+import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
@@ -60,14 +62,18 @@ Future<http.Response?> _defaultGuardianModeTransport({
 /// Returns a [GuardianModeInfo] that includes a [GuardianModeState] for the
 /// two-tier picker.  Handles both the new schema {override, features} and the
 /// legacy schema {mode}.
-Future<GuardianModeInfo?> getGuardianMode({
+Future<EllaServiceResult<GuardianModeInfo>> getGuardianMode({
   bool? guardianAllowed,
   GuardianModeTransport? transport,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
-  if (!(guardianAllowed ?? allowsGuardianSurface())) return null;
+  if (!(guardianAllowed ?? allowsGuardianSurface())) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.featureUnavailable));
+  }
   final context = _guardianModeRequestContext(exactAuthority: exactAuthority);
-  if (context == null) return null;
+  if (context == null) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.authenticationRequired));
+  }
   try {
     final response = await (transport ?? _defaultGuardianModeTransport)(
       url: context.url,
@@ -80,14 +86,22 @@ Future<GuardianModeInfo?> getGuardianMode({
     if (response != null && response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       if (data['success'] == true) {
-        return GuardianModeInfo.fromJson(data);
+        return EllaServiceResult.success(GuardianModeInfo.fromJson(data));
       }
     }
     Logger.debug('getGuardianMode: ${response?.statusCode}');
-    return null;
+    return EllaServiceResult.failure(
+      response == null
+          ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+          : ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body),
+    );
+  } on ClientApiFailure catch (failure) {
+    return EllaServiceResult.failure(failure);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
   } catch (e) {
     Logger.debug('getGuardianMode error: $e');
-    return null;
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
   }
 }
 
@@ -95,15 +109,19 @@ Future<GuardianModeInfo?> getGuardianMode({
 ///
 /// Sends the new two-tier body:
 ///   { "override": "CYBORG" | "CHATBOT" | "DEMO" | null, "features": [...] }
-Future<bool> setGuardianModeTwoTier(
+Future<EllaServiceResult<void>> setGuardianModeTwoTier(
   GuardianModeState state, {
   bool? guardianAllowed,
   GuardianModeTransport? transport,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
-  if (!(guardianAllowed ?? allowsGuardianSurface())) return false;
+  if (!(guardianAllowed ?? allowsGuardianSurface())) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.featureUnavailable));
+  }
   final context = _guardianModeRequestContext(exactAuthority: exactAuthority);
-  if (context == null) return false;
+  if (context == null) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.authenticationRequired));
+  }
   try {
     final response = await (transport ?? _defaultGuardianModeTransport)(
       url: context.url,
@@ -115,18 +133,27 @@ Future<bool> setGuardianModeTwoTier(
 
     if (response != null && response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return data['success'] == true;
+      if (data['success'] == true) return const EllaServiceResult.success();
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
     }
     Logger.debug('setGuardianMode: ${response?.statusCode}');
-    return false;
+    return EllaServiceResult.failure(
+      response == null
+          ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+          : ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body),
+    );
+  } on ClientApiFailure catch (failure) {
+    return EllaServiceResult.failure(failure);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
   } catch (e) {
     Logger.debug('setGuardianMode error: $e');
-    return false;
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
   }
 }
 
 /// Legacy single-mode PUT — kept for callers that haven't migrated yet.
-Future<bool> setGuardianMode(
+Future<EllaServiceResult<void>> setGuardianMode(
   GuardianModeKey mode, {
   bool? guardianAllowed,
   GuardianModeTransport? transport,
@@ -149,10 +176,8 @@ Future<List<GuardianPreset>> getGuardianPresets({bool? guardianAllowed, http.Cli
   if (_cachedPresets != null) return _cachedPresets!;
   final transport = client ?? http.Client();
   try {
-    final response = await transport.get(
-      Uri.parse('$_dashboardBase/api/guardian/presets'),
-      headers: {'Content-Type': 'application/json'},
-    ).timeout(const Duration(seconds: 10));
+    final response = await transport.get(Uri.parse('$_dashboardBase/api/guardian/presets'),
+        headers: {'Content-Type': 'application/json'}).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -184,11 +209,7 @@ List<GuardianPreset> _fallbackPresets() => [
         presetKey: 'ACTIVE_SUPPORT',
         name: 'Active Support',
         description: 'Emergency alerts + recall assistance + schedule reminders + pattern monitoring.',
-        detailsBullets: [
-          'Medical emergencies',
-          'Wake words (always active)',
-          'Recall assistance',
-        ],
+        detailsBullets: ['Medical emergencies', 'Wake words (always active)', 'Recall assistance'],
         color: const Color(0xFF14B8A6),
       ),
       GuardianPreset(
@@ -196,22 +217,14 @@ List<GuardianPreset> _fallbackPresets() => [
         name: 'Maximum Awareness',
         description:
             'High-sensitivity care monitoring for risk, vulnerability, health, cognitive, emotional, and social support signals.',
-        detailsBullets: [
-          'Broad care monitoring',
-          'Lower alert thresholds',
-          'Helpful during outings or recovery',
-        ],
+        detailsBullets: ['Broad care monitoring', 'Lower alert thresholds', 'Helpful during outings or recovery'],
         color: const Color(0xFF6366F1),
       ),
       GuardianPreset(
         presetKey: 'MEMORY_SUPPORT',
         name: 'Memory Support',
         description: 'Proactive memory cues and gentle recall assistance for cognitive support.',
-        detailsBullets: [
-          'Memory cues',
-          'Daily routine reminders',
-          'Cognitive pattern monitoring',
-        ],
+        detailsBullets: ['Memory cues', 'Daily routine reminders', 'Cognitive pattern monitoring'],
         color: const Color(0xFF10B981),
       ),
       GuardianPreset(
@@ -219,22 +232,14 @@ List<GuardianPreset> _fallbackPresets() => [
         name: 'Cyborg',
         description:
             'Experimental ambient intelligence — Ella listens broadly and speaks only when she can add useful context, coaching, memory, or insight.',
-        detailsBullets: [
-          'Ambient world enhancement',
-          'Useful companion asides',
-          'Experimental brain-enhancer mode',
-        ],
+        detailsBullets: ['Ambient world enhancement', 'Useful companion asides', 'Experimental brain-enhancer mode'],
         color: const Color(0xFFEC4899),
       ),
       GuardianPreset(
         presetKey: 'CHATBOT',
         name: 'Chatbot',
         description: 'Full two-way voice conversation with Ella, focused on primary-speaker user utterances.',
-        detailsBullets: [
-          'Conversational replies',
-          'Suppresses media/background audio',
-          'Best for direct voice chat',
-        ],
+        detailsBullets: ['Conversational replies', 'Suppresses media/background audio', 'Best for direct voice chat'],
         color: const Color(0xFFF97316),
       ),
       GuardianPreset(

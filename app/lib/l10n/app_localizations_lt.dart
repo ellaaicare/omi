@@ -9057,6 +9057,31 @@ class AppLocalizationsLt extends AppLocalizations {
       'Ella could not finish setup yet. Try again if the button is available, or use the support code below.';
 
   @override
+  String get ellaClientUpdateRequiredTitle => 'An update is required';
+
+  @override
+  String get ellaClientUpdateRequiredBody =>
+      'Update Ella to continue securely. This version cannot connect to your private workspace.';
+
+  @override
+  String get ellaWorkspaceUnavailableTitle => 'Your Ella workspace is not ready';
+
+  @override
+  String get ellaWorkspaceUnavailableBody => 'Ella could not verify your private workspace. Try again shortly.';
+
+  @override
+  String get ellaChatUnavailableTitle => 'Ella could not connect';
+
+  @override
+  String get ellaChatUnavailableBody => 'Your message was not sent. Check your connection and try again.';
+
+  @override
+  String get ellaSafetyDataUnavailable => 'Ella could not verify this information. Try again before making changes.';
+
+  @override
+  String get todayWhispersUnavailable => 'Whispers are unavailable until Ella verifies your account';
+
+  @override
   String ellaVoiceTimeRemaining(String time) {
     return 'About $time left';
   }

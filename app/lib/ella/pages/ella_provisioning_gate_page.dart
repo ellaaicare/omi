@@ -137,11 +137,17 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
                     children: [
                       const Icon(Icons.lock_outline_rounded, color: EllaColors.tealDeep, size: 44),
                       const SizedBox(height: 20),
-                      Text(context.l10n.aiConsentOffGateTitle,
-                          style: EllaTextStyles.display, textAlign: TextAlign.center),
+                      Text(
+                        context.l10n.aiConsentOffGateTitle,
+                        style: EllaTextStyles.display,
+                        textAlign: TextAlign.center,
+                      ),
                       const SizedBox(height: 12),
-                      Text(context.l10n.aiConsentOffGateBody,
-                          style: EllaTextStyles.secondary, textAlign: TextAlign.center),
+                      Text(
+                        context.l10n.aiConsentOffGateBody,
+                        style: EllaTextStyles.secondary,
+                        textAlign: TextAlign.center,
+                      ),
                       const SizedBox(height: 24),
                       SizedBox(
                         width: double.infinity,
@@ -175,12 +181,14 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
         final canRetry =
             provider.state == EllaProvisioningState.degraded || (isBlocked && (provider.receipt?.retryable ?? false));
         final timedOut = provider.errorCode == 'provisioning_timeout';
+        final updateRequired = provider.errorCode == 'upgrade_required';
 
         final title = switch (provider.state) {
           EllaProvisioningState.idle || EllaProvisioningState.checking => context.l10n.settingUp,
           EllaProvisioningState.queued || EllaProvisioningState.provisioning => context.l10n.settingUp,
           EllaProvisioningState.degraded when timedOut => context.l10n.ellaProvisioningTimeoutTitle,
           EllaProvisioningState.degraded => context.l10n.ellaProvisioningConnectionTitle,
+          EllaProvisioningState.blocked when updateRequired => context.l10n.ellaClientUpdateRequiredTitle,
           EllaProvisioningState.blocked => context.l10n.ellaProvisioningPausedTitle,
           EllaProvisioningState.ready => context.l10n.settingUp,
         };
@@ -189,6 +197,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
           EllaProvisioningState.queued || EllaProvisioningState.provisioning => context.l10n.pleaseWait,
           EllaProvisioningState.degraded when timedOut => context.l10n.ellaProvisioningTimeoutBody,
           EllaProvisioningState.degraded => context.l10n.ellaProvisioningConnectionBody,
+          EllaProvisioningState.blocked when updateRequired => context.l10n.ellaClientUpdateRequiredBody,
           EllaProvisioningState.blocked => context.l10n.ellaProvisioningPausedBody,
           EllaProvisioningState.ready => context.l10n.pleaseWait,
         };

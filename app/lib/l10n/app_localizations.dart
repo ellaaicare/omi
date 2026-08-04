@@ -16851,6 +16851,54 @@ abstract class AppLocalizations {
   /// **'Ella could not finish setup yet. Try again if the button is available, or use the support code below.'**
   String get ellaProvisioningPausedBody;
 
+  /// No description provided for @ellaClientUpdateRequiredTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'An update is required'**
+  String get ellaClientUpdateRequiredTitle;
+
+  /// No description provided for @ellaClientUpdateRequiredBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Update Ella to continue securely. This version cannot connect to your private workspace.'**
+  String get ellaClientUpdateRequiredBody;
+
+  /// No description provided for @ellaWorkspaceUnavailableTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your Ella workspace is not ready'**
+  String get ellaWorkspaceUnavailableTitle;
+
+  /// No description provided for @ellaWorkspaceUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not verify your private workspace. Try again shortly.'**
+  String get ellaWorkspaceUnavailableBody;
+
+  /// No description provided for @ellaChatUnavailableTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not connect'**
+  String get ellaChatUnavailableTitle;
+
+  /// No description provided for @ellaChatUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your message was not sent. Check your connection and try again.'**
+  String get ellaChatUnavailableBody;
+
+  /// No description provided for @ellaSafetyDataUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not verify this information. Try again before making changes.'**
+  String get ellaSafetyDataUnavailable;
+
+  /// No description provided for @todayWhispersUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers are unavailable until Ella verifies your account'**
+  String get todayWhispersUnavailable;
+
   /// Small voice-surface estimate of remaining allowed voice time
   ///
   /// In en, this message translates to:

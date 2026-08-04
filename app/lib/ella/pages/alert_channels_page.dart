@@ -28,7 +28,7 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
     final policy = await policy_api.getEscalationPolicy();
     if (mounted) {
       setState(() {
-        _policy = policy;
+        _policy = policy.isSuccess ? policy.value : null;
         _loading = false;
       });
     }
@@ -47,11 +47,7 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
         ),
         title: Text(
           context.l10n.ellaAlertChannels,
-          style: const TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            color: EllaColors.textPrimary,
-          ),
+          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
         ),
         centerTitle: false,
       ),
@@ -59,11 +55,7 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
           ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
           : _policy == null
               ? _buildUnavailable()
-              : RefreshIndicator(
-                  color: EllaColors.primary,
-                  onRefresh: _loadPolicy,
-                  child: _buildPolicyContent(),
-                ),
+              : RefreshIndicator(color: EllaColors.primary, onRefresh: _loadPolicy, child: _buildPolicyContent()),
     );
   }
 
@@ -90,8 +82,10 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
             const SizedBox(height: 24),
             TextButton(
               onPressed: _loadPolicy,
-              child: Text(context.l10n.ellaAlertChannelsRetry,
-                  style: const TextStyle(fontSize: 16, color: EllaColors.primary)),
+              child: Text(
+                context.l10n.ellaAlertChannelsRetry,
+                style: const TextStyle(fontSize: 16, color: EllaColors.primary),
+              ),
             ),
           ],
         ),
@@ -108,10 +102,7 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
         if (p.display.subtitle.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(left: 4, bottom: 16),
-            child: Text(
-              p.display.subtitle,
-              style: const TextStyle(fontSize: 14, color: EllaColors.textTertiary),
-            ),
+            child: Text(p.display.subtitle, style: const TextStyle(fontSize: 14, color: EllaColors.textTertiary)),
           ),
 
         // YOUR CHANNELS
@@ -120,8 +111,10 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
         if (p.userChannels.isEmpty)
           Padding(
             padding: const EdgeInsets.only(left: 4, top: 4, bottom: 8),
-            child: Text(context.l10n.ellaAlertChannelsNoChannels,
-                style: const TextStyle(fontSize: 14, color: EllaColors.textTertiary)),
+            child: Text(
+              context.l10n.ellaAlertChannelsNoChannels,
+              style: const TextStyle(fontSize: 14, color: EllaColors.textTertiary),
+            ),
           ),
 
         const SizedBox(height: 20),
@@ -148,18 +141,20 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
         // PRIVACY NOTES
         if (p.privacyNotes.isNotEmpty) ...[
           _SectionHeader(label: context.l10n.ellaAlertChannelsPrivacyNotes),
-          ...p.privacyNotes.map((note) => Padding(
-                padding: const EdgeInsets.only(left: 4, bottom: 8),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('•  ', style: TextStyle(fontSize: 14, color: EllaColors.textTertiary)),
-                    Expanded(
-                      child: Text(note, style: const TextStyle(fontSize: 14, color: EllaColors.textSecondary)),
-                    ),
-                  ],
-                ),
-              )),
+          ...p.privacyNotes.map(
+            (note) => Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('•  ', style: TextStyle(fontSize: 14, color: EllaColors.textTertiary)),
+                  Expanded(
+                    child: Text(note, style: const TextStyle(fontSize: 14, color: EllaColors.textSecondary)),
+                  ),
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 20),
         ],
 
@@ -226,10 +221,7 @@ class _ChannelStatusRow extends StatelessWidget {
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: EllaColors.textPrimary),
                   ),
                   if (channel.reason.isNotEmpty)
-                    Text(
-                      channel.reason,
-                      style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary),
-                    ),
+                    Text(channel.reason, style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary)),
                 ],
               ),
             ),
@@ -278,10 +270,7 @@ class _EmergencyContactCard extends StatelessWidget {
                 Container(
                   width: 36,
                   height: 36,
-                  decoration: BoxDecoration(
-                    color: EllaColors.error.withValues(alpha: 0.1),
-                    shape: BoxShape.circle,
-                  ),
+                  decoration: BoxDecoration(color: EllaColors.error.withValues(alpha: 0.1), shape: BoxShape.circle),
                   child: const Icon(Icons.emergency, size: 18, color: EllaColors.error),
                 ),
                 const SizedBox(width: 12),
@@ -291,14 +280,14 @@ class _EmergencyContactCard extends StatelessWidget {
                     children: [
                       Text(
                         contact.displayName ?? 'Emergency Contact',
-                        style:
-                            const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: EllaColors.textPrimary),
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                          color: EllaColors.textPrimary,
+                        ),
                       ),
                       if (contact.text.isNotEmpty)
-                        Text(
-                          contact.text,
-                          style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary),
-                        ),
+                        Text(contact.text, style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary)),
                     ],
                   ),
                 ),
@@ -321,7 +310,10 @@ class _EmergencyContactCard extends StatelessWidget {
                           Text(
                             context.l10n.ellaAlertChannelsNotConfigured,
                             style: const TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.w500, color: EllaColors.textPrimary),
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                              color: EllaColors.textPrimary,
+                            ),
                           ),
                           Text(
                             context.l10n.ellaAlertChannelsSetUpContact,
@@ -426,23 +418,25 @@ class _CaregiverPolicyRow extends StatelessWidget {
               spacing: 6,
               runSpacing: 4,
               children: caregiver.channels
-                  .map((c) => Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: c.enabled
-                              ? EllaColors.primary.withValues(alpha: 0.1)
-                              : EllaColors.textTertiary.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(8),
+                  .map(
+                    (c) => Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: c.enabled
+                            ? EllaColors.primary.withValues(alpha: 0.1)
+                            : EllaColors.textTertiary.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        c.displayName,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: c.enabled ? EllaColors.primary : EllaColors.textTertiary,
                         ),
-                        child: Text(
-                          c.displayName,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                            color: c.enabled ? EllaColors.primary : EllaColors.textTertiary,
-                          ),
-                        ),
-                      ))
+                      ),
+                    ),
+                  )
                   .toList(),
             ),
             const SizedBox(height: 8),
@@ -458,10 +452,7 @@ class _CaregiverPolicyRow extends StatelessWidget {
             ),
             if (caregiver.plainLanguage.isNotEmpty) ...[
               const SizedBox(height: 6),
-              Text(
-                caregiver.plainLanguage,
-                style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary),
-              ),
+              Text(caregiver.plainLanguage, style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary)),
             ],
           ],
         ),
@@ -486,13 +477,7 @@ class _PermissionChip extends StatelessWidget {
           color: enabled ? EllaColors.primary : EllaColors.textTertiary,
         ),
         const SizedBox(width: 3),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 12,
-            color: enabled ? EllaColors.textPrimary : EllaColors.textTertiary,
-          ),
-        ),
+        Text(label, style: TextStyle(fontSize: 12, color: enabled ? EllaColors.textPrimary : EllaColors.textTertiary)),
       ],
     );
   }

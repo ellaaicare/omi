@@ -25,6 +25,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   late bool _isEmergencyContact;
   bool _resending = false;
   bool _loadingEmergency = true;
+  bool _loadFailed = false;
 
   @override
   void initState() {
@@ -39,7 +40,16 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     try {
       final caregivers = await caregiver_api.getCaregivers();
       final emergencyId = SharedPreferencesUtil().publicMode ? null : await caregiver_api.getEmergencyContactId();
-      final updated = caregivers.firstWhere(
+      if (caregivers.isFailure || emergencyId?.isFailure == true) {
+        if (mounted) {
+          setState(() {
+            _loadingEmergency = false;
+            _loadFailed = true;
+          });
+        }
+        return;
+      }
+      final updated = (caregivers.value ?? const <Caregiver>[]).firstWhere(
         (c) => c.id == _caregiver.id,
         orElse: () => _caregiver,
       );
@@ -47,12 +57,18 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
         setState(() {
           _dailySummary = updated.receiveDailySummary;
           _caregiver = updated;
-          _isEmergencyContact = emergencyId == updated.id;
+          _isEmergencyContact = emergencyId?.value == updated.id;
           _loadingEmergency = false;
+          _loadFailed = false;
         });
       }
     } catch (_) {
-      if (mounted) setState(() => _loadingEmergency = false);
+      if (mounted) {
+        setState(() {
+          _loadingEmergency = false;
+          _loadFailed = true;
+        });
+      }
     }
   }
 
@@ -62,6 +78,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   }
 
   Future<void> _toggleDailySummary(bool value) async {
+    if (_loadFailed) return;
     setState(() => _dailySummary = value);
     try {
       await caregiver_api.updateCaregiverPermissions(_caregiver.id, dailySummary: value);
@@ -71,6 +88,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   }
 
   Future<void> _toggleEmergencyContact(bool value) async {
+    if (_loadFailed) return;
     final previousValue = _isEmergencyContact;
     setState(() => _isEmergencyContact = value);
     try {
@@ -89,21 +107,16 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     if (_resending) return;
     setState(() => _resending = true);
     try {
-      await caregiver_api.resendInvite(
-        uid: SharedPreferencesUtil().uid,
-        caregiverId: _caregiver.id,
-      );
+      await caregiver_api.resendInvite(uid: SharedPreferencesUtil().uid, caregiverId: _caregiver.id);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaResendSuccess(_caregiver.name))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(context.l10n.ellaResendSuccess(_caregiver.name))));
         await _refreshFromBackend();
       }
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)));
       }
     }
     if (mounted) setState(() => _resending = false);
@@ -130,8 +143,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(context.l10n.ellaRemoveConfirmButton,
-                style: const TextStyle(fontSize: 18, color: EllaColors.error)),
+            child: Text(
+              context.l10n.ellaRemoveConfirmButton,
+              style: const TextStyle(fontSize: 18, color: EllaColors.error),
+            ),
           ),
         ],
       ),
@@ -142,16 +157,14 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     try {
       await caregiver_api.removeCaregiver(_caregiver.id);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaRemoveSuccess(_caregiver.name))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(context.l10n.ellaRemoveSuccess(_caregiver.name))));
         Navigator.of(context).pop();
       }
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)));
       }
     }
   }
@@ -194,16 +207,18 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
         padding: const EdgeInsets.symmetric(horizontal: 24),
         children: [
           const SizedBox(height: 16),
+          if (_loadFailed) ...[
+            Text(context.l10n.ellaSafetyDataUnavailable, textAlign: TextAlign.center),
+            TextButton(onPressed: _refreshFromBackend, child: Text(context.l10n.retry)),
+            const SizedBox(height: 8),
+          ],
 
           // Avatar
           Center(
             child: Container(
               width: 72,
               height: 72,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: EllaColors.primary.withValues(alpha: 0.15),
-              ),
+              decoration: BoxDecoration(shape: BoxShape.circle, color: EllaColors.primary.withValues(alpha: 0.15)),
               child: Center(
                 child: Text(
                   cg.initial,
@@ -214,13 +229,17 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
           ),
           const SizedBox(height: 12),
           Center(
-            child: Text(cg.name,
-                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary)),
+            child: Text(
+              cg.name,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
+            ),
           ),
           const SizedBox(height: 4),
           Center(
-            child: Text(cg.displayRelationship,
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textTertiary)),
+            child: Text(
+              cg.displayRelationship,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textTertiary),
+            ),
           ),
 
           const SizedBox(height: 24),
@@ -244,12 +263,17 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
                       decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
                     ),
                     const SizedBox(width: 6),
-                    Text(statusLabel, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: statusColor)),
+                    Text(
+                      statusLabel,
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: statusColor),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 4),
-                Text(dateLabel,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary)),
+                Text(
+                  dateLabel,
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary),
+                ),
                 if (cg.isInvited || cg.isExpired) ...[
                   const SizedBox(height: 12),
                   Semantics(
@@ -284,9 +308,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('Phone: ${_formatPhone(cg.phone)}',
-                        style:
-                            const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textPrimary)),
+                    child: Text(
+                      'Phone: ${_formatPhone(cg.phone)}',
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textPrimary),
+                    ),
                   ),
                   Semantics(
                     button: true,
@@ -313,9 +338,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('Email: ${cg.email}',
-                        style:
-                            const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textPrimary)),
+                    child: Text(
+                      'Email: ${cg.email}',
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textPrimary),
+                    ),
                   ),
                   Semantics(
                     button: true,
@@ -340,7 +366,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
                   ? '${cg.name} is your emergency contact and will receive critical alerts'
                   : 'Tap to make ${cg.name} your emergency contact for critical alerts',
               isOn: _isEmergencyContact,
-              onChanged: _loadingEmergency ? null : _toggleEmergencyContact,
+              onChanged: _loadingEmergency || _loadFailed ? null : _toggleEmergencyContact,
               borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
             ),
             const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),
@@ -349,7 +375,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
             title: context.l10n.ellaPermissionDailySummary,
             description: context.l10n.ellaPermissionDailySummaryDescription,
             isOn: _dailySummary,
-            onChanged: _toggleDailySummary,
+            onChanged: _loadFailed ? null : _toggleDailySummary,
             borderRadius: SharedPreferencesUtil().publicMode
                 ? BorderRadius.circular(EllaSizes.radiusLarge)
                 : const BorderRadius.vertical(bottom: Radius.circular(EllaSizes.radiusLarge)),
@@ -367,9 +393,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
               borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
               child: Container(
                 height: 56,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-                ),
+                decoration: BoxDecoration(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
                 child: Center(
                   child: Text(
                     context.l10n.ellaRemoveFromCareTeam,

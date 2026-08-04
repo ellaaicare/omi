@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
@@ -181,11 +182,7 @@ Future<http.Response?> makeApiCall({
   } catch (e, stackTrace) {
     if (e is ExactAccountAuthorityChangedException) rethrow;
     Logger.debug('HTTP request failed: $e, $stackTrace');
-    PlatformManager.instance.crashReporter.reportCrash(
-      e,
-      stackTrace,
-      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
-    );
+    await _reportTransportFailure(e, stackTrace, url: url, method: method);
     return null;
   }
 }
@@ -246,11 +243,7 @@ Future<http.Response> makeMultipartApiCall({
   } catch (e, stackTrace) {
     if (e is ExactAccountAuthorityChangedException) rethrow;
     Logger.debug('Multipart HTTP request failed: $e, $stackTrace');
-    PlatformManager.instance.crashReporter.reportCrash(
-      e,
-      stackTrace,
-      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
-    );
+    await _reportTransportFailure(e, stackTrace, url: url, method: method);
     rethrow;
   }
 }
@@ -283,63 +276,21 @@ Stream<String> makeStreamingApiCall({
 
     if (streamedResponse.statusCode != 200) {
       Logger.error('Streaming request failed: ${streamedResponse.statusCode}');
-      return;
+      final body = await streamedResponse.stream.transform(utf8.decoder).join();
+      throw ClientApiFailure.fromHttp(statusCode: streamedResponse.statusCode, body: body);
     }
 
-    var buffers = <String>[];
-    await for (var data in streamedResponse.stream.transform(utf8.decoder)) {
-      _verifyRequestAuthority(
-        exactAuthority: exactAuthority,
-        expectedAuthenticatedUid: expectedAuthenticatedUid,
-        boundary: 'during streaming response',
-      );
-      var lines = data.split('\n\n');
-      for (var line in lines.where((line) => line.isNotEmpty)) {
-        // Handle package splitting by 1024 bytes in dart
-        if (line.length >= 1024) {
-          buffers.add(line);
-          continue;
-        }
-
-        // Merge packages if needed
-        if (buffers.isNotEmpty) {
-          buffers.add(line);
-          line = buffers.join();
-          buffers.clear();
-        }
-
-        _verifyRequestAuthority(
-          exactAuthority: exactAuthority,
-          expectedAuthenticatedUid: expectedAuthenticatedUid,
-          boundary: 'before streaming response delivery',
-        );
-        yield line;
-      }
-    }
-
-    _verifyRequestAuthority(
+    yield* _decodeDelimitedStreamingResponse(
+      streamedResponse.stream,
       exactAuthority: exactAuthority,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
-      boundary: 'after streaming response completion',
+      responseKind: 'streaming',
     );
-
-    // Flush remaining buffers
-    if (buffers.isNotEmpty) {
-      _verifyRequestAuthority(
-        exactAuthority: exactAuthority,
-        expectedAuthenticatedUid: expectedAuthenticatedUid,
-        boundary: 'before final streaming response delivery',
-      );
-      yield buffers.join();
-    }
   } catch (e, stackTrace) {
-    if (e is ExactAccountAuthorityChangedException) rethrow;
+    if (e is ExactAccountAuthorityChangedException || e is ClientApiFailure) rethrow;
     Logger.error('Streaming request error: $e');
-    PlatformManager.instance.crashReporter.reportCrash(
-      e,
-      stackTrace,
-      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
-    );
+    await _reportTransportFailure(e, stackTrace, url: url, method: method);
+    throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
   }
 }
 
@@ -349,9 +300,22 @@ Stream<String> makeMultipartStreamingApiCall({
   Map<String, String> headers = const {},
   Map<String, String> fields = const {},
   String fileFieldName = 'files',
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
   try {
-    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
+    final builtHeaders = await buildHeaders(
+      requireAuthCheck: _isRequiredAuthCheck(url),
+      fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+    _verifyRequestAuthority(
+      exactAuthority: exactAuthority,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      boundary: 'before multipart stream assembly',
+    );
 
     var request = http.MultipartRequest('POST', Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -361,45 +325,99 @@ Stream<String> makeMultipartStreamingApiCall({
       request.files.add(await http.MultipartFile.fromPath(fileFieldName, file.path, filename: basename(file.path)));
     }
 
-    var response = await HttpPoolManager.instance.sendStreaming(request);
+    var response = await HttpPoolManager.instance.sendStreaming(request, exactAuthority: exactAuthority);
 
     if (response.statusCode != 200) {
       Logger.error('Multipart streaming request failed: ${response.statusCode}');
-      return;
+      final body = await response.stream.transform(utf8.decoder).join();
+      throw ClientApiFailure.fromHttp(statusCode: response.statusCode, body: body);
     }
 
-    var buffers = <String>[];
-    await for (var data in response.stream.transform(utf8.decoder)) {
-      var lines = data.split('\n\n');
-      for (var line in lines.where((line) => line.isNotEmpty)) {
-        // Handle package splitting by 1024 bytes in dart
-        if (line.length >= 1024) {
-          buffers.add(line);
-          continue;
-        }
-
-        // Merge packages if needed
-        if (buffers.isNotEmpty) {
-          buffers.add(line);
-          line = buffers.join();
-          buffers.clear();
-        }
-
-        yield line;
-      }
-    }
-
-    // Flush remaining buffers
-    if (buffers.isNotEmpty) {
-      yield buffers.join();
-    }
-  } catch (e, stackTrace) {
-    Logger.error('Multipart streaming request error: $e');
-    PlatformManager.instance.crashReporter.reportCrash(
-      e,
-      stackTrace,
-      userAttributes: {'url': redactUrlForLogs(url), 'method': 'POST'},
+    yield* _decodeDelimitedStreamingResponse(
+      response.stream,
+      exactAuthority: exactAuthority,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      responseKind: 'multipart streaming',
     );
+  } catch (e, stackTrace) {
+    if (e is ExactAccountAuthorityChangedException || e is ClientApiFailure) rethrow;
+    Logger.error('Multipart streaming request error: $e');
+    await _reportTransportFailure(e, stackTrace, url: url, method: 'POST');
+    throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+  }
+}
+
+Stream<String> _decodeDelimitedStreamingResponse(
+  Stream<List<int>> responseStream, {
+  required ExactAccountAuthorityVerifier? exactAuthority,
+  required String? expectedAuthenticatedUid,
+  required String responseKind,
+}) async* {
+  final framer = _DelimitedEventFramer();
+  await for (final data in responseStream.transform(utf8.decoder)) {
+    _verifyRequestAuthority(
+      exactAuthority: exactAuthority,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      boundary: 'during $responseKind response',
+    );
+    for (final frame in framer.add(data)) {
+      _verifyRequestAuthority(
+        exactAuthority: exactAuthority,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        boundary: 'before $responseKind response delivery',
+      );
+      yield frame;
+    }
+  }
+
+  _verifyRequestAuthority(
+    exactAuthority: exactAuthority,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    boundary: 'after $responseKind response completion',
+  );
+  if (framer.hasIncompleteFrame) {
+    throw const ClientApiFailure(ClientApiFailureKind.incompleteStream, retryable: true);
+  }
+}
+
+class _DelimitedEventFramer {
+  String _pending = '';
+
+  bool get hasIncompleteFrame => _pending.trim().isNotEmpty;
+
+  List<String> add(String chunk) {
+    _pending += chunk;
+    final frames = <String>[];
+    while (true) {
+      final lfIndex = _pending.indexOf('\n\n');
+      final crlfIndex = _pending.indexOf('\r\n\r\n');
+      if (lfIndex < 0 && crlfIndex < 0) break;
+
+      final useCrlf = crlfIndex >= 0 && (lfIndex < 0 || crlfIndex <= lfIndex);
+      final delimiterIndex = useCrlf ? crlfIndex : lfIndex;
+      final delimiterLength = useCrlf ? 4 : 2;
+      final frame = _pending.substring(0, delimiterIndex).replaceAll('\r\n', '\n');
+      _pending = _pending.substring(delimiterIndex + delimiterLength);
+      if (frame.trim().isNotEmpty) frames.add(frame);
+    }
+    return frames;
+  }
+}
+
+Future<void> _reportTransportFailure(
+  Object error,
+  StackTrace stackTrace, {
+  required String url,
+  required String method,
+}) async {
+  try {
+    await PlatformManager.instance.crashReporter.reportCrash(
+      error,
+      stackTrace,
+      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
+    );
+  } catch (_) {
+    // Telemetry must never replace the typed transport failure.
   }
 }
 

@@ -35,4 +35,27 @@ void main() {
     expect(find.byType(HomePageWrapper), findsNothing);
     expect(find.byIcon(Icons.lock_outline_rounded), findsOneWidget);
   });
+
+  testWidgets('update-required gate is explicit and does not render Home', (tester) async {
+    final provider = EllaProvisioningProvider()
+      ..state = EllaProvisioningState.blocked
+      ..errorCode = 'upgrade_required';
+    addTearDown(provider.dispose);
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaProvisioningGatePage(readyChild: SizedBox(), startOnMount: false),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('An update is required'), findsOneWidget);
+    expect(find.textContaining('Update Ella to continue securely'), findsOneWidget);
+    expect(find.byType(HomePageWrapper), findsNothing);
+  });
 }

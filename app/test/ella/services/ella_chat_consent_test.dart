@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 
@@ -33,8 +34,11 @@ void main() {
     expect(preferences.aiConsentAccepted, isTrue);
     preferences.uid = 'uid-b';
 
-    final chunks = await sendEllaChatStream('private message').toList();
-
-    expect(chunks, isEmpty);
+    await expectLater(
+      sendEllaChatStream('private message').toList(),
+      throwsA(
+        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
+      ),
+    );
   });
 }

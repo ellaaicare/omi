@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -20,10 +21,15 @@ void main() {
   test('protected API boundaries fail closed without current server consent', () async {
     final file = File('${Directory.systemTemp.path}/ai-consent-protected-payload');
 
-    expect(await sendMessageStreamServer('private chat').toList(), isEmpty);
-    expect(await sendEllaMessageStream('private Ella chat').toList(), isEmpty);
-    expect(await sendVoiceMessageStreamServer([file]).toList(), isEmpty);
-    await expectLater(uploadFilesServer([file]), throwsStateError);
+    await expectLater(_expectConsentFailure(sendMessageStreamServer('private chat')), completes);
+    await expectLater(_expectConsentFailure(sendEllaMessageStream('private Ella chat')), completes);
+    await expectLater(_expectConsentFailure(sendVoiceMessageStreamServer([file])), completes);
+    await expectLater(
+      uploadFilesServer([file]),
+      throwsA(
+        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
+      ),
+    );
     expect(await sendStorageToBackend(file, '2026-07-27T00:00:00Z'), isEmpty);
     expect(await updateUserGeolocation(geolocation: Geolocation(latitude: 1, longitude: 2)), isFalse);
     expect(
@@ -51,8 +57,8 @@ void main() {
     await SharedPreferencesUtil.init();
 
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
-    expect(await sendEllaMessageStream('must not leave device').toList(), isEmpty);
-    expect(await sendMessageStreamServer('must not leave device').toList(), isEmpty);
+    await _expectConsentFailure(sendEllaMessageStream('must not leave device'));
+    await _expectConsentFailure(sendMessageStreamServer('must not leave device'));
   });
 
   test('revocation immediately blocks protected text, audio, and location egress', () async {
@@ -78,8 +84,17 @@ void main() {
     preferences.declineAiConsent();
 
     final file = File('${Directory.systemTemp.path}/revoked-v8-audio');
-    expect(await sendEllaMessageStream('must not leave device').toList(), isEmpty);
-    expect(await sendVoiceMessageStreamServer([file]).toList(), isEmpty);
+    await _expectConsentFailure(sendEllaMessageStream('must not leave device'));
+    await _expectConsentFailure(sendVoiceMessageStreamServer([file]));
     expect(await updateUserGeolocation(geolocation: Geolocation(latitude: 1, longitude: 2)), isFalse);
   });
+}
+
+Future<void> _expectConsentFailure(Stream<Object?> stream) async {
+  await expectLater(
+    stream.toList(),
+    throwsA(
+      isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
+    ),
+  );
 }
