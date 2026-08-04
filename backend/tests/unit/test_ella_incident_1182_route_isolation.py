@@ -359,6 +359,56 @@ def test_authenticated_chat_and_legacy_level4_cannot_record_caller_or_runtime_ma
         assert forbidden_field not in level4_source
 
 
+def test_post_auth_chat_output_never_contains_caller_selected_header_values(monkeypatch, capsys, caplog):
+    private_markers = (
+        "HOSTILE_PRIVATE_CLIENT_TYPE_1182",
+        "HOSTILE_PRIVATE_CLIENT_VERSION_1182",
+        "HOSTILE_PRIVATE_ROUTE_1182",
+        "HOSTILE_PRIVATE_DEBUG_1182",
+    )
+    blocked_head_output = f"[FLOW:CHAT] client={private_markers[0]} request_received=true"
+    assert private_markers[0] in blocked_head_output
+
+    async def isolated_runtime(*_args, **_kwargs):
+        return SimpleNamespace(provider="hermes", agent_id="bounded-agent")
+
+    async def stream(*_args, **_kwargs):
+        yield "done: content-free\n\n"
+
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", isolated_runtime)
+    monkeypatch.setattr(chat, "_stream_hermes_chat", stream)
+    monkeypatch.setattr(chat, "record_trace", lambda *_args, **_kwargs: None)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/ella/chat/stream",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    response = asyncio.run(
+        chat.ella_chat_stream(
+            chat.EllaChatRequest(uid="uid-a", message="content-free test"),
+            request,
+            authenticated_uid="uid-a",
+            x_ella_debug_level=private_markers[3],
+            x_ella_client_type=private_markers[0],
+            x_ella_client_version=private_markers[1],
+            x_ella_route=private_markers[2],
+        )
+    )
+
+    captured = capsys.readouterr()
+    process_output = f"{captured.out}\n{captured.err}\n{caplog.text}"
+    assert response.status_code == 200
+    assert "[FLOW:CHAT]" in process_output
+    assert chat._bounded_client_type(private_markers[0]) == "other"
+    assert chat._bounded_client_type("iOS") == "ios"
+    for marker in private_markers:
+        assert marker not in process_output
+
+
 def test_unbound_non_owner_chat_fails_before_trace_or_provider(monkeypatch):
     effects = []
 

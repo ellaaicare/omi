@@ -19,8 +19,31 @@ from typing import Any, Mapping
 
 ATTESTATION_VERSION = "honcho-isolation-v2"
 ATTESTATION_ISSUER = "hermes-provisioner"
-ATTESTATION_TTL_SECONDS = 120
+ATTESTATION_TTL_SECONDS = 360
 ATTESTATION_KEY_ENV = "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
+
+# These credentials authorize a transport, service, operator, or runtime edge
+# crossed by the self-hosted provisioning contract.  The attestation integrity
+# key must remain a separate authority from every one of them.
+ATTESTATION_CROSS_AUTHORITY_ENV_NAMES = frozenset(
+    {
+        "ELLA_HERMES_PROVISION_API_TOKEN",
+        "ELLA_PROVISION_API_TOKEN",
+        "ELLA_EVENT_LEDGER_TOKEN",
+        "ELLA_CALLBACK_SERVICE_KEY",
+        "ELLA_CAREGIVER_SERVICE_KEY",
+        "ELLA_DASHBOARD_SECRET",
+        "ELLA_VOICE_PROXY_SERVICE_TOKEN",
+        "ELLA_INTERNAL_VOICE_TTS_TOKEN",
+        "ELLA_MEMORY_REINTERPRETATION_OPERATOR_TOKEN",
+        "ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN",
+        "HERMES_API_SERVER_KEY",
+        "HONCHO_API_KEY",
+        "ELLA_VOICE_HONCHO_API_KEY",
+        "ELLA_CORRECTION_HONCHO_API_KEY",
+    }
+)
+ATTESTATION_CROSS_AUTHORITY_ENV_PREFIXES = ("ELLA_HERMES_GATEWAY_KEY_",)
 
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -63,10 +86,35 @@ def content_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _cross_authority_environment_names() -> tuple[str, ...]:
+    names = set(ATTESTATION_CROSS_AUTHORITY_ENV_NAMES)
+    names.update(
+        name
+        for name in os.environ
+        if any(name.startswith(prefix) for prefix in ATTESTATION_CROSS_AUTHORITY_ENV_PREFIXES)
+    )
+    binding_reference = os.getenv("ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF", "")
+    if binding_reference.startswith("env:"):
+        referenced_name = binding_reference[4:]
+        if re.fullmatch(r"ELLA_[A-Z0-9_]{3,120}", referenced_name):
+            names.add(referenced_name)
+    return tuple(sorted(names))
+
+
 def _attestation_key() -> bytes:
     raw = os.getenv(ATTESTATION_KEY_ENV, "")
-    if raw != raw.strip() or len(raw) < 32:
+    if raw != raw.strip() or any(character.isspace() for character in raw) or len(raw) < 32:
         raise HonchoAttestationError("honcho_attestation_key_unavailable")
+    for name in _cross_authority_environment_names():
+        candidate = os.getenv(name, "")
+        if not candidate:
+            continue
+        # Some existing service boundaries strip their own configuration.
+        # Compare that effective value as well, while never normalizing or
+        # accepting padding on the attestation key itself.
+        effective_values = (candidate, candidate.strip())
+        if any(value and hmac.compare_digest(raw, value) for value in effective_values):
+            raise HonchoAttestationError("honcho_attestation_key_conflict")
     return raw.encode("utf-8")
 
 

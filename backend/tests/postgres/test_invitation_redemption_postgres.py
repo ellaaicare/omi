@@ -1554,6 +1554,72 @@ def test_self_hosted_resolution_rechecks_attestation_inside_authority_transactio
     asyncio.run(_run_with_database(scenario))
 
 
+def test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution(monkeypatch):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "attestation-key-separation"
+        email = "attestation-key-separation@example.test"
+        await pilot_invite_admin._issue_invitation(
+            code="RSTU-3456",
+            code_file_existed=False,
+            code_file_ref_hmac="9" * 64,
+            kind="ordinary",
+            allowed_email_hash=pilot_invite_admin._email_hash(CONFIG, email),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        await _redeem_self_hosted(uid, email, "RSTU-3456")
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        staged = await _stage_attested_local_binding(repository, pool, uid)
+
+        attestation_key = os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"]
+        monkeypatch.setenv("HERMES_API_SERVER_KEY", attestation_key)
+        with pytest.raises(RuntimePoolClaimError, match="honcho_attestation_key_conflict"):
+            await repository.activate_runtime_binding(
+                uid=uid,
+                provider="hermes",
+                require_invitation_target=True,
+                authority_lineage=_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT
+                    (SELECT active FROM ella_runtime_bindings WHERE id = $1) AS active,
+                    (SELECT COUNT(*) FROM ella_runtime_targets WHERE runtime_binding_id = $1) AS published_targets
+                """,
+                staged["id"],
+            )
+        assert tuple(state.values()) == (False, 0)
+
+        monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+        monkeypatch.setenv("HERMES_API_SERVER_KEY", attestation_key)
+        with pytest.raises(RuntimePoolClaimError, match="honcho_attestation_key_conflict"):
+            await repository.resolve_active_runtime(
+                uid,
+                template_version="hermes-user-v1",
+                target_mode="hermes-chat",
+                required_provider="hermes",
+                authority_lineage=_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkeypatch):
     async def scenario(pool: asyncpg.Pool) -> None:
         users = (

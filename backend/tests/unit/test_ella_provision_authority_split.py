@@ -328,7 +328,10 @@ def test_real_provision_client_posts_only_to_accepted_exact_authority(monkeypatc
 
     assert result == {"mode": "hermes_only", "provisionMode": "hermes_only"}
     assert captured["url"] == f"{APPROVED_HERMES_PROVISION_URL}/provision"
-    assert captured["headers"] == {"Authorization": f"Bearer {HERMES_TOKEN}"}
+    assert captured["headers"] == {
+        "Authorization": f"Bearer {HERMES_TOKEN}",
+        "Idempotency-Key": provisioning.provision_idempotency_key(_attestation_challenge()),
+    }
 
 
 @pytest.mark.parametrize("case", REJECTION_CASES)

@@ -463,7 +463,10 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_ella_incident_1182_route_isolation.py \
               tests/unit/test_ella_incident_1182_callback_auth.py \
-              tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py |
+              tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+              tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write \
+              tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
+              tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding |
               sed '/^$/d'
           )"
           required_incident_ids=(
@@ -473,6 +476,7 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_client_trace_uses_authenticated_uid_and_discards_caller_runtime_material"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_trace_recording_is_synchronous_content_free_and_never_persists"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_authenticated_chat_and_legacy_level4_cannot_record_caller_or_runtime_material"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_post_auth_chat_output_never_contains_caller_selected_header_values"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_unbound_non_owner_chat_fails_before_trace_or_provider"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_retained_owner_chat_requires_exact_subject_and_complete_server_configuration"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_legacy_routing_is_never_returned_for_non_owner_without_binding"
@@ -486,15 +490,21 @@ jobs:
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_token_generation_requires_two_distinct_configured_secrets"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_dashboard_signing_has_no_source_fallback"
             "tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py::test_voice_diagnostics_require_exact_firebase_bearer"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
+            "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
           )
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 19
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 23
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
             tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+            tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write \
+            tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
+            tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding \
             -v | tee /tmp/incident-1182-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/incident-1182-pytest.log
 
@@ -548,6 +558,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_runtime_receipt_requires_owned_workspace_port_and_honcho"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
+            "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
@@ -556,6 +569,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_activation_rejects_tampered_attestation_before_publication"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
           collected_ids="$(
@@ -576,7 +590,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 498
+          test "$collected" -eq 502
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

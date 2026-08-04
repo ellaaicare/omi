@@ -167,7 +167,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 145
+          test "$collected" -eq 149
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -191,6 +191,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
+            "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
@@ -201,6 +204,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_activation_rejects_tampered_attestation_before_publication"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"

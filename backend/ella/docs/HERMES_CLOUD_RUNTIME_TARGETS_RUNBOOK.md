@@ -29,7 +29,7 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
 - Legacy retained Plato/Honcho paths remain separate and must not be modified by
   the Cloud target migration.
 - Invitation-owned self-hosted Hermes is usable only with a
-  `honcho-isolation-v2` HMAC attestation. OMI creates a 120-second nonce
+  `honcho-isolation-v2` HMAC attestation. OMI creates a 360-second nonce
   challenge binding the exact Firebase UID, internal account owner,
   invitation-target family, binding id, and provisioning job id. The
   provisioner must read the profile-local `<profile>/honcho.json` and sign the
@@ -41,9 +41,26 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
   resolution transaction. Database strings or mutually agreeing unsigned
   response objects are not runtime authority.
 - The provisioner and OMI must receive the same separately scoped
-  `ELLA_HERMES_PROVISION_ATTESTATION_KEY` (minimum 32 bytes). Missing, padded,
-  malformed, stale, partial, or incorrectly signed evidence fails closed. This
-  source contract requires provisioner support before rollout.
+  `ELLA_HERMES_PROVISION_ATTESTATION_KEY` (minimum 32 bytes). Source rejects
+  equality with configured provision, callback, caregiver, event-ledger,
+  dashboard, voice, operator, Honcho, and Hermes runtime/gateway credentials.
+  Missing, whitespace, padded, short, equal, stale, partial, or incorrectly
+  signed evidence fails closed. This source contract requires provisioner
+  support and independently staged credentials before rollout.
+- `ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS` remains bounded to 30-300 seconds.
+  It plus `ELLA_HERMES_PROVISION_ATTESTATION_VERIFICATION_GRACE_SECONDS`
+  (default 30 seconds) must be strictly less than the 360-second proof lifetime;
+  invalid combinations fail before provider work.
+- Every request carries a stable content-free `Idempotency-Key` derived from the
+  exact UID, invitation target, provisioning job, and deterministic binding.
+  The provisioner must atomically reconcile that key to one existing or newly
+  created profile/runtime, return a fresh response for each new nonce, and
+  reject any attempt to reuse the key across UID/target/job/binding context.
+  OMI treats post-provider malformed, stale, context-invalid, or MAC-invalid
+  evidence as retryable without staging or publication, then retries the same
+  job/binding with a fresh challenge. This external idempotency behavior is a
+  mandatory deployment gate; do not enable rollout until it is independently
+  exercised against the actual provisioner.
 - Existing invitation bindings without the persisted v2 attestation fail
   closed. Re-provision them through the reviewed provider path; do not
   synthesize or backfill the proof from database values.

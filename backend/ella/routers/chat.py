@@ -83,6 +83,7 @@ CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
 CHAT_TEMPORAL_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_MAX_CHARS", "9000"))
+CHAT_CLIENT_TYPE_ALLOWLIST = frozenset({"ios", "android", "web"})
 CHAT_USER_TIMEZONE = timezone_name(os.getenv("ELLA_USER_TIMEZONE", os.getenv("ELLA_PLATO_TIMEZONE", "")))
 CHAT_CONTEXT_CHANNELS = [
     channel.strip()
@@ -277,10 +278,15 @@ def _resolve_debug_level(header_value: str = None) -> int:
             level = int(header_value)
             if 0 <= level <= 4:
                 return level
-            logger.warning(f"[FLOW:CHAT] Invalid debug level in header: {header_value}, using config default")
+            logger.warning("[FLOW:CHAT] Invalid debug level header; using config default")
         except (ValueError, TypeError):
-            logger.warning(f"[FLOW:CHAT] Non-integer debug level in header: {header_value}, using config default")
+            logger.warning("[FLOW:CHAT] Non-integer debug level header; using config default")
     return ELLA_CONFIG.debug_level
+
+
+def _bounded_client_type(header_value: str | None) -> str:
+    normalized = str(header_value or "").strip().lower()
+    return normalized if normalized in CHAT_CLIENT_TYPE_ALLOWLIST else "other"
 
 
 async def _fetch_chat_canonical_events(
@@ -1046,12 +1052,9 @@ async def ella_chat_stream(
 
     debug_level = _resolve_debug_level(x_ella_debug_level)
 
-    # Comprehensive flow entry log
-    client_type = x_ella_client_type or "unknown"
-    print(
-        f"[FLOW:CHAT] level={debug_level} client={client_type} request_received=true",
-        flush=True,
-    )
+    # Caller-selected header values never enter process output.
+    client_type = _bounded_client_type(x_ella_client_type)
+    print(f"[FLOW:CHAT] level={debug_level} request_received=true", flush=True)
 
     # Create routing trace
     trace = RouteTrace()
@@ -1069,7 +1072,7 @@ async def ella_chat_stream(
                 request.message,
                 uid,
                 {
-                    "type": x_ella_client_type or "",
+                    "type": client_type,
                     "version": x_ella_client_version or "",
                     "route": x_ella_route or "",
                 },
@@ -1082,7 +1085,7 @@ async def ella_chat_stream(
                 request.message,
                 uid,
                 {
-                    "type": x_ella_client_type or "",
+                    "type": client_type,
                     "version": x_ella_client_version or "",
                     "ip": raw_request.client.host if raw_request.client else "",
                     "route": x_ella_route or "",
@@ -1128,7 +1131,7 @@ async def ella_chat_stream(
                 request.message,
                 uid,
                 {
-                    "type": x_ella_client_type or "",
+                    "type": client_type,
                     "version": x_ella_client_version or "",
                 },
             ),

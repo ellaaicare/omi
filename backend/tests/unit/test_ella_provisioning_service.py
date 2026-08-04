@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hmac
 import uuid
 
 import pytest
@@ -9,10 +10,18 @@ from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_PROVIDER,
     SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
-from database.honcho_attestation import calculate_signature, create_challenge, observed_runtime_fields
+from database.honcho_attestation import (
+    ATTESTATION_CROSS_AUTHORITY_ENV_NAMES,
+    ATTESTATION_TTL_SECONDS,
+    HonchoAttestationError,
+    calculate_signature,
+    create_challenge,
+    observed_runtime_fields,
+)
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+    deterministic_runtime_binding_id,
 )
 from ella.services.ai_consent import (
     CURRENT_POLICY_VERSION,
@@ -21,10 +30,15 @@ from ella.services.ai_consent import (
     CURRENT_SCOPE_VERSION,
 )
 from ella.services.provisioning import (
+    ATTESTATION_VERIFICATION_GRACE_ENV,
+    DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS,
+    DEFAULT_PROVISION_TIMEOUT_SECONDS,
+    MAX_PROVISION_TIMEOUT_SECONDS,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
     extract_runtime_binding,
+    provision_idempotency_key,
     provision_timeout_seconds,
     public_receipt,
     provisioning_enabled,
@@ -33,6 +47,7 @@ from ella.services.provisioning import (
     rollout_enabled,
     stable_payload_hash,
     validate_internal_gateway_url,
+    validated_provision_timeout_seconds,
 )
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
@@ -198,6 +213,7 @@ class FakeRepository:
         self.identity_calls = []
         self.omi_identity_calls = []
         self.user_active = False
+        self.activation_calls = 0
         self.schema_checks = 0
         self.self_hosted_schema_checks = 0
         self.self_hosted_admission = self_hosted_admission
@@ -281,6 +297,7 @@ class FakeRepository:
         model=SELF_HOSTED_RUNTIME_MODEL,
     ):
         del require_invitation_target, authority_lineage, model
+        self.activation_calls += 1
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
         return self.binding
@@ -385,6 +402,178 @@ def test_provision_timeout_is_bounded_for_cold_runtime_starts(monkeypatch, confi
         monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS", configured)
 
     assert provision_timeout_seconds() == expected
+
+
+def test_attestation_key_separation_inventory_fails_before_provider_or_binding_write(monkeypatch):
+    expected_authorities = {
+        "ELLA_HERMES_PROVISION_API_TOKEN",
+        "ELLA_PROVISION_API_TOKEN",
+        "ELLA_EVENT_LEDGER_TOKEN",
+        "ELLA_CALLBACK_SERVICE_KEY",
+        "ELLA_CAREGIVER_SERVICE_KEY",
+        "ELLA_DASHBOARD_SECRET",
+        "ELLA_VOICE_PROXY_SERVICE_TOKEN",
+        "ELLA_INTERNAL_VOICE_TTS_TOKEN",
+        "ELLA_MEMORY_REINTERPRETATION_OPERATOR_TOKEN",
+        "ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN",
+        "HERMES_API_SERVER_KEY",
+        "HONCHO_API_KEY",
+        "ELLA_VOICE_HONCHO_API_KEY",
+        "ELLA_CORRECTION_HONCHO_API_KEY",
+    }
+    assert set(ATTESTATION_CROSS_AUTHORITY_ENV_NAMES) == expected_authorities
+
+    shared = "synthetic-equal-authority-material-000001"
+    assert hmac.compare_digest(shared, shared)
+    candidates = sorted(expected_authorities) + ["ELLA_HERMES_GATEWAY_KEY_TEST_RUNTIME"]
+    for candidate in candidates:
+        with monkeypatch.context() as scoped:
+            scoped.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+            scoped.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", shared)
+            scoped.setenv(candidate, shared)
+            repository = FakeRepository()
+            client = FakeProvisionClient({"mode": "hermes_only", "provisionMode": "hermes_only"})
+            asyncio.run(
+                ProvisioningCoordinator(repository, client).process_claimed_job(
+                    job=_job(state="provisioning", stage="profile_ready"),
+                    identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+                )
+            )
+            assert client.calls == []
+            assert repository.staged is None
+            assert repository.activation_calls == 0
+            assert repository.job["error_code"] == "honcho_attestation_key_conflict"
+            assert shared not in str(repository.job)
+
+    with monkeypatch.context() as scoped:
+        scoped.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", shared)
+        scoped.setenv("ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF", "env:ELLA_TEST_PROVISION_BINDING")
+        scoped.setenv("ELLA_TEST_PROVISION_BINDING", f" {shared} ")
+        with pytest.raises(HonchoAttestationError, match="honcho_attestation_key_conflict"):
+            create_challenge(
+                firebase_uid="user-a",
+                account_owner_id="owner-a",
+                runtime_target_id="target-a",
+                binding_id="binding-a",
+                job_id="job-a",
+            )
+
+
+def test_attestation_window_covers_max_slow_response_and_rejects_invalid_config(monkeypatch):
+    blocked_head_ttl_seconds = 120
+    assert DEFAULT_PROVISION_TIMEOUT_SECONDS >= blocked_head_ttl_seconds
+    assert MAX_PROVISION_TIMEOUT_SECONDS > blocked_head_ttl_seconds
+    assert MAX_PROVISION_TIMEOUT_SECONDS + DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS < ATTESTATION_TTL_SECONDS
+
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS", str(MAX_PROVISION_TIMEOUT_SECONDS))
+    clock = [1_700_000_000.0]
+
+    class SlowProvisionClient(FakeProvisionClient):
+        async def provision(self, identity, target_schema_version, *, attestation_challenge):
+            self.calls.append((identity, target_schema_version, attestation_challenge))
+            clock[0] = attestation_challenge["issued_at"] + MAX_PROVISION_TIMEOUT_SECONDS
+            return _attach_attestation(copy.deepcopy(self.result), attestation_challenge)
+
+    repository = FakeRepository()
+    client = SlowProvisionClient(_runtime_receipt())
+    asyncio.run(
+        ProvisioningCoordinator(repository, client, clock=lambda: clock[0]).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    challenge = client.calls[0][2]
+    assert challenge["expires_at"] - challenge["issued_at"] == ATTESTATION_TTL_SECONDS
+    assert challenge["expires_at"] - int(clock[0]) > DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS
+    assert repository.job["state"] == "ready"
+    assert repository.activation_calls == 1
+
+    monkeypatch.setenv(ATTESTATION_VERIFICATION_GRACE_ENV, "60")
+    with pytest.raises(ProvisioningError, match="honcho_attestation_window_invalid"):
+        validated_provision_timeout_seconds()
+    rejected_repository = FakeRepository()
+    rejected_client = FakeProvisionClient(_runtime_receipt())
+    asyncio.run(
+        ProvisioningCoordinator(rejected_repository, rejected_client).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    assert rejected_client.calls == []
+    assert rejected_repository.staged is None
+    assert rejected_repository.activation_calls == 0
+    assert rejected_repository.job["error_code"] == "honcho_attestation_window_invalid"
+
+
+def test_post_provider_attestation_rejections_retry_and_reconcile_one_binding(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    identity = VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles")
+
+    for failure in ("stale", "malformed", "context", "mac"):
+        clock = [1_700_000_000.0]
+
+        class RejectedProofClient(FakeProvisionClient):
+            async def provision(self, requested_identity, target_schema_version, *, attestation_challenge):
+                self.calls.append((requested_identity, target_schema_version, attestation_challenge))
+                receipt = _attach_attestation(copy.deepcopy(self.result), attestation_challenge)
+                if failure == "stale":
+                    clock[0] = attestation_challenge["expires_at"] + 1
+                elif failure == "malformed":
+                    receipt["honchoAttestation"].pop("nonce")
+                elif failure == "context":
+                    receipt["honchoAttestation"]["firebase_uid"] = "user-b"
+                    receipt["honchoAttestation"]["signature"] = calculate_signature(receipt["honchoAttestation"])
+                else:
+                    receipt["honchoAttestation"]["signature"] = "0" * 64
+                return receipt
+
+        repository = FakeRepository()
+        client = RejectedProofClient(_runtime_receipt())
+        asyncio.run(
+            ProvisioningCoordinator(repository, client, clock=lambda: clock[0]).process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=identity,
+            )
+        )
+        assert repository.job["state"] == "retryable"
+        assert repository.job["retryable"] is True
+        assert repository.staged is None
+        assert repository.activation_calls == 0
+
+    clock = [1_700_000_000.0]
+
+    class RecoveringProofClient(FakeProvisionClient):
+        async def provision(self, requested_identity, target_schema_version, *, attestation_challenge):
+            self.calls.append((requested_identity, target_schema_version, attestation_challenge))
+            receipt = _attach_attestation(copy.deepcopy(self.result), attestation_challenge)
+            clock[0] += 1
+            if len(self.calls) == 1:
+                receipt["honchoAttestation"]["signature"] = "0" * 64
+            return receipt
+
+    repository = FakeRepository()
+    client = RecoveringProofClient(_runtime_receipt())
+    coordinator = ProvisioningCoordinator(repository, client, clock=lambda: clock[0])
+    job = _job(state="provisioning", stage="profile_ready")
+    asyncio.run(coordinator.process_claimed_job(job=job, identity=identity))
+    assert repository.job["state"] == "retryable"
+    assert repository.staged is None
+    asyncio.run(coordinator.process_claimed_job(job=job, identity=identity))
+    assert repository.job["state"] == "ready"
+    assert repository.activation_calls == 1
+    assert len(client.calls) == 2
+    first_challenge, second_challenge = client.calls[0][2], client.calls[1][2]
+    assert first_challenge["nonce"] != second_challenge["nonce"]
+    assert first_challenge["job_id"] == second_challenge["job_id"]
+    assert first_challenge["binding_id"] == second_challenge["binding_id"]
+    assert provision_idempotency_key(first_challenge) == provision_idempotency_key(second_challenge)
+    assert deterministic_runtime_binding_id(uid="user-a", provider="hermes", role="user") == (
+        deterministic_runtime_binding_id(uid="user-a", provider="hermes", role="user")
+    )
+    assert deterministic_runtime_binding_id(uid="user-a", provider="hermes", role="user") != (
+        deterministic_runtime_binding_id(uid="user-b", provider="hermes", role="user")
+    )
 
 
 def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission():
@@ -729,8 +918,9 @@ def test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_par
     assert "credentialRef" not in str(evidence)
 
     tenant_b_challenge = _attestation_challenge("tenant-b")
-    with pytest.raises(ProvisioningError, match="honcho_attestation_context_mismatch"):
+    with pytest.raises(ProvisioningError, match="honcho_attestation_context_mismatch") as replay_error:
         _extract(receipt, "tenant-b", challenge=tenant_b_challenge)
+    assert replay_error.value.retryable is True
 
     for field, replacement in (
         ("runtime_target_id", "target-swapped"),
@@ -747,13 +937,15 @@ def test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_par
     with pytest.raises(ProvisioningError, match="honcho_attestation_readback_mismatch"):
         _extract(port_swap, challenge=tenant_a_challenge)
 
-    with pytest.raises(ProvisioningError, match="honcho_attestation_stale"):
+    with pytest.raises(ProvisioningError, match="honcho_attestation_stale") as stale_error:
         _extract(receipt, challenge=tenant_a_challenge, now=tenant_a_challenge["expires_at"] + 1)
+    assert stale_error.value.retryable is True
 
     partial = copy.deepcopy(receipt)
     partial["honchoAttestation"].pop("nonce")
-    with pytest.raises(ProvisioningError, match="honcho_attestation_malformed"):
+    with pytest.raises(ProvisioningError, match="honcho_attestation_malformed") as malformed_error:
         _extract(partial, challenge=tenant_a_challenge)
+    assert malformed_error.value.retryable is True
 
     malformed_nonce_challenge = dict(tenant_a_challenge, nonce="short")
     with pytest.raises(ProvisioningError, match="honcho_attestation_freshness_invalid"):
@@ -764,13 +956,22 @@ def test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_par
 
     forged = copy.deepcopy(receipt)
     forged["honchoAttestation"]["signature"] = "0" * 64
-    with pytest.raises(ProvisioningError, match="honcho_attestation_integrity_invalid"):
+    with pytest.raises(ProvisioningError, match="honcho_attestation_integrity_invalid") as integrity_error:
         _extract(forged, challenge=tenant_a_challenge)
+    assert integrity_error.value.retryable is True
 
 
 def test_missing_attestation_key_fails_before_provisioner_or_binding_write(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
-    for invalid_key in (None, "short", " unit-test-attestation-key-32-bytes-minimum"):
+    for invalid_key in (
+        None,
+        "",
+        " " * 32,
+        "short",
+        " unit-test-attestation-key-32-bytes-minimum",
+        "unit-test-attestation-key-32-bytes-minimum ",
+        "unit-test-attestation key-32-bytes-minimum",
+    ):
         if invalid_key is None:
             monkeypatch.delenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY")
         else:

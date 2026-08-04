@@ -32,6 +32,7 @@ from database.runtime_targets import (
 )
 
 _pool: Optional[asyncpg.Pool] = None
+_SELF_HOSTED_BINDING_NAMESPACE = uuid.UUID("fa9b67e0-982d-4cab-9814-d38e992ecf6a")
 REQUIRED_PROVISIONING_INDEXES = (
     "ella_provisioning_jobs_user_schema_key",
     "ella_provisioning_jobs_state_updated_idx",
@@ -142,6 +143,16 @@ REQUIRED_SELF_HOSTED_INVITE_COLUMNS = (
     ("voice_entitlements", "invitation_consent_pending"),
     ("ella_runtime_targets", "invitation_target_id"),
 )
+
+
+def deterministic_runtime_binding_id(*, uid: str, provider: str, role: str) -> str:
+    """Return one stable, non-authorizing binding identity for retry reconciliation."""
+    parts = (str(uid), str(provider), str(role))
+    if not all(parts):
+        raise ValueError("runtime_binding_identity_incomplete")
+    return str(uuid.uuid5(_SELF_HOSTED_BINDING_NAMESPACE, "\0".join(parts)))
+
+
 REQUIRED_SELF_HOSTED_INVITE_CONSTRAINTS = (
     "ella_invitation_targets_required_profile_class_check",
     "ella_invitation_redemptions_consent_shape_check",
@@ -2773,7 +2784,14 @@ class EllaProvisioningRepository:
                     provider,
                     role,
                 )
-                return str(existing or uuid.uuid4())
+                return str(
+                    existing
+                    or deterministic_runtime_binding_id(
+                        uid=uid,
+                        provider=provider,
+                        role=role,
+                    )
+                )
 
     async def _verify_self_hosted_honcho_attestation(
         self,
