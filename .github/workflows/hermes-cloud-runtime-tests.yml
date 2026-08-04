@@ -550,6 +550,7 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
+              tests/unit/test_ella_provisioning_service.py \
               tests/unit/test_ella_runtime_route_isolation.py \
               tests/unit/test_voice_proxy_auth.py \
               tests/postgres/test_hermes_cloud_pool_postgres.py \

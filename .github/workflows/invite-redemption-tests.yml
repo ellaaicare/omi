@@ -164,7 +164,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 139
+          test "$collected" -eq 141
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -185,6 +185,8 @@ jobs:
             "tests/unit/test_ella_onboarding_contract.py::test_onboarding_ensure_requires_current_ai_consent_dependency"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_invitation_admission_precedes_identity_and_job_writes"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_authority_drift_blocks_before_provider_call"
+            "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
+            "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope"
