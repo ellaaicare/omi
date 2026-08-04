@@ -153,7 +153,15 @@ def test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid(monkeyp
     monkeypatch.setattr(
         callbacks,
         "update_caregiver",
-        lambda uid, _caregiver_id, data: effects.append(("permissions", uid)) or {"id": "caregiver-a", **data},
+        lambda uid, _caregiver_id, data: effects.append(("permissions", uid, data))
+        or {
+            "id": "caregiver-a",
+            "permissions": {
+                "receive_emergency_alerts": False,
+                "receive_daily_summary": data["permissions.receive_daily_summary"],
+                "daily_summary_email": data["permissions.daily_summary_email"],
+            },
+        },
     )
     monkeypatch.setattr(
         callbacks,
@@ -202,12 +210,20 @@ def test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid(monkeyp
     ]
 
     assert [response.status_code for response in responses] == [200, 201, 200, 200, 200, 200, 204]
+    assert responses[4].json()["permissions"]["receive_emergency_alerts"] is False
     assert effects == [
         ("list", "uid-a"),
         ("invite", "uid-a"),
         ("get-emergency", "uid-a"),
         ("set-emergency", "uid-a"),
-        ("permissions", "uid-a"),
+        (
+            "permissions",
+            "uid-a",
+            {
+                "permissions.receive_daily_summary": True,
+                "permissions.daily_summary_email": True,
+            },
+        ),
         ("resend", "uid-a"),
         ("delete", "uid-a"),
     ]

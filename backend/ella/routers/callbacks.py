@@ -1080,7 +1080,10 @@ async def update_caregiver_permissions(
     caregiver = update_caregiver(
         authenticated_uid,
         caregiver_id,
-        {"permissions": request.model_dump()},
+        {
+            "permissions.receive_daily_summary": request.receive_daily_summary,
+            "permissions.daily_summary_email": request.daily_summary_email,
+        },
     )
     if caregiver is None:
         raise HTTPException(status_code=404, detail="Caregiver not found")

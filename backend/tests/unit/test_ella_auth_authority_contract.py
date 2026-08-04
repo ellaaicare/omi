@@ -1,3 +1,4 @@
+import ast
 import logging
 from pathlib import Path
 
@@ -79,6 +80,18 @@ def test_exact_firebase_boundary_never_accepts_admin_key(monkeypatch):
     assert error.value.status_code == 401
 
 
+def test_ella_lazy_exports_keep_imports_at_module_scope():
+    source = (BACKEND / "utils" / "ella" / "__init__.py").read_text()
+    tree = ast.parse(source)
+    lazy_loader = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__getattr__"
+    )
+
+    assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) for node in ast.walk(lazy_loader))
+
+
 def test_minimum_client_build_is_fail_closed_and_version_aware(monkeypatch):
     monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", lambda _token: {"uid": "user-a"})
     monkeypatch.setenv("ELLA_MIN_SUPPORTED_CLIENT_BUILD", "805")
@@ -91,11 +104,22 @@ def test_minimum_client_build_is_fail_closed_and_version_aware(monkeypatch):
         exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", None, "804", None)
     assert old.value.status_code == 426
     assert exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", None, "805", None) == "user-a"
+    with pytest.raises(HTTPException) as old_shared_header:
+        exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.525+804", None, None)
+    assert old_shared_header.value.status_code == 426
+    assert exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.525+805", None, None) == "user-a"
+    with pytest.raises(HTTPException) as missing_build_component:
+        exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.525", None, None)
+    assert missing_build_component.value.status_code == 426
 
     monkeypatch.setenv("ELLA_MIN_SUPPORTED_CLIENT_BUILD", "1.0.525")
     assert exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.525", None, None) == "user-a"
+    assert exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.525+805", None, None) == "user-a"
+    with pytest.raises(HTTPException) as build_only_for_semantic_gate:
+        exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", None, "805", None)
+    assert build_only_for_semantic_gate.value.status_code == 426
     with pytest.raises(HTTPException) as old_version:
-        exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.524", None, None)
+        exact_firebase_auth.get_exact_firebase_uid("Bearer firebase", "1.0.524+999", None, None)
     assert old_version.value.status_code == 426
 
     monkeypatch.setenv("ELLA_MIN_SUPPORTED_CLIENT_BUILD", "not-a-version")

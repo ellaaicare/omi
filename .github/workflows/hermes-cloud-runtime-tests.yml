@@ -529,6 +529,7 @@ jobs:
             "tests/unit/test_ella_auth_authority_contract.py::test_admin_key_suffix_cannot_mint_arbitrary_subject"
             "tests/unit/test_ella_auth_authority_contract.py::test_admin_branch_observation_is_bounded_and_content_free"
             "tests/unit/test_ella_auth_authority_contract.py::test_exact_firebase_boundary_never_accepts_admin_key"
+            "tests/unit/test_ella_auth_authority_contract.py::test_ella_lazy_exports_keep_imports_at_module_scope"
             "tests/unit/test_ella_auth_authority_contract.py::test_minimum_client_build_is_fail_closed_and_version_aware"
             "tests/unit/test_ella_auth_authority_contract.py::test_service_authority_is_constant_time_bound_to_one_subject"
             "tests/unit/test_ella_auth_authority_contract.py::test_ella_user_routes_do_not_inherit_legacy_admin_subject_auth"
@@ -553,7 +554,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 53
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 54
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \

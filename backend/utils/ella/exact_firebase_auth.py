@@ -12,6 +12,7 @@ from firebase_admin import auth as firebase_auth
 ELLA_SUBJECT_UID_HEADER = "X-Ella-Subject-Uid"
 MAX_FIREBASE_UID_LENGTH = 128
 CLIENT_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}$")
+APP_VERSION_WITH_BUILD_RE = re.compile(r"^(?P<version>\d+(?:\.\d+){0,3})(?:\+(?P<build>\d+))?$")
 
 
 def _normalize_subject_uid(subject_uid: Optional[str], *, feature: str) -> str:
@@ -51,6 +52,31 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
 
 
+def _client_gate_value(
+    minimum: str,
+    x_app_version: Optional[str],
+    x_ella_app_build: Optional[str],
+    x_ella_client_version: Optional[str],
+) -> str:
+    minimum_is_build = "." not in minimum
+    if minimum_is_build:
+        explicit_build = x_ella_app_build.strip() if isinstance(x_ella_app_build, str) else ""
+        if explicit_build:
+            return explicit_build
+    supplied_version = next(
+        (value.strip() for value in (x_app_version, x_ella_client_version) if isinstance(value, str) and value.strip()),
+        "",
+    )
+    match = APP_VERSION_WITH_BUILD_RE.fullmatch(supplied_version)
+    if match is None:
+        return supplied_version
+    if minimum_is_build:
+        if match.group("build"):
+            return match.group("build")
+        return match.group("version") if "." not in match.group("version") else ""
+    return match.group("version")
+
+
 def require_supported_ella_client(
     x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
     x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
@@ -59,8 +85,7 @@ def require_supported_ella_client(
     minimum = os.getenv("ELLA_MIN_SUPPORTED_CLIENT_BUILD", "").strip()
     if not minimum:
         return
-    supplied_values = (x_ella_app_build, x_app_version, x_ella_client_version)
-    supplied = next((value.strip() for value in supplied_values if isinstance(value, str) and value.strip()), "")
+    supplied = _client_gate_value(minimum, x_app_version, x_ella_app_build, x_ella_client_version)
     try:
         minimum_parts = _version_tuple(minimum)
         supplied_parts = _version_tuple(supplied)
