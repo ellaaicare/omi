@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
+from database.honcho_attestation import authority_credential
 from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_MODEL,
     SELF_HOSTED_RUNTIME_PROVIDER,
@@ -88,7 +89,7 @@ entitlement_router = APIRouter(tags=["voice"])
 
 # Configuration
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
-ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
+ELLA_SESSION_SECRET = authority_credential("ELLA_SESSION_SECRET", strip=False)
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 SESSION_EXPIRY_MINUTES = int(os.getenv("ELLA_SESSION_EXPIRY_MINUTES", "25"))
 VOICE_CANARY_ENFORCEMENT_ENABLED = os.getenv(
@@ -106,12 +107,12 @@ ELLA_KOKORO_TTS_URL = os.getenv("ELLA_KOKORO_TTS_URL", "http://100.76.138.56:893
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
-HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
+HERMES_VOICE_MEMORY_TOKEN = authority_credential("HERMES_VOICE_MEMORY_TOKEN", "ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_PROVISION_API_URL = os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
-HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").strip()
-VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
+HERMES_PROVISION_API_TOKEN = authority_credential("ELLA_HERMES_PROVISION_API_TOKEN")
+VOICE_PROXY_SERVICE_TOKEN = authority_credential("ELLA_VOICE_PROXY_SERVICE_TOKEN")
 VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
 VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
 VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS = float(
@@ -127,7 +128,7 @@ ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_T
     "on",
 }
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
 _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
 
 

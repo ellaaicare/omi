@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from database.ella_provisioning import EllaProvisioningRepository
+from database.honcho_attestation import authority_credential
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime, retained_owner_uid_configured
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
@@ -33,15 +34,15 @@ router = APIRouter(prefix="/v1/ella", tags=["ella-resolve"])
 # Database connection pool (shared with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
-PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
+PROVISION_API_KEY = authority_credential("ELLA_PROVISION_API_KEY", "ELLA_PROVISION_API_TOKEN", strip=False)
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 PUBLIC_GATEWAY_URL = os.getenv("OPENCLAW_PUBLIC_URL", "https://gateway.ella-ai-care.com")
 CHAT_PLATFORM = os.getenv("ELLA_CHAT_PLATFORM", "openclaw").strip().lower()
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_PUBLIC_URL", "").strip()
-HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
+HERMES_GATEWAY_TOKEN = authority_credential("HERMES_API_SERVER_KEY", "API_SERVER_KEY", strip=False)
 HERMES_PROVISION_URL = os.getenv("HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
 
 

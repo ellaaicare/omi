@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 from typing import Any, Mapping
 
@@ -22,28 +23,25 @@ ATTESTATION_ISSUER = "hermes-provisioner"
 ATTESTATION_TTL_SECONDS = 360
 ATTESTATION_KEY_ENV = "ELLA_HERMES_PROVISION_ATTESTATION_KEY"
 
-# These credentials authorize a transport, service, operator, or runtime edge
-# crossed by the self-hosted provisioning contract.  The attestation integrity
-# key must remain a separate authority from every one of them.
-ATTESTATION_CROSS_AUTHORITY_ENV_NAMES = frozenset(
-    {
-        "ELLA_HERMES_PROVISION_API_TOKEN",
-        "ELLA_PROVISION_API_TOKEN",
-        "ELLA_EVENT_LEDGER_TOKEN",
-        "ELLA_CALLBACK_SERVICE_KEY",
-        "ELLA_CAREGIVER_SERVICE_KEY",
-        "ELLA_DASHBOARD_SECRET",
-        "ELLA_VOICE_PROXY_SERVICE_TOKEN",
-        "ELLA_INTERNAL_VOICE_TTS_TOKEN",
-        "ELLA_MEMORY_REINTERPRETATION_OPERATOR_TOKEN",
-        "ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN",
-        "HERMES_API_SERVER_KEY",
-        "HONCHO_API_KEY",
-        "ELLA_VOICE_HONCHO_API_KEY",
-        "ELLA_CORRECTION_HONCHO_API_KEY",
-    }
+# This contract is intentionally name-based instead of a second hand-maintained
+# list of currently known callers.  Every server-owned secret-like environment
+# credential is a distinct authority from the Honcho attestation MAC.  Dynamic
+# runtime credentials and configured secret references are covered without
+# trusting receipt/provider metadata to choose the comparison set.
+AUTHORITY_CREDENTIAL_ENV_SUFFIXES = ("_KEY", "_KEYS", "_PASSWORD", "_SECRET", "_TOKEN", "_TOKENS")
+AUTHORITY_CREDENTIAL_ENV_PREFIXES = (
+    "ELLA_HERMES_GATEWAY_KEY_",
+    "ELLA_HERMES_CLOUD_API_KEY_",
+    "ELLA_HONCHO_CLOUD_API_KEY_",
 )
-ATTESTATION_CROSS_AUTHORITY_ENV_PREFIXES = ("ELLA_HERMES_GATEWAY_KEY_",)
+AUTHORITY_CREDENTIAL_REFERENCE_ENV_NAMES = (
+    "ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF",
+    "ELLA_HERMES_BROKER_SERVICE_TOKEN_REF",
+    "ELLA_RUNTIME_POOL_ALERT_TOKEN_REF",
+)
+_ENVIRONMENT_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,120}$")
+_OBSERVED_AUTHORITY_VALUES: set[bytes] = set()
+_OBSERVED_AUTHORITY_VALUES_LOCK = threading.Lock()
 
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -86,36 +84,76 @@ def content_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _cross_authority_environment_names() -> tuple[str, ...]:
-    names = set(ATTESTATION_CROSS_AUTHORITY_ENV_NAMES)
-    names.update(
-        name
-        for name in os.environ
-        if any(name.startswith(prefix) for prefix in ATTESTATION_CROSS_AUTHORITY_ENV_PREFIXES)
+def is_authority_credential_environment_name(name: str) -> bool:
+    """Classify server credential names without consulting caller/provider data."""
+    return bool(
+        name != ATTESTATION_KEY_ENV
+        and _ENVIRONMENT_NAME_RE.fullmatch(name)
+        and (
+            name.endswith(AUTHORITY_CREDENTIAL_ENV_SUFFIXES)
+            or any(name.startswith(prefix) for prefix in AUTHORITY_CREDENTIAL_ENV_PREFIXES)
+        )
     )
-    binding_reference = os.getenv("ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF", "")
-    if binding_reference.startswith("env:"):
-        referenced_name = binding_reference[4:]
-        if re.fullmatch(r"ELLA_[A-Z0-9_]{3,120}", referenced_name):
+
+
+def authority_credential(*environment_names: str, strip: bool = True) -> str:
+    """Resolve one runtime authority through the same contract used for separation."""
+    for name in environment_names:
+        if not is_authority_credential_environment_name(name):
+            raise ValueError("invalid_authority_credential_reference")
+        value = os.getenv(name, "")
+        effective = value.strip() if strip else value
+        if effective:
+            with _OBSERVED_AUTHORITY_VALUES_LOCK:
+                _OBSERVED_AUTHORITY_VALUES.add(effective.encode("utf-8"))
+            return effective
+    return ""
+
+
+def _configured_authority_reference_names() -> set[str]:
+    names: set[str] = set()
+    for reference_environment in AUTHORITY_CREDENTIAL_REFERENCE_ENV_NAMES:
+        reference = os.getenv(reference_environment, "")
+        if not reference.startswith("env:"):
+            continue
+        referenced_name = reference[4:]
+        if _ENVIRONMENT_NAME_RE.fullmatch(referenced_name):
             names.add(referenced_name)
+    return names
+
+
+def _cross_authority_environment_names() -> tuple[str, ...]:
+    names = {name for name in os.environ if is_authority_credential_environment_name(name)}
+    names.update(_configured_authority_reference_names())
     return tuple(sorted(names))
+
+
+def _effective_authority_values(name: str) -> tuple[str, ...]:
+    candidate = os.getenv(name, "")
+    if not candidate:
+        return ()
+    values = {candidate, candidate.strip()}
+    if name.endswith(("_KEYS", "_TOKENS")):
+        values.update(item.strip() for item in candidate.split(","))
+    return tuple(value for value in values if value)
 
 
 def _attestation_key() -> bytes:
     raw = os.getenv(ATTESTATION_KEY_ENV, "")
     if raw != raw.strip() or any(character.isspace() for character in raw) or len(raw) < 32:
         raise HonchoAttestationError("honcho_attestation_key_unavailable")
+    raw_bytes = raw.encode("utf-8")
+    with _OBSERVED_AUTHORITY_VALUES_LOCK:
+        observed_values = tuple(_OBSERVED_AUTHORITY_VALUES)
+    conflict = False
+    for value in observed_values:
+        conflict |= hmac.compare_digest(raw_bytes, value)
     for name in _cross_authority_environment_names():
-        candidate = os.getenv(name, "")
-        if not candidate:
-            continue
-        # Some existing service boundaries strip their own configuration.
-        # Compare that effective value as well, while never normalizing or
-        # accepting padding on the attestation key itself.
-        effective_values = (candidate, candidate.strip())
-        if any(value and hmac.compare_digest(raw, value) for value in effective_values):
-            raise HonchoAttestationError("honcho_attestation_key_conflict")
-    return raw.encode("utf-8")
+        for value in _effective_authority_values(name):
+            conflict |= hmac.compare_digest(raw_bytes, value.encode("utf-8"))
+    if conflict:
+        raise HonchoAttestationError("honcho_attestation_key_conflict")
+    return raw_bytes
 
 
 def _canonical_payload(attestation: Mapping[str, Any]) -> bytes:

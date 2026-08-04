@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import ipaddress
@@ -81,6 +82,8 @@ MIN_PROVISION_TIMEOUT_SECONDS = 30.0
 MAX_PROVISION_TIMEOUT_SECONDS = 300.0
 DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS = 30.0
 ATTESTATION_VERIFICATION_GRACE_ENV = "ELLA_HERMES_PROVISION_ATTESTATION_VERIFICATION_GRACE_SECONDS"
+ATTESTATION_CLOCK_SKEW_MARGIN_SECONDS = 1.0
+MAX_PROVISION_RESPONSE_BYTES = 262_144
 RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
 DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS = 120
 DEFAULT_CLOUD_POOL_LOW_WATER = 2
@@ -92,6 +95,13 @@ class VerifiedIdentity:
     email: str
     name: str
     timezone: str
+
+
+@dataclass(frozen=True)
+class ProvisionDeadline:
+    provider_timeout_seconds: float
+    verification_grace_seconds: float
+    total_seconds: float
 
 
 def rollout_enabled(global_flag: str, uid_allowlist: str, uid: Optional[str] = None) -> bool:
@@ -286,13 +296,28 @@ def attestation_verification_grace_seconds() -> float:
     return value
 
 
-def validated_provision_timeout_seconds() -> float:
-    """Enforce transport + verification grace strictly inside proof lifetime."""
+def provision_deadline() -> ProvisionDeadline:
+    """Snapshot one monotonic transaction budget strictly inside proof freshness."""
     timeout = provision_timeout_seconds()
     grace = attestation_verification_grace_seconds()
-    if timeout + grace >= ATTESTATION_TTL_SECONDS:
+    total = timeout + grace
+    if total + ATTESTATION_CLOCK_SKEW_MARGIN_SECONDS >= ATTESTATION_TTL_SECONDS:
         raise ProvisioningError("honcho_attestation_window_invalid", retryable=False)
-    return timeout
+    return ProvisionDeadline(
+        provider_timeout_seconds=timeout,
+        verification_grace_seconds=grace,
+        total_seconds=total,
+    )
+
+
+def validated_provision_timeout_seconds() -> float:
+    """Return the per-operation transport cap from the validated total budget."""
+    return provision_deadline().provider_timeout_seconds
+
+
+def validated_provision_deadline_seconds() -> float:
+    """Return the monotonic deadline for the complete provisioning transaction."""
+    return provision_deadline().total_seconds
 
 
 def provision_idempotency_key(challenge: dict[str, Any]) -> str:
@@ -307,14 +332,6 @@ def provision_idempotency_key(challenge: dict[str, Any]) -> str:
         digest.update(b"\0")
         digest.update(value.encode("utf-8"))
     return f"ella-hermes-v1-{digest.hexdigest()}"
-
-
-def _post_provider_attestation_reconciliation_required(code: str) -> bool:
-    return code.startswith("honcho_attestation_") or code in {
-        "honcho_receipt_incomplete",
-        "honcho_runtime_proof_incomplete",
-        "honcho_runtime_proof_mismatch",
-    }
 
 
 def stable_payload_hash(payload: dict[str, Any]) -> str:
@@ -428,6 +445,25 @@ def validate_internal_gateway_url(value: str) -> str:
     return value.rstrip("/")
 
 
+async def _bounded_provision_response_body(response: httpx.Response) -> bytes:
+    content_length = response.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            raise ProvisioningError("invalid_provision_receipt", retryable=True) from exc
+        if declared_size < 0 or declared_size > MAX_PROVISION_RESPONSE_BYTES:
+            raise ProvisioningError("invalid_provision_receipt", retryable=True)
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > MAX_PROVISION_RESPONSE_BYTES:
+            body.clear()
+            raise ProvisioningError("invalid_provision_receipt", retryable=True)
+    return bytes(body)
+
+
 class HermesProvisionClient:
     @staticmethod
     def resolve_authority(expected_snapshot: ProvisionAuthoritySnapshot | None = None) -> ProvisionAuthority:
@@ -450,10 +486,12 @@ class HermesProvisionClient:
         *,
         attestation_challenge: dict[str, Any],
         authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+        timeout_seconds: float | None = None,
+        deadline_check: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         entry_snapshot = self.snapshot_authority(authority_snapshot)
         send_snapshot: ProvisionAuthoritySnapshot | None = None
-        timeout_seconds = validated_provision_timeout_seconds()
+        timeout_seconds = validated_provision_timeout_seconds() if timeout_seconds is None else timeout_seconds
         idempotency_key = provision_idempotency_key(attestation_challenge)
         try:
             async with httpx.AsyncClient(
@@ -475,15 +513,35 @@ class HermesProvisionClient:
                 }
                 authority = self.resolve_authority(payload_authority.snapshot())
                 send_snapshot = authority.snapshot()
-                response = await client.post(
+                async with client.stream(
+                    "POST",
                     f"{authority.base_url}/provision",
                     headers={
                         "Authorization": f"Bearer {authority.token}",
                         "Idempotency-Key": idempotency_key,
                     },
                     json=payload,
-                )
-                self.resolve_authority(send_snapshot)
+                ) as response:
+                    self.resolve_authority(send_snapshot)
+
+                    if response.status_code == 409:
+                        raise ProvisioningError("runtime_capacity", retryable=True)
+                    if 300 <= response.status_code < 400:
+                        raise ProvisioningError(
+                            "provision_request_rejected", retryable=False, detail={"status": response.status_code}
+                        )
+                    if response.status_code in {401, 403}:
+                        raise ProvisioningError("provision_service_auth_failed", retryable=False)
+                    if response.status_code >= 500:
+                        raise ProvisioningError("provision_service_unavailable", retryable=True)
+                    if response.status_code >= 400:
+                        raise ProvisioningError(
+                            "provision_request_rejected", retryable=False, detail={"status": response.status_code}
+                        )
+                    response_body = await _bounded_provision_response_body(response)
+                    self.resolve_authority(send_snapshot)
+                    if deadline_check is not None:
+                        deadline_check()
         except httpx.TimeoutException as exc:
             if send_snapshot is not None:
                 self.resolve_authority(send_snapshot)
@@ -493,25 +551,14 @@ class HermesProvisionClient:
                 self.resolve_authority(send_snapshot)
             raise ProvisioningError("provision_service_unavailable", retryable=True) from exc
 
-        if response.status_code == 409:
-            raise ProvisioningError("runtime_capacity", retryable=True)
-        if 300 <= response.status_code < 400:
-            raise ProvisioningError(
-                "provision_request_rejected", retryable=False, detail={"status": response.status_code}
-            )
-        if response.status_code in {401, 403}:
-            raise ProvisioningError("provision_service_auth_failed", retryable=False)
-        if response.status_code >= 500:
-            raise ProvisioningError("provision_service_unavailable", retryable=True)
-        if response.status_code >= 400:
-            raise ProvisioningError(
-                "provision_request_rejected", retryable=False, detail={"status": response.status_code}
-            )
-
         try:
-            result = response.json()
-        except ValueError as exc:
+            result = json.loads(response_body)
+        except (UnicodeDecodeError, ValueError) as exc:
             raise ProvisioningError("invalid_provision_receipt", retryable=True) from exc
+        if deadline_check is not None:
+            deadline_check()
+        if not isinstance(result, dict):
+            raise ProvisioningError("invalid_provision_receipt", retryable=True)
         if result.get("provisionMode") != "hermes_only" or result.get("mode") != "hermes_only":
             raise ProvisioningError("non_hermes_provision_rejected", retryable=False)
         return result
@@ -716,6 +763,7 @@ class ProvisioningCoordinator:
         runtime_admission: Any = None,
         staged_attestation_verifier: Any = None,
         clock: Callable[[], float] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ):
         self.repository = repository
         self.client = client or HermesProvisionClient()
@@ -725,6 +773,7 @@ class ProvisioningCoordinator:
         self.runtime_admission = runtime_admission
         self.staged_attestation_verifier = staged_attestation_verifier
         self.clock = clock or time.time
+        self.monotonic_clock = monotonic_clock or time.monotonic
 
     def _authority_snapshot(
         self,
@@ -931,8 +980,98 @@ class ProvisioningCoordinator:
         if cloud_provisioning_enabled(identity.uid):
             await self._process_cloud_claimed_job(job=job, identity=identity)
             return
+
+        progress: dict[str, Any] = {
+            "authority_snapshot": authority_snapshot,
+            "provider_work_started": False,
+        }
+        try:
+            deadline = provision_deadline()
+        except ProvisioningError as exc:
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="blocked",
+                stage="runtime_ready",
+                retryable=False,
+                error_code=exc.code,
+            )
+            return
+
+        progress["deadline_at"] = self.monotonic_clock() + deadline.total_seconds
+
+        def deadline_check() -> None:
+            if self.monotonic_clock() >= progress["deadline_at"]:
+                raise TimeoutError("provision_transaction_timeout")
+
+        try:
+            async with asyncio.timeout(deadline.total_seconds):
+                await self._process_claimed_job_with_deadline(
+                    job=job,
+                    identity=identity,
+                    deadline=deadline,
+                    deadline_check=deadline_check,
+                    progress=progress,
+                    authority_snapshot=authority_snapshot,
+                )
+        except TimeoutError:
+            await self._record_interrupted_provision(
+                job=job,
+                progress=progress,
+                error_code="provision_transaction_timeout",
+            )
+        except asyncio.CancelledError:
+            await self._record_interrupted_provision(
+                job=job,
+                progress=progress,
+                error_code="provision_transaction_cancelled",
+            )
+            raise
+
+    async def _record_interrupted_provision(
+        self,
+        *,
+        job: dict[str, Any],
+        progress: dict[str, Any],
+        error_code: str,
+    ) -> None:
+        provider_work_started = bool(progress.get("provider_work_started"))
+        error_detail = {"reconciliation": "retry_same_job_binding"} if provider_work_started else {}
+        receipt = (
+            {
+                "type": "runtime_attestation_reconciliation_required",
+                "same_job_binding_required": True,
+                "content_free": True,
+            }
+            if provider_work_started
+            else None
+        )
+        try:
+            await self._repository_call(
+                progress.get("authority_snapshot"),
+                self.repository.update_job,
+                job_id=str(job["id"]),
+                state="retryable",
+                stage="runtime_ready",
+                retryable=True,
+                error_code=error_code,
+                error_detail=error_detail,
+                receipt=receipt,
+            )
+        except Exception:
+            logger.error("Unable to persist provisioning interruption state")
+
+    async def _process_claimed_job_with_deadline(
+        self,
+        *,
+        job: dict[str, Any],
+        identity: VerifiedIdentity,
+        deadline: ProvisionDeadline,
+        deadline_check: Callable[[], None],
+        progress: dict[str, Any],
+        authority_snapshot: ProvisionAuthoritySnapshot | None = None,
+    ) -> None:
         authority_snapshot = self._authority_snapshot(authority_snapshot)
-        provider_response_received = False
+        progress["authority_snapshot"] = authority_snapshot
         try:
             invitation_admission = None
             invitation_owned = False
@@ -981,7 +1120,6 @@ class ProvisioningCoordinator:
             ).strip()
             if not account_owner_id or not runtime_target_id:
                 raise ProvisioningError("honcho_attestation_context_incomplete", retryable=False)
-            validated_provision_timeout_seconds()
             binding_id = await self._repository_call(
                 authority_snapshot,
                 self.repository.prepare_runtime_binding_identity,
@@ -989,6 +1127,7 @@ class ProvisioningCoordinator:
                 provider="hermes",
                 role="user",
             )
+            deadline_check()
             try:
                 attestation_challenge = create_challenge(
                     firebase_uid=identity.uid,
@@ -1004,20 +1143,24 @@ class ProvisioningCoordinator:
                     retryable=exc.code == "honcho_attestation_key_unavailable",
                 ) from exc
             if isinstance(self.client, HermesProvisionClient):
+                progress["provider_work_started"] = True
                 result = await self.client.provision(
                     identity,
                     str(job["target_schema_version"]),
                     attestation_challenge=attestation_challenge,
                     authority_snapshot=authority_snapshot,
+                    timeout_seconds=deadline.provider_timeout_seconds,
+                    deadline_check=deadline_check,
                 )
                 self.client.resolve_authority(authority_snapshot)
             else:
+                progress["provider_work_started"] = True
                 result = await self.client.provision(
                     identity,
                     str(job["target_schema_version"]),
                     attestation_challenge=attestation_challenge,
                 )
-            provider_response_received = True
+            deadline_check()
             binding_data = extract_runtime_binding(
                 result,
                 identity.uid,
@@ -1025,12 +1168,14 @@ class ProvisioningCoordinator:
                 expected_template_version=str(job["target_schema_version"]),
                 now=int(self.clock()),
             )
+            deadline_check()
             binding = await self._repository_call(
                 authority_snapshot,
                 self.repository.stage_runtime_binding,
                 uid=identity.uid,
                 binding=binding_data,
             )
+            deadline_check()
             await self._repository_call(
                 authority_snapshot,
                 self.repository.update_job,
@@ -1044,6 +1189,7 @@ class ProvisioningCoordinator:
                     "binding_revision": binding["revision"],
                 },
             )
+            deadline_check()
             activated = await self._repository_call(
                 authority_snapshot,
                 self.repository.activate_runtime_binding,
@@ -1053,6 +1199,7 @@ class ProvisioningCoordinator:
                 authority_lineage=(current_self_hosted_runtime_lineage() if self_hosted_required else None),
                 model=SELF_HOSTED_RUNTIME_MODEL,
             )
+            deadline_check()
             await self._repository_call(
                 authority_snapshot,
                 self.repository.update_job,
@@ -1065,12 +1212,13 @@ class ProvisioningCoordinator:
                     "binding_revision": activated["revision"],
                 },
             )
+            deadline_check()
+        except TimeoutError:
+            raise
         except ProvisioningError as exc:
             if exc.code == "hermes_provision_authority_drift":
                 return
-            reconciliation_required = provider_response_received and _post_provider_attestation_reconciliation_required(
-                exc.code
-            )
+            reconciliation_required = bool(progress.get("provider_work_started"))
             retryable = exc.retryable or reconciliation_required
             error_detail = dict(exc.detail)
             receipt = None
@@ -1098,6 +1246,9 @@ class ProvisioningCoordinator:
                     return
                 raise
         except RuntimePoolClaimError as exc:
+            if progress.get("provider_work_started"):
+                await self._record_interrupted_provision(job=job, progress=progress, error_code=exc.code)
+                return
             try:
                 await self._repository_call(
                     authority_snapshot,
@@ -1114,6 +1265,13 @@ class ProvisioningCoordinator:
                 raise
         except Exception:
             logger.error("Unexpected Hermes provisioning failure")
+            if progress.get("provider_work_started"):
+                await self._record_interrupted_provision(
+                    job=job,
+                    progress=progress,
+                    error_code="provision_transaction_interrupted",
+                )
+                return
             try:
                 await self._repository_call(
                     authority_snapshot,

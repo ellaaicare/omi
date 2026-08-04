@@ -1,8 +1,11 @@
+import ast
 import asyncio
 import copy
-import hmac
+import re
 import uuid
+from pathlib import Path
 
+import httpx
 import pytest
 
 from database.runtime_targets import (
@@ -11,12 +14,12 @@ from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 from database.honcho_attestation import (
-    ATTESTATION_CROSS_AUTHORITY_ENV_NAMES,
     ATTESTATION_TTL_SECONDS,
     HonchoAttestationError,
     calculate_signature,
     create_challenge,
     observed_runtime_fields,
+    authority_credential,
 )
 from database.ella_provisioning import (
     EllaProvisioningRepository,
@@ -33,7 +36,10 @@ from ella.services.provisioning import (
     ATTESTATION_VERIFICATION_GRACE_ENV,
     DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS,
     DEFAULT_PROVISION_TIMEOUT_SECONDS,
+    MAX_PROVISION_RESPONSE_BYTES,
     MAX_PROVISION_TIMEOUT_SECONDS,
+    HermesProvisionClient,
+    ProvisionDeadline,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
@@ -49,6 +55,7 @@ from ella.services.provisioning import (
     validate_internal_gateway_url,
     validated_provision_timeout_seconds,
 )
+from ella.services import provisioning as provisioning_service
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
     retained_owner_uid_configured,
@@ -56,6 +63,7 @@ from ella.services.runtime_resolver import (
     runtime_bindings_enabled,
     runtime_from_binding,
 )
+from ella.utils.provision_authority import ProvisionAuthority, ProvisionAuthoritySnapshot
 
 
 def _job(**overrides):
@@ -262,6 +270,11 @@ class FakeRepository:
         return dict(self.job)
 
     async def update_job(self, **kwargs):
+        self.job_calls.append(dict(kwargs))
+        if self.job["state"] in {"ready", "blocked", "rolling_back", "manual_intervention"} and (
+            self.job["state"] != kwargs["state"]
+        ):
+            return dict(self.job)
         self.job.update(
             state=kwargs["state"],
             stage=kwargs["stage"],
@@ -314,6 +327,25 @@ class FakeProvisionClient:
     async def provision(self, identity, target_schema_version, *, attestation_challenge):
         self.calls.append((identity, target_schema_version, attestation_challenge))
         return _attach_attestation(copy.deepcopy(self.result), attestation_challenge)
+
+
+def _local_provision_client(base_url: str) -> HermesProvisionClient:
+    snapshot = ProvisionAuthoritySnapshot(b"s" * 32)
+    authority = ProvisionAuthority(
+        base_url=base_url,
+        token="synthetic-local-provider-token",
+        token_reference="LOCAL_TEST_ONLY",
+        _snapshot=snapshot,
+    )
+
+    class LocalProvisionClient(HermesProvisionClient):
+        @staticmethod
+        def resolve_authority(expected_snapshot=None):
+            if expected_snapshot is not None and not snapshot.matches(expected_snapshot):
+                raise AssertionError("unexpected authority snapshot")
+            return authority
+
+    return LocalProvisionClient()
 
 
 class _FakeDocument:
@@ -404,28 +436,63 @@ def test_provision_timeout_is_bounded_for_cold_runtime_starts(monkeypatch, confi
     assert provision_timeout_seconds() == expected
 
 
-def test_attestation_key_separation_inventory_fails_before_provider_or_binding_write(monkeypatch):
-    expected_authorities = {
-        "ELLA_HERMES_PROVISION_API_TOKEN",
-        "ELLA_PROVISION_API_TOKEN",
-        "ELLA_EVENT_LEDGER_TOKEN",
-        "ELLA_CALLBACK_SERVICE_KEY",
-        "ELLA_CAREGIVER_SERVICE_KEY",
-        "ELLA_DASHBOARD_SECRET",
-        "ELLA_VOICE_PROXY_SERVICE_TOKEN",
-        "ELLA_INTERNAL_VOICE_TTS_TOKEN",
-        "ELLA_MEMORY_REINTERPRETATION_OPERATOR_TOKEN",
-        "ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN",
-        "HERMES_API_SERVER_KEY",
-        "HONCHO_API_KEY",
-        "ELLA_VOICE_HONCHO_API_KEY",
-        "ELLA_CORRECTION_HONCHO_API_KEY",
-    }
-    assert set(ATTESTATION_CROSS_AUTHORITY_ENV_NAMES) == expected_authorities
+def test_attestation_key_separation_tracks_runtime_credential_lookups_from_source(monkeypatch):
+    backend_root = Path(__file__).resolve().parents[2]
+    credential_name = re.compile(
+        r"^(?!(?:ELLA_HERMES_PROVISION_ATTESTATION_KEY)$)[A-Z][A-Z0-9_]*(?:_KEYS?|_TOKENS?|_SECRET|_PASSWORD)$"
+    )
+
+    def literal_environment_names(node):
+        if not isinstance(node, ast.Call):
+            return ()
+        function = node.func
+        if isinstance(function, ast.Name) and function.id == "authority_credential":
+            candidates = node.args
+        elif (
+            isinstance(function, ast.Attribute)
+            and function.attr == "getenv"
+            and isinstance(function.value, ast.Name)
+            and function.value.id == "os"
+        ):
+            candidates = node.args[:1]
+        elif (
+            isinstance(function, ast.Attribute)
+            and function.attr == "get"
+            and isinstance(function.value, ast.Attribute)
+            and function.value.attr == "environ"
+            and isinstance(function.value.value, ast.Name)
+            and function.value.value.id == "os"
+        ):
+            candidates = node.args[:1]
+        else:
+            return ()
+        return tuple(
+            candidate.value
+            for candidate in candidates
+            if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str)
+        )
+
+    discovered = set()
+    for relative_root in ("database", "ella", "utils/ella"):
+        for source_path in (backend_root / relative_root).rglob("*.py"):
+            if source_path.name == "honcho_attestation.py":
+                continue
+            source_tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            discovered.update(
+                name
+                for node in ast.walk(source_tree)
+                for name in literal_environment_names(node)
+                if credential_name.fullmatch(name)
+            )
+    assert {
+        "ELLA_PROVISION_API_KEY",
+        "PROVISION_API_TOKEN",
+        "HERMES_VOICE_MEMORY_TOKEN",
+        "API_SERVER_KEY",
+    } <= discovered
 
     shared = "synthetic-equal-authority-material-000001"
-    assert hmac.compare_digest(shared, shared)
-    candidates = sorted(expected_authorities) + ["ELLA_HERMES_GATEWAY_KEY_TEST_RUNTIME"]
+    candidates = sorted(discovered) + ["ELLA_HERMES_GATEWAY_KEY_TEST_RUNTIME"]
     for candidate in candidates:
         with monkeypatch.context() as scoped:
             scoped.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
@@ -449,6 +516,21 @@ def test_attestation_key_separation_inventory_fails_before_provider_or_binding_w
         scoped.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", shared)
         scoped.setenv("ELLA_HERMES_PROVISION_AUTHORITY_BINDING_REF", "env:ELLA_TEST_PROVISION_BINDING")
         scoped.setenv("ELLA_TEST_PROVISION_BINDING", f" {shared} ")
+        with pytest.raises(HonchoAttestationError, match="honcho_attestation_key_conflict"):
+            create_challenge(
+                firebase_uid="user-a",
+                account_owner_id="owner-a",
+                runtime_target_id="target-a",
+                binding_id="binding-a",
+                job_id="job-a",
+            )
+
+    stale_cached = "synthetic-stale-runtime-authority-000001"
+    with monkeypatch.context() as scoped:
+        scoped.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", stale_cached)
+        scoped.setenv("API_SERVER_KEY", stale_cached)
+        assert authority_credential("API_SERVER_KEY") == stale_cached
+        scoped.setenv("API_SERVER_KEY", "synthetic-reloaded-runtime-authority-000002")
         with pytest.raises(HonchoAttestationError, match="honcho_attestation_key_conflict"):
             create_challenge(
                 firebase_uid="user-a",
@@ -504,6 +586,287 @@ def test_attestation_window_covers_max_slow_response_and_rejects_invalid_config(
     assert rejected_repository.staged is None
     assert rejected_repository.activation_calls == 0
     assert rejected_repository.job["error_code"] == "honcho_attestation_window_invalid"
+
+
+def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.setattr(
+        provisioning_service,
+        "provision_deadline",
+        lambda: ProvisionDeadline(provider_timeout_seconds=0.3, verification_grace_seconds=0.01, total_seconds=0.12),
+    )
+
+    async def scenario():
+        request_received = asyncio.Event()
+        response_finished = asyncio.Event()
+
+        async def slow_drip(reader, writer):
+            try:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                content_length = 0
+                for line in headers.decode("ascii").split("\r\n"):
+                    if line.lower().startswith("content-length:"):
+                        content_length = int(line.split(":", 1)[1].strip())
+                if content_length:
+                    await reader.readexactly(content_length)
+                request_received.set()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nContent-Type: application/json\r\n\r\n")
+                await writer.drain()
+                for byte in b'{"a":1}\n':
+                    writer.write(bytes([byte]))
+                    await writer.drain()
+                    await asyncio.sleep(0.025)
+            except (asyncio.IncompleteReadError, BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    response_finished.set()
+
+        server = await asyncio.start_server(slow_drip, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        repository = FakeRepository()
+        coordinator = ProvisioningCoordinator(repository, _local_provision_client(f"http://127.0.0.1:{port}"))
+        async with server:
+            await coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+            await asyncio.wait_for(request_received.wait(), timeout=0.2)
+            await asyncio.wait_for(response_finished.wait(), timeout=0.2)
+
+        assert repository.staged is None
+        assert repository.activation_calls == 0
+        assert repository.job["state"] == "retryable"
+        assert repository.job["error_code"] == "provision_transaction_timeout"
+        assert repository.job_calls[-1]["receipt"] == {
+            "type": "runtime_attestation_reconciliation_required",
+            "same_job_binding_required": True,
+            "content_free": True,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.setattr(
+        provisioning_service,
+        "provision_deadline",
+        lambda: ProvisionDeadline(provider_timeout_seconds=0.2, verification_grace_seconds=0.1, total_seconds=0.3),
+    )
+
+    async def scenario():
+        async def oversized(reader, writer):
+            headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                (
+                    int(line.split(":", 1)[1].strip())
+                    for line in headers.decode("ascii").split("\r\n")
+                    if line.lower().startswith("content-length:")
+                ),
+                0,
+            )
+            if content_length:
+                await reader.readexactly(content_length)
+            writer.write(
+                (
+                    "HTTP/1.1 200 OK\r\n"
+                    f"Content-Length: {MAX_PROVISION_RESPONSE_BYTES + 1}\r\n"
+                    "Content-Type: application/json\r\n\r\n"
+                ).encode("ascii")
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(oversized, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        repository = FakeRepository()
+        coordinator = ProvisioningCoordinator(repository, _local_provision_client(f"http://127.0.0.1:{port}"))
+        async with server:
+            await coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+
+        assert repository.staged is None
+        assert repository.activation_calls == 0
+        assert repository.job["state"] == "retryable"
+        assert repository.job["error_code"] == "invalid_provision_receipt"
+
+    asyncio.run(scenario())
+
+
+def test_total_deadline_rejects_delayed_json_parse_before_binding_write(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monotonic = [100.0]
+    monkeypatch.setattr(
+        provisioning_service,
+        "provision_deadline",
+        lambda: ProvisionDeadline(provider_timeout_seconds=0.2, verification_grace_seconds=0.8, total_seconds=1.0),
+    )
+    original_loads = provisioning_service.json.loads
+
+    def delayed_loads(payload, *args, **kwargs):
+        result = original_loads(payload, *args, **kwargs)
+        if isinstance(payload, bytes):
+            monotonic[0] += 2.0
+        return result
+
+    monkeypatch.setattr(provisioning_service.json, "loads", delayed_loads)
+
+    async def scenario():
+        async def signed_receipt(reader, writer):
+            headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                (
+                    int(line.split(":", 1)[1].strip())
+                    for line in headers.decode("ascii").split("\r\n")
+                    if line.lower().startswith("content-length:")
+                ),
+                0,
+            )
+            request_body = await reader.readexactly(content_length)
+            request_payload = provisioning_service.json.JSONDecoder().decode(request_body.decode("utf-8"))
+            response_payload = _attach_attestation(_runtime_receipt(), request_payload["honchoAttestationChallenge"])
+            response_body = provisioning_service.json.dumps(response_payload).encode("utf-8")
+            writer.write(
+                (
+                    "HTTP/1.1 200 OK\r\n"
+                    f"Content-Length: {len(response_body)}\r\n"
+                    "Content-Type: application/json\r\n\r\n"
+                ).encode("ascii")
+                + response_body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(signed_receipt, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        repository = FakeRepository()
+        coordinator = ProvisioningCoordinator(
+            repository,
+            _local_provision_client(f"http://127.0.0.1:{port}"),
+            monotonic_clock=lambda: monotonic[0],
+        )
+        async with server:
+            await coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+
+        assert repository.staged is None
+        assert repository.activation_calls == 0
+        assert repository.job["state"] == "retryable"
+        assert repository.job["error_code"] == "provision_transaction_timeout"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("boundary", ("verification", "staging", "activation"))
+def test_total_deadline_stops_delayed_verification_and_local_publication(monkeypatch, boundary):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monotonic = [100.0]
+    total_seconds = 1.0 if boundary == "verification" else 0.03
+    monkeypatch.setattr(
+        provisioning_service,
+        "provision_deadline",
+        lambda: ProvisionDeadline(
+            provider_timeout_seconds=0.2,
+            verification_grace_seconds=0.1,
+            total_seconds=total_seconds,
+        ),
+    )
+
+    class DelayedRepository(FakeRepository):
+        async def stage_runtime_binding(self, *, uid, binding):
+            if boundary == "staging":
+                await asyncio.sleep(0.06)
+            return await super().stage_runtime_binding(uid=uid, binding=binding)
+
+        async def activate_runtime_binding(self, **kwargs):
+            if boundary == "activation":
+                await asyncio.sleep(0.06)
+            return await super().activate_runtime_binding(**kwargs)
+
+    if boundary == "verification":
+        original_extract = provisioning_service.extract_runtime_binding
+
+        def delayed_verification(*args, **kwargs):
+            result = original_extract(*args, **kwargs)
+            monotonic[0] += 2.0
+            return result
+
+        monkeypatch.setattr(provisioning_service, "extract_runtime_binding", delayed_verification)
+
+    repository = DelayedRepository()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        FakeProvisionClient(_runtime_receipt()),
+        monotonic_clock=lambda: monotonic[0],
+    )
+    asyncio.run(
+        coordinator.process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+
+    assert repository.job["state"] == "retryable"
+    assert repository.job["error_code"] == "provision_transaction_timeout"
+    assert repository.activation_calls == 0
+    assert not any(call["state"] == "ready" for call in repository.job_calls)
+    if boundary in {"verification", "staging"}:
+        assert repository.staged is None
+    else:
+        assert repository.staged["active"] is False
+
+
+def test_external_cancellation_after_provider_work_records_retryable_reconciliation(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+
+    class CancellableProvisionClient(FakeProvisionClient):
+        def __init__(self):
+            super().__init__(_runtime_receipt())
+            self.started = asyncio.Event()
+
+        async def provision(self, identity, target_schema_version, *, attestation_challenge):
+            self.calls.append((identity, target_schema_version, attestation_challenge))
+            self.started.set()
+            await asyncio.Event().wait()
+
+    async def scenario():
+        repository = FakeRepository()
+        client = CancellableProvisionClient()
+        coordinator = ProvisioningCoordinator(repository, client)
+        task = asyncio.create_task(
+            coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+        )
+        await asyncio.wait_for(client.started.wait(), timeout=0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert repository.staged is None
+        assert repository.activation_calls == 0
+        assert repository.job["state"] == "retryable"
+        assert repository.job["error_code"] == "provision_transaction_cancelled"
+        assert repository.job_calls[-1]["receipt"] == {
+            "type": "runtime_attestation_reconciliation_required",
+            "same_job_binding_required": True,
+            "content_free": True,
+        }
+
+    asyncio.run(scenario())
 
 
 def test_post_provider_attestation_rejections_retry_and_reconcile_one_binding(monkeypatch):
@@ -1168,6 +1531,7 @@ def test_legacy_8210_receipt_cannot_activate(monkeypatch):
 
     asyncio.run(coordinator.process_claimed_job(job=_job(state="provisioning"), identity=identity))
 
-    assert repository.job["state"] == "degraded"
+    assert repository.job["state"] == "retryable"
+    assert repository.job["retryable"] is True
     assert repository.job["error_code"] == "runtime_receipt_missing"
     assert repository.binding is None

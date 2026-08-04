@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from database.honcho_attestation import authority_credential
+
 LEGACY_PROVISION_URL_ENV = "ELLA_PROVISION_API_URL"
 LEGACY_PROVISION_TOKEN_ENV = "ELLA_PROVISION_API_TOKEN"
 HERMES_PROVISION_URL_ENV = "ELLA_HERMES_PROVISION_API_URL"
@@ -191,7 +193,7 @@ def _resolve_binding_reference(reference: str) -> tuple[str, str]:
 
 def _legacy_coordinates() -> tuple[str, str]:
     base_url = _canonical_legacy_base_url(os.getenv(LEGACY_PROVISION_URL_ENV, DEFAULT_LEGACY_PROVISION_URL))
-    return base_url, os.getenv(LEGACY_PROVISION_TOKEN_ENV, "").strip()
+    return base_url, authority_credential(LEGACY_PROVISION_TOKEN_ENV)
 
 
 def legacy_provision_authority() -> ProvisionAuthority:
@@ -210,7 +212,7 @@ def legacy_provision_authority() -> ProvisionAuthority:
             _socket_destinations(base_url, error_code="provision_authority_pair_conflict")
         ).intersection(_socket_destinations(hermes_base_url, error_code="provision_authority_pair_conflict")):
             raise ProvisionAuthorityError("provision_authority_pair_conflict")
-    hermes_token = os.getenv(HERMES_PROVISION_TOKEN_ENV, "").strip()
+    hermes_token = authority_credential(HERMES_PROVISION_TOKEN_ENV)
     if hermes_token and hmac.compare_digest(token, hermes_token):
         raise ProvisionAuthorityError("provision_authority_pair_conflict")
 
@@ -222,7 +224,7 @@ def hermes_provision_authority(
 ) -> ProvisionAuthority:
     """Return the invitation-owned Hermes authority after all fail-closed checks."""
     raw_url = os.getenv(HERMES_PROVISION_URL_ENV, "")
-    token = os.getenv(HERMES_PROVISION_TOKEN_ENV, "").strip()
+    token = authority_credential(HERMES_PROVISION_TOKEN_ENV)
     binding_reference = os.getenv(HERMES_PROVISION_BINDING_REF_ENV, "").strip()
     if not raw_url or not token or not binding_reference:
         raise ProvisionAuthorityError("hermes_provision_authority_incomplete")

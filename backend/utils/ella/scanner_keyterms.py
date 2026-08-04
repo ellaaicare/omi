@@ -11,6 +11,8 @@ from typing import Optional
 import asyncpg
 import httpx
 
+from database.honcho_attestation import authority_credential
+
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
@@ -81,12 +83,12 @@ def _provision_url(uid: str = "", *, isolated: bool = False) -> str:
 
 def _provision_token(uid: str = "", *, isolated: bool = False) -> str:
     if uid and isolated:
-        return os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
-    return (
-        os.getenv("ELLA_PROVISION_API_TOKEN")
-        or os.getenv("ELLA_PROVISION_API_KEY")
-        or os.getenv("PROVISION_API_TOKEN")
-        or ""
+        return authority_credential("ELLA_HERMES_PROVISION_API_TOKEN", strip=False)
+    return authority_credential(
+        "ELLA_PROVISION_API_TOKEN",
+        "ELLA_PROVISION_API_KEY",
+        "PROVISION_API_TOKEN",
+        strip=False,
     )
 
 

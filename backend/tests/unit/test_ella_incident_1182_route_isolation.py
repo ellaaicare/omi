@@ -409,6 +409,141 @@ def test_post_auth_chat_output_never_contains_caller_selected_header_values(monk
         assert marker not in process_output
 
 
+def test_chat_caller_metadata_is_fixed_before_canonical_and_cloud_sinks(monkeypatch, capsys, caplog):
+    markers = (
+        "HOSTILE_TYPE_1182\r\n",
+        "Hostile_Version_1182\x00",
+        "HOSTILE_ROUTE_1182" * 128,
+        "HOSTILE_DEBUG_1182\t",
+    )
+    canonical_events = []
+
+    async def no_canonical_context(*_args, **_kwargs):
+        return []
+
+    async def no_temporal_context(*_args, **_kwargs):
+        return None, []
+
+    async def runtime_authority_disabled(*_args, **_kwargs):
+        return False
+
+    async def capture_canonical_event(event):
+        canonical_events.append(event)
+
+    class StreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"ok"}}]}'
+            yield "data: [DONE]"
+
+    class StreamClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return StreamResponse()
+
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", lambda *_args, **_kwargs: _async_value(None))
+    monkeypatch.setattr(chat, "_retained_owner_chat_configured", lambda _uid: True)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_canonical_context)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal_context)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", runtime_authority_disabled)
+    monkeypatch.setattr(chat, "_write_ios_chat_canonical_event", capture_canonical_event)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", StreamClient)
+    monkeypatch.setattr(chat, "HERMES_GATEWAY_TOKEN", "configured-test-gateway-token")
+    monkeypatch.setattr(chat, "HERMES_GATEWAY_URL", "http://runtime.test")
+    monkeypatch.setattr(chat, "HERMES_MODEL", "hermes")
+    monkeypatch.setattr(chat, "record_trace", lambda *_args, **_kwargs: None)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/ella/chat/stream", "headers": []})
+    response = asyncio.run(
+        chat.ella_chat_stream(
+            chat.EllaChatRequest(uid="uid-a", message="content-free"),
+            request,
+            authenticated_uid="uid-a",
+            x_ella_debug_level=markers[3],
+            x_ella_client_type=markers[0],
+            x_ella_client_version=markers[1],
+            x_ella_route=markers[2],
+        )
+    )
+    asyncio.run(_collect_response_body(response))
+
+    assert len(canonical_events) == 2
+    assert {event.role for event in canonical_events} == {"user", "assistant"}
+    assert all(
+        event.metadata["client"] == {"type": "other", "route": chat.CHAT_SERVER_ROUTE_CATEGORY}
+        for event in canonical_events
+    )
+
+    cloud_requests = []
+    cloud_runtime = SimpleNamespace(provider="hermes_cloud", binding_id="binding-a")
+
+    async def cloud_runtime_for_user(*_args, **_kwargs):
+        return cloud_runtime
+
+    async def create_repository():
+        return SimpleNamespace()
+
+    class CloudRuntimeService:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run_turn(self, _runtime, turn_request):
+            cloud_requests.append(turn_request)
+            return SimpleNamespace(
+                text="ok",
+                canonical_assistant_event_id="assistant-event-a",
+                duplicate=False,
+                response_id="response-a",
+            )
+
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", cloud_runtime_for_user)
+    monkeypatch.setattr(chat.EllaProvisioningRepository, "create", create_repository)
+    monkeypatch.setattr(chat, "HermesCloudRuntimeService", CloudRuntimeService)
+    cloud_response = asyncio.run(
+        chat.ella_chat_stream(
+            chat.EllaChatRequest(uid="uid-a", message="content-free"),
+            request,
+            authenticated_uid="uid-a",
+            x_ella_debug_level=markers[3],
+            x_ella_client_type=" \tIoS\r\n",
+            x_ella_client_version=markers[1],
+            x_ella_route=markers[2],
+        )
+    )
+    asyncio.run(_collect_response_body(cloud_response))
+
+    assert len(cloud_requests) == 1
+    assert cloud_requests[0].client_metadata == {
+        "type": "ios",
+        "route": chat.CHAT_SERVER_ROUTE_CATEGORY,
+    }
+    assert chat._server_owned_client_metadata("ANDROID")["type"] == "android"
+    assert chat._server_owned_client_metadata(" web ")["type"] == "web"
+
+    captured = capsys.readouterr()
+    all_sinks = f"{canonical_events!r}\n{cloud_requests!r}\n{captured.out}\n{captured.err}\n{caplog.text}"
+    for marker in markers:
+        assert marker not in all_sinks
+
+
+async def _async_value(value):
+    return value
+
+
 def test_unbound_non_owner_chat_fails_before_trace_or_provider(monkeypatch):
     effects = []
 

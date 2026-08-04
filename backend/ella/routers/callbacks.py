@@ -42,6 +42,7 @@ import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
 from database._client import db
+from database.honcho_attestation import authority_credential
 from models.conversation import CategoryEnum
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
@@ -72,7 +73,7 @@ ELLA_AUDIO_BUCKET = os.getenv("ELLA_AUDIO_BUCKET", "omi-dev-ca005.firebasestorag
 # OpenAI TTS configuration
 OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
-PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
+PROVISION_API_KEY = authority_credential("ELLA_PROVISION_API_KEY", "ELLA_PROVISION_API_TOKEN", strip=False)
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
 CAREGIVER_SERVICE_HEADER = "X-Ella-Caregiver-Service-Key"
@@ -308,7 +309,7 @@ async def _resolve_workspace_target_for_uid(uid: str) -> Optional[tuple[str, str
         return (
             runtime.agent_id,
             os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210").rstrip("/"),
-            os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", ""),
+            authority_credential("ELLA_HERMES_PROVISION_API_TOKEN", strip=False),
         )
 
     agent_id = await _resolve_agent_id_for_uid(uid)

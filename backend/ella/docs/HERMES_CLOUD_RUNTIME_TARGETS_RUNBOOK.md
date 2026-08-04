@@ -41,16 +41,22 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
   resolution transaction. Database strings or mutually agreeing unsigned
   response objects are not runtime authority.
 - The provisioner and OMI must receive the same separately scoped
-  `ELLA_HERMES_PROVISION_ATTESTATION_KEY` (minimum 32 bytes). Source rejects
-  equality with configured provision, callback, caregiver, event-ledger,
-  dashboard, voice, operator, Honcho, and Hermes runtime/gateway credentials.
+  `ELLA_HERMES_PROVISION_ATTESTATION_KEY` (minimum 32 bytes). Source discovers
+  secret-like environment credentials, dynamic Hermes keys, and configured
+  authority-secret references on every verification. Accessor-observed values
+  remain in the process separation set so reload cannot hide a cached runtime
+  credential. Equality is rejected before provider work, activation, and
+  resolution.
   Missing, whitespace, padded, short, equal, stale, partial, or incorrectly
   signed evidence fails closed. This source contract requires provisioner
   support and independently staged credentials before rollout.
 - `ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS` remains bounded to 30-300 seconds.
   It plus `ELLA_HERMES_PROVISION_ATTESTATION_VERIFICATION_GRACE_SECONDS`
-  (default 30 seconds) must be strictly less than the 360-second proof lifetime;
-  invalid combinations fail before provider work.
+  (default 30 seconds) forms one monotonic deadline over response streaming,
+  bounded decode, proof verification, staging, activation, and publication.
+  That total plus the clock-skew margin must be strictly less than the
+  360-second wall-clock proof lifetime; invalid combinations fail before
+  external or binding work.
 - Every request carries a stable content-free `Idempotency-Key` derived from the
   exact UID, invitation target, provisioning job, and deterministic binding.
   The provisioner must atomically reconcile that key to one existing or newly

@@ -464,8 +464,13 @@ jobs:
               tests/unit/test_ella_incident_1182_route_isolation.py \
               tests/unit/test_ella_incident_1182_callback_auth.py \
               tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
-              tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write \
+              tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source \
               tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
+              tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes \
+              tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write \
+              tests/unit/test_ella_provisioning_service.py::test_total_deadline_rejects_delayed_json_parse_before_binding_write \
+              tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication \
+              tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation \
               tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding |
               sed '/^$/d'
           )"
@@ -477,6 +482,7 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_trace_recording_is_synchronous_content_free_and_never_persists"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_authenticated_chat_and_legacy_level4_cannot_record_caller_or_runtime_material"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_post_auth_chat_output_never_contains_caller_selected_header_values"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_chat_caller_metadata_is_fixed_before_canonical_and_cloud_sinks"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_unbound_non_owner_chat_fails_before_trace_or_provider"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_retained_owner_chat_requires_exact_subject_and_complete_server_configuration"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_legacy_routing_is_never_returned_for_non_owner_without_binding"
@@ -490,20 +496,32 @@ jobs:
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_token_generation_requires_two_distinct_configured_secrets"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_dashboard_signing_has_no_source_fallback"
             "tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py::test_voice_diagnostics_require_exact_firebase_bearer"
-            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes"
+            "tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_rejects_delayed_json_parse_before_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[verification]"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[staging]"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[activation]"
+            "tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation"
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
           )
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 23
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 31
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
             tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
-            tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write \
+            tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source \
             tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config \
+            tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes \
+            tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write \
+            tests/unit/test_ella_provisioning_service.py::test_total_deadline_rejects_delayed_json_parse_before_binding_write \
+            tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication \
+            tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation \
             tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding \
             -v | tee /tmp/incident-1182-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/incident-1182-pytest.log
@@ -558,8 +576,15 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_runtime_receipt_requires_owned_workspace_port_and_honcho"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
-            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_inventory_fails_before_provider_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_attestation_key_separation_tracks_runtime_credential_lookups_from_source"
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes"
+            "tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_rejects_delayed_json_parse_before_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[verification]"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[staging]"
+            "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[activation]"
+            "tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation"
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
@@ -590,7 +615,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 502
+          test "$collected" -eq 509
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

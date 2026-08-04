@@ -1574,7 +1574,7 @@ def test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution(mo
         staged = await _stage_attested_local_binding(repository, pool, uid)
 
         attestation_key = os.environ["ELLA_HERMES_PROVISION_ATTESTATION_KEY"]
-        monkeypatch.setenv("HERMES_API_SERVER_KEY", attestation_key)
+        monkeypatch.setenv("ELLA_PROVISION_API_KEY", attestation_key)
         with pytest.raises(RuntimePoolClaimError, match="honcho_attestation_key_conflict"):
             await repository.activate_runtime_binding(
                 uid=uid,
@@ -1594,7 +1594,7 @@ def test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution(mo
             )
         assert tuple(state.values()) == (False, 0)
 
-        monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+        monkeypatch.delenv("ELLA_PROVISION_API_KEY", raising=False)
         await repository.activate_runtime_binding(
             uid=uid,
             provider="hermes",
@@ -1602,7 +1602,7 @@ def test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution(mo
             authority_lineage=_self_hosted_lineage(),
             model=SELF_HOSTED_RUNTIME_MODEL,
         )
-        monkeypatch.setenv("HERMES_API_SERVER_KEY", attestation_key)
+        monkeypatch.setenv("ELLA_PROVISION_API_KEY", attestation_key)
         with pytest.raises(RuntimePoolClaimError, match="honcho_attestation_key_conflict"):
             await repository.resolve_active_runtime(
                 uid,

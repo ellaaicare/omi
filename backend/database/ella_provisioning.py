@@ -2746,6 +2746,10 @@ class EllaProvisioningRepository:
                 END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
+              AND (
+                    state NOT IN ('ready', 'blocked', 'rolling_back', 'manual_intervention')
+                    OR state = $2
+                  )
             RETURNING *
             """,
             uuid.UUID(str(job_id)),
@@ -2757,6 +2761,12 @@ class EllaProvisioningRepository:
             json.dumps(receipt or {}),
         )
         if not row:
+            existing = await self.pool.fetchrow(
+                "SELECT * FROM ella_provisioning_jobs WHERE id = $1",
+                uuid.UUID(str(job_id)),
+            )
+            if existing and str(existing["state"]) in {"ready", "blocked", "rolling_back", "manual_intervention"}:
+                return dict(existing)
             raise LookupError("provisioning_job_not_found")
         return dict(row)
 

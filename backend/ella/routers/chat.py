@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from ella.config import ELLA_CONFIG
 from database.ella_provisioning import EllaProvisioningRepository
+from database.honcho_attestation import authority_credential
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
@@ -71,10 +72,10 @@ XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_CHAT_MODEL = os.getenv("ELLA_GROK_CHAT_MODEL", "grok-3-mini")
 
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "http://100.67.113.120:19001")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
 CHAT_PLATFORM = os.getenv("ELLA_CHAT_PLATFORM", "hermes").strip().lower()
 HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "").strip().rstrip("/")
-HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
+HERMES_GATEWAY_TOKEN = authority_credential("HERMES_API_SERVER_KEY", "API_SERVER_KEY", strip=False)
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "").strip()
 HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
@@ -84,6 +85,7 @@ CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", 
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
 CHAT_TEMPORAL_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_MAX_CHARS", "9000"))
 CHAT_CLIENT_TYPE_ALLOWLIST = frozenset({"ios", "android", "web"})
+CHAT_SERVER_ROUTE_CATEGORY = "chat_stream"
 CHAT_USER_TIMEZONE = timezone_name(os.getenv("ELLA_USER_TIMEZONE", os.getenv("ELLA_PLATO_TIMEZONE", "")))
 CHAT_CONTEXT_CHANNELS = [
     channel.strip()
@@ -287,6 +289,14 @@ def _resolve_debug_level(header_value: str = None) -> int:
 def _bounded_client_type(header_value: str | None) -> str:
     normalized = str(header_value or "").strip().lower()
     return normalized if normalized in CHAT_CLIENT_TYPE_ALLOWLIST else "other"
+
+
+def _server_owned_client_metadata(header_value: str | None) -> dict[str, str]:
+    """Return the only caller-derived category allowed past the auth boundary."""
+    return {
+        "type": _bounded_client_type(header_value),
+        "route": CHAT_SERVER_ROUTE_CATEGORY,
+    }
 
 
 async def _fetch_chat_canonical_events(
@@ -1052,8 +1062,10 @@ async def ella_chat_stream(
 
     debug_level = _resolve_debug_level(x_ella_debug_level)
 
-    # Caller-selected header values never enter process output.
-    client_type = _bounded_client_type(x_ella_client_type)
+    # Discard raw version, route, and debug metadata before every downstream
+    # branch. Only the fixed client enum and server-owned route category remain.
+    client_metadata = _server_owned_client_metadata(x_ella_client_type)
+    del x_ella_client_version, x_ella_route
     print(f"[FLOW:CHAT] level={debug_level} request_received=true", flush=True)
 
     # Create routing trace
@@ -1071,11 +1083,7 @@ async def ella_chat_stream(
             _stream_hermes_cloud_chat(
                 request.message,
                 uid,
-                {
-                    "type": client_type,
-                    "version": x_ella_client_version or "",
-                    "route": x_ella_route or "",
-                },
+                client_metadata,
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
                 runtime=runtime,
@@ -1084,12 +1092,7 @@ async def ella_chat_stream(
             else _stream_hermes_chat(
                 request.message,
                 uid,
-                {
-                    "type": client_type,
-                    "version": x_ella_client_version or "",
-                    "ip": raw_request.client.host if raw_request.client else "",
-                    "route": x_ella_route or "",
-                },
+                client_metadata,
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
                 runtime=runtime,
@@ -1130,10 +1133,7 @@ async def ella_chat_stream(
             _stream_level_4_openclaw(
                 request.message,
                 uid,
-                {
-                    "type": client_type,
-                    "version": x_ella_client_version or "",
-                },
+                client_metadata,
             ),
             media_type="text/event-stream",
         )
@@ -1158,7 +1158,7 @@ class EllaChatHistoryRequest(BaseModel):
 
 
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 
 
 @router.get("/chat/history")

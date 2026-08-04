@@ -33,6 +33,22 @@ HERMES_TOKEN = "hermes-test-token-distinct"
 BINDING_ENV = "ELLA_TEST_HERMES_PROVISION_AUTHORITY_BINDING"
 
 
+class _StreamingJSONResponse:
+    def __init__(self, payload, *, status_code=200):
+        self.payload = payload
+        self.status_code = status_code
+        self.headers = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def aiter_bytes(self):
+        yield json.dumps(self.payload).encode("utf-8")
+
+
 @pytest.fixture(autouse=True)
 def _honcho_attestation_key(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_PROVISION_ATTESTATION_KEY", "authority-attestation-key-32-bytes-minimum")
@@ -293,13 +309,6 @@ def test_real_provision_client_posts_only_to_accepted_exact_authority(monkeypatc
     monkeypatch.setenv("ELLA_HERMES_PROVISION_API_REVIEWED_ALLOWLIST", "")
     captured = {}
 
-    class Response:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return {"mode": "hermes_only", "provisionMode": "hermes_only"}
-
     class AsyncClient:
         def __init__(self, timeout, *, follow_redirects, trust_env):
             captured["timeout"] = timeout
@@ -312,9 +321,9 @@ def test_real_provision_client_posts_only_to_accepted_exact_authority(monkeypatc
         async def __aexit__(self, exc_type, exc, traceback):
             return False
 
-        async def post(self, url, *, headers, json):
+        def stream(self, _method, url, *, headers, json):
             captured.update(url=url, headers=headers, payload=json)
-            return Response()
+            return _StreamingJSONResponse({"mode": "hermes_only", "provisionMode": "hermes_only"})
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
@@ -912,13 +921,6 @@ def test_real_claimed_worker_stops_after_inflight_http_authority_drift(monkeypat
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
     sends = []
 
-    class Response:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return _runtime_receipt()
-
     class AsyncClient:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -929,10 +931,10 @@ def test_real_claimed_worker_stops_after_inflight_http_authority_drift(monkeypat
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, *_args, **_kwargs):
+        def stream(self, *_args, **_kwargs):
             sends.append("http")
             _drift_authority(monkeypatch, case)
-            return Response()
+            return _StreamingJSONResponse(_runtime_receipt())
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
     repository = _RecordingRepository()
@@ -975,15 +977,6 @@ def test_claimed_worker_rechecks_before_every_post_http_mutation(
     _configure_distinct_authorities(monkeypatch)
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
 
-    class Response:
-        status_code = 200
-
-        def __init__(self, challenge):
-            self.challenge = challenge
-
-        def json(self):
-            return _runtime_receipt(self.challenge)
-
     class AsyncClient:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -994,8 +987,8 @@ def test_claimed_worker_rechecks_before_every_post_http_mutation(
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, *_args, **kwargs):
-            return Response(kwargs["json"]["honchoAttestationChallenge"])
+        def stream(self, *_args, **kwargs):
+            return _StreamingJSONResponse(_runtime_receipt(kwargs["json"]["honchoAttestationChallenge"]))
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
     repository = _RecordingRepository()
@@ -1589,9 +1582,6 @@ def test_http_transports_disable_redirects_proxies_and_environment_drift(monkeyp
     _configure_distinct_authorities(monkeypatch)
     captured = {}
 
-    class Response:
-        status_code = 302
-
     class AsyncClient:
         def __init__(self, timeout, *, follow_redirects, trust_env):
             captured.update(timeout=timeout, follow_redirects=follow_redirects, trust_env=trust_env)
@@ -1602,9 +1592,9 @@ def test_http_transports_disable_redirects_proxies_and_environment_drift(monkeyp
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, url, **_kwargs):
+        def stream(self, _method, url, **_kwargs):
             captured["url"] = url
-            return Response()
+            return _StreamingJSONResponse({}, status_code=302)
 
     monkeypatch.setattr(provisioning.httpx, "AsyncClient", AsyncClient)
 
