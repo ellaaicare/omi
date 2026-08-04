@@ -100,7 +100,7 @@ async def fetch_canonical_timeline(
         response = await client.get(
             DEFAULT_TIMELINE_URL,
             params=params,
-            headers=canonical_event_service_headers(),
+            headers=canonical_event_service_headers(uid),
         )
     response.raise_for_status()
 

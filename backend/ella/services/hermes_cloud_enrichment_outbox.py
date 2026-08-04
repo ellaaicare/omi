@@ -109,6 +109,7 @@ def deliver_enrichment_job(job: dict[str, Any]) -> DeliveryResult:
             headers={
                 "Content-Type": "application/json",
                 "X-Ella-Hermes-Cloud-Enrichment-Token": token,
+                "X-Ella-Subject-Uid": str(job["uid"]),
             },
             timeout=timeout,
         )

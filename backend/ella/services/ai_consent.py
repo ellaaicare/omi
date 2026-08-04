@@ -15,7 +15,7 @@ from typing import Any, Callable, Literal, Optional, Protocol
 from fastapi import Depends, Header, HTTPException
 from google.cloud.firestore_v1 import transactional
 
-from utils.other import endpoints as auth
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
@@ -720,7 +720,7 @@ def assert_current_ai_consent(uid: str) -> str:
 
 
 def require_current_ai_consent(
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ) -> str:
     return assert_current_ai_consent(authenticated_uid)
 
@@ -729,6 +729,9 @@ def require_current_ai_consent_or_internal_tts(
     authorization: Optional[str] = Header(default=None),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Ella-Internal-Token"),
     x_subject_uid: Optional[str] = Header(default=None, alias="X-Ella-Subject-Uid"),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
 ) -> str:
     configured_internal_token = os.getenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", "")
     if (
@@ -741,13 +744,15 @@ def require_current_ai_consent_or_internal_tts(
             raise HTTPException(status_code=400, detail={"code": "ai_consent_subject_required"})
         return assert_current_ai_consent(subject_uid)
     if authorization:
-        return assert_current_ai_consent(auth.get_current_user_uid(authorization))
-    if ai_consent_global_enforcement_enabled():
-        raise HTTPException(status_code=401, detail={"code": "authorization_required"})
-    # A legacy anonymous request has no trustworthy subject to compare with the
-    # UID canary. Canary clients must send Firebase auth; global enforcement
-    # removes this migration bridge for every caller.
-    return "migration-bypass"
+        return assert_current_ai_consent(
+            get_exact_firebase_uid(
+                authorization,
+                x_app_version,
+                x_ella_app_build,
+                x_ella_client_version,
+            )
+        )
+    raise HTTPException(status_code=401, detail={"code": "authorization_required"})
 
 
 def resolve_processor(provider_alias: str) -> Optional[dict[str, Any]]:

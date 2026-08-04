@@ -19,6 +19,7 @@ from ella.services.hermes_cloud_photon import (
     PhotonSidecarPreflight,
 )
 from ella.services.runtime_errors import ProvisioningError
+from utils.ella.exact_firebase_auth import ELLA_SUBJECT_UID_HEADER, get_exact_service_authority
 
 
 class PhotonPreflightIn(BaseModel):
@@ -55,7 +56,7 @@ class PhotonDeliveryAckIn(BaseModel):
     acknowledged_at: datetime
 
 
-def _require_sidecar_token(presented: Optional[str]) -> None:
+def _require_sidecar_authority(presented: Optional[str], subject_uid: Optional[str]) -> str:
     expected = os.getenv("ELLA_HERMES_CLOUD_PHOTON_SIDECAR_TOKEN", "")
     if len(expected) < 32:
         raise HTTPException(
@@ -64,6 +65,16 @@ def _require_sidecar_token(presented: Optional[str]) -> None:
         )
     if not presented or not hmac.compare_digest(presented.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail={"code": "invalid_photon_sidecar_token"})
+    owner_uid = os.getenv("ELLA_HERMES_CLOUD_PHOTON_INTERNAL_OWNER_UID", "").strip()
+    if not owner_uid:
+        raise HTTPException(status_code=503, detail={"code": "photon_owner_subject_not_configured"})
+    authority = get_exact_service_authority(
+        provided_service_key=presented,
+        configured_service_key=expected,
+        service_subject_uid=subject_uid,
+        service="photon_sidecar",
+    )
+    return authority.require_uid(owner_uid, feature="Photon sidecar")
 
 
 def _http_error(exc: ProvisioningError) -> HTTPException:
@@ -108,8 +119,9 @@ def create_photon_router(
             default=None,
             alias="X-Ella-Photon-Sidecar-Token",
         ),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ) -> dict[str, Any]:
-        _require_sidecar_token(x_sidecar_token)
+        _require_sidecar_authority(x_sidecar_token, subject_uid)
         try:
             receipt = await (await _adapter()).preflight(
                 PhotonSidecarPreflight(
@@ -136,8 +148,9 @@ def create_photon_router(
             default=None,
             alias="X-Ella-Photon-Sidecar-Token",
         ),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ) -> dict[str, Any]:
-        _require_sidecar_token(x_sidecar_token)
+        _require_sidecar_authority(x_sidecar_token, subject_uid)
         try:
             result = await (await _adapter()).handle_inbound(
                 PhotonInboundEnvelope(
@@ -170,8 +183,9 @@ def create_photon_router(
             default=None,
             alias="X-Ella-Photon-Sidecar-Token",
         ),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ) -> dict[str, Any]:
-        _require_sidecar_token(x_sidecar_token)
+        _require_sidecar_authority(x_sidecar_token, subject_uid)
         try:
             result = await (await _adapter()).acknowledge_delivery(
                 PhotonDeliveryAck(

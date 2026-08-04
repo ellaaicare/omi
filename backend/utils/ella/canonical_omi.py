@@ -201,7 +201,7 @@ def write_omi_canonical_event(
     response = requests.post(
         CANONICAL_EVENTS_URL,
         json={"events": [event]},
-        headers={"Content-Type": "application/json", **canonical_event_service_headers()},
+        headers={"Content-Type": "application/json", **canonical_event_service_headers(uid)},
         timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
     )
     elapsed_ms = int((time.time() - started) * 1000)

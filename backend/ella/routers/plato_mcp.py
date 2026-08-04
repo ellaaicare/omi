@@ -571,7 +571,7 @@ async def _fetch_canonical_timeline(limit: int, channels: list[str], since: Opti
         params["since"] = since
     params["timezone"] = _plato_timezone()
     async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(timeline_url, params=params, headers=canonical_event_service_headers())
+        response = await client.get(timeline_url, params=params, headers=canonical_event_service_headers(_plato_uid()))
     if response.status_code != 200:
         raise RuntimeError(f"timeline_http_{response.status_code}")
     payload = response.json()

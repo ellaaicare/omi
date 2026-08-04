@@ -103,7 +103,7 @@ class MemorySmoke:
             "POST",
             self.backend_url + path,
             payload,
-            headers={"X-Ella-Observer-Token": self.args.observer_token},
+            headers={"X-Ella-Observer-Token": self.args.observer_token, "X-Ella-Subject-Uid": self.args.uid},
         )
         self.metrics[path.strip("/").replace("/", "_") + "_ms"] = elapsed
         return response
@@ -115,7 +115,7 @@ class MemorySmoke:
             raise SmokeFailure(f"backend health failed: {health}")
         observer, elapsed = _get_json(
             self.backend_url + "/v1/ella/observer/health",
-            headers={"X-Ella-Observer-Token": self.args.observer_token},
+            headers={"X-Ella-Observer-Token": self.args.observer_token, "X-Ella-Subject-Uid": self.args.uid},
         )
         self.metrics["observer_health_ms"] = elapsed
         if observer.get("ok") is not True:
@@ -241,7 +241,7 @@ class MemorySmoke:
             "POST",
             self.backend_url + "/v1/ella/events",
             {"events": batch},
-            {"X-Ella-Event-Ledger-Key": ledger_token},
+            {"X-Ella-Event-Ledger-Key": ledger_token, "X-Ella-Subject-Uid": self.args.uid},
         )
         self.metrics["write_multichannel_events_ms"] = elapsed
         self.artifacts["multichannel_write"] = response

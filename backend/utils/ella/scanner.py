@@ -635,7 +635,7 @@ def _log_trace_event(
                 "latency_ms": latency_ms,
                 "metadata": metadata or {},
             },
-            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
+            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
             timeout=0.25,
         )
     except Exception:
@@ -717,7 +717,7 @@ def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_seg
                 response = requests.post(
                     GUARDIAN_ENQUEUE_URL,
                     json=payload,
-                    headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
+                    headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
                     timeout=GUARDIAN_WAKE_ACK_TIMEOUT_S,
                 )
                 _log_trace_event(
@@ -759,7 +759,7 @@ def _insert_wake_ack_direct(uid: str, trace_id: str, payload: dict) -> dict:
         response = requests.post(
             GUARDIAN_ENQUEUE_URL,
             json=payload,
-            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
+            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
             timeout=max(GUARDIAN_WAKE_ACK_TIMEOUT_S, 12.0),
         )
         return {

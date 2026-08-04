@@ -19,6 +19,8 @@ from utils.ella import exact_firebase_auth
 def _verify_firebase(token):
     if token == "token-a":
         return {"uid": "uid-a"}
+    if token == "token-b":
+        return {"uid": "uid-b"}
     raise ValueError("invalid token")
 
 
@@ -118,6 +120,129 @@ def test_emergency_contact_exact_owner_positive_control(monkeypatch):
     assert emergency.json()["push_sent"] is True
 
 
+def test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid(monkeypatch):
+    effects = []
+
+    monkeypatch.setattr(
+        callbacks,
+        "get_caregivers",
+        lambda uid: effects.append(("list", uid)) or [{"id": "caregiver-a", "name": "Caregiver"}],
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "create_caregiver",
+        lambda uid, data: effects.append(("invite", uid))
+        or {
+            **data,
+            "id": "caregiver-a",
+            "invite_code": "123456",
+            "status": "invited",
+            "invite_expires_at": "2026-08-11T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "get_emergency_caregiver_id",
+        lambda uid: effects.append(("get-emergency", uid)) or "caregiver-a",
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "set_emergency_caregiver",
+        lambda uid, caregiver_id: effects.append(("set-emergency", uid)) or caregiver_id,
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "update_caregiver",
+        lambda uid, _caregiver_id, data: effects.append(("permissions", uid)) or {"id": "caregiver-a", **data},
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "refresh_caregiver_invite",
+        lambda uid, _caregiver_id: effects.append(("resend", uid))
+        or {
+            "id": "caregiver-a",
+            "invite_code": "654321",
+            "status": "invited",
+            "invite_expires_at": "2026-08-11T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "delete_caregiver",
+        lambda uid, _caregiver_id: effects.append(("delete", uid)) or True,
+    )
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer token-a"}
+
+    responses = [
+        client.get("/v1/ella/caregivers", headers=headers),
+        client.post(
+            "/v1/ella/caregivers/invite",
+            headers=headers,
+            json={
+                "name": "Caregiver",
+                "email": "caregiver@example.test",
+                "relationship": "friend",
+                "permissions": {"receive_daily_summary": True, "daily_summary_email": True},
+            },
+        ),
+        client.get("/v1/ella/caregivers/emergency-contact", headers=headers),
+        client.put(
+            "/v1/ella/caregivers/emergency-contact",
+            headers=headers,
+            json={"caregiver_id": "caregiver-a"},
+        ),
+        client.put(
+            "/v1/ella/caregivers/caregiver-a/permissions",
+            headers=headers,
+            json={"receive_daily_summary": True, "daily_summary_email": True},
+        ),
+        client.post("/v1/ella/caregivers/caregiver-a/resend-invite", headers=headers),
+        client.delete("/v1/ella/caregivers/caregiver-a", headers=headers),
+    ]
+
+    assert [response.status_code for response in responses] == [200, 201, 200, 200, 200, 200, 204]
+    assert effects == [
+        ("list", "uid-a"),
+        ("invite", "uid-a"),
+        ("get-emergency", "uid-a"),
+        ("set-emergency", "uid-a"),
+        ("permissions", "uid-a"),
+        ("resend", "uid-a"),
+        ("delete", "uid-a"),
+    ]
+
+    effects.clear()
+    caller_uid = client.post(
+        "/v1/ella/caregivers/invite",
+        headers={"Authorization": "Bearer token-b"},
+        json={
+            "uid": "uid-a",
+            "name": "Caregiver",
+            "email": "caregiver@example.test",
+            "relationship": "friend",
+        },
+    )
+    assert caller_uid.status_code == 422
+    assert effects == []
+
+
+def test_caregiver_routes_reject_unauth_admin_and_service_before_storage(monkeypatch):
+    effects = []
+    monkeypatch.setattr(callbacks, "get_caregivers", lambda uid: effects.append(uid) or [])
+    monkeypatch.setenv("ADMIN_KEY", "unit-admin-key:")
+    monkeypatch.setenv("ELLA_ADMIN_SUBJECT_ALLOWLIST", "uid-a")
+    client = _client(monkeypatch)
+
+    for headers in (
+        {},
+        {"Authorization": "Bearer unit-admin-key:uid-a"},
+        {"X-Ella-Caregiver-Service-Key": "caregiver-service-test", "X-Ella-Subject-Uid": "uid-a"},
+    ):
+        assert client.get("/v1/ella/caregivers", headers=headers).status_code == 401
+    assert effects == []
+
+
 def test_internal_callback_service_fails_closed_and_positive_control_is_scoped(monkeypatch):
     effects = []
 
@@ -137,17 +262,135 @@ def test_internal_callback_service_fails_closed_and_positive_control_is_scoped(m
     monkeypatch.setenv("ELLA_CALLBACK_SERVICE_KEY", "callback-service-test")
     wrong = client.get(
         "/v1/ella/conversations/enrichment/reconcile-candidates?uid=uid-a",
-        headers={"X-Ella-Callback-Service-Key": "wrong"},
+        headers={"X-Ella-Callback-Service-Key": "wrong", "X-Ella-Subject-Uid": "uid-a"},
     )
     assert wrong.status_code == 403
     assert effects == []
 
-    accepted = client.get(
+    unbound = client.get(
         "/v1/ella/conversations/enrichment/reconcile-candidates?uid=uid-a",
         headers={"X-Ella-Callback-Service-Key": "callback-service-test"},
     )
+    assert unbound.status_code == 403
+    assert effects == []
+
+    cross_owner = client.get(
+        "/v1/ella/conversations/enrichment/reconcile-candidates?uid=uid-a",
+        headers={
+            "X-Ella-Callback-Service-Key": "callback-service-test",
+            "X-Ella-Subject-Uid": "uid-b",
+        },
+    )
+    assert cross_owner.status_code == 403
+    assert effects == []
+
+    accepted = client.get(
+        "/v1/ella/conversations/enrichment/reconcile-candidates?uid=uid-a",
+        headers={
+            "X-Ella-Callback-Service-Key": "callback-service-test",
+            "X-Ella-Subject-Uid": "uid-a",
+        },
+    )
     assert accepted.status_code == 200
     assert effects == ["db"]
+
+
+def test_callback_routes_reject_unbound_wrong_and_nonservice_authority_before_effects(monkeypatch):
+    effects = []
+    monkeypatch.setenv("ELLA_CALLBACK_SERVICE_KEY", "callback-service-test")
+    monkeypatch.setattr(callbacks, "assert_current_ai_consent", lambda uid: effects.append(("consent", uid)))
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: effects.append(("read", uid, conversation_id)) or {},
+    )
+    monkeypatch.setattr(callbacks, "send_notification", lambda **kwargs: effects.append(("push", kwargs["user_id"])))
+    client = _client(monkeypatch)
+
+    requests = (
+        ("get", "/v1/ella/conversation/conversation-a/data?uid=uid-a", {}),
+        (
+            "post",
+            "/v1/ella/notification",
+            {"json": {"uid": "uid-a", "message": "Test", "generate_audio": False}},
+        ),
+        ("post", "/v1/ella/daily-summary", {"json": {"uid": "uid-a"}}),
+    )
+    denied_headers = (
+        {},
+        {"Authorization": "Bearer token-a"},
+        {"X-Ella-Callback-Service-Key": "wrong", "X-Ella-Subject-Uid": "uid-a"},
+        {"X-Ella-Callback-Service-Key": "callback-service-test"},
+        {"X-Ella-Callback-Service-Key": "callback-service-test", "X-Ella-Subject-Uid": "uid-b"},
+    )
+    for method, path, kwargs in requests:
+        for headers in denied_headers:
+            assert getattr(client, method)(path, headers=headers, **kwargs).status_code == 403
+    assert effects == []
+
+
+def test_callback_routes_accept_only_matching_bound_subject(monkeypatch):
+    effects = []
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            effects.append(("daily-summary", "uid-a"))
+            return Response()
+
+    monkeypatch.setenv("ELLA_CALLBACK_SERVICE_KEY", "callback-service-test")
+    monkeypatch.setattr(callbacks, "assert_current_ai_consent", lambda uid: effects.append(("consent", uid)))
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: effects.append(("read", uid, conversation_id)) or {},
+    )
+    monkeypatch.setattr(callbacks, "send_notification", lambda **kwargs: effects.append(("push", kwargs["user_id"])))
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", lambda **_kwargs: Client())
+    client = _client(monkeypatch)
+    headers = {
+        "X-Ella-Callback-Service-Key": "callback-service-test",
+        "X-Ella-Subject-Uid": "uid-a",
+    }
+
+    assert (
+        client.get(
+            "/v1/ella/conversation/conversation-a/data?uid=uid-a",
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/v1/ella/notification",
+            headers=headers,
+            json={"uid": "uid-a", "message": "Test", "generate_audio": False},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/v1/ella/daily-summary",
+            headers=headers,
+            json={"uid": "uid-a"},
+        ).status_code
+        == 200
+    )
+    assert effects == [
+        ("read", "uid-a", "conversation-a"),
+        ("consent", "uid-a"),
+        ("push", "uid-a"),
+        ("daily-summary", "uid-a"),
+    ]
 
 
 def test_caregiver_token_generation_requires_two_distinct_configured_secrets(monkeypatch):
@@ -160,13 +403,16 @@ def test_caregiver_token_generation_requires_two_distinct_configured_secrets(mon
     assert (
         client.post(
             "/v1/ella/generate-dashboard-token?uid=uid-a&caregiver_id=caregiver-a",
-            headers={"X-Ella-Caregiver-Service-Key": "wrong"},
+            headers={"X-Ella-Caregiver-Service-Key": "wrong", "X-Ella-Subject-Uid": "uid-a"},
         ).status_code
         == 403
     )
     accepted = client.post(
         "/v1/ella/generate-dashboard-token?uid=uid-a&caregiver_id=caregiver-a",
-        headers={"X-Ella-Caregiver-Service-Key": "caregiver-service-test"},
+        headers={
+            "X-Ella-Caregiver-Service-Key": "caregiver-service-test",
+            "X-Ella-Subject-Uid": "uid-a",
+        },
     )
     assert accepted.status_code == 200
     assert accepted.json()["expires_in_hours"] == 24

@@ -41,6 +41,7 @@ from ella.services.provisioning import (
     self_hosted_runtime_authority_required,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 logger = logging.getLogger("ella.onboarding")
@@ -123,7 +124,7 @@ async def ensure_onboarding(
     payload: OnboardingEnsureRequest,
     background_tasks: BackgroundTasks,
     response: Response,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> dict[str, Any]:
     if not SCHEMA_VERSION_RE.fullmatch(payload.target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
@@ -227,7 +228,7 @@ async def ensure_onboarding(
 @router.get("/status")
 async def onboarding_status(
     target_schema_version: str = DEFAULT_TARGET_SCHEMA_VERSION,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> dict[str, Any]:
     if not SCHEMA_VERSION_RE.fullmatch(target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})

@@ -34,7 +34,10 @@ def test_guardian_trace_service_caller_uses_scoped_key(monkeypatch):
 
     assert len(posts) == 1
     assert posts[0][0] == scanner.GUARDIAN_TRACE_LOG_URL
-    assert posts[0][1]["headers"] == {"X-Guardian-Key": "configured-guardian-service-key"}
+    assert posts[0][1]["headers"] == {
+        "X-Guardian-Key": "configured-guardian-service-key",
+        "X-Ella-Subject-Uid": "uid-a",
+    }
 
 
 def test_guardian_trace_service_caller_fails_closed_without_configured_key(monkeypatch):

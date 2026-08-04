@@ -22,7 +22,7 @@ def _install_stubs():
     proposals.get_proposal_by_idempotency_key = MagicMock(return_value=None)
     proposals.save_proposal = MagicMock(side_effect=lambda proposal: proposal)
 
-    database = sys.modules.setdefault("database", types.ModuleType("database"))
+    database = importlib.import_module("database")
     setattr(database, "conversations", conversations)
     setattr(database, "memories", memories)
     setattr(database, "proposals", proposals)

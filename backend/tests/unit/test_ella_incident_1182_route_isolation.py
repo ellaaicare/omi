@@ -149,14 +149,25 @@ def test_canonical_service_validates_every_identity_and_preserves_internal_sync(
     app = FastAPI()
     app.include_router(canonical_events.create_canonical_events_router(store))
     client = TestClient(app)
-    headers = {"X-Ella-Event-Ledger-Key": "ledger-service-test"}
+    headers = {
+        "X-Ella-Event-Ledger-Key": "ledger-service-test",
+        "X-Ella-Subject-Uid": "uid-a",
+    }
 
     accepted = client.post(
         "/v1/ella/events",
         headers=headers,
-        json={"events": [_event(), _event("uid-b", event_id="event-b")]},
+        json={"events": [_event()]},
     )
     assert accepted.status_code == 200
+    assert len(store.writes) == 1
+
+    mixed_owner = client.post(
+        "/v1/ella/events",
+        headers=headers,
+        json={"events": [_event(), _event("uid-b", event_id="event-b")]},
+    )
+    assert mixed_owner.status_code == 403
     assert len(store.writes) == 1
 
     malformed = _event(event_id="event-c")
@@ -165,13 +176,14 @@ def test_canonical_service_validates_every_identity_and_preserves_internal_sync(
     assert rejected.status_code == 403
     assert len(store.writes) == 1
 
-    timeline = client.get("/v1/ella/timeline?uid=uid-b", headers=headers)
+    uid_b_headers = {**headers, "X-Ella-Subject-Uid": "uid-b"}
+    timeline = client.get("/v1/ella/timeline?uid=uid-b", headers=uid_b_headers)
     assert timeline.status_code == 200
     assert store.timeline_calls[0][0] == "uid-b"
 
     completion = client.post(
         "/v1/ella/sessions/session-b/complete",
-        headers=headers,
+        headers=uid_b_headers,
         json={
             "uid": "uid-b",
             "canonical_identity": "uid-b",
@@ -757,6 +769,27 @@ MOUNTED_ROUTE_CONTRACT = {
     ("callbacks", "DELETE", "/v1/ella/emergency-contact/{contact_id}"): _contract(
         "delete_emergency_contact", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
+    ("callbacks", "GET", "/v1/ella/caregivers"): _contract(
+        "list_caregivers", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "POST", "/v1/ella/caregivers/invite"): _contract(
+        "invite_caregiver", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "GET", "/v1/ella/caregivers/emergency-contact"): _contract(
+        "get_emergency_caregiver", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "PUT", "/v1/ella/caregivers/emergency-contact"): _contract(
+        "update_emergency_caregiver", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "PUT", "/v1/ella/caregivers/{caregiver_id}/permissions"): _contract(
+        "update_caregiver_permissions", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "POST", "/v1/ella/caregivers/{caregiver_id}/resend-invite"): _contract(
+        "resend_caregiver_invite", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("callbacks", "DELETE", "/v1/ella/caregivers/{caregiver_id}"): _contract(
+        "remove_caregiver", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
     ("callbacks", "GET", "/v1/ella/caregiver-dashboard-data"): _contract(
         "caregiver_dashboard_data", manual="validate_dashboard_token"
     ),
@@ -773,7 +806,7 @@ MOUNTED_ROUTE_CONTRACT = {
         "resolve_endpoint", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
     ("resolve", "GET", "/v1/ella/chat/history/{agent_id}"): _contract(
-        "proxy_chat_history", "utils.other.endpoints:get_current_user_uid"
+        "proxy_chat_history", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
     ("trace", "POST", "/v1/ella/debug/client-trace"): _contract(
         "ingest_client_trace", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
@@ -826,7 +859,7 @@ MOUNTED_ROUTE_CONTRACT = {
         "create_voice_session", "ella.services.ai_consent:require_current_ai_consent"
     ),
     ("voice", "GET", "/v1/voice/entitlement"): _contract(
-        "get_voice_entitlement", "utils.other.endpoints:get_current_user_uid"
+        "get_voice_entitlement", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
     ("voice", "POST", "/v1/voice/canary/accept"): _contract(
         "accept_voice_canary_session", manual="authenticate_voice_proxy_request"
@@ -851,7 +884,7 @@ MOUNTED_ROUTE_CONTRACT = {
     ),
     ("voice", "POST", "/v1/voice/search"): _contract("unified_search", manual="authenticate_voice_proxy_request"),
     ("voice", "GET", "/v1/entitlement"): _contract(
-        "get_voice_entitlement", "utils.other.endpoints:get_current_user_uid"
+        "get_voice_entitlement", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
 }
 
@@ -901,7 +934,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
                 assert dependencies, f"unclassified authority: {key}"
 
     assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
-    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 42
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 49
     assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
 
 

@@ -25,7 +25,6 @@ from database.honcho_attestation import authority_credential
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime, retained_owner_uid_configured
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
-from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +251,7 @@ async def proxy_chat_history(
     agent_id: str,
     limit: int = 50,
     session_key: Optional[str] = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """Proxy chat history requests to the Provision API on Mac Mini.
 

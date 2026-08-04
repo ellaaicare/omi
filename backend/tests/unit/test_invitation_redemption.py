@@ -21,6 +21,7 @@ from ella.routers import invites
 from ella.routers import voice
 from ella.services import ai_consent
 from ella.services import invitation_authority
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 
@@ -220,7 +221,7 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
         "get_user",
         lambda _uid: SimpleNamespace(email="verified@example.test", email_verified=True),
     )
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
     response = client.post(
         "/v1/invite/redeem",
         json={"code": "ABCD-2345"},
@@ -236,7 +237,7 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
 def test_redeem_rejects_unverified_firebase_email_before_authority_or_database(monkeypatch):
     app = FastAPI()
     app.include_router(invites.router)
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
     monkeypatch.setattr(
         invites.auth,
         "get_user",
@@ -287,7 +288,7 @@ def test_authenticated_malformed_body_returns_safe_invalid_envelope(
 ):
     app = FastAPI()
     app.include_router(invites.router)
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
     redemption_called = False
 
     async def fake_redeem(**_kwargs):
@@ -336,7 +337,7 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
         return {"status": "none", "quota": {}}
 
     monkeypatch.setattr(voice.voice_canary_db, "get_entitlement_contract", fake_contract)
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
     response = client.get("/v1/entitlement")
     assert response.status_code == 200
     assert captured["uid"] == "firebase-subject"
@@ -347,7 +348,7 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
 def test_typed_failure_shape_is_compatible_with_ios(monkeypatch):
     app = FastAPI()
     app.include_router(invites.router)
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
 
     async def fake_redeem(**_kwargs):
         raise invitations.InviteRedemptionFailure(

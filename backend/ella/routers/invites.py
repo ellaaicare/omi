@@ -20,6 +20,7 @@ from ella.services.invitation_authority import (
     revalidate_invitation_pilot,
     revalidate_self_hosted_invitation,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 router = APIRouter(prefix="/v1/invite", tags=["ella-invites"])
@@ -98,7 +99,7 @@ async def _validated_payload(request: Request) -> InviteRedeemRequest:
 )
 async def redeem_invite(
     request: Request,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
     app_build: str = Header(default="", alias="X-Ella-App-Build"),
 ) -> dict:
     payload = await _validated_payload(request)

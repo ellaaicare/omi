@@ -1309,7 +1309,7 @@ elif mode in {"chat-xai", "chat-xai-whitespace"}:
     asyncio.run(consume())
     would_send_retained = captured.get("authorization") == f"Bearer {initial}"
 elif mode == "guardian-service":
-    module._verify_key(initial, None)
+    module._verify_key(initial, None, "synthetic-user")
     would_send_retained = True
 elif mode == "guardian-provision":
     async def no_timeline(*args, **kwargs):
@@ -1400,7 +1400,14 @@ elif mode == "guardian-tts":
     module._guardian_tts_candidates = lambda effective, requested: ["elevenlabs"]
     module.httpx.AsyncClient = SyntheticAsyncClient
     request = module.SynthesizeRequest(uid="synthetic-user", text="hello")
-    asyncio.run(module.synthesize_audio(request, "synthetic-distinct-guardian-service-key-000001", None))
+    asyncio.run(
+        module.synthesize_audio(
+            request,
+            "synthetic-distinct-guardian-service-key-000001",
+            None,
+            "synthetic-user",
+        )
+    )
     would_send_retained = captured.get("token") == retained
 elif mode in {"voice-xai", "voice-inworld", "voice-elevenlabs"}:
     class SyntheticResponse:
@@ -1659,7 +1666,10 @@ if module_name == "ella.routers.callbacks":
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
     fake_exact_auth = types.ModuleType("utils.ella.exact_firebase_auth")
+    fake_exact_auth.ELLA_SUBJECT_UID_HEADER = "X-Ella-Subject-Uid"
+    fake_exact_auth.EllaRequestAuthority = object
     fake_exact_auth.get_exact_firebase_uid = lambda *args, **kwargs: None
+    fake_exact_auth.get_exact_service_authority = lambda *args, **kwargs: None
     fake_exact_auth.require_matching_firebase_uid = lambda *args, **kwargs: None
     sys.modules["utils.ella.exact_firebase_auth"] = fake_exact_auth
     fake_storage = types.ModuleType("utils.other.storage")
@@ -1867,7 +1877,7 @@ def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monke
     monkeypatch.setattr(
         provisioning_service,
         "provision_deadline",
-        lambda: ProvisionDeadline(provider_timeout_seconds=0.3, verification_grace_seconds=0.01, total_seconds=0.12),
+        lambda: ProvisionDeadline(provider_timeout_seconds=1.0, verification_grace_seconds=0.01, total_seconds=0.5),
     )
 
     async def scenario():
@@ -1889,7 +1899,7 @@ def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monke
                 for byte in b'{"a":1}\n':
                     writer.write(bytes([byte]))
                     await writer.drain()
-                    await asyncio.sleep(0.025)
+                    await asyncio.sleep(0.1)
             except (asyncio.IncompleteReadError, BrokenPipeError, ConnectionResetError):
                 pass
             finally:
@@ -1910,8 +1920,8 @@ def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monke
                 job=_job(state="provisioning", stage="profile_ready"),
                 identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
             )
-            await asyncio.wait_for(request_received.wait(), timeout=0.2)
-            await asyncio.wait_for(response_finished.wait(), timeout=0.2)
+            await asyncio.wait_for(request_received.wait(), timeout=2.0)
+            await asyncio.wait_for(response_finished.wait(), timeout=2.0)
 
         assert repository.staged is None
         assert repository.activation_calls == 0

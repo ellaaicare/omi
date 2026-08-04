@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from database.honcho_attestation import authority_credential
 from utils.ella.canonical_auth import CANONICAL_EVENT_SERVICE_HEADER
 from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
     EllaRequestAuthority,
     get_exact_firebase_uid,
     get_firebase_or_service_authority,
@@ -134,6 +135,10 @@ def _require_reinterpretation_completion_auth(
 def _canonical_event_authority(
     authorization: Optional[str] = Header(default=None),
     service_key: Optional[str] = Header(default=None, alias=CANONICAL_EVENT_SERVICE_HEADER),
+    service_subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
 ) -> EllaRequestAuthority:
     """Authenticate an exact Firebase subject or the dedicated ledger service."""
     configured = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
@@ -148,8 +153,19 @@ def _canonical_event_authority(
             provided_service_key=provided_service_key,
             configured_service_key=configured,
             service="canonical-event-ledger",
+            service_subject_uid=service_subject_uid,
+            x_app_version=x_app_version,
+            x_ella_app_build=x_ella_app_build,
+            x_ella_client_version=x_ella_client_version,
         )
-    return EllaRequestAuthority(firebase_uid=get_exact_firebase_uid(authorization))
+    return EllaRequestAuthority(
+        firebase_uid=get_exact_firebase_uid(
+            authorization,
+            x_app_version,
+            x_ella_app_build,
+            x_ella_client_version,
+        )
+    )
 
 
 def _authorize_canonical_owner(
