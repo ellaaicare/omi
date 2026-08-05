@@ -42,7 +42,7 @@ def main() -> int:
     parser.add_argument("--live", action="store_true", help="Create proposals instead of dry-running")
     args = parser.parse_args()
 
-    token = _env("ELLA_OBSERVER_ADMIN_TOKEN", _env("ELLA_ADMIN_TOKEN", ""))
+    token = _env("ELLA_OBSERVER_ADMIN_TOKEN")
     if not token:
         print("ELLA_OBSERVER_ADMIN_TOKEN is required", file=sys.stderr)
         return 2
@@ -66,7 +66,11 @@ def main() -> int:
     }
     url = args.backend_url.rstrip("/") + "/v1/ella/observer/run"
     with httpx.Client(timeout=60.0) as client:
-        response = client.post(url, headers={"X-Ella-Observer-Token": token}, json=payload)
+        response = client.post(
+            url,
+            headers={"X-Ella-Observer-Token": token, "X-Ella-Subject-Uid": args.uid},
+            json=payload,
+        )
     if response.status_code >= 400:
         print(f"Observer request failed: HTTP {response.status_code} {response.text[:500]}", file=sys.stderr)
         return 1

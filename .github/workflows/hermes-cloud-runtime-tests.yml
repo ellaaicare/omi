@@ -315,6 +315,7 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
+          database/ella_caregivers.py
           database/ella_provisioning.py
           database/honcho_attestation.py
           database/hermes_cloud_enrichment_outbox.py
@@ -327,6 +328,7 @@ jobs:
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
           ella/routers/canonical_events.py
+          ella/routers/corrections.py
           ella/routers/debug_metadata.py
           ella/routers/ai_consent.py
           ella/routers/chat.py
@@ -334,10 +336,12 @@ jobs:
           ella/routers/hermes_cloud_enrichment.py
           ella/routers/guardian.py
           ella/routers/invites.py
+          ella/routers/memory_reinterpretation.py
           ella/routers/onboarding.py
           ella/routers/observer.py
           ella/routers/plato_mcp.py
           ella/routers/resolve.py
+          ella/routers/settings.py
           ella/routers/trace.py
           ella/routers/voice.py
           ella/services/ai_consent.py
@@ -367,11 +371,13 @@ jobs:
           ella/utils/provision_authority.py
           scripts/hermes_cloud_pool_admin.py
           scripts/ella_memory_e2e_smoke.py
+          scripts/ella_observer_cron.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_product_fit_canary.py
           scripts/pilot_invite_admin.py
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
+          utils/ella/__init__.py
           utils/ella/postprocess.py
           utils/ella/canonical_auth.py
           utils/ella/canonical_context.py
@@ -379,22 +385,26 @@ jobs:
           utils/ella/exact_firebase_auth.py
           utils/ella/scanner.py
           utils/ella/scanner_keyterms.py
+          utils/other/endpoints.py
           tests/unit/test_ella_reviewed_route_integration.py
 
       - name: Validate formatting and OpenAPI contract
         run: >-
           black --check --line-length 120 --skip-string-normalization
           database/authority_advisory_lock.py
+          database/ella_caregivers.py
           database/ella_provisioning.py database/honcho_attestation.py database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
           routers/users.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/ai_consent.py ella/routers/canonical_events.py ella/routers/chat.py
+          ella/routers/corrections.py
           ella/routers/debug_metadata.py ella/routers/escalations.py
-          ella/routers/guardian.py ella/routers/invites.py
+          ella/routers/guardian.py ella/routers/hermes_cloud_enrichment.py ella/routers/invites.py
+          ella/routers/memory_reinterpretation.py ella/routers/observer.py ella/routers/photon.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
-          ella/routers/trace.py
+          ella/routers/settings.py ella/routers/trace.py
           ella/services/hermes_cloud_policy.py
           ella/services/hermes_broker_client.py
           ella/services/hermes_broker_prototype.py
@@ -409,16 +419,21 @@ jobs:
           ella/services/summary_recovery.py
           ella/utils/auto_provision.py ella/utils/identity_sync.py
           ella/utils/provision_authority.py
-          utils/ella/canonical_auth.py utils/ella/canonical_context.py
+          utils/ella/__init__.py utils/ella/canonical_auth.py utils/ella/canonical_context.py
           utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py
           utils/ella/scanner.py utils/ella/scanner_keyterms.py
+          utils/other/endpoints.py
           scripts/voice_canary_admin.py
           scripts/ella_memory_e2e_smoke.py
+          scripts/ella_observer_cron.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
           tests/unit/test_ella_ai_consent.py
+          tests/unit/test_ella_all_router_authority_manifest.py
+          tests/unit/test_ella_app_settings.py
+          tests/unit/test_ella_auth_authority_contract.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_canonical_context.py
           tests/unit/test_ella_debug_metadata.py
@@ -439,6 +454,7 @@ jobs:
           tests/unit/test_ella_provisioning_service.py
           tests/unit/test_hermes_cloud_openapi.py
           tests/unit/test_hermes_cloud_enrichment.py
+          tests/unit/test_hermes_cloud_enrichment_router.py
           tests/unit/test_hermes_cloud_photon.py
           tests/unit/test_hermes_broker_prototype.py
           tests/unit/test_hermes_binding_envelope_contract.py
@@ -455,7 +471,7 @@ jobs:
           tests/postgres/test_runtime_migration_atomicity_postgres.py
           &&
           black --check --line-length 120 --skip-string-normalization
-          --line-ranges 900-925 --line-ranges 1555-1585
+          --line-ranges 900-925 --line-ranges 1210-1225 --line-ranges 1555-1585
           ella/routers/voice.py
           &&
           python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
@@ -468,6 +484,8 @@ jobs:
               tests/unit/test_ella_incident_1182_route_isolation.py \
               tests/unit/test_ella_incident_1182_callback_auth.py \
               tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+              tests/unit/test_ella_auth_authority_contract.py \
+              tests/unit/test_ella_all_router_authority_manifest.py \
               tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases \
               tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness \
               tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract \
@@ -500,10 +518,24 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_routes_reject_unauth_admin_and_service_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_internal_callback_service_fails_closed_and_positive_control_is_scoped"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_callback_routes_reject_unbound_wrong_and_nonservice_authority_before_effects"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_callback_routes_accept_only_matching_bound_subject"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_token_generation_requires_two_distinct_configured_secrets"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_dashboard_signing_has_no_source_fallback"
             "tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py::test_voice_diagnostics_require_exact_firebase_bearer"
+            "tests/unit/test_ella_auth_authority_contract.py::test_admin_key_suffix_cannot_mint_arbitrary_subject"
+            "tests/unit/test_ella_auth_authority_contract.py::test_admin_branch_observation_is_bounded_and_content_free"
+            "tests/unit/test_ella_auth_authority_contract.py::test_exact_firebase_boundary_never_accepts_admin_key"
+            "tests/unit/test_ella_auth_authority_contract.py::test_ella_lazy_exports_keep_imports_at_module_scope"
+            "tests/unit/test_ella_auth_authority_contract.py::test_minimum_client_build_is_fail_closed_and_version_aware"
+            "tests/unit/test_ella_auth_authority_contract.py::test_service_authority_is_constant_time_bound_to_one_subject"
+            "tests/unit/test_ella_auth_authority_contract.py::test_ella_user_routes_do_not_inherit_legacy_admin_subject_auth"
+            "tests/unit/test_ella_auth_authority_contract.py::test_fifteen_fixed_capability_admin_guards_are_retained"
+            "tests/unit/test_ella_all_router_authority_manifest.py::test_all_ella_router_modules_and_routes_have_declared_authority_and_disposition"
+            "tests/unit/test_ella_all_router_authority_manifest.py::test_every_router_source_is_registered_without_disabling_conditional_routers"
             "tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases"
             "tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness"
             "tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract"
@@ -522,11 +554,13 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 35
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 54
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
             tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py \
+            tests/unit/test_ella_auth_authority_contract.py \
+            tests/unit/test_ella_all_router_authority_manifest.py \
             tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases \
             tests/unit/test_ella_provisioning_service.py::test_primary_fallback_authorities_preserve_outbound_selection_and_legacy_truthiness \
             tests/unit/test_ella_provisioning_service.py::test_authority_credential_presence_optional_none_and_redacted_separation_contract \
@@ -635,7 +669,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 513
+          test "$collected" -eq 514
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -734,7 +768,8 @@ jobs:
           escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"
           required_escalation_auth_ids=(
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_reaches_load_context_for_explicit_uid"
-            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_requires_uid_before_load_context"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_rejects_wrong_subject_before_context"
+            "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_requires_bound_subject_before_load_context"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_uid_uses_authenticated_uid_when_uid_omitted"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_uid_rejects_cross_user_read"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_context"
@@ -747,7 +782,7 @@ jobs:
           for required_id in "${required_escalation_auth_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$escalation_auth_ids"
           done
-          test "$(grep -c '::' <<<"$escalation_auth_ids")" -eq 10
+          test "$(grep -c '::' <<<"$escalation_auth_ids")" -eq 11
           pytest tests/unit/test_ella_escalations_router_auth.py -v
           reviewed_route_ids="$(pytest --collect-only -q tests/unit/test_ella_reviewed_route_integration.py | sed '/^$/d')"
           required_reviewed_route_ids=(
@@ -766,7 +801,7 @@ jobs:
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 18
+          test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 19
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 19
           pytest tests/unit/test_invitation_redemption.py -v

@@ -51,13 +51,43 @@ def test_enrichment_router_requires_configured_service_token(monkeypatch):
 
 def test_enrichment_router_rejects_wrong_service_token(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN", "x" * 32)
-    response = _client(FakeService()).post(
+    service = FakeService()
+    response = _client(service).post(
         "/v1/ella/internal/hermes-cloud/enrichment/run",
-        headers={"X-Ella-Hermes-Cloud-Enrichment-Token": "wrong"},
+        headers={
+            "X-Ella-Hermes-Cloud-Enrichment-Token": "wrong",
+            "X-Ella-Subject-Uid": "synthetic-user",
+        },
         json={"uid": "synthetic-user", "conversation_id": "conversation-a"},
     )
 
     assert response.status_code == 401
+    assert service.calls == []
+
+
+def test_enrichment_router_rejects_unbound_and_wrong_subject_before_service(monkeypatch):
+    token = "x" * 32
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN", token)
+    service = FakeService()
+    client = _client(service)
+
+    unbound = client.post(
+        "/v1/ella/internal/hermes-cloud/enrichment/run",
+        headers={"X-Ella-Hermes-Cloud-Enrichment-Token": token},
+        json={"uid": "synthetic-user", "conversation_id": "conversation-a"},
+    )
+    wrong_subject = client.post(
+        "/v1/ella/internal/hermes-cloud/enrichment/run",
+        headers={
+            "X-Ella-Hermes-Cloud-Enrichment-Token": token,
+            "X-Ella-Subject-Uid": "other-user",
+        },
+        json={"uid": "synthetic-user", "conversation_id": "conversation-a"},
+    )
+
+    assert unbound.status_code == 403
+    assert wrong_subject.status_code == 403
+    assert service.calls == []
 
 
 def test_enrichment_router_returns_content_free_receipt(monkeypatch):
@@ -66,7 +96,10 @@ def test_enrichment_router_returns_content_free_receipt(monkeypatch):
     service = FakeService()
     response = _client(service).post(
         "/v1/ella/internal/hermes-cloud/enrichment/run",
-        headers={"X-Ella-Hermes-Cloud-Enrichment-Token": token},
+        headers={
+            "X-Ella-Hermes-Cloud-Enrichment-Token": token,
+            "X-Ella-Subject-Uid": "synthetic-user",
+        },
         json={"uid": "synthetic-user", "conversation_id": "conversation-a"},
     )
 
@@ -93,7 +126,10 @@ def test_enrichment_router_binds_outbox_identity(monkeypatch):
     transcript_sha256 = "a" * 64
     response = _client(service).post(
         "/v1/ella/internal/hermes-cloud/enrichment/run",
-        headers={"X-Ella-Hermes-Cloud-Enrichment-Token": token},
+        headers={
+            "X-Ella-Hermes-Cloud-Enrichment-Token": token,
+            "X-Ella-Subject-Uid": "synthetic-user",
+        },
         json={
             "uid": "synthetic-user",
             "conversation_id": "conversation-a",

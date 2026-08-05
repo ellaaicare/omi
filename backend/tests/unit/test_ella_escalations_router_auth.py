@@ -80,6 +80,7 @@ def test_policy_view_internal_key_reaches_load_context_for_explicit_uid(monkeypa
             x_guardian_key=_TEST_ESCALATION_WEBHOOK_KEY,
             x_escalation_key=None,
             key=None,
+            subject_uid="uid-1",
         )
     )
 
@@ -88,7 +89,28 @@ def test_policy_view_internal_key_reaches_load_context_for_explicit_uid(monkeypa
     assert response["uid"] == "uid-1"
 
 
-def test_policy_view_internal_key_requires_uid_before_load_context(monkeypatch, configured_escalation_key):
+def test_policy_view_internal_key_rejects_wrong_subject_before_context(monkeypatch, configured_escalation_key):
+    async def fail_load_context(_uid):
+        raise AssertionError("_load_context must not run for a mismatched service subject")
+
+    monkeypatch.setattr(escalations, "_load_context", fail_load_context)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            escalations.get_escalation_policy(
+                uid="uid-1",
+                authorization=None,
+                x_guardian_key=_TEST_ESCALATION_WEBHOOK_KEY,
+                x_escalation_key=None,
+                key=None,
+                subject_uid="uid-2",
+            )
+        )
+
+    assert exc.value.status_code == 403
+
+
+def test_policy_view_internal_key_requires_bound_subject_before_load_context(monkeypatch, configured_escalation_key):
     async def fail_load_context(_uid):
         raise AssertionError("_load_context must not run without an explicit service-authority UID")
 
@@ -102,14 +124,15 @@ def test_policy_view_internal_key_requires_uid_before_load_context(monkeypatch, 
                 x_guardian_key=_TEST_ESCALATION_WEBHOOK_KEY,
                 x_escalation_key=None,
                 key=None,
+                subject_uid=None,
             )
         )
 
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 403
 
 
 def test_policy_view_uid_uses_authenticated_uid_when_uid_omitted(monkeypatch):
-    monkeypatch.setattr(escalations.auth_endpoints, "verify_token", lambda token: "uid-1")
+    monkeypatch.setattr(escalations, "get_exact_firebase_uid", lambda *_args: "uid-1")
 
     assert (
         escalations._resolve_policy_view_uid(
@@ -118,13 +141,14 @@ def test_policy_view_uid_uses_authenticated_uid_when_uid_omitted(monkeypatch):
             x_guardian_key=None,
             x_escalation_key=None,
             key=None,
+            subject_uid=None,
         )
         == "uid-1"
     )
 
 
 def test_policy_view_uid_rejects_cross_user_read(monkeypatch):
-    monkeypatch.setattr(escalations.auth_endpoints, "verify_token", lambda token: "uid-1")
+    monkeypatch.setattr(escalations, "get_exact_firebase_uid", lambda *_args: "uid-1")
 
     with pytest.raises(HTTPException) as exc:
         escalations._resolve_policy_view_uid(
@@ -133,6 +157,7 @@ def test_policy_view_uid_rejects_cross_user_read(monkeypatch):
             x_guardian_key=None,
             x_escalation_key=None,
             key=None,
+            subject_uid=None,
         )
 
     assert exc.value.status_code == 403
@@ -146,12 +171,12 @@ def test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_
 
     verified_tokens = []
 
-    def reject_firebase_token(token):
-        verified_tokens.append(token)
-        raise InvalidIdTokenError
+    def reject_firebase_token(authorization, *_version_headers):
+        verified_tokens.append(authorization)
+        raise HTTPException(status_code=401, detail="Invalid or expired Firebase bearer")
 
     monkeypatch.setattr(escalations, "_load_context", fail_load_context)
-    monkeypatch.setattr(escalations.auth_endpoints, "verify_token", reject_firebase_token)
+    monkeypatch.setattr(escalations, "get_exact_firebase_uid", reject_firebase_token)
 
     denial_cases = {
         "absent": {},
@@ -171,13 +196,23 @@ def test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_
             "x_guardian_key": None,
             "x_escalation_key": None,
             "key": None,
+            "subject_uid": None,
             **overrides,
         }
         with pytest.raises(HTTPException) as exc:
             asyncio.run(escalations.get_escalation_policy(**arguments))
         assert exc.value.status_code == 401, case_name
 
-    assert verified_tokens == ["invalid-test-token"]
+    assert verified_tokens == [
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "not-a-bearer-token",
+        "Bearer invalid-test-token",
+    ]
 
 
 class _FakePool:
@@ -261,6 +296,7 @@ def test_policy_markdown_internal_key_reaches_same_auth_and_context(monkeypatch,
             x_guardian_key=_TEST_ESCALATION_WEBHOOK_KEY,
             x_escalation_key=None,
             key=None,
+            subject_uid="uid-1",
         )
     )
 
@@ -292,6 +328,7 @@ def test_evaluate_internal_key_reaches_load_context_for_explicit_uid(monkeypatch
             x_guardian_key=None,
             x_escalation_key=_TEST_ESCALATION_WEBHOOK_KEY,
             key=None,
+            subject_uid="uid-1",
         )
     )
 
@@ -333,7 +370,7 @@ def test_production_default_empty_and_absent_credentials_deny_all_authority_path
                 headers=headers,
                 json={"uid": "uid-1"},
             )
-            assert evaluate_response.status_code == 403, (case_name, evaluate_response.text)
+            assert evaluate_response.status_code == 503, (case_name, evaluate_response.text)
 
             with pytest.raises(HTTPException) as exc:
                 production_escalations._verify_key(*verifier_arguments)

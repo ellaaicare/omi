@@ -1323,8 +1323,10 @@ def test_internal_router_requires_service_token_and_silently_ignores_unknown_sen
     monkeypatch,
 ):
     adapter, _, runtime_service = _adapter()
+    factory_calls = []
 
     async def factory():
+        factory_calls.append("adapter")
         return adapter
 
     app = FastAPI()
@@ -1343,22 +1345,44 @@ def test_internal_router_requires_service_token_and_silently_ignores_unknown_sen
         "synthetic": True,
     }
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PHOTON_SIDECAR_TOKEN", "t" * 32)
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PHOTON_INTERNAL_OWNER_UID", "synthetic-owner")
 
     unauthorized = client.post(
         "/v1/ella/internal/hermes-cloud/photon/inbound",
         json=payload,
     )
-    ignored = client.post(
+    unbound = client.post(
         "/v1/ella/internal/hermes-cloud/photon/inbound",
         json=payload,
         headers={"X-Ella-Photon-Sidecar-Token": "t" * 32},
     )
-
+    wrong_subject = client.post(
+        "/v1/ella/internal/hermes-cloud/photon/inbound",
+        json=payload,
+        headers={
+            "X-Ella-Photon-Sidecar-Token": "t" * 32,
+            "X-Ella-Subject-Uid": "different-owner",
+        },
+    )
     assert unauthorized.status_code == 401
+    assert unbound.status_code == 403
+    assert wrong_subject.status_code == 403
+    assert factory_calls == []
+
+    ignored = client.post(
+        "/v1/ella/internal/hermes-cloud/photon/inbound",
+        json=payload,
+        headers={
+            "X-Ella-Photon-Sidecar-Token": "t" * 32,
+            "X-Ella-Subject-Uid": "synthetic-owner",
+        },
+    )
+
     assert ignored.status_code == 200
     assert ignored.json() == {
         "ok": True,
         "status": "ignored",
         "duplicate": False,
     }
+    assert factory_calls == ["adapter"]
     assert runtime_service.calls == []

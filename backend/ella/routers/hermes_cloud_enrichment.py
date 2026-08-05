@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ella.services.hermes_cloud_enrichment import HermesCloudEnrichmentService
 from ella.services.runtime_errors import ProvisioningError
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_service_authority,
+)
 
 
 class HermesCloudEnrichmentIn(BaseModel):
@@ -38,18 +43,24 @@ class HermesCloudEnrichmentIn(BaseModel):
     )
 
 
-def _require_service_token(presented: Optional[str]) -> None:
+def _require_service_token(presented: Optional[str], subject_uid: Optional[str]) -> EllaRequestAuthority:
     expected = os.getenv("ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN", "")
     if len(expected) < 32:
         raise HTTPException(
             status_code=503,
             detail={"code": "hermes_cloud_enrichment_auth_not_configured"},
         )
-    if not presented or not hmac.compare_digest(presented.encode(), expected.encode()):
+    if not presented or not hmac.compare_digest(presented, expected):
         raise HTTPException(
             status_code=401,
-            detail={"code": "invalid_hermes_cloud_enrichment_token"},
+            detail={"code": "invalid_hermes_cloud_enrichment_service_credential"},
         )
+    return get_exact_service_authority(
+        provided_service_key=presented,
+        configured_service_key=expected,
+        service_subject_uid=subject_uid,
+        service="hermes_cloud_enrichment",
+    )
 
 
 def _http_error(exc: ProvisioningError) -> HTTPException:
@@ -101,8 +112,10 @@ def create_hermes_cloud_enrichment_router(
             default=None,
             alias="X-Ella-Hermes-Cloud-Enrichment-Token",
         ),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ) -> dict[str, Any]:
-        _require_service_token(x_service_token)
+        authority = _require_service_token(x_service_token, subject_uid)
+        payload.uid = authority.require_uid(payload.uid, feature="Hermes Cloud enrichment")
         try:
             result = await (await _service()).enrich(
                 uid=payload.uid,

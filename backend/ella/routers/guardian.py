@@ -60,8 +60,10 @@ from utils.ella.canonical_context import (
     fetch_canonical_timeline,
 )
 from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
     EllaRequestAuthority,
     get_exact_firebase_uid,
+    get_exact_service_authority,
     get_firebase_or_service_authority,
     require_matching_firebase_uid,
 )
@@ -123,6 +125,10 @@ def get_guardian_user_or_service_authority(
     authorization: Optional[str] = Header(None),
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
 ) -> EllaRequestAuthority:
     """Authenticate either the exact Firebase owner or the Guardian service."""
     return get_firebase_or_service_authority(
@@ -130,6 +136,10 @@ def get_guardian_user_or_service_authority(
         provided_service_key=x_guardian_key or key,
         configured_service_key=GUARDIAN_WEBHOOK_KEY,
         service="guardian",
+        service_subject_uid=subject_uid,
+        x_app_version=x_app_version,
+        x_ella_app_build=x_ella_app_build,
+        x_ella_client_version=x_ella_client_version,
     )
 
 
@@ -181,11 +191,15 @@ async def _get_pool() -> asyncpg.Pool:
 def _verify_key(
     x_guardian_key: Optional[str] = None,
     key: Optional[str] = None,
-) -> None:
+    subject_uid: Optional[str] = None,
+) -> EllaRequestAuthority:
     """Verify webhook authentication key."""
-    provided = x_guardian_key or key
-    if not GUARDIAN_WEBHOOK_KEY or not provided or not secrets.compare_digest(provided, GUARDIAN_WEBHOOK_KEY):
-        raise HTTPException(status_code=403, detail="Invalid guardian key")
+    return get_exact_service_authority(
+        provided_service_key=x_guardian_key or key,
+        configured_service_key=GUARDIAN_WEBHOOK_KEY,
+        service_subject_uid=subject_uid,
+        service="guardian",
+    )
 
 
 def _dict_value(data: object, *keys: str) -> dict:
@@ -1592,14 +1606,13 @@ async def enqueue(
     req: EnqueueRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Enqueue an audio clip for a user."""
     _start = time.time()
-    _verify_key(x_guardian_key, key)
-
-    uid = req.uid or req.userID
-    if not uid:
-        raise HTTPException(status_code=400, detail="uid (or userID) is required")
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    uid = authority.require_uid(req.uid or req.userID, feature="Guardian enqueue")
+    req.uid = uid
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
     trace_id = _trace_id_from_metadata(req.metadata, item_id)
@@ -1769,9 +1782,11 @@ async def synthesize_audio(
     req: SynthesizeRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = None,
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Resolve user voice settings and synthesize Guardian one-shot audio."""
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    req.uid = authority.require_uid(req.uid, feature="Guardian synthesis")
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text required")
@@ -1887,10 +1902,12 @@ async def upload_audio(
     filename: Optional[str] = Form(None),
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Upload an audio file and return its public URL."""
     _start = time.time()
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    uid = authority.require_uid(uid, feature="Guardian audio upload")
 
     content = await file.read()
     result = _store_audio_content(uid, content, filename)
@@ -1910,10 +1927,12 @@ async def upload_audio_json(
     req: UploadJsonRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Upload a base64-encoded audio file and return its public URL."""
     _start = time.time()
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    req.uid = authority.require_uid(req.uid, feature="Guardian JSON audio upload")
 
     try:
         content = base64.b64decode(req.audio_base64, validate=True)
@@ -1989,9 +2008,11 @@ async def view_debug_events(
     limit: int = 50,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Return recent Guardian pipeline/debug events for a user."""
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    uid = authority.require_uid(uid, feature="Guardian debug events")
     pool = await _get_pool()
     safe_limit = max(1, min(limit, 200))
 
@@ -2037,9 +2058,11 @@ async def debug_trigger(
     req: DebugTriggerRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Insert a direct debug Guardian queue item for device validation."""
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    req.uid = authority.require_uid(req.uid, feature="Guardian debug trigger")
 
     item_id = req.queue_item_id or f"guardian_{uuid.uuid4().hex[:12]}"
     trace_id = req.trace_id or item_id
@@ -2061,6 +2084,7 @@ async def debug_trigger(
         ),
         x_guardian_key=x_guardian_key,
         key=key,
+        subject_uid=req.uid,
     )
 
 
@@ -2224,14 +2248,13 @@ async def deliver(
     req: DeliverRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Evaluate escalation policy, reserve idempotency rows, then dispatch to n8n."""
     started_at = time.time()
-    _verify_key(x_guardian_key, key)
-
-    uid = req.uid.strip()
-    if not uid:
-        raise HTTPException(status_code=400, detail="uid is required")
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    uid = authority.require_uid(req.uid, feature="Guardian delivery")
+    req.uid = uid
 
     trace_id = req.trace_id or uid
     user, caregivers = await _load_delivery_context(uid)
@@ -2310,6 +2333,7 @@ async def deliver(
                 headers={
                     "Content-Type": "application/json",
                     "X-Guardian-Key": GUARDIAN_WEBHOOK_KEY,
+                    "X-Ella-Subject-Uid": uid,
                 },
             )
             dispatch_ok = response.status_code < 300
@@ -2365,9 +2389,11 @@ async def email_send(
     req: EmailSendRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Send a guardian alert email via configured SMTP relay."""
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    req.uid = authority.require_uid(req.uid, feature="Guardian email")
     if not req.to:
         raise HTTPException(status_code=400, detail="email recipient is required")
 
@@ -2466,9 +2492,11 @@ async def log_pipeline_event(
     req: TraceLogRequest,
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Log a pipeline event (called by n8n workflows)."""
-    _verify_key(x_guardian_key, key)
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    req.uid = authority.require_uid(req.uid, feature="Guardian trace log")
     metadata = dict(req.metadata or {})
     if req.error_detail:
         metadata["error_detail"] = req.error_detail

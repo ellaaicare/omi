@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from ella.routers import ai_consent
 from ella.services import ai_consent as consent, consent_authority
 from database import managed_cloud_consent
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 
 def _submission(
@@ -766,18 +767,20 @@ def test_tts_internal_service_token_cannot_bypass_subject_consent(monkeypatch):
     assert missing_consent.value.detail["code"] == "ai_consent_required"
 
 
-def test_tts_uid_canary_does_not_break_unattributed_legacy_callers(monkeypatch):
+def test_tts_uid_canary_rejects_unattributed_legacy_callers(monkeypatch):
     monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
     monkeypatch.delenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", raising=False)
     monkeypatch.delenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", raising=False)
 
-    result = consent.require_current_ai_consent_or_internal_tts(
-        authorization=None,
-        x_internal_token=None,
-        x_subject_uid=None,
-    )
+    with pytest.raises(HTTPException) as error:
+        consent.require_current_ai_consent_or_internal_tts(
+            authorization=None,
+            x_internal_token=None,
+            x_subject_uid=None,
+        )
 
-    assert result == "migration-bypass"
+    assert error.value.status_code == 401
+    assert error.value.detail == {"code": "authorization_required"}
 
 
 def test_tts_global_enforcement_rejects_unattributed_legacy_callers(monkeypatch):
@@ -799,7 +802,7 @@ def test_tts_global_enforcement_rejects_unattributed_legacy_callers(monkeypatch)
 def test_tts_authenticated_canary_subject_must_have_current_consent(monkeypatch):
     repository = consent.InMemoryConsentRepository()
     monkeypatch.setattr(consent, "_repository", repository)
-    monkeypatch.setattr(consent.auth, "get_current_user_uid", lambda _authorization: "user-a")
+    monkeypatch.setattr(consent, "get_exact_firebase_uid", lambda *_args: "user-a")
     monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
 
     with pytest.raises(HTTPException) as error:
@@ -1003,7 +1006,7 @@ def test_policy_is_public_but_status_and_receipts_require_firebase_auth(monkeypa
     assert client.get("/v1/users/ai-consent").status_code == 401
     assert client.get("/v1/users/ai-consent/receipts/aicr_unknown").status_code == 401
 
-    app.dependency_overrides[consent.auth.get_current_user_uid] = lambda: "user-a"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "user-a"
     status_response = client.get("/v1/users/ai-consent")
     assert status_response.status_code == 200
     assert status_response.json()["subject_uid"] == "user-a"
@@ -1014,7 +1017,7 @@ def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     app = FastAPI()
     app.include_router(ai_consent.router)
-    app.dependency_overrides[consent.auth.get_current_user_uid] = lambda: "user-a"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "user-a"
     client = TestClient(app)
 
     response = client.post(

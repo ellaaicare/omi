@@ -261,6 +261,7 @@ def test_deliver_dispatches_pending_backend_resolved_recipient(monkeypatch):
         guardian.deliver(
             guardian.DeliverRequest(uid="uid-1", trace_id="trace-1", severity="critical", summary="Needs help"),
             x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
         )
     )
 
@@ -268,6 +269,7 @@ def test_deliver_dispatches_pending_backend_resolved_recipient(monkeypatch):
     assert len(_FakeAsyncClient.posts) == 1
     _url, kwargs = _FakeAsyncClient.posts[0]
     assert kwargs["headers"]["X-Guardian-Key"] == guardian.GUARDIAN_WEBHOOK_KEY
+    assert kwargs["headers"]["X-Ella-Subject-Uid"] == "uid-1"
     step = kwargs["json"]["delivery_plan"][0]
     assert step["target"] == "user"
     assert step["recipient_phone"] == "+15550000001"
@@ -277,11 +279,13 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     _FakeAsyncClient.posts = []
     monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(guardian.app_settings_db, "get_voice_settings", lambda uid: {"voice_mode": "grok-voice"})
+    monkeypatch.setattr(guardian, "ELLA_INTERNAL_VOICE_TTS_TOKEN", "test-internal-tts-token")
 
     response = asyncio.run(
         guardian.synthesize_audio(
             guardian.SynthesizeRequest(uid="uid-1", text="Hello", trace_id="trace-1"),
             x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
         )
     )
 
@@ -289,6 +293,8 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     url, kwargs = _FakeAsyncClient.posts[0]
     assert url == guardian.ELLA_INTERNAL_VOICE_TTS_URL
     assert kwargs["headers"]["X-TTS-Provider"] == "xai-tts"
+    assert kwargs["headers"]["X-Ella-Internal-Token"] == guardian.ELLA_INTERNAL_VOICE_TTS_TOKEN
+    assert kwargs["headers"]["X-Ella-Subject-Uid"] == "uid-1"
     assert kwargs["json"]["text"] == "Hello"
     assert response.headers["x-guardian-tts-provider"] == "xai-tts"
     assert response.headers["x-guardian-voice-mode"] == "grok-voice"
@@ -304,6 +310,7 @@ def test_synthesize_audio_uses_matching_tts_provider(monkeypatch):
         guardian.synthesize_audio(
             guardian.SynthesizeRequest(uid="uid-1", text="Hello", trace_id="trace-1"),
             x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
         )
     )
 
@@ -347,6 +354,7 @@ def test_synthesize_audio_falls_back_to_next_candidate(monkeypatch):
         guardian.synthesize_audio(
             guardian.SynthesizeRequest(uid="uid-1", text="Hello", trace_id="trace-1"),
             x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
         )
     )
 
@@ -434,6 +442,7 @@ def test_trace_log_requires_configured_key_and_rejects_bad_key(monkeypatch):
             guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
             x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
             key=None,
+            subject_uid="uid-1",
         )
     )
     assert ok["logged"] is True
@@ -939,7 +948,10 @@ def test_guardian_owner_routes_reject_missing_malformed_and_cross_user_before_st
 def test_guardian_owner_or_service_reads_enforce_service_scope_and_owner(monkeypatch):
     pool = _GuardianRoutePool()
     client = _guardian_route_client(monkeypatch, pool)
-    service_headers = {"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY}
+    service_headers = {
+        "X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY,
+        "X-Ella-Subject-Uid": "uid-b",
+    }
 
     queue = client.get("/v1/ella/guardian/queue?uid=uid-b", headers=service_headers)
     trace = client.get("/v1/ella/guardian/trace/trace-a?uid=uid-b", headers=service_headers)
@@ -952,8 +964,14 @@ def test_guardian_owner_or_service_reads_enforce_service_scope_and_owner(monkeyp
 
     calls_after_success = pool.call_count
     for headers in (
-        {"X-Guardian-Key": "wrong-service"},
-        {"Authorization": "Bearer valid-a", "X-Guardian-Key": "wrong-service"},
+        {"X-Guardian-Key": "wrong-service", "X-Ella-Subject-Uid": "uid-a"},
+        {"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY},
+        {"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": "uid-b"},
+        {
+            "Authorization": "Bearer valid-a",
+            "X-Guardian-Key": "wrong-service",
+            "X-Ella-Subject-Uid": "uid-a",
+        },
     ):
         assert client.get("/v1/ella/guardian/queue?uid=uid-a", headers=headers).status_code == 403
         assert client.get("/v1/ella/guardian/trace/trace-a?uid=uid-a", headers=headers).status_code == 403
@@ -988,7 +1006,12 @@ def test_guardian_service_routes_reject_missing_and_wrong_scope_before_state(
     files,
     data,
 ):
-    for headers in ({}, {"X-Guardian-Key": "wrong-service"}):
+    for headers in (
+        {},
+        {"X-Guardian-Key": "wrong-service", "X-Ella-Subject-Uid": "uid-a"},
+        {"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY},
+        {"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": "uid-b"},
+    ):
         pool = _GuardianRoutePool()
         client = _guardian_route_client(monkeypatch, pool)
         request_kwargs = {"headers": headers}
@@ -1001,7 +1024,7 @@ def test_guardian_service_routes_reject_missing_and_wrong_scope_before_state(
 
         response = client.request(method, path, **request_kwargs)
 
-        assert response.status_code == 403
+        assert response.status_code == 403, (headers, response.text)
         assert pool.call_count == 0
 
 
@@ -1012,7 +1035,10 @@ def test_guardian_trace_log_accepts_only_configured_trace_service_key(monkeypatc
 
     accepted = client.post(
         "/v1/ella/guardian/trace/log",
-        headers={"X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY},
+        headers={
+            "X-Guardian-Key": guardian.GUARDIAN_WEBHOOK_KEY,
+            "X-Ella-Subject-Uid": "uid-a",
+        },
         json=payload,
     )
 

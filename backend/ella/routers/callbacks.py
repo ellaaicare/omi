@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 import asyncpg
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import database.conversations as conversations_db
 import database.memories as memories_db
@@ -44,6 +44,15 @@ import database.users as users_db
 from database._client import db
 from database.honcho_attestation import authority_credential
 from models.conversation import CategoryEnum
+from database.ella_caregivers import (
+    create_caregiver,
+    delete_caregiver,
+    get_caregivers,
+    get_emergency_caregiver_id,
+    refresh_caregiver_invite,
+    set_emergency_caregiver,
+    update_caregiver,
+)
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
 from ella.services.ai_consent import assert_current_ai_consent
@@ -59,7 +68,13 @@ from ella.services.summary_writeback import (
 )
 from utils.notifications import send_notification
 from utils.ella.canonical_omi import write_omi_canonical_event
-from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_firebase_uid,
+    get_exact_service_authority,
+    require_matching_firebase_uid,
+)
 from utils.other.storage import storage_client
 
 logger = logging.getLogger(__name__)
@@ -79,25 +94,28 @@ CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
 CAREGIVER_SERVICE_HEADER = "X-Ella-Caregiver-Service-Key"
 
 
-def _require_service_key(provided: Optional[str], *, env_name: str, service: str) -> str:
-    configured = os.getenv(env_name, "").strip()
-    if not configured:
-        raise HTTPException(status_code=503, detail={"code": f"{service}_service_auth_not_configured"})
-    if not provided or not secrets.compare_digest(provided, configured):
-        raise HTTPException(status_code=403, detail={"code": f"invalid_{service}_service_credential"})
-    return service
-
-
 def require_callback_service(
     service_key: Optional[str] = Header(default=None, alias=CALLBACK_SERVICE_HEADER),
-) -> str:
-    return _require_service_key(service_key, env_name="ELLA_CALLBACK_SERVICE_KEY", service="ella_callback")
+    subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+) -> EllaRequestAuthority:
+    return get_exact_service_authority(
+        provided_service_key=service_key,
+        configured_service_key=os.getenv("ELLA_CALLBACK_SERVICE_KEY", "").strip(),
+        service_subject_uid=subject_uid,
+        service="ella_callback",
+    )
 
 
 def require_caregiver_service(
     service_key: Optional[str] = Header(default=None, alias=CAREGIVER_SERVICE_HEADER),
-) -> str:
-    return _require_service_key(service_key, env_name="ELLA_CAREGIVER_SERVICE_KEY", service="ella_caregiver")
+    subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+) -> EllaRequestAuthority:
+    return get_exact_service_authority(
+        provided_service_key=service_key,
+        configured_service_key=os.getenv("ELLA_CAREGIVER_SERVICE_KEY", "").strip(),
+        service_subject_uid=subject_uid,
+        service="ella_caregiver",
+    )
 
 
 # ============================================================================
@@ -360,7 +378,7 @@ async def update_conversation_summary(
     conversation_id: str,
     update: ConversationSummaryUpdate,
     uid: str = None,
-    _service: str = Depends(require_callback_service),
+    service: EllaRequestAuthority = Depends(require_callback_service),
 ):
     """
     Update the structured summary of an OMI conversation.
@@ -369,6 +387,7 @@ async def update_conversation_summary(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation summary callback")
 
     try:
         return await write_conversation_summary(
@@ -412,7 +431,7 @@ async def list_enrichment_reconcile_candidates(
     uid: Optional[str] = None,
     lookback_minutes: int = 180,
     limit: int = 25,
-    _service: str = Depends(require_callback_service),
+    service: EllaRequestAuthority = Depends(require_callback_service),
 ):
     """
     Internal helper for n8n reconciliation.
@@ -421,6 +440,7 @@ async def list_enrichment_reconcile_candidates(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Enrichment reconciliation")
     if lookback_minutes <= 0:
         raise HTTPException(status_code=400, detail="lookback_minutes must be positive")
     if limit <= 0 or limit > 200:
@@ -489,7 +509,7 @@ def _structured_field(structured, key: str):
 async def get_conversation_data(
     conversation_id: str,
     uid: Optional[str] = None,
-    _service: str = Depends(require_callback_service),
+    service: EllaRequestAuthority = Depends(require_callback_service),
 ):
     """
     Fetch conversation data used by the reprocessing pipeline when re-firing the
@@ -497,6 +517,7 @@ async def get_conversation_data(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation data callback")
 
     try:
         conversation = conversations_db.get_conversation(uid, conversation_id)
@@ -555,7 +576,7 @@ async def ella_health():
 @router.post("/notification", response_model=NotificationResponse)
 async def ella_notification(
     request: NotificationRequest,
-    _service: str = Depends(require_callback_service),
+    service: EllaRequestAuthority = Depends(require_callback_service),
 ):
     """
     Send push notification to user with optional TTS audio.
@@ -566,6 +587,7 @@ async def ella_notification(
     Flow:
         Letta agent tool call -> n8n webhook -> this endpoint -> TTS -> GCS -> FCM -> iOS
     """
+    request.uid = service.require_uid(request.uid, feature="Ella notification")
     assert_current_ai_consent(request.uid)
     logger.info(f"[Ella] Notification: uid={request.uid}, urgency={request.urgency}, audio={request.generate_audio}")
 
@@ -800,7 +822,7 @@ class DailySummaryResponse(BaseModel):
 @router.post("/daily-summary", response_model=DailySummaryResponse)
 async def ella_daily_summary(
     request: DailySummaryRequest,
-    _service: str = Depends(require_callback_service),
+    service: EllaRequestAuthority = Depends(require_callback_service),
 ):
     """
     Trigger daily summary generation for a user's caregivers.
@@ -814,6 +836,7 @@ async def ella_daily_summary(
         OR
         Caregiver dashboard "Send Summary Now" -> this endpoint -> n8n daily-summary webhook
     """
+    request.uid = service.require_uid(request.uid, feature="Ella daily summary")
     logger.info(f"[Ella] Daily summary requested: uid={request.uid}, date={request.date}")
 
     summary_date = request.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -981,6 +1004,115 @@ async def delete_emergency_contact(
         raise HTTPException(status_code=404, detail="Contact not found")
 
     logger.info("[Ella] Contact deleted")
+
+
+# ============================================================================
+# Authenticated first-party caregiver API
+# ============================================================================
+
+
+class CaregiverInviteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    email: str = Field(..., min_length=3, max_length=254)
+    relationship: str = Field(default="other", max_length=100)
+    permissions: Dict[str, bool] = Field(default_factory=dict)
+
+
+class CaregiverPermissionsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receive_daily_summary: bool
+    daily_summary_email: bool
+
+
+class EmergencyCaregiverUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    caregiver_id: str = Field(default="", max_length=128)
+
+
+@router.get("/caregivers")
+async def list_caregivers(authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    caregivers = get_caregivers(authenticated_uid)
+    return {"caregivers": caregivers}
+
+
+@router.post("/caregivers/invite", status_code=201)
+async def invite_caregiver(
+    request: CaregiverInviteRequest,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    caregiver = create_caregiver(authenticated_uid, request.model_dump())
+    return {
+        "invite_id": caregiver["id"],
+        "caregiver_id": caregiver["id"],
+        "invite_code": caregiver["invite_code"],
+        "status": caregiver["status"],
+        "expires_at": caregiver["invite_expires_at"],
+    }
+
+
+@router.get("/caregivers/emergency-contact")
+async def get_emergency_caregiver(authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    return {"caregiver_id": get_emergency_caregiver_id(authenticated_uid)}
+
+
+@router.put("/caregivers/emergency-contact")
+async def update_emergency_caregiver(
+    request: EmergencyCaregiverUpdate,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    selected = set_emergency_caregiver(authenticated_uid, request.caregiver_id.strip())
+    if request.caregiver_id.strip() and selected is None:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+    return {"caregiver_id": selected}
+
+
+@router.put("/caregivers/{caregiver_id}/permissions")
+async def update_caregiver_permissions(
+    caregiver_id: str,
+    request: CaregiverPermissionsUpdate,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    caregiver = update_caregiver(
+        authenticated_uid,
+        caregiver_id,
+        {
+            "permissions.receive_daily_summary": request.receive_daily_summary,
+            "permissions.daily_summary_email": request.daily_summary_email,
+        },
+    )
+    if caregiver is None:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+    return caregiver
+
+
+@router.post("/caregivers/{caregiver_id}/resend-invite")
+async def resend_caregiver_invite(
+    caregiver_id: str,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    caregiver = refresh_caregiver_invite(authenticated_uid, caregiver_id)
+    if caregiver is None:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+    return {
+        "caregiver_id": caregiver["id"],
+        "invite_code": caregiver["invite_code"],
+        "status": caregiver["status"],
+        "expires_at": caregiver["invite_expires_at"],
+    }
+
+
+@router.delete("/caregivers/{caregiver_id}", status_code=204)
+async def remove_caregiver(
+    caregiver_id: str,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    if not delete_caregiver(authenticated_uid, caregiver_id):
+        raise HTTPException(status_code=404, detail="Caregiver not found")
 
 
 # ============================================================================
@@ -1160,7 +1292,7 @@ async def caregiver_dashboard_data(token: str, date: Optional[str] = None):
 async def generate_dashboard_token_endpoint(
     uid: str,
     caregiver_id: str,
-    _service: str = Depends(require_caregiver_service),
+    service: EllaRequestAuthority = Depends(require_caregiver_service),
 ):
     """
     Generate a dashboard token for a caregiver. Called by n8n workflows
@@ -1169,6 +1301,7 @@ async def generate_dashboard_token_endpoint(
     This is an internal endpoint — should be called from n8n on the same VPS,
     not exposed to end users.
     """
+    uid = service.require_uid(uid, feature="Caregiver dashboard token")
     token = generate_dashboard_token(caregiver_id=caregiver_id, user_id=uid, omi_uid=uid, hours_valid=24)
     dashboard_url = f"https://ella-ai-care.com/dashboard/?token={token}"
 

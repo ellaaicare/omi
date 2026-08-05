@@ -70,7 +70,6 @@ from ella.services.voice_honcho import (
 )
 from utils.ella.canonical_context import fetch_canonical_timeline
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
-from utils.other import endpoints as auth
 
 # JWT handling
 try:
@@ -1216,7 +1215,7 @@ async def create_voice_session(
 @entitlement_router.get("/v1/entitlement")
 @router.get("/entitlement")
 async def get_voice_entitlement(
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """Return the stable frontend contract without exposing operator notes."""
     contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)

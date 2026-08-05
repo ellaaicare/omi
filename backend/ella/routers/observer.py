@@ -7,6 +7,7 @@ smoke tests. They are token-gated and default to dry-run behavior.
 from __future__ import annotations
 
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -18,6 +19,11 @@ from ella.services.observer_apply import apply_pending_observer_memory_proposals
 from ella.services.observer import observer_log_to_dict, run_observer
 from ella.services.observer_extractor import build_extraction_result, combined_extractor, normalize_extractor_mode
 from ella.services.observer_logs import ObserverRunLogStore, PostgresObserverRunLogStore
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_service_authority,
+)
 
 DEFAULT_OBSERVER_LIMIT = 100
 MAX_OBSERVER_LIMIT = 500
@@ -50,7 +56,7 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _observer_token() -> str:
-    return _env("ELLA_OBSERVER_ADMIN_TOKEN", _env("ELLA_ADMIN_TOKEN", ""))
+    return _env("ELLA_OBSERVER_ADMIN_TOKEN")
 
 
 def _token_from_authorization(authorization: Optional[str]) -> str:
@@ -62,13 +68,18 @@ def _token_from_authorization(authorization: Optional[str]) -> str:
     return value
 
 
-def _authenticate(authorization: Optional[str], x_ella_observer_token: Optional[str]) -> None:
-    configured = _observer_token()
-    if not configured:
-        raise HTTPException(status_code=503, detail="Observer admin token is not configured")
+def _authenticate(
+    authorization: Optional[str],
+    x_ella_observer_token: Optional[str],
+    subject_uid: Optional[str],
+) -> EllaRequestAuthority:
     supplied = (x_ella_observer_token or "").strip() or _token_from_authorization(authorization)
-    if supplied != configured:
-        raise HTTPException(status_code=401, detail="Invalid observer admin token")
+    return get_exact_service_authority(
+        provided_service_key=supplied,
+        configured_service_key=_observer_token(),
+        service_subject_uid=subject_uid,
+        service="ella_observer",
+    )
 
 
 def _parse_datetime(value: datetime | str | None) -> Optional[datetime]:
@@ -106,10 +117,10 @@ def create_observer_router(
         request: ObserverRunRequest,
         authorization: Optional[str] = Header(default=None),
         x_ella_observer_token: Optional[str] = Header(default=None, alias="X-Ella-Observer-Token"),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ):
-        _authenticate(authorization, x_ella_observer_token)
-        if not request.uid:
-            raise HTTPException(status_code=400, detail="uid is required")
+        authority = _authenticate(authorization, x_ella_observer_token, subject_uid)
+        request.uid = authority.require_uid(request.uid, feature="Observer run")
         source_events = await events.timeline(
             uid=request.uid,
             since=_parse_datetime(request.since),
@@ -145,10 +156,10 @@ def create_observer_router(
         request: ObserverApplyRequest,
         authorization: Optional[str] = Header(default=None),
         x_ella_observer_token: Optional[str] = Header(default=None, alias="X-Ella-Observer-Token"),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ):
-        _authenticate(authorization, x_ella_observer_token)
-        if not request.uid:
-            raise HTTPException(status_code=400, detail="uid is required")
+        authority = _authenticate(authorization, x_ella_observer_token, subject_uid)
+        request.uid = authority.require_uid(request.uid, feature="Observer apply")
         return await apply_pending_observer_memory_proposals(
             profile_uid=request.uid,
             event_store=events,
@@ -161,12 +172,17 @@ def create_observer_router(
     @router.get("/runs/{run_id}")
     async def get_run(
         run_id: str,
+        uid: str,
         authorization: Optional[str] = Header(default=None),
         x_ella_observer_token: Optional[str] = Header(default=None, alias="X-Ella-Observer-Token"),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ):
-        _authenticate(authorization, x_ella_observer_token)
+        authority = _authenticate(authorization, x_ella_observer_token, subject_uid)
+        uid = authority.require_uid(uid, feature="Observer run readback")
         log = await logs.get(run_id)
         if not log:
+            raise HTTPException(status_code=404, detail="Observer run not found")
+        if not secrets.compare_digest(str(log.get("profile_uid") or ""), uid):
             raise HTTPException(status_code=404, detail="Observer run not found")
         return {"ok": True, "observer_run": log}
 
@@ -174,11 +190,13 @@ def create_observer_router(
     async def health(
         authorization: Optional[str] = Header(default=None),
         x_ella_observer_token: Optional[str] = Header(default=None, alias="X-Ella-Observer-Token"),
+        subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
     ):
-        _authenticate(authorization, x_ella_observer_token)
+        authority = _authenticate(authorization, x_ella_observer_token, subject_uid)
         return {
             "ok": True,
             "mode": "proposal_only",
+            "subject_bound": bool(authority.service_subject_uid),
             "default_dry_run": True,
             "default_extractor_mode": normalize_extractor_mode(""),
         }
