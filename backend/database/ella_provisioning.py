@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import posixpath
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -13,6 +15,13 @@ import asyncpg
 
 from database import authority_advisory_lock
 from database import voice_canary as voice_canary_db
+from database.honcho_attestation import (
+    ATTESTATION_VERSION,
+    HonchoAttestationError,
+    authority_credential,
+    observed_runtime_fields,
+    verify_persisted_attestation,
+)
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
@@ -24,6 +33,7 @@ from database.runtime_targets import (
 )
 
 _pool: Optional[asyncpg.Pool] = None
+_SELF_HOSTED_BINDING_NAMESPACE = uuid.UUID("fa9b67e0-982d-4cab-9814-d38e992ecf6a")
 REQUIRED_PROVISIONING_INDEXES = (
     "ella_provisioning_jobs_user_schema_key",
     "ella_provisioning_jobs_state_updated_idx",
@@ -134,6 +144,16 @@ REQUIRED_SELF_HOSTED_INVITE_COLUMNS = (
     ("voice_entitlements", "invitation_consent_pending"),
     ("ella_runtime_targets", "invitation_target_id"),
 )
+
+
+def deterministic_runtime_binding_id(*, uid: str, provider: str, role: str) -> str:
+    """Return one stable, non-authorizing binding identity for retry reconciliation."""
+    parts = (str(uid), str(provider), str(role))
+    if not all(parts):
+        raise ValueError("runtime_binding_identity_incomplete")
+    return str(uuid.uuid5(_SELF_HOSTED_BINDING_NAMESPACE, "\0".join(parts)))
+
+
 REQUIRED_SELF_HOSTED_INVITE_CONSTRAINTS = (
     "ella_invitation_targets_required_profile_class_check",
     "ella_invitation_redemptions_consent_shape_check",
@@ -317,7 +337,7 @@ async def get_pool() -> asyncpg.Pool:
             host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
             port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
             user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
             min_size=1,
             max_size=10,
@@ -559,6 +579,7 @@ class EllaProvisioningRepository:
             SELECT
                 entitlement.*,
                 target.id AS runtime_target_id,
+                target.invitation_target_id AS attestation_runtime_target_id,
                 target.status AS runtime_target_status,
                 target.entitlement_revision AS runtime_target_entitlement_revision,
                 authority.decision AS consent_decision,
@@ -2726,6 +2747,10 @@ class EllaProvisioningRepository:
                 END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
+              AND (
+                    state NOT IN ('ready', 'blocked', 'rolling_back', 'manual_intervention')
+                    OR state = $2
+                  )
             RETURNING *
             """,
             uuid.UUID(str(job_id)),
@@ -2737,10 +2762,127 @@ class EllaProvisioningRepository:
             json.dumps(receipt or {}),
         )
         if not row:
+            existing = await self.pool.fetchrow(
+                "SELECT * FROM ella_provisioning_jobs WHERE id = $1",
+                uuid.UUID(str(job_id)),
+            )
+            if existing and str(existing["state"]) in {"ready", "blocked", "rolling_back", "manual_intervention"}:
+                return dict(existing)
             raise LookupError("provisioning_job_not_found")
         return dict(row)
 
+    async def prepare_runtime_binding_identity(self, *, uid: str, provider: str, role: str = "user") -> str:
+        """Reserve the exact binding identity included in the provision challenge."""
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                existing = await connection.fetchval(
+                    """
+                    SELECT b.id
+                    FROM ella_runtime_bindings b
+                    JOIN users u ON u.id = b.user_id
+                    WHERE u.omi_uid = $1 AND b.provider = $2 AND b.role = $3
+                    FOR SHARE OF b
+                    """,
+                    uid,
+                    provider,
+                    role,
+                )
+                return str(
+                    existing
+                    or deterministic_runtime_binding_id(
+                        uid=uid,
+                        provider=provider,
+                        role=role,
+                    )
+                )
+
+    async def _verify_self_hosted_honcho_attestation(
+        self,
+        connection,
+        *,
+        binding: dict[str, Any],
+        uid: str,
+        runtime_target_id: str,
+        allowed_job_states: set[tuple[str, str]],
+        require_current_freshness: bool,
+    ) -> None:
+        receipt = binding.get("health_receipt") or {}
+        if isinstance(receipt, str):
+            try:
+                receipt = json.loads(receipt)
+            except json.JSONDecodeError as exc:
+                raise RuntimePoolClaimError("honcho_attestation_evidence_malformed") from exc
+        evidence = receipt.get("honcho_isolation") if isinstance(receipt, dict) else None
+        attestation = evidence.get("attestation") if isinstance(evidence, dict) else None
+        if not isinstance(attestation, dict):
+            raise RuntimePoolClaimError("honcho_attestation_evidence_malformed")
+
+        profiles_root = os.getenv("ELLA_HERMES_PROFILES_ROOT", "/Users/ellaai/.hermes/profiles")
+        profile_name = str(binding.get("profile_name") or "")
+        expected_challenge = {
+            "version": ATTESTATION_VERSION,
+            "nonce": attestation.get("nonce"),
+            "issued_at": attestation.get("issued_at"),
+            "expires_at": attestation.get("expires_at"),
+            "firebase_uid": uid,
+            "account_owner_id": str(binding.get("account_user_id") or binding.get("user_id") or ""),
+            "runtime_target_id": str(runtime_target_id),
+            "binding_id": str(binding.get("id") or ""),
+            "job_id": str(attestation.get("job_id") or ""),
+        }
+        expected_config = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/honcho.json")
+        try:
+            verified_evidence = verify_persisted_attestation(
+                evidence,
+                expected_challenge=expected_challenge,
+                observed=observed_runtime_fields(
+                    profile_name=profile_name,
+                    config_path=expected_config,
+                    workspace_root=str(binding.get("workspace_root") or ""),
+                    honcho_workspace=str(binding.get("honcho_workspace") or ""),
+                    observed_peer_id=str(binding.get("observed_peer") or ""),
+                    observer_peer_id=str(binding.get("observer_peer") or ""),
+                    gateway_port=int(binding.get("gateway_port") or 0),
+                    gateway_target=str(binding.get("internal_gateway_url") or ""),
+                    credential_ref=str(binding.get("credential_ref") or ""),
+                    agent_id=str(binding.get("agent_id") or ""),
+                    service_label=str(binding.get("service_label") or ""),
+                ),
+            )
+        except (HonchoAttestationError, TypeError, ValueError) as exc:
+            code = exc.code if isinstance(exc, HonchoAttestationError) else "honcho_attestation_readback_mismatch"
+            raise RuntimePoolClaimError(code) from exc
+        if require_current_freshness and int(time.time()) > int(verified_evidence["attestation"]["expires_at"]):
+            raise RuntimePoolClaimError("honcho_attestation_stale")
+
+        try:
+            job_id = uuid.UUID(str(attestation["job_id"]))
+        except (TypeError, ValueError) as exc:
+            raise RuntimePoolClaimError("honcho_attestation_job_mismatch") from exc
+        job = await connection.fetchrow(
+            """
+            SELECT state, stage
+            FROM ella_provisioning_jobs
+            WHERE id = $1 AND user_id = $2 AND target_schema_version = $3
+            FOR UPDATE
+            """,
+            job_id,
+            binding["user_id"],
+            binding["template_version"],
+        )
+        if not job or (str(job["state"]), str(job["stage"])) not in allowed_job_states:
+            raise RuntimePoolClaimError("honcho_attestation_job_mismatch")
+
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
+        requested_binding_id = str(binding.get("binding_id") or uuid.uuid4())
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -2797,7 +2939,7 @@ class EllaProvisioningRepository:
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING *
                     """,
-                    uuid.uuid4(),
+                    uuid.UUID(requested_binding_id),
                     uid,
                     binding.get("role", "user"),
                     binding["provider"],
@@ -2819,6 +2961,8 @@ class EllaProvisioningRepository:
                 )
         if not row:
             raise LookupError("user_not_found")
+        if binding.get("binding_id") and str(row["id"]) != requested_binding_id:
+            raise RuntimePoolClaimError("honcho_attestation_binding_mismatch")
         return dict(row)
 
     async def activate_runtime_binding(
@@ -2980,6 +3124,14 @@ class EllaProvisioningRepository:
                     )
                     if not authority:
                         raise RuntimePoolClaimError("invitation_runtime_target_missing")
+                    await self._verify_self_hosted_honcho_attestation(
+                        connection,
+                        binding=dict(selected),
+                        uid=uid,
+                        runtime_target_id=str(authority["invitation_target_id"]),
+                        allowed_job_states={("provisioning", "smoke_passed")},
+                        require_current_freshness=True,
+                    )
                     decision = await voice_canary_db.revalidate_runtime_activation_on_connection(
                         connection,
                         uid=uid,
@@ -3281,6 +3433,7 @@ class EllaProvisioningRepository:
                             binding.*, app_user.omi_uid, app_user.name,
                             app_user.status AS user_status, app_user.profile_class,
                             target.id AS resolved_target_id,
+                            target.invitation_target_id AS resolved_attestation_target_id,
                             target.mode AS resolved_target_mode,
                             target.endpoint_ref AS resolved_target_endpoint_ref,
                             target.credential_ref AS resolved_target_credential_ref,
@@ -3390,8 +3543,17 @@ class EllaProvisioningRepository:
                     )
                     if not decision.allowed:
                         raise RuntimePoolClaimError(f"runtime_admission_{decision.code}")
+                    await self._verify_self_hosted_honcho_attestation(
+                        connection,
+                        binding=dict(row),
+                        uid=uid,
+                        runtime_target_id=str(row["resolved_attestation_target_id"]),
+                        allowed_job_states={("provisioning", "smoke_passed"), ("ready", "active")},
+                        require_current_freshness=False,
+                    )
                     result = dict(row)
                     result["runtime_target_id"] = str(row["resolved_target_id"])
+                    result["attestation_runtime_target_id"] = str(row["resolved_attestation_target_id"])
                     result["runtime_target_mode"] = str(row["resolved_target_mode"])
                     result["target_endpoint_ref"] = str(row["resolved_target_endpoint_ref"] or "")
                     result["target_credential_ref"] = str(row["resolved_target_credential_ref"] or "")

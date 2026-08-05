@@ -6,11 +6,13 @@ from datetime import datetime, timedelta, timezone
 
 import redis
 
+from database.honcho_attestation import authority_credential
+
 r = redis.Redis(
     host=os.getenv('REDIS_DB_HOST'),
     port=int(os.getenv('REDIS_DB_PORT')) if os.getenv('REDIS_DB_PORT') is not None else 6379,
     username='default',
-    password=os.getenv('REDIS_DB_PASSWORD'),
+    password=(authority_credential('REDIS_DB_PASSWORD', strip=False) if 'REDIS_DB_PASSWORD' in os.environ else None),
     health_check_interval=30,
 )
 

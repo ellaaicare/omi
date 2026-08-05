@@ -11,6 +11,8 @@ from typing import Optional
 import asyncpg
 import httpx
 
+from database.honcho_attestation import authority_credential
+
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
@@ -81,11 +83,13 @@ def _provision_url(uid: str = "", *, isolated: bool = False) -> str:
 
 def _provision_token(uid: str = "", *, isolated: bool = False) -> str:
     if uid and isolated:
-        return os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
+        return authority_credential("ELLA_HERMES_PROVISION_API_TOKEN", strip=False)
+    # Preserve the legacy truthy fallback chain while registering only the
+    # nonempty credential that is actually selected for the outbound request.
     return (
-        os.getenv("ELLA_PROVISION_API_TOKEN")
-        or os.getenv("ELLA_PROVISION_API_KEY")
-        or os.getenv("PROVISION_API_TOKEN")
+        authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
+        or authority_credential("ELLA_PROVISION_API_KEY", strip=False)
+        or authority_credential("PROVISION_API_TOKEN", strip=False)
         or ""
     )
 
@@ -131,7 +135,7 @@ async def _get_pool():
             host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
             port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
             user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
             min_size=1,
             max_size=4,

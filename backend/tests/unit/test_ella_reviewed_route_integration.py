@@ -46,6 +46,7 @@ def _load_resolve_router():
         return None
 
     runtime_module.resolve_isolated_runtime = resolve_isolated_runtime
+    runtime_module.retained_owner_uid_configured = lambda _uid: False
     runtime_errors_module = types.ModuleType("ella.services.runtime_errors")
 
     class ProvisioningError(Exception):

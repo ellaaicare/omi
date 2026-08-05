@@ -1,7 +1,7 @@
 # Hermes Cloud Runtime Targets — Flags-Off Deploy Runbook
 
 Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
-`ellaaicare/ella-ai#1123`.
+`ellaaicare/ella-ai#1123`, `ellaaicare/ella-ai#1182`.
 
 ## Source contract
 
@@ -28,6 +28,48 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
   disclose, or require Honcho Cloud on the Cloud route.
 - Legacy retained Plato/Honcho paths remain separate and must not be modified by
   the Cloud target migration.
+- Invitation-owned self-hosted Hermes is usable only with a
+  `honcho-isolation-v2` HMAC attestation. OMI creates a 360-second nonce
+  challenge binding the exact Firebase UID, internal account owner,
+  invitation-target family, binding id, and provisioning job id. The
+  provisioner must read the profile-local `<profile>/honcho.json` and sign the
+  complete fixed-schema response: challenge fields, profile/config-path hash,
+  workspace-root hash, Honcho workspace and both peer ids, gateway port and
+  target hash, credential-reference hash, agent id, and service label. OMI
+  verifies freshness, exact context, readback, and integrity before staging,
+  again inside the activation transaction, and again inside each invitation
+  resolution transaction. Database strings or mutually agreeing unsigned
+  response objects are not runtime authority.
+- The provisioner and OMI must receive the same separately scoped
+  `ELLA_HERMES_PROVISION_ATTESTATION_KEY` (minimum 32 bytes). Source discovers
+  secret-like environment credentials, dynamic Hermes keys, and configured
+  authority-secret references on every verification. Accessor-observed values
+  remain in the process separation set so reload cannot hide a cached runtime
+  credential. Equality is rejected before provider work, activation, and
+  resolution.
+  Missing, whitespace, padded, short, equal, stale, partial, or incorrectly
+  signed evidence fails closed. This source contract requires provisioner
+  support and independently staged credentials before rollout.
+- `ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS` remains bounded to 30-300 seconds.
+  It plus `ELLA_HERMES_PROVISION_ATTESTATION_VERIFICATION_GRACE_SECONDS`
+  (default 30 seconds) forms one monotonic deadline over response streaming,
+  bounded decode, proof verification, staging, activation, and publication.
+  That total plus the clock-skew margin must be strictly less than the
+  360-second wall-clock proof lifetime; invalid combinations fail before
+  external or binding work.
+- Every request carries a stable content-free `Idempotency-Key` derived from the
+  exact UID, invitation target, provisioning job, and deterministic binding.
+  The provisioner must atomically reconcile that key to one existing or newly
+  created profile/runtime, return a fresh response for each new nonce, and
+  reject any attempt to reuse the key across UID/target/job/binding context.
+  OMI treats post-provider malformed, stale, context-invalid, or MAC-invalid
+  evidence as retryable without staging or publication, then retries the same
+  job/binding with a fresh challenge. This external idempotency behavior is a
+  mandatory deployment gate; do not enable rollout until it is independently
+  exercised against the actual provisioner.
+- Existing invitation bindings without the persisted v2 attestation fail
+  closed. Re-provision them through the reviewed provider path; do not
+  synthesize or backfill the proof from database values.
 - `ai-data-processors-v7` is immutable historical consent. Cloud target traffic
   requires `ai-data-processors-v8`, `managed-cloud-internal-pilot-v2`, and the
   current processor/scope hashes.

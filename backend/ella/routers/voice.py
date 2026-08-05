@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
+from database.honcho_attestation import authority_credential
 from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_MODEL,
     SELF_HOSTED_RUNTIME_PROVIDER,
@@ -68,6 +69,7 @@ from ella.services.voice_honcho import (
     search_voice_honcho,
 )
 from utils.ella.canonical_context import fetch_canonical_timeline
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 # JWT handling
@@ -87,30 +89,28 @@ entitlement_router = APIRouter(tags=["voice"])
 
 # Configuration
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
-ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
+ELLA_SESSION_SECRET = authority_credential("ELLA_SESSION_SECRET", strip=False)
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 SESSION_EXPIRY_MINUTES = int(os.getenv("ELLA_SESSION_EXPIRY_MINUTES", "25"))
 VOICE_CANARY_ENFORCEMENT_ENABLED = os.getenv(
     "ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED",
     "true",
 ).strip().lower() in {"1", "true", "yes", "on"}
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+ELEVENLABS_API_KEY = authority_credential("ELEVENLABS_API_KEY", strip=False)
+XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_TTS_VOICE_ID = os.getenv("XAI_TTS_VOICE_ID", "eve")
 XAI_TTS_LANGUAGE = os.getenv("XAI_TTS_LANGUAGE", "en")
 XAI_TTS_OPTIMIZE_STREAMING_LATENCY = int(os.getenv("XAI_TTS_OPTIMIZE_STREAMING_LATENCY", "1"))
-INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
+INWORLD_API_KEY = authority_credential("INWORLD_API_KEY", strip=False)
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 ELLA_KOKORO_TTS_URL = os.getenv("ELLA_KOKORO_TTS_URL", "http://100.76.138.56:8931")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
-HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
+HERMES_VOICE_MEMORY_TOKEN = authority_credential("HERMES_VOICE_MEMORY_TOKEN", "ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_PROVISION_API_URL = os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
-HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").strip()
-VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
+HERMES_PROVISION_API_TOKEN = authority_credential("ELLA_HERMES_PROVISION_API_TOKEN")
+VOICE_PROXY_SERVICE_TOKEN = authority_credential("ELLA_VOICE_PROXY_SERVICE_TOKEN")
 VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
 VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
 VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS = float(
@@ -126,7 +126,7 @@ ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_T
     "on",
 }
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
 _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
 
 
@@ -421,7 +421,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=2,
             max_size=10,
@@ -904,7 +904,7 @@ def create_session_token(
 
 
 @router.get("/providers")
-async def get_voice_providers():
+async def get_voice_providers(_authenticated_uid: str = Depends(get_exact_firebase_uid)):
     """
     List available voice providers for iOS settings toggle.
 
@@ -1565,27 +1565,9 @@ async def synthesize_speech(
 
 
 @router.get("/health")
-async def voice_health():
-    """Health check for voice endpoints."""
-    v2v_status = {
-        pid: {
-            "available": info["key_check"](),
-            "default_mode": info["default_mode"],
-        }
-        for pid, info in V2V_PROVIDERS.items()
-    }
-
-    return {
-        "status": "ok",
-        "service": "ella-voice",
-        "voice_endpoint": ELLA_VOICE_ENDPOINT,
-        "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_providers": ["elevenlabs", "fish-audio", "kokoro", "inworld", "xai-tts"],
-        "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
-        "tts_xai_configured": bool(XAI_API_KEY),
-        "tts_local_url": ELLA_TTS_URL,
-        "v2v_providers": v2v_status,
-    }
+async def voice_health(_authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    """Return minimal authenticated health; provider diagnostics stay private."""
+    return {"status": "ok", "service": "ella-voice"}
 
 
 # ============================================================================

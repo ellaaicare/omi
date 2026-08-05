@@ -72,7 +72,7 @@ class MemorySmoke:
         self.artifacts: dict[str, Any] = {}
 
     def enforce_profile_safety(self) -> None:
-        writes_real_plato = self.args.uid == DEFAULT_PLATO_UID or self.args.canonical_identity.lower() == "plato"
+        writes_real_plato = self.args.uid == DEFAULT_PLATO_UID or self.args.mcp_canonical_identity.lower() == "plato"
         if writes_real_plato and not self.args.allow_real_profile:
             raise SmokeFailure(
                 "Refusing to write live memory smoke data to Plato without --allow-real-profile. "
@@ -141,7 +141,7 @@ class MemorySmoke:
                     "title": "E2E memory smoke test",
                     "description": f"Remember the E2E memory smoke phrase: {phrase}.",
                     "requested_change": {"memory": f"The E2E memory smoke phrase is {phrase}."},
-                    "target": {"canonical_identity": self.args.canonical_identity},
+                    "target": {"canonical_identity": self.args.mcp_canonical_identity},
                     "evidence": [{"kind": "automated_e2e_smoke", "synthetic": True, "at": _now_iso()}],
                     "confidence": 0.96,
                     "idempotency_key": f"ella-memory-e2e:{phrase}",
@@ -234,7 +234,15 @@ class MemorySmoke:
                     "metadata": {"test": "ella_memory_e2e_smoke", "synthetic": True, "phrase": phrase},
                 }
             )
-        response, elapsed = _json_request("POST", self.backend_url + "/v1/ella/events", {"events": batch})
+        ledger_token = _env("ELLA_EVENT_LEDGER_TOKEN")
+        if not ledger_token:
+            raise SmokeFailure("ELLA_EVENT_LEDGER_TOKEN is required for canonical event ingestion")
+        response, elapsed = _json_request(
+            "POST",
+            self.backend_url + "/v1/ella/events",
+            {"events": batch},
+            {"X-Ella-Event-Ledger-Key": ledger_token},
+        )
         self.metrics["write_multichannel_events_ms"] = elapsed
         self.artifacts["multichannel_write"] = response
         if response.get("ok") is not True:
@@ -285,7 +293,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run live Ella memory continuity smoke")
     parser.add_argument("--backend-url", default=_env("ELLA_BACKEND_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--uid", default=_env("ELLA_PLATO_UID", DEFAULT_PLATO_UID))
-    parser.add_argument("--canonical-identity", default="plato")
+    parser.add_argument(
+        "--canonical-identity",
+        default=None,
+        help="Exact canonical event identity (defaults to --uid; must equal it for ledger writes).",
+    )
+    parser.add_argument(
+        "--mcp-canonical-identity",
+        default="plato",
+        help="MCP profile alias used by proposal/search tools; intentionally distinct from ledger identity.",
+    )
     parser.add_argument("--mcp-token", default=_env("ELLA_PLATO_MCP_TOKEN", "").split(",")[0])
     parser.add_argument("--observer-token", default=_env("ELLA_OBSERVER_ADMIN_TOKEN", _env("ELLA_ADMIN_TOKEN", "")))
     parser.add_argument("--phrase", default=_default_phrase())
@@ -297,7 +314,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Allow writes to the real Plato profile. Required because this smoke creates durable proposals/events.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.canonical_identity is None:
+        args.canonical_identity = args.uid
+    return args
 
 
 def main(argv: list[str]) -> int:

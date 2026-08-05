@@ -16,6 +16,12 @@ from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
 )
+from database.honcho_attestation import (
+    ATTESTATION_VERSION,
+    HonchoAttestationError,
+    observed_runtime_fields,
+    verify_persisted_attestation,
+)
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
@@ -56,6 +62,13 @@ def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
         "ELLA_RUNTIME_BINDINGS_ENABLED_UIDS",
         uid,
     )
+
+
+def retained_owner_uid_configured(uid: Optional[str]) -> bool:
+    """Return true only for the explicit retained-owner subject."""
+    candidate = uid if isinstance(uid, str) else ""
+    owner_uid = os.getenv("ELLA_PLATO_UID", "").strip()
+    return bool(candidate and owner_uid and hmac.compare_digest(candidate, owner_uid))
 
 
 async def runtime_authority_enabled(
@@ -241,6 +254,15 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     if profile_name == "plato-eval" and uid != plato_uid:
         raise ProvisioningError("plato_binding_forbidden", retryable=False)
 
+    health_receipt = binding.get("health_receipt") or {}
+    if isinstance(health_receipt, str):
+        try:
+            health_receipt = json.loads(health_receipt)
+        except json.JSONDecodeError:
+            health_receipt = {}
+    if not isinstance(health_receipt, dict):
+        health_receipt = {}
+
     if provider == "hermes_cloud":
         if any(
             binding.get(field)
@@ -284,12 +306,6 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
             photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
         )
-        health_receipt = binding.get("health_receipt") or {}
-        if isinstance(health_receipt, str):
-            try:
-                health_receipt = json.loads(health_receipt)
-            except json.JSONDecodeError:
-                health_receipt = {}
         stored_lineage = RuntimeTargetLineage(
             policy_version=str(
                 binding.get("target_policy_version")
@@ -363,6 +379,44 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
                     retryable=False,
                 ) from exc
             expected_model = SELF_HOSTED_RUNTIME_MODEL
+
+            honcho_isolation = health_receipt.get("honcho_isolation")
+            expected_honcho_config = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/honcho.json")
+            attestation = honcho_isolation.get("attestation") if isinstance(honcho_isolation, dict) else None
+            if not isinstance(attestation, dict):
+                raise ProvisioningError("honcho_attestation_evidence_malformed", retryable=False)
+            expected_challenge = {
+                "version": ATTESTATION_VERSION,
+                "nonce": attestation.get("nonce"),
+                "issued_at": attestation.get("issued_at"),
+                "expires_at": attestation.get("expires_at"),
+                "firebase_uid": uid,
+                "account_owner_id": str(binding.get("account_user_id") or ""),
+                "runtime_target_id": str(binding.get("attestation_runtime_target_id") or ""),
+                "binding_id": str(binding.get("id") or ""),
+                "job_id": str(attestation.get("job_id") or ""),
+            }
+            try:
+                verify_persisted_attestation(
+                    honcho_isolation,
+                    expected_challenge=expected_challenge,
+                    observed=observed_runtime_fields(
+                        profile_name=profile_name,
+                        config_path=expected_honcho_config,
+                        workspace_root=workspace_root,
+                        honcho_workspace=str(binding.get("honcho_workspace") or ""),
+                        observed_peer_id=str(binding.get("observed_peer") or ""),
+                        observer_peer_id=str(binding.get("observer_peer") or ""),
+                        gateway_port=gateway_port,
+                        gateway_target=gateway_url,
+                        credential_ref=str(binding.get("credential_ref") or ""),
+                        agent_id=agent_id,
+                        service_label=str(binding.get("service_label") or ""),
+                    ),
+                )
+            except (HonchoAttestationError, TypeError, ValueError) as exc:
+                code = exc.code if isinstance(exc, HonchoAttestationError) else "honcho_attestation_readback_mismatch"
+                raise ProvisioningError(code, retryable=False) from exc
         else:
             expected_model = str(binding.get("agent_id") or "")
             consent_authority_epoch = ""
