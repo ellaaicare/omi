@@ -103,6 +103,9 @@ PROVISION_CONFLICT_CODES = frozenset(
         "registry_identity_conflict",
         "runtime_profile_identity_conflict",
         "runtime_profile_identity_unmanaged",
+        "runtime_profile_config_invalid",
+        "runtime_policy_conflict",
+        "runtime_reservation_missing",
         "runtime_profile_soul_drift",
         "unowned_profile_exists",
         "unsafe_existing_profile_capabilities",
@@ -493,7 +496,7 @@ async def _bounded_provision_response_body(response: httpx.Response) -> bytes:
 def _provision_conflict_code(response_body: bytes) -> str:
     try:
         payload = json.loads(response_body)
-    except (UnicodeDecodeError, ValueError):
+    except (RecursionError, UnicodeDecodeError, ValueError):
         return PROVISION_CONFLICT_FALLBACK_CODE
     if not isinstance(payload, dict):
         return PROVISION_CONFLICT_FALLBACK_CODE
@@ -570,13 +573,22 @@ class HermesProvisionClient:
                         try:
                             response_body = await _bounded_provision_response_body(response)
                         except ProvisioningError as exc:
+                            self.resolve_authority(send_snapshot)
+                            if deadline_check is not None:
+                                deadline_check()
                             raise ProvisioningError(
                                 PROVISION_CONFLICT_FALLBACK_CODE,
                                 retryable=False,
                                 detail={"status": 409},
                             ) from exc
+                        self.resolve_authority(send_snapshot)
+                        if deadline_check is not None:
+                            deadline_check()
+                        conflict_code = _provision_conflict_code(response_body)
+                        if deadline_check is not None:
+                            deadline_check()
                         raise ProvisioningError(
-                            _provision_conflict_code(response_body),
+                            conflict_code,
                             retryable=False,
                             detail={"status": 409},
                         )
