@@ -351,6 +351,48 @@ def _local_provision_client(base_url: str) -> HermesProvisionClient:
     return LocalProvisionClient()
 
 
+async def _provision_with_response(
+    response_body: bytes,
+    *,
+    status_code: int = 409,
+    declared_length: int | None = None,
+):
+    async def respond(reader, writer):
+        headers = await reader.readuntil(b"\r\n\r\n")
+        content_length = next(
+            (
+                int(line.split(":", 1)[1].strip())
+                for line in headers.decode("ascii").split("\r\n")
+                if line.lower().startswith("content-length:")
+            ),
+            0,
+        )
+        if content_length:
+            await reader.readexactly(content_length)
+        response_length = len(response_body) if declared_length is None else declared_length
+        writer.write(
+            (
+                f"HTTP/1.1 {status_code} Conflict\r\n"
+                f"Content-Length: {response_length}\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii")
+            + response_body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(respond, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        return await _local_provision_client(f"http://127.0.0.1:{port}").provision(
+            VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            "hermes-user-v1",
+            attestation_challenge=_attestation_challenge(),
+        )
+
+
 class _FakeDocument:
     def __init__(self, *, exists, data=None):
         self.exists = exists
@@ -1984,6 +2026,94 @@ def test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write(m
         assert repository.job["error_code"] == "invalid_provision_receipt"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("response_body", "expected_code"),
+    (
+        (
+            b'{"detail":{"code":"unsafe_existing_profile_capabilities","message":"must-not-persist"}}',
+            "unsafe_existing_profile_capabilities",
+        ),
+        (b'{"detail":{"code":"unreviewed_conflict","message":"must-not-persist"}}', "provision_request_conflict"),
+        (b"not-json", "provision_request_conflict"),
+    ),
+)
+def test_streamed_provision_conflicts_are_content_free_and_nonretryable(response_body, expected_code):
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(_provision_with_response(response_body))
+
+    assert error.value.code == expected_code
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+    assert "must-not-persist" not in str(error.value.detail)
+
+
+def test_oversized_provision_conflict_is_content_free_and_nonretryable():
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b"",
+                declared_length=MAX_PROVISION_RESPONSE_BYTES + 1,
+            )
+        )
+
+    assert error.value.code == "provision_request_conflict"
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+
+
+def test_known_provision_conflict_blocks_job_without_reconciliation_retry(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", raising=False)
+    response_body = b'{"detail":{"code":"unsafe_existing_profile_capabilities","message":"must-not-persist"}}'
+
+    async def scenario():
+        async def respond(reader, writer):
+            headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                (
+                    int(line.split(":", 1)[1].strip())
+                    for line in headers.decode("ascii").split("\r\n")
+                    if line.lower().startswith("content-length:")
+                ),
+                0,
+            )
+            if content_length:
+                await reader.readexactly(content_length)
+            writer.write(
+                (
+                    "HTTP/1.1 409 Conflict\r\n"
+                    f"Content-Length: {len(response_body)}\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                + response_body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        repository = FakeRepository()
+        coordinator = ProvisioningCoordinator(repository, _local_provision_client(f"http://127.0.0.1:{port}"))
+        async with server:
+            await coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+        return repository
+
+    repository = asyncio.run(scenario())
+
+    assert repository.job["state"] == "blocked"
+    assert repository.job["retryable"] is False
+    assert repository.job["error_code"] == "unsafe_existing_profile_capabilities"
+    update = repository.job_calls[-1]
+    assert update["error_detail"] == {"status": 409}
+    assert update["receipt"] is None
+    assert "must-not-persist" not in str(update)
 
 
 def test_total_deadline_rejects_delayed_json_parse_before_binding_write(monkeypatch):
