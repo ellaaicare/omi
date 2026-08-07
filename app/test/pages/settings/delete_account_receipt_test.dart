@@ -151,7 +151,7 @@ Future<void> _pumpDeleteAccount(
 Future<void> _confirmDeletion(WidgetTester tester) async {
   await tester.tap(find.byType(Checkbox));
   await tester.pump();
-  await tester.tap(find.byType(ElevatedButton));
+  await tester.tap(find.byType(FilledButton));
   await tester.pumpAndSettle();
   await tester.tap(find.text('Delete Now'));
   await tester.pumpAndSettle();
