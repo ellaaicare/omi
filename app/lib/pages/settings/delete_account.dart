@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 
-import 'package:gradient_borders/gradient_borders.dart';
-
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -110,48 +109,34 @@ class _DeleteAccountState extends State<DeleteAccount> {
     return PopScope(
       canPop: !isDeleteing,
       child: Scaffold(
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        appBar: AppBar(
-          backgroundColor: Theme.of(context).colorScheme.primary,
-          title: Text(context.l10n.deleteAccountTitle),
-        ),
+        backgroundColor: EllaColors.paper,
+        appBar: AppBar(title: Text(context.l10n.deleteAccountTitle)),
         body: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           child: Column(
             children: [
-              const SizedBox(
-                height: 10,
-              ),
+              const SizedBox(height: 10),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 50),
                 child: Text(
                   context.l10n.deleteAccountConfirm,
-                  style: const TextStyle(
-                    fontSize: 24,
-                  ),
+                  style: Theme.of(context).textTheme.headlineMedium,
                   textAlign: TextAlign.center,
                 ),
               ),
-              const SizedBox(
-                height: 10,
-              ),
-              Text(
-                context.l10n.cannotBeUndone,
-                style: const TextStyle(fontSize: 18),
-              ),
-              const SizedBox(
-                height: 30,
-              ),
+              const SizedBox(height: 10),
+              Text(context.l10n.cannotBeUndone, style: EllaTextStyles.body),
+              const SizedBox(height: 30),
               ListTile(
-                leading: const Icon(Icons.message_rounded),
+                leading: const Icon(Icons.message_rounded, color: EllaColors.tealDeep),
                 title: Text(context.l10n.allDataErased),
               ),
               ListTile(
-                leading: const Icon(Icons.person_pin_outlined),
+                leading: const Icon(Icons.person_pin_outlined, color: EllaColors.tealDeep),
                 title: Text(context.l10n.appsDisconnected),
               ),
               ListTile(
-                leading: const Icon(Icons.upload_file_outlined),
+                leading: const Icon(Icons.upload_file_outlined, color: EllaColors.tealDeep),
                 title: Text(context.l10n.exportBeforeDelete),
               ),
               const SizedBox(height: 30),
@@ -165,79 +150,52 @@ class _DeleteAccountState extends State<DeleteAccount> {
                       }
                     },
                   ),
-                  Expanded(
-                    child: Text(context.l10n.deleteAccountCheckbox),
-                  ),
+                  Expanded(child: Text(context.l10n.deleteAccountCheckbox)),
                 ],
               ),
-              const SizedBox(
-                height: 30,
-              ),
+              const SizedBox(height: 30),
               isDeleteing
-                  ? const CircularProgressIndicator(
-                      color: Colors.white,
-                    )
-                  : Container(
-                      decoration: BoxDecoration(
-                        border: const GradientBoxBorder(
-                          gradient: LinearGradient(colors: [
-                            Color.fromARGB(127, 208, 208, 208),
-                            Color.fromARGB(127, 188, 99, 121),
-                            Color.fromARGB(127, 86, 101, 182),
-                            Color.fromARGB(127, 126, 190, 236)
-                          ]),
-                          width: 2,
-                        ),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: ElevatedButton(
+                  ? const CircularProgressIndicator(color: EllaColors.tealDeep)
+                  : SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
                         onPressed: () {
                           if (checkboxValue) {
                             showDialog(
-                                context: context,
-                                builder: (c) {
-                                  return getDialog(context, () {
+                              context: context,
+                              builder: (c) {
+                                return getDialog(
+                                  context,
+                                  () {
                                     MixpanelManager().deleteAccountCancelled();
                                     Navigator.of(context).pop();
-                                  }, () {
+                                  },
+                                  () {
                                     deleteAccountNow();
                                     Navigator.of(context).pop();
-                                  }, context.l10n.areYouSure, context.l10n.deleteAccountFinal,
-                                      okButtonText: context.l10n.deleteNow, cancelButtonText: context.l10n.goBack);
-                                });
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(context.l10n.checkBoxToConfirm),
-                              ),
+                                  },
+                                  context.l10n.areYouSure,
+                                  context.l10n.deleteAccountFinal,
+                                  okButtonText: context.l10n.deleteNow,
+                                  cancelButtonText: context.l10n.goBack,
+                                );
+                              },
                             );
+                          } else {
+                            ScaffoldMessenger.of(
+                              context,
+                            ).showSnackBar(SnackBar(content: Text(context.l10n.checkBoxToConfirm)));
                           }
                         },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.transparent,
-                          shadowColor: const Color.fromARGB(255, 17, 17, 17),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: EllaColors.error,
+                          foregroundColor: EllaColors.paper,
+                          minimumSize: const Size.fromHeight(EllaSizes.minTouchTarget),
                         ),
-                        child: Container(
-                          width: double.infinity,
-                          height: 45,
-                          alignment: Alignment.center,
-                          child: Text(
-                            context.l10n.deleteAccount,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w400,
-                              fontSize: 18,
-                              color: Color.fromARGB(255, 255, 255, 255),
-                            ),
-                          ),
-                        ),
+                        child: Text(context.l10n.deleteAccount),
                       ),
                     ),
-              const SizedBox(
-                height: 70,
-              ),
+              const SizedBox(height: 70),
             ],
           ),
         ),
