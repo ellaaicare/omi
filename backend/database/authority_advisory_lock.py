@@ -390,3 +390,79 @@ async def verify_self_owner_after_lock(
     if current != owner.account_id or current != owner.profile_id:
         raise AuthorityLockError("authority_lock_owner_drift")
     return current
+
+
+async def resolve_self_owner_unlocked_or_bootstrap(
+    connection: asyncpg.Connection,
+    *,
+    uid: str,
+    allow_bootstrap: bool,
+) -> AuthorityOwner:
+    """Resolve an existing self-owner, or return the deterministic not-yet-created
+    owner when ``allow_bootstrap`` (the reversible fresh-UID consent relax).
+
+    Mirrors :func:`resolve_self_owner_unlocked` but instead of raising
+    ``authority_lock_owner_missing`` for a UID with no ``users`` row, it returns
+    the deterministic provisional owner so the caller can bootstrap the row
+    inside the advisory-lock transaction. Without ``allow_bootstrap`` the strict
+    ``authority_lock_owner_missing`` behavior is preserved byte-for-byte.
+    """
+    row = await connection.fetchrow(
+        "SELECT id FROM users WHERE omi_uid = $1",
+        uid,
+    )
+    if row:
+        return AuthorityOwner.from_values(row["id"], row["id"])
+    if not allow_bootstrap:
+        raise AuthorityLockError("authority_lock_owner_missing")
+    return provisional_identity_owner(uid)
+
+
+async def verify_self_owner_after_lock_or_bootstrap(
+    connection: asyncpg.Connection,
+    *,
+    uid: str,
+    owner: AuthorityOwner,
+    proof: AuthorityLockProof,
+    allow_bootstrap: bool,
+) -> uuid.UUID:
+    """Re-read and lock ownership inside the advisory-lock transaction, creating
+    the deterministic ``users`` row for a fresh UID when ``allow_bootstrap``.
+
+    The INSERT only runs while the per-UID advisory lock is held (matching the
+    codebase's write discipline), uses the deterministic provisional owner id so
+    a later redemption/ensure reconciles onto the same row, and is idempotent via
+    ``ON CONFLICT (omi_uid) DO NOTHING``.
+    """
+    owner_lock = proof
+    await require_self_owner_lock(
+        connection,
+        owner_lock,
+        user_id=owner.account_id,
+    )
+    row = await connection.fetchrow(
+        "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
+        uid,
+    )
+    if row is None and allow_bootstrap:
+        row = await connection.fetchrow(
+            """
+            INSERT INTO users (id, omi_uid, name, timezone, status)
+            VALUES ($1, $2, 'Synthetic User', 'UTC', 'PENDING')
+            ON CONFLICT (omi_uid) DO NOTHING
+            RETURNING id
+            """,
+            owner.account_id,
+            uid,
+        )
+        if row is None:
+            row = await connection.fetchrow(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                uid,
+            )
+    if not row:
+        raise AuthorityLockError("authority_lock_owner_missing")
+    current = _validated_database_uuid(row["id"], field="user_id")
+    if current != owner.account_id or current != owner.profile_id:
+        raise AuthorityLockError("authority_lock_owner_drift")
+    return current

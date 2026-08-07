@@ -22,6 +22,7 @@ USER_MUTATION_RE = re.compile(
 )
 
 EXPECTED_WRITERS = {
+    ("database/authority_advisory_lock.py", "verify_self_owner_after_lock_or_bootstrap"),
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "claim_cloud_pool_binding"),
@@ -41,12 +42,14 @@ EXPECTED_WRITERS = {
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
     ("database/managed_cloud_consent.py", "synchronize_denial"),
     ("database/managed_cloud_consent.py", "synchronize_grant"),
+    ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("database/voice_canary.py", "delete_user_voice_data"),
     ("database/voice_canary.py", "update_entitlement_status"),
     ("database/voice_canary.py", "upsert_entitlement"),
 }
 
 DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
+    ("database/authority_advisory_lock.py", "verify_self_owner_after_lock_or_bootstrap"),
     ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/invitation_operator.py", "_cleanup_locked"),
@@ -58,6 +61,7 @@ DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
 }
 
 PROOF_GATED_HELPERS = {
+    ("database/authority_advisory_lock.py", "verify_self_owner_after_lock_or_bootstrap"),
     ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
@@ -65,6 +69,7 @@ PROOF_GATED_HELPERS = {
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 EXPECTED_GLOBAL_USER_WRITERS = {
+    ("database/authority_advisory_lock.py", "verify_self_owner_after_lock_or_bootstrap"),
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
@@ -72,12 +77,17 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/ella_provisioning.py", "update_guardian_mode"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
 NON_AUTHORITY_USER_WRITERS = {
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
 REAL_POSTGRES_WRITER_COVERAGE = {
+    ("database/authority_advisory_lock.py", "verify_self_owner_after_lock_or_bootstrap"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_consent_bootstrap_creates_users_row_and_grant",
+    ),
     ("database/ella_provisioning.py", "activate_runtime_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"runtime_activate"',
@@ -145,6 +155,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/managed_cloud_consent.py", "synchronize_grant"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"consent_grant"',
+    ),
+    ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_delete_unlinks_users_row_and_consent_authority_freeing_uid",
     ),
     ("database/voice_canary.py", "delete_user_voice_data"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
@@ -250,7 +264,11 @@ def test_every_owner_bound_writer_has_direct_lock_or_lock_proof():
         assert "acquire_authority_lock(" in source, key
         verification_indices = [
             source.index(token)
-            for token in ("verify_self_owner_after_lock(", "verify_identity_owner_after_lock(")
+            for token in (
+                "verify_self_owner_after_lock_or_bootstrap(",
+                "verify_self_owner_after_lock(",
+                "verify_identity_owner_after_lock(",
+            )
             if token in source
         ]
         assert verification_indices, key
