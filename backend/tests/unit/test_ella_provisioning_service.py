@@ -41,6 +41,7 @@ from ella.services.provisioning import (
     DEFAULT_PROVISION_TIMEOUT_SECONDS,
     MAX_PROVISION_RESPONSE_BYTES,
     MAX_PROVISION_TIMEOUT_SECONDS,
+    PROVISION_CONFLICT_CODES,
     HermesProvisionClient,
     ProvisionDeadline,
     ProvisioningCoordinator,
@@ -351,6 +352,58 @@ def _local_provision_client(base_url: str) -> HermesProvisionClient:
             return authority
 
     return LocalProvisionClient()
+
+
+async def _provision_with_response(
+    response_body: bytes,
+    *,
+    status_code: int = 409,
+    declared_length: int | None = None,
+    client_factory=None,
+    deadline_check=None,
+    during_body=None,
+):
+    async def respond(reader, writer):
+        headers = await reader.readuntil(b"\r\n\r\n")
+        content_length = next(
+            (
+                int(line.split(":", 1)[1].strip())
+                for line in headers.decode("ascii").split("\r\n")
+                if line.lower().startswith("content-length:")
+            ),
+            0,
+        )
+        if content_length:
+            await reader.readexactly(content_length)
+        response_length = len(response_body) if declared_length is None else declared_length
+        response_headers = (
+            f"HTTP/1.1 {status_code} Conflict\r\n"
+            f"Content-Length: {response_length}\r\n"
+            "Content-Type: application/json\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        if during_body is None or not response_body:
+            writer.write(response_headers + response_body)
+        else:
+            writer.write(response_headers + response_body[:1])
+            await writer.drain()
+            await during_body()
+            writer.write(response_body[1:])
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(respond, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    client = _local_provision_client(base_url) if client_factory is None else client_factory(base_url)
+    async with server:
+        return await client.provision(
+            VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            "hermes-user-v1",
+            attestation_challenge=_attestation_challenge(),
+            deadline_check=deadline_check,
+        )
 
 
 class _FakeDocument:
@@ -1986,6 +2039,228 @@ def test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write(m
         assert repository.job["error_code"] == "invalid_provision_receipt"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("response_body", "expected_code"),
+    (
+        (
+            b'{"detail":{"code":"unsafe_existing_profile_capabilities","message":"must-not-persist"}}',
+            "unsafe_existing_profile_capabilities",
+        ),
+        (b'{"detail":{"code":"runtime_profile_config_invalid"}}', "runtime_profile_config_invalid"),
+        (b'{"detail":{"code":"runtime_policy_conflict"}}', "runtime_policy_conflict"),
+        (b'{"detail":{"code":"runtime_reservation_missing"}}', "runtime_reservation_missing"),
+        (b'{"detail":{"code":"unreviewed_conflict","message":"must-not-persist"}}', "provision_request_conflict"),
+        (b"not-json", "provision_request_conflict"),
+    ),
+)
+def test_streamed_provision_conflicts_are_content_free_and_nonretryable(response_body, expected_code):
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(_provision_with_response(response_body))
+
+    assert error.value.code == expected_code
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+    assert "must-not-persist" not in str(error.value.detail)
+
+
+def test_provision_conflict_contract_matches_reviewed_shim_codes():
+    assert PROVISION_CONFLICT_CODES == {
+        "agent_owner_mapping_conflict",
+        "agent_workspace_mapping_conflict",
+        "agent_workspace_outside_profiles_root",
+        "honcho_config_invalid",
+        "honcho_identity_conflict",
+        "honcho_profile_map_alias_conflict",
+        "honcho_profile_map_conflict",
+        "invalid_profile_name",
+        "legacy_caregiver_profile_requires_migration",
+        "legacy_profile_requires_migration",
+        "plato_runtime_rollback_forbidden",
+        "profile_ownership_conflict",
+        "profile_ownership_invalid",
+        "registry_identity_conflict",
+        "runtime_policy_conflict",
+        "runtime_profile_config_invalid",
+        "runtime_profile_identity_conflict",
+        "runtime_profile_identity_unmanaged",
+        "runtime_profile_soul_drift",
+        "runtime_reservation_missing",
+        "unowned_profile_exists",
+        "unsafe_existing_profile_capabilities",
+        "unsafe_profile_ownership_path",
+        "unsafe_profile_path",
+    }
+
+
+def test_recursive_provision_conflict_is_content_free_and_nonretryable():
+    nested = b'{"detail":' + (b"[" * 1_500) + b"0" + (b"]" * 1_500) + b"}"
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(_provision_with_response(nested))
+
+    assert error.value.code == "provision_request_conflict"
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+
+
+@pytest.mark.parametrize(
+    ("response_body", "declared_length"),
+    (
+        (b'{"detail":{"code":"runtime_policy_conflict"}}', None),
+        (b"", MAX_PROVISION_RESPONSE_BYTES + 1),
+    ),
+)
+def test_provision_conflict_rechecks_total_deadline_after_body_read(response_body, declared_length):
+    def expired_deadline():
+        raise ProvisioningError("provision_transaction_timeout", retryable=True)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                response_body,
+                declared_length=declared_length,
+                deadline_check=expired_deadline,
+            )
+        )
+
+    assert error.value.code == "provision_transaction_timeout"
+
+
+def test_provision_conflict_rechecks_total_deadline_after_json_parse(monkeypatch):
+    parsed = {"value": False}
+    original_loads = provisioning_service.json.loads
+
+    def delayed_loads(payload, *args, **kwargs):
+        result = original_loads(payload, *args, **kwargs)
+        parsed["value"] = True
+        return result
+
+    def deadline_check():
+        if parsed["value"]:
+            raise ProvisioningError("provision_transaction_timeout", retryable=True)
+
+    monkeypatch.setattr(provisioning_service.json, "loads", delayed_loads)
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b'{"detail":{"code":"runtime_policy_conflict"}}',
+                deadline_check=deadline_check,
+            )
+        )
+
+    assert error.value.code == "provision_transaction_timeout"
+
+
+def test_provision_conflict_rechecks_authority_after_inflight_body_drift():
+    state = {"drifted": False, "resolve_calls": 0}
+
+    def client_factory(base_url):
+        snapshot = ProvisionAuthoritySnapshot(b"d" * 32)
+        authority = ProvisionAuthority(
+            base_url=base_url,
+            token="synthetic-local-provider-token",
+            token_reference="LOCAL_TEST_ONLY",
+            _snapshot=snapshot,
+        )
+
+        class DriftingProvisionClient(HermesProvisionClient):
+            @staticmethod
+            def resolve_authority(expected_snapshot=None):
+                state["resolve_calls"] += 1
+                if state["drifted"]:
+                    raise ProvisioningError("provision_authority_changed", retryable=False)
+                if expected_snapshot is not None and not snapshot.matches(expected_snapshot):
+                    raise AssertionError("unexpected authority snapshot")
+                return authority
+
+        return DriftingProvisionClient()
+
+    async def drift_after_initial_response_check():
+        while state["resolve_calls"] < 4:
+            await asyncio.sleep(0)
+        state["drifted"] = True
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b'{"detail":{"code":"runtime_policy_conflict"}}',
+                client_factory=client_factory,
+                during_body=drift_after_initial_response_check,
+            )
+        )
+
+    assert error.value.code == "provision_authority_changed"
+    assert error.value.retryable is False
+    assert state["resolve_calls"] == 5
+
+
+def test_oversized_provision_conflict_is_content_free_and_nonretryable():
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b"",
+                declared_length=MAX_PROVISION_RESPONSE_BYTES + 1,
+            )
+        )
+
+    assert error.value.code == "provision_request_conflict"
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+
+
+def test_known_provision_conflict_blocks_job_without_reconciliation_retry(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", raising=False)
+    response_body = b'{"detail":{"code":"unsafe_existing_profile_capabilities","message":"must-not-persist"}}'
+
+    async def scenario():
+        async def respond(reader, writer):
+            headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                (
+                    int(line.split(":", 1)[1].strip())
+                    for line in headers.decode("ascii").split("\r\n")
+                    if line.lower().startswith("content-length:")
+                ),
+                0,
+            )
+            if content_length:
+                await reader.readexactly(content_length)
+            writer.write(
+                (
+                    "HTTP/1.1 409 Conflict\r\n"
+                    f"Content-Length: {len(response_body)}\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                + response_body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        repository = FakeRepository()
+        coordinator = ProvisioningCoordinator(repository, _local_provision_client(f"http://127.0.0.1:{port}"))
+        async with server:
+            await coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+        return repository
+
+    repository = asyncio.run(scenario())
+
+    assert repository.job["state"] == "blocked"
+    assert repository.job["retryable"] is False
+    assert repository.job["error_code"] == "unsafe_existing_profile_capabilities"
+    update = repository.job_calls[-1]
+    assert update["error_detail"] == {"status": 409}
+    assert update["receipt"] is None
+    assert "must-not-persist" not in str(update)
 
 
 def test_total_deadline_rejects_delayed_json_parse_before_binding_write(monkeypatch):

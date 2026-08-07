@@ -84,6 +84,35 @@ DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS = 30.0
 ATTESTATION_VERIFICATION_GRACE_ENV = "ELLA_HERMES_PROVISION_ATTESTATION_VERIFICATION_GRACE_SECONDS"
 ATTESTATION_CLOCK_SKEW_MARGIN_SECONDS = 1.0
 MAX_PROVISION_RESPONSE_BYTES = 262_144
+PROVISION_CONFLICT_FALLBACK_CODE = "provision_request_conflict"
+PROVISION_CONFLICT_CODES = frozenset(
+    {
+        "agent_owner_mapping_conflict",
+        "agent_workspace_mapping_conflict",
+        "agent_workspace_outside_profiles_root",
+        "honcho_config_invalid",
+        "honcho_identity_conflict",
+        "honcho_profile_map_alias_conflict",
+        "honcho_profile_map_conflict",
+        "invalid_profile_name",
+        "legacy_caregiver_profile_requires_migration",
+        "legacy_profile_requires_migration",
+        "plato_runtime_rollback_forbidden",
+        "profile_ownership_conflict",
+        "profile_ownership_invalid",
+        "registry_identity_conflict",
+        "runtime_profile_identity_conflict",
+        "runtime_profile_identity_unmanaged",
+        "runtime_profile_config_invalid",
+        "runtime_policy_conflict",
+        "runtime_reservation_missing",
+        "runtime_profile_soul_drift",
+        "unowned_profile_exists",
+        "unsafe_existing_profile_capabilities",
+        "unsafe_profile_ownership_path",
+        "unsafe_profile_path",
+    }
+)
 RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
 DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS = 120
 DEFAULT_CLOUD_POOL_LOW_WATER = 2
@@ -485,6 +514,22 @@ async def _bounded_provision_response_body(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
+def _provision_conflict_code(response_body: bytes) -> str:
+    try:
+        payload = json.loads(response_body)
+    except (RecursionError, UnicodeDecodeError, ValueError):
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    if not isinstance(payload, dict):
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    code = detail.get("code")
+    if not isinstance(code, str) or code not in PROVISION_CONFLICT_CODES:
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    return code
+
+
 class HermesProvisionClient:
     @staticmethod
     def resolve_authority(expected_snapshot: ProvisionAuthoritySnapshot | None = None) -> ProvisionAuthority:
@@ -546,7 +591,28 @@ class HermesProvisionClient:
                     self.resolve_authority(send_snapshot)
 
                     if response.status_code == 409:
-                        raise ProvisioningError("runtime_capacity", retryable=True)
+                        try:
+                            response_body = await _bounded_provision_response_body(response)
+                        except ProvisioningError as exc:
+                            self.resolve_authority(send_snapshot)
+                            if deadline_check is not None:
+                                deadline_check()
+                            raise ProvisioningError(
+                                PROVISION_CONFLICT_FALLBACK_CODE,
+                                retryable=False,
+                                detail={"status": 409},
+                            ) from exc
+                        self.resolve_authority(send_snapshot)
+                        if deadline_check is not None:
+                            deadline_check()
+                        conflict_code = _provision_conflict_code(response_body)
+                        if deadline_check is not None:
+                            deadline_check()
+                        raise ProvisioningError(
+                            conflict_code,
+                            retryable=False,
+                            detail={"status": 409},
+                        )
                     if 300 <= response.status_code < 400:
                         raise ProvisioningError(
                             "provision_request_rejected", retryable=False, detail={"status": response.status_code}
@@ -1248,7 +1314,7 @@ class ProvisioningCoordinator:
         except ProvisioningError as exc:
             if exc.code == "hermes_provision_authority_drift":
                 return
-            reconciliation_required = bool(progress.get("provider_work_started"))
+            reconciliation_required = bool(progress.get("provider_work_started")) and exc.detail.get("status") != 409
             retryable = exc.retryable or reconciliation_required
             error_detail = dict(exc.detail)
             receipt = None
