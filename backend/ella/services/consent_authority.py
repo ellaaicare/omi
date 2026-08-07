@@ -11,6 +11,7 @@ from ella.services.ai_consent import (
     ConsentSubmission,
     managed_cloud_real_data_enabled,
 )
+from ella.services.provisioning import self_hosted_fresh_uid_relax_enabled
 
 
 def _managed_authority_required(uid: str) -> bool:
@@ -59,6 +60,7 @@ async def submit_with_managed_cloud_authority(
             grant=managed_cloud_consent.ManagedCloudGrant.from_mapping(
                 uid,
                 payload.get("receipt"),
-            )
+            ),
+            allow_fresh_uid_bootstrap=self_hosted_fresh_uid_relax_enabled(),
         )
     return payload

@@ -244,15 +244,23 @@ async def lock_or_bootstrap_grant_on_connection(
 async def synchronize_grant(
     *,
     grant: ManagedCloudGrant,
+    allow_fresh_uid_bootstrap: bool = False,
 ) -> dict[str, Any]:
-    """Publish a Firestore grant into the PostgreSQL ordering authority."""
+    """Publish a Firestore grant into the PostgreSQL ordering authority.
+
+    When ``allow_fresh_uid_bootstrap`` is set, a UID with no ``users`` row gets a
+    deterministic ``users`` row created inside the advisory-lock transaction so a
+    fresh self-hosted account can complete consent (the reversible relax flag).
+    Without it, the strict ``authority_lock_owner_missing`` behavior is preserved.
+    """
     grant.validate()
     try:
         pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
-            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked_or_bootstrap(
                 conn,
                 uid=grant.account_uid,
+                allow_bootstrap=allow_fresh_uid_bootstrap,
             )
             async with conn.transaction():
                 owner_lock = await authority_advisory_lock.acquire_authority_lock(
@@ -263,11 +271,12 @@ async def synchronize_grant(
                     conn,
                     uid=grant.account_uid,
                 )
-                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock_or_bootstrap(
                     conn,
                     uid=grant.account_uid,
                     owner=owner,
                     proof=owner_lock,
+                    allow_bootstrap=allow_fresh_uid_bootstrap,
                 )
                 row = await conn.fetchrow(
                     """

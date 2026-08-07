@@ -169,12 +169,10 @@ async def _seed_grant(pool, uid):
 
 def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             INSERT INTO users (omi_uid, guardian_mode)
             VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
-            """
-        )
+            """)
         previous_pool = guardian._pool
         guardian._pool = pool
         try:
@@ -191,8 +189,7 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
 def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -269,8 +266,7 @@ def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects
                     'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
                     'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
                 );
-            """
-        )
+            """)
 
         before = {
             table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
@@ -574,23 +570,19 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """
-            )
+                """)
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -1793,5 +1785,99 @@ def test_new_identity_owner_collision_after_lookup_fails_closed():
                 "status": "PENDING",
             }
         ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_consent_bootstrap_creates_users_row_and_grant():
+    """A fresh UID with no users row completes consent via the bootstrap path,
+    creating the deterministic users row inside the advisory-lock transaction,
+    and later idempotent re-consent reconciles onto the same row. Without the
+    relax flag the strict authority_lock_owner_missing behavior is preserved.
+    """
+
+    async def scenario(pool):
+        uid = "synthetic-consent-bootstrap-fresh"
+        owner = authority_advisory_lock.provisional_identity_owner(uid)
+
+        async with pool.acquire() as conn:
+            before = await conn.fetchval(
+                "SELECT 1 FROM users WHERE omi_uid = $1",
+                uid,
+            )
+        assert before is None
+
+        result = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="one"),
+            allow_fresh_uid_bootstrap=True,
+        )
+        assert result["user_id"] == owner.account_id
+
+        async with pool.acquire() as observer:
+            row = await observer.fetchrow(
+                """
+                SELECT id, omi_uid, name, timezone, status
+                FROM users
+                WHERE omi_uid = $1
+                """,
+                uid,
+            )
+            decision = await observer.fetchval(
+                """
+                SELECT decision
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                owner.account_id,
+            )
+            receipt_ref = await observer.fetchval(
+                """
+                SELECT consent_receipt_ref
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                owner.account_id,
+            )
+        assert row is not None
+        assert tuple(row.values()) == (
+            owner.account_id,
+            uid,
+            "Synthetic User",
+            "UTC",
+            "PENDING",
+        )
+        assert decision == "granted"
+        assert receipt_ref and receipt_ref.startswith("sha256:")
+
+        # Idempotent re-consent reconciles onto the same deterministic row.
+        result_two = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="two"),
+            allow_fresh_uid_bootstrap=True,
+        )
+        assert result_two["user_id"] == owner.account_id
+        async with pool.acquire() as observer:
+            count = await observer.fetchval(
+                "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                uid,
+            )
+        assert count == 1
+
+        # A different fresh UID with the relax flag off fails closed first.
+        strict_uid = "synthetic-consent-bootstrap-strict"
+        with pytest.raises(
+            managed_cloud_consent.ManagedCloudAuthorityUnavailable,
+            match="managed_cloud_authority_unavailable",
+        ) as raised:
+            await managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(strict_uid),
+                allow_fresh_uid_bootstrap=False,
+            )
+        assert raised.value.__cause__.code == "authority_lock_owner_missing"
+        async with pool.acquire() as observer:
+            strict_count = await observer.fetchval(
+                "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                strict_uid,
+            )
+        assert strict_count == 0
 
     asyncio.run(_run_with_database(scenario))
