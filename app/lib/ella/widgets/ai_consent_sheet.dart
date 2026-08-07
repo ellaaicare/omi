@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_legal_links.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -13,14 +14,14 @@ class AiConsentSheet extends StatefulWidget {
 
   const AiConsentSheet({super.key, this.onAccept, this.onDecline, this.onRequestDeletion, this.reviewMode = false});
 
-  final Future<bool> Function()? onAccept;
+  final Future<AiConsentGrantOutcome> Function()? onAccept;
   final Future<bool> Function()? onDecline;
   final Future<void> Function()? onRequestDeletion;
   final bool reviewMode;
 
   static Future<bool?> show(
     BuildContext context, {
-    Future<bool> Function()? onAccept,
+    Future<AiConsentGrantOutcome> Function()? onAccept,
     Future<bool> Function()? onDecline,
     Future<void> Function()? onRequestDeletion,
     bool reviewMode = false,
@@ -54,34 +55,48 @@ class AiConsentSheet extends StatefulWidget {
 }
 
 class _AiConsentSheetState extends State<AiConsentSheet> {
+  static const _genericFailure = AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.rejected);
+
   bool _isSubmitting = false;
-  bool _hasError = false;
+  AiConsentGrantFailureKind? _failureKind;
+  String _supportCode = '';
 
   Future<void> _accept() async {
     if (_isSubmitting) return;
     setState(() {
       _isSubmitting = true;
-      _hasError = false;
+      _failureKind = null;
+      _supportCode = '';
     });
 
+    var outcome = _genericFailure;
     try {
-      final accepted = await (widget.onAccept?.call() ?? Future<bool>.value(false));
+      outcome = await (widget.onAccept?.call() ?? Future<AiConsentGrantOutcome>.value(_genericFailure));
       if (!mounted) return;
-      if (accepted) {
+      if (outcome.accepted) {
         Navigator.of(context).pop(true);
         return;
       }
     } catch (_) {
       // Keep the consent surface open and capture disabled on acknowledgement failure.
+      outcome = _genericFailure;
     }
 
     if (mounted) {
       setState(() {
         _isSubmitting = false;
-        _hasError = true;
+        _failureKind = outcome.failureKind ?? AiConsentGrantFailureKind.rejected;
+        _supportCode = outcome.supportCode;
       });
     }
   }
+
+  String _failureMessage(BuildContext context) => switch (_failureKind) {
+        AiConsentGrantFailureKind.serverUnavailable => context.l10n.aiConsentGrantUnavailableBody,
+        AiConsentGrantFailureKind.policyMismatch => context.l10n.aiConsentGrantPolicyMismatchBody,
+        AiConsentGrantFailureKind.network => context.l10n.aiConsentGrantNetworkBody,
+        _ => context.l10n.somethingWentWrongTryAgain,
+      };
 
   Future<void> _decline() async {
     if (_isSubmitting) return;
@@ -213,17 +228,30 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                         recognizer: TapGestureRecognizer()..onTap = () => launchUrl(AiConsentSheet.privacyPolicyUri),
                       ),
                     ),
-                    if (_hasError) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        context.l10n.somethingWentWrongTryAgain,
-                        style: bodyStyle?.copyWith(color: EllaColors.error),
-                      ),
-                    ],
                   ],
                 ),
               ),
             ),
+            if (_failureKind != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 0, 24, 10),
+                child: Semantics(
+                  liveRegion: true,
+                  child: Column(
+                    children: [
+                      Text(
+                        _failureMessage(context),
+                        style: EllaTextStyles.secondary.copyWith(color: EllaColors.error),
+                        textAlign: TextAlign.center,
+                      ),
+                      if (_supportCode.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(_supportCode, style: EllaTextStyles.caption, textAlign: TextAlign.center),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Column(

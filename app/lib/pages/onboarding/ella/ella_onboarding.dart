@@ -193,10 +193,12 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       await AiConsentSheet.show(
         context,
         onAccept: () async {
-          final receiptId = await consentService.grantCurrentConsent(uid: uid);
-          if (receiptId == null) return false;
-          if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
-          return true;
+          final outcome = await consentService.grantCurrentConsentWithOutcome(uid: uid);
+          final receiptId = outcome.receiptId;
+          if (receiptId != null && mounted) {
+            context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+          }
+          return outcome;
         },
         onDecline: () => consentService.declineCurrentConsent(uid: uid),
       );

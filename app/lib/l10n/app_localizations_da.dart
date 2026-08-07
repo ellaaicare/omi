@@ -9234,4 +9234,15 @@ class AppLocalizationsDa extends AppLocalizations {
   @override
   String get ellaWorkspaceRouteExplanation =>
       'Not verified does not mean another account is in use. It means Ella has not received route-specific proof yet.';
+
+  @override
+  String get aiConsentGrantUnavailableBody =>
+      'Ella couldn\'t confirm your choice with the server, so nothing has been shared yet. Please try again in a few minutes.';
+
+  @override
+  String get aiConsentGrantPolicyMismatchBody =>
+      'This version of Ella no longer matches the current privacy policy. Please update the app, then try again.';
+
+  @override
+  String get aiConsentGrantNetworkBody => 'Ella couldn\'t reach the server. Check your connection and try again.';
 }

@@ -188,7 +188,7 @@ void main() {
   });
 }
 
-class _GuardedConsentTransport implements EllaAiConsentTransport {
+class _GuardedConsentTransport extends EllaAiConsentTransport {
   bool allowRequests = false;
   int policyCalls = 0;
   int statusCalls = 0;
