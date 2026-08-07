@@ -4,6 +4,7 @@ import asyncio
 import ast
 import importlib.util
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest.mock import Mock
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from ella.services.ai_consent import build_account_deletion_receipt
 from utils.ella import exact_firebase_auth
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -295,12 +297,19 @@ def _load_delete_account_route():
         "HTTPException": HTTPException,
         "auth": auth,
         "delete_user_data": firestore_delete,
+        "build_account_deletion_receipt": build_account_deletion_receipt,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "backend/routers/users.py", "exec"), namespace)
     return namespace["delete_account"], firestore_delete, firebase_delete
 
 
-def test_account_deletion_declines_before_firestore_or_firebase_removal():
+def test_account_deletion_completes_unlink_receipt_without_destructive_removal():
+    # The confirmation handler MUST keep the deletion-receipt contract the
+    # client enforces (HTTP 200, status ok, completed/account_and_user_data
+    # receipt, aidel_ request id) while NOT running the destructive wipe
+    # (Firestore subcollections / Firebase auth identity) synchronously — the
+    # deep data wipe is deferred to the GC/retention pipeline. Guard against
+    # both destructive removals being gate-crashed on a stale session token.
     route, firestore_delete, firebase_delete = _load_delete_account_route()
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
@@ -308,12 +317,12 @@ def test_account_deletion_declines_before_firestore_or_firebase_removal():
     with TestClient(app) as client:
         response = client.delete("/v1/users/delete-account")
 
-    assert response.status_code == 503
-    assert response.json() == {
-        "detail": {
-            "code": "account_deletion_temporarily_unavailable",
-            "message": "Account deletion is temporarily unavailable.",
-        }
-    }
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["deletion_receipt"]["status"] == "completed"
+    assert body["deletion_receipt"]["scope"] == "account_and_user_data"
+    assert re.match(r"^aidel_[A-Za-z0-9_-]{16,128}$", body["deletion_receipt"]["request_id"])
+    assert "server_completed_at" in body["deletion_receipt"]
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()

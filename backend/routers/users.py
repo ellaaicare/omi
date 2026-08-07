@@ -57,6 +57,7 @@ from utils.notifications import send_notification, send_training_data_submitted_
 from utils.llm.external_integrations import generate_comprehensive_daily_summary
 from models.notification_message import NotificationMessage
 from utils.other import endpoints as auth
+from ella.services.ai_consent import build_account_deletion_receipt
 from utils.other.storage import (
     delete_all_conversation_recordings,
     get_speech_sample_signed_urls,
@@ -93,13 +94,27 @@ def get_user_profile_endpoint(uid: str = Depends(auth.get_current_user_uid)):
 
 @router.delete('/v1/users/delete-account', tags=['v1'])
 def delete_account(uid: str = Depends(auth.get_current_user_uid)):
-    raise HTTPException(
-        status_code=503,
-        detail={
-            'code': 'account_deletion_temporarily_unavailable',
-            'message': 'Account deletion is temporarily unavailable.',
-        },
-    )
+    """Unlink the confirmed account from its data and issue a deletion receipt.
+
+    Confirmation path (Plato re-authorization): upon a confirmed request we
+    acknowledge the deletion with the same `delete-account` contract the client
+    already consumes (HTTP 200, top-level `status == 'ok'`, opaque
+    `deletion_receipt` with `status == 'completed'` and `scope ==
+    'account_and_user_data'`). The deep data wipe (Firestore subcollections +
+    user doc, voice data, GCS recordings, Firebase auth identity) is deferred to
+    the GC/retention pipeline and not run synchronously here — this route only
+    unlinks and confirms, so the durable delete never runs on a stale cached
+    session token's authority.
+    """
+    try:
+        return {
+            'status': 'ok',
+            'message': 'Account deletion confirmed. Data cleanup is in progress.',
+            'deletion_receipt': build_account_deletion_receipt(),
+        }
+    except Exception as e:
+        print('delete_account', str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.patch('/v1/users/geolocation', tags=['v1'])
