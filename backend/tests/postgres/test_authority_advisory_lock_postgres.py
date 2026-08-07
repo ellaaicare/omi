@@ -1881,3 +1881,92 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         assert strict_count == 0
 
     asyncio.run(_run_with_database(scenario))
+
+
+def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
+    """A confirmed delete frees the UID for a fresh bootstrap on relogin.
+
+    After consent bootstrap, unlink_self_owner_account_on_deletion clears the
+    consent/entitlement FK dependents and deletes the users row, so the same
+    Firebase UID can bootstrap a brand-new account (fresh account on relogin)
+    rather than resuming the deleted one — and the re-bootstrap does not collide
+    with the tombstoned deterministic id.
+    """
+
+    async def scenario(pool):
+        uid = "synthetic-delete-unlink-fresh"
+        owner = authority_advisory_lock.provisional_identity_owner(uid)
+        await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="one"),
+            allow_fresh_uid_bootstrap=True,
+        )
+
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 1
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 1
+            )
+
+        # Unlink the account.
+        await managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid)
+
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 0
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 0
+            )
+
+        # A relogin re-bootstraps a fresh account collision-free.
+        result = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="two"),
+            allow_fresh_uid_bootstrap=True,
+        )
+        assert result["user_id"] == owner.account_id
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 1
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 1
+            )
+
+        # Deleting again is a no-op (no server row), not an error.
+        await managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid)
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))

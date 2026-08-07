@@ -430,6 +430,74 @@ async def synchronize_grant(
         raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
 
 
+async def unlink_self_owner_account_on_deletion(*, uid: str) -> None:
+    """Unlink a confirmed account from its data and free the UID for re-admission.
+
+    Runs under the same per-UID authority advisory lock that gates every other
+    writer. Clears the FK dependents (consent authority, entitlement/runtime
+    links) then deletes the ``users`` row so the same Firebase UID's next login
+    bootstraps a *fresh* account (Plato's "fresh account on relogin" semantic),
+    rather than resuming the old one. Idempotent and a no-op when no ``users``
+    row exists — so the deletion receipt is only issued when the server state
+    was actually unlinked.
+    """
+    try:
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as conn:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                conn,
+                uid=uid,
+            )
+            async with conn.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    conn,
+                    owner=owner,
+                )
+                await voice_canary.lock_runtime_authority_on_connection(
+                    conn,
+                    uid=uid,
+                )
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    conn,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                # Clear the FK dependents under the lock before freeing omi_uid.
+                await _quarantine_on_connection(
+                    conn,
+                    uid=uid,
+                    user_id=user_id,
+                    reason="account_deletion_confirmed",
+                    owner_lock=owner_lock,
+                )
+                # ella_invitation_redemptions.user_id is ON DELETE RESTRICT; detach it.
+                await conn.execute(
+                    """
+                    UPDATE ella_invitation_redemptions
+                    SET user_id = NULL
+                    WHERE user_id = $1
+                    """,
+                    user_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM users
+                    WHERE id = $1
+                    """,
+                    user_id,
+                )
+    except authority_advisory_lock.AuthorityLockError as exc:
+        if exc.code == "authority_lock_owner_missing":
+            # Nothing server-side to unlink; the receipt stays accurate.
+            return
+        raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
+    except ManagedCloudAuthorityUnavailable:
+        raise
+    except Exception as exc:
+        raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
+
+
 async def synchronize_denial(
     *,
     uid: str,

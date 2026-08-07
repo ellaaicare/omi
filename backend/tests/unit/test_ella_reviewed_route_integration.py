@@ -9,7 +9,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -286,11 +286,16 @@ def test_legacy_history_proxy_unexpected_failure_logs_no_runtime_material(monkey
 def _load_delete_account_route():
     source = (_BACKEND / "routers" / "users.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "delete_account")
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "delete_account"
+    )
     function.decorator_list = []
     authenticated_uid = lambda: "uid-a"
     firestore_delete = Mock()
     firebase_delete = Mock()
+    unlink = AsyncMock()
     auth = types.SimpleNamespace(get_current_user_uid=authenticated_uid, delete_account=firebase_delete)
     namespace = {
         "Depends": Depends,
@@ -298,19 +303,21 @@ def _load_delete_account_route():
         "auth": auth,
         "delete_user_data": firestore_delete,
         "build_account_deletion_receipt": build_account_deletion_receipt,
+        "unlink_self_owner_account_on_deletion": unlink,
+        "ManagedCloudAuthorityUnavailable": RuntimeError,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "backend/routers/users.py", "exec"), namespace)
-    return namespace["delete_account"], firestore_delete, firebase_delete
+    return namespace["delete_account"], firestore_delete, firebase_delete, unlink
 
 
 def test_account_deletion_completes_unlink_receipt_without_destructive_removal():
     # The confirmation handler MUST keep the deletion-receipt contract the
     # client enforces (HTTP 200, status ok, completed/account_and_user_data
-    # receipt, aidel_ request id) while NOT running the destructive wipe
-    # (Firestore subcollections / Firebase auth identity) synchronously — the
-    # deep data wipe is deferred to the GC/retention pipeline. Guard against
-    # both destructive removals being gate-crashed on a stale session token.
-    route, firestore_delete, firebase_delete = _load_delete_account_route()
+    # receipt, aidel_ request id) AND actually unlink the server-side account
+    # (users row / consent authority freed under the advisory lock) — so the
+    # receipt is truthful and a relogin creates a fresh account. The deep
+    # Firestore/Firebase wipe is deferred to the GC/retention pipeline.
+    route, firestore_delete, firebase_delete, unlink = _load_delete_account_route()
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
 
@@ -324,5 +331,6 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     assert body["deletion_receipt"]["scope"] == "account_and_user_data"
     assert re.match(r"^aidel_[A-Za-z0-9_-]{16,128}$", body["deletion_receipt"]["request_id"])
     assert "server_completed_at" in body["deletion_receipt"]
+    unlink.assert_called_once_with(uid="uid-a")
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()

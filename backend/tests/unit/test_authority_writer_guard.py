@@ -42,6 +42,7 @@ EXPECTED_WRITERS = {
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
     ("database/managed_cloud_consent.py", "synchronize_denial"),
     ("database/managed_cloud_consent.py", "synchronize_grant"),
+    ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("database/voice_canary.py", "delete_user_voice_data"),
     ("database/voice_canary.py", "update_entitlement_status"),
     ("database/voice_canary.py", "upsert_entitlement"),
@@ -76,6 +77,7 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/ella_provisioning.py", "update_guardian_mode"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
 NON_AUTHORITY_USER_WRITERS = {
@@ -153,6 +155,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/managed_cloud_consent.py", "synchronize_grant"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"consent_grant"',
+    ),
+    ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_delete_unlinks_users_row_and_consent_authority_freeing_uid",
     ),
     ("database/voice_canary.py", "delete_user_voice_data"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
