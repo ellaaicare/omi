@@ -76,9 +76,9 @@ class AiConsentCoordinator {
     final accepted = await AiConsentSheet.show(
       context,
       onAccept: () async {
-        final receiptId = await service.grantCurrentConsent(uid: uid);
-        if (receiptId == null) return false;
-        if (context.mounted) {
+        final outcome = await service.grantCurrentConsentWithOutcome(uid: uid);
+        final receiptId = outcome.receiptId;
+        if (receiptId != null && context.mounted) {
           try {
             context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
           } catch (_) {
@@ -86,7 +86,7 @@ class AiConsentCoordinator {
             // action is rendered outside the provisioning provider tree.
           }
         }
-        return true;
+        return outcome;
       },
       onDecline: () => service.declineCurrentConsent(uid: uid),
     );

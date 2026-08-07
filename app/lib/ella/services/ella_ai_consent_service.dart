@@ -135,12 +135,51 @@ class AiConsentSubmission {
       };
 }
 
+/// Transport-level result of a consent submission, preserving the failure
+/// cause instead of collapsing every non-200 response to null.
+class AiConsentSubmitResult {
+  const AiConsentSubmitResult({this.status, this.httpStatus, this.errorCode = ''});
+
+  final AiConsentStatus? status;
+
+  /// HTTP status of the response; null when the server was unreachable.
+  final int? httpStatus;
+
+  /// Backend `detail.code` for non-200 responses, when present.
+  final String errorCode;
+}
+
+enum AiConsentGrantFailureKind { authorityChanged, policyMismatch, serverUnavailable, network, rejected }
+
+/// Outcome of a grant attempt: an accepted receipt, or a typed failure the
+/// consent surface can present honestly. Failure never carries authority.
+class AiConsentGrantOutcome {
+  const AiConsentGrantOutcome.accepted(String this.receiptId)
+      : failureKind = null,
+        supportCode = '';
+
+  const AiConsentGrantOutcome.failed(this.failureKind, {this.supportCode = ''}) : receiptId = null;
+
+  final String? receiptId;
+  final AiConsentGrantFailureKind? failureKind;
+  final String supportCode;
+
+  bool get accepted => receiptId != null;
+}
+
 abstract class EllaAiConsentTransport {
   Future<AiConsentPolicy?> fetchPolicy();
 
   Future<AiConsentStatus?> fetchStatus();
 
   Future<AiConsentStatus?> submit(AiConsentSubmission submission);
+
+  /// Default detail wrapper so existing transports and fakes keep working:
+  /// a null status is reported as unreachable, anything else as HTTP 200.
+  Future<AiConsentSubmitResult> submitWithDetails(AiConsentSubmission submission) async {
+    final status = await submit(submission);
+    return AiConsentSubmitResult(status: status, httpStatus: status == null ? null : 200);
+  }
 }
 
 class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
@@ -180,16 +219,30 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
   }
 
   @override
-  Future<AiConsentStatus?> submit(AiConsentSubmission submission) async {
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) async => (await submitWithDetails(submission)).status;
+
+  @override
+  Future<AiConsentSubmitResult> submitWithDetails(AiConsentSubmission submission) async {
     final response = await makeApiCall(
       url: _endpoint,
       headers: const {},
       method: 'POST',
       body: jsonEncode(submission.toJson()),
     );
-    if (response?.statusCode != 200) return null;
-    final body = _decodeMap(response!.body);
-    return body == null ? null : AiConsentStatus.fromJson(body);
+    if (response == null) return const AiConsentSubmitResult();
+    if (response.statusCode != 200) {
+      return AiConsentSubmitResult(httpStatus: response.statusCode, errorCode: _errorCode(response.body));
+    }
+    final body = _decodeMap(response.body);
+    return AiConsentSubmitResult(status: body == null ? null : AiConsentStatus.fromJson(body), httpStatus: 200);
+  }
+
+  static String _errorCode(String body) {
+    final decoded = _decodeMap(body);
+    final detail = decoded?['detail'];
+    if (detail is Map<String, dynamic> && detail['code'] is String) return detail['code'] as String;
+    if (decoded?['code'] is String) return decoded!['code'] as String;
+    return '';
   }
 }
 
@@ -261,16 +314,60 @@ class EllaAiConsentService {
     }
   }
 
-  Future<String?> grantCurrentConsent({required String uid}) async {
+  Future<String?> grantCurrentConsent({required String uid}) async =>
+      (await grantCurrentConsentWithOutcome(uid: uid)).receiptId;
+
+  /// Grant with a typed outcome so the consent surface can say why an attempt
+  /// failed. Semantics are identical to [grantCurrentConsent]: fail closed,
+  /// never persist authority on any failure path.
+  Future<AiConsentGrantOutcome> grantCurrentConsentWithOutcome({required String uid}) async {
+    const authorityChanged = AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.authorityChanged);
     final authority = _captureAuthority(uid);
     if (authority == null) {
       SharedPreferencesUtil.clearAiConsentServerVerification();
-      return null;
+      return authorityChanged;
     }
-    final status = await _submit(authority: authority, decision: AiConsentDecision.granted);
-    if (!_requireCurrentAuthority(authority) || status == null || !status.isCurrentGrantFor(uid)) return null;
-    if (!_persistVerifiedGrant(authority, status)) return null;
-    return _preferences.aiConsentAccepted ? status.receiptId : null;
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    if (!_requireCurrentAuthority(authority)) return authorityChanged;
+
+    final policy = await _transport.fetchPolicy();
+    if (!_requireCurrentAuthority(authority)) return authorityChanged;
+    if (policy == null) {
+      return const AiConsentGrantOutcome.failed(
+        AiConsentGrantFailureKind.serverUnavailable,
+        supportCode: 'consent_policy_unavailable',
+      );
+    }
+    if (!policy.isBundledCurrent) {
+      return const AiConsentGrantOutcome.failed(
+        AiConsentGrantFailureKind.policyMismatch,
+        supportCode: 'consent_policy_mismatch',
+      );
+    }
+
+    final result =
+        await _transport.submitWithDetails(_buildSubmission(policy: policy, decision: AiConsentDecision.granted));
+    if (!_requireCurrentAuthority(authority)) return authorityChanged;
+    if (result.httpStatus == null) {
+      return const AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.network);
+    }
+    if (result.httpStatus != 200) {
+      return AiConsentGrantOutcome.failed(
+        result.errorCode == 'ai_consent_policy_mismatch'
+            ? AiConsentGrantFailureKind.policyMismatch
+            : AiConsentGrantFailureKind.serverUnavailable,
+        supportCode: result.errorCode.isEmpty ? 'http_${result.httpStatus}' : result.errorCode,
+      );
+    }
+    final status = result.status;
+    if (status == null || !status.isCurrentGrantFor(uid)) {
+      return const AiConsentGrantOutcome.failed(
+        AiConsentGrantFailureKind.rejected,
+        supportCode: 'consent_grant_not_current',
+      );
+    }
+    if (!_persistVerifiedGrant(authority, status)) return authorityChanged;
+    return _preferences.aiConsentAccepted ? AiConsentGrantOutcome.accepted(status.receiptId) : authorityChanged;
   }
 
   Future<bool> declineCurrentConsent({required String uid}) async {
@@ -303,26 +400,27 @@ class EllaAiConsentService {
     if (!_requireCurrentAuthority(authority)) return null;
     final policy = await _fetchAcceptedPolicy();
     if (!_requireCurrentAuthority(authority) || policy == null) return null;
+    final status = await _transport.submit(_buildSubmission(policy: policy, decision: decision));
+    return _requireCurrentAuthority(authority) ? status : null;
+  }
 
+  AiConsentSubmission _buildSubmission({required AiConsentPolicy policy, required AiConsentDecision decision}) {
     final fullVersion = _clientVersionFactory();
     final separator = fullVersion.lastIndexOf('+');
     final appVersion = separator > 0 ? fullVersion.substring(0, separator) : fullVersion;
     final buildNumber =
         separator > 0 && separator < fullVersion.length - 1 ? fullVersion.substring(separator + 1) : 'unknown';
-    final status = await _transport.submit(
-      AiConsentSubmission(
-        decision: decision,
-        policyVersion: policy.version,
-        processorSetHash: policy.processorSetHash,
-        requestId: _requestIdFactory(),
-        appVersion: appVersion,
-        buildNumber: buildNumber,
-        locale: _localeFactory(),
-        scopeVersion: policy.scopeVersion,
-        scopeHash: policy.scopeHash,
-      ),
+    return AiConsentSubmission(
+      decision: decision,
+      policyVersion: policy.version,
+      processorSetHash: policy.processorSetHash,
+      requestId: _requestIdFactory(),
+      appVersion: appVersion,
+      buildNumber: buildNumber,
+      locale: _localeFactory(),
+      scopeVersion: policy.scopeVersion,
+      scopeHash: policy.scopeHash,
     );
-    return _requireCurrentAuthority(authority) ? status : null;
   }
 
   Future<AiConsentPolicy?> _fetchAcceptedPolicy() async {

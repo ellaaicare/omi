@@ -63,7 +63,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
       }
       final accepted = await AiConsentSheet.show(
         context,
-        onAccept: () async => (await consentService.grantCurrentConsent(uid: user.uid)) != null,
+        onAccept: () => consentService.grantCurrentConsentWithOutcome(uid: user.uid),
         onDecline: () => consentService.declineCurrentConsent(uid: user.uid),
       );
       if (!mounted) return;
