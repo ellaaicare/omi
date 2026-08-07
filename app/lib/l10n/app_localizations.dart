@@ -17228,6 +17228,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Not verified does not mean another account is in use. It means Ella has not received route-specific proof yet.'**
   String get ellaWorkspaceRouteExplanation;
+
+  /// No description provided for @aiConsentGrantUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t confirm your choice with the server, so nothing has been shared yet. Please try again in a few minutes.'**
+  String get aiConsentGrantUnavailableBody;
+
+  /// No description provided for @aiConsentGrantPolicyMismatchBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This version of Ella no longer matches the current privacy policy. Please update the app, then try again.'**
+  String get aiConsentGrantPolicyMismatchBody;
+
+  /// No description provided for @aiConsentGrantNetworkBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t reach the server. Check your connection and try again.'**
+  String get aiConsentGrantNetworkBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

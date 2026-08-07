@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/l10n/app_localizations.dart';
 
@@ -37,10 +38,16 @@ void main() {
                 scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
                 scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
               );
-              return true;
+              return AiConsentGrantOutcome.accepted('${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a');
             },
           ),
         ),
+      );
+
+  Widget buildFailingApp(AiConsentGrantOutcome outcome) => MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(body: AiConsentSheet(onAccept: () async => outcome)),
       );
 
   testWidgets('presents as a bounded sheet with Not now always visible', (tester) async {
@@ -165,6 +172,63 @@ void main() {
     expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
     expect(preferences.aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
     expect(preferences.aiConsentDeferredVersion, isEmpty);
+  });
+
+  testWidgets('server-unavailable grant failure stays open with typed message and support code', (tester) async {
+    await tester.pumpWidget(buildFailingApp(const AiConsentGrantOutcome.failed(
+      AiConsentGrantFailureKind.serverUnavailable,
+      supportCode: 'managed_cloud_consent_authority_unavailable',
+    )));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AiConsentSheet), findsOneWidget);
+    expect(
+      find.text("Ella couldn't confirm your choice with the server, so nothing has been shared yet. "
+          'Please try again in a few minutes.'),
+      findsOneWidget,
+    );
+    expect(find.text('managed_cloud_consent_authority_unavailable'), findsOneWidget);
+    expect(find.text('Allow and continue').hitTestable(), findsOneWidget);
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+  });
+
+  testWidgets('policy-mismatch grant failure asks for an app update', (tester) async {
+    await tester.pumpWidget(buildFailingApp(const AiConsentGrantOutcome.failed(
+      AiConsentGrantFailureKind.policyMismatch,
+      supportCode: 'consent_policy_mismatch',
+    )));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('This version of Ella no longer matches the current privacy policy. '
+          'Please update the app, then try again.'),
+      findsOneWidget,
+    );
+    expect(find.text('consent_policy_mismatch'), findsOneWidget);
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+  });
+
+  testWidgets('network grant failure shows connection guidance without a support code', (tester) async {
+    await tester.pumpWidget(buildFailingApp(const AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.network)));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text("Ella couldn't reach the server. Check your connection and try again."), findsOneWidget);
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
   });
 
   testWidgets('Not now defers the current processor contract', (tester) async {

@@ -807,7 +807,7 @@ class _DeferredEnsureTransport implements EllaProvisioningTransport {
   Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
 }
 
-class _FakeConsentTransport implements EllaAiConsentTransport {
+class _FakeConsentTransport extends EllaAiConsentTransport {
   _FakeConsentTransport({required this.policy, this.statusResponse, this.submitResponse});
 
   final AiConsentPolicy? policy;
@@ -836,7 +836,7 @@ class _FakeConsentTransport implements EllaAiConsentTransport {
   }
 }
 
-class _DeferredConsentPolicyTransport implements EllaAiConsentTransport {
+class _DeferredConsentPolicyTransport extends EllaAiConsentTransport {
   _DeferredConsentPolicyTransport({this.statusResponse, this.submitResponse});
 
   final AiConsentStatus? statusResponse;
@@ -867,7 +867,7 @@ class _DeferredConsentPolicyTransport implements EllaAiConsentTransport {
   }
 }
 
-class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
+class _DeferredConsentStatusTransport extends EllaAiConsentTransport {
   final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
   final Completer<void> statusStarted = Completer<void>();
 
@@ -888,7 +888,7 @@ class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
   }
 }
 
-class _DeferredConsentSubmitTransport implements EllaAiConsentTransport {
+class _DeferredConsentSubmitTransport extends EllaAiConsentTransport {
   final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
   final Completer<void> submitStarted = Completer<void>();
   final List<AiConsentSubmission> submissions = [];
