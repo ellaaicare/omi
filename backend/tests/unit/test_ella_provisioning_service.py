@@ -54,6 +54,8 @@ from ella.services.provisioning import (
     retained_compatibility_receipt,
     resolve_gateway_credential,
     rollout_enabled,
+    self_hosted_fresh_uid_relax_enabled,
+    self_hosted_provisioning_enabled,
     stable_payload_hash,
     validate_internal_gateway_url,
     validated_provision_timeout_seconds,
@@ -2637,6 +2639,45 @@ def test_missing_attestation_key_fails_before_provisioner_or_binding_write(monke
         assert client.calls == []
         assert repository.staged is None
         assert repository.job["error_code"] == "honcho_attestation_key_unavailable"
+
+
+def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    identity = VerifiedIdentity("fresh-relax-user", "user@example.test", "User", "UTC")
+    repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+
+    # Without the relax flag a fresh self-hosted UID is denied (strict gate).
+    assert self_hosted_provisioning_enabled(identity.uid, admission=None) is False
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    assert self_hosted_fresh_uid_relax_enabled() is True
+    assert self_hosted_provisioning_enabled(identity.uid, admission=None) is True
+
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
+    job, binding, claimed = asyncio.run(
+        coordinator.ensure_job(
+            identity=identity,
+            target_schema_version="hermes-user-v1",
+            client_request_id="request-fresh-relax",
+            request_payload={"client": "ios"},
+        )
+    )
+    # Fresh user admitted: proceeds past the gate without invitation_authority_required.
+    assert job["state"] in {"provisioning", "queued"}
+    assert claimed is True
+    assert len(repository.identity_calls) == 1
+    assert len(repository.job_calls) == 1
+
+    # Strict matching still enforced when an admission record IS present.
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
+    repository.self_hosted_admission = _self_hosted_admission(identity.uid)
+    assert self_hosted_provisioning_enabled(identity.uid, admission=repository.self_hosted_admission) is True
+    repository.self_hosted_admission.pop("consent_scope_hash", None)
+    repository.self_hosted_admission["consent_scope_hash"] = "sha256:deadbeef"
+    assert self_hosted_provisioning_enabled(identity.uid, admission=repository.self_hosted_admission) is False
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
