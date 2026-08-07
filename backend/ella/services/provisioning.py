@@ -135,6 +135,19 @@ def self_hosted_provisioning_configured() -> bool:
     return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false").strip().lower() in TRUE_VALUES
 
 
+def self_hosted_fresh_uid_relax_enabled() -> bool:
+    """INTERIM relax (Plato, 2026-08-07, elle-ai #1189).
+
+    Return True when the operator has asked us to admit brand-new self-hosted
+    UIDs that hold no matching invitation admission yet. This is explicitly
+    temporary: payload is to get a fully functional fresh user -> provision
+    hermes -> isolated account with chat/voice/memories -> delete-account
+    working end-to-end. Once E2E is proven, invitation gating is re-added by
+    unsetting/unsetting this flag (the strict path below is kept intact).
+    """
+    return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "false").strip().lower() in TRUE_VALUES
+
+
 def current_self_hosted_runtime_lineage() -> RuntimeTargetLineage:
     """Return the exact invitation consent lineage required by local Hermes."""
     return RuntimeTargetLineage(
@@ -151,7 +164,15 @@ def self_hosted_provisioning_enabled(
     admission: Optional[dict[str, Any]] = None,
 ) -> bool:
     """Admit only the exact UID backed by current invitation authority."""
-    if not self_hosted_provisioning_configured() or not uid or not admission:
+    if not self_hosted_provisioning_configured() or not uid:
+        return False
+    if admission is None and self_hosted_fresh_uid_relax_enabled():
+        # INTERIM relax (Plato #1189): a brand-new self-hosted UID that has no
+        # admission record yet is admitted so the fresh-user flow (consent ->
+        # ensure -> provision -> isolated account) can run end-to-end. Invitation
+        # gating is re-added by unsetting ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID.
+        return True
+    if not admission:
         return False
     return hmac.compare_digest(str(admission.get("omi_uid") or ""), uid) and _self_hosted_invitation_matches(admission)
 
@@ -861,7 +882,16 @@ class ProvisioningCoordinator:
             raise ProvisioningError("invitation_authority_required", retryable=False)
         if self_hosted_configured and not self_hosted_required and not legacy_required:
             raise ProvisioningError("invitation_authority_required", retryable=False)
-        if self_hosted_required:
+        if self_hosted_required and invitation_admission is None:
+            # INTERIM relax (Plato #1189): a fresh self-hosted UID admitted
+            # without an admission record has no invitation chain to resolve.
+            # The attestation/context is derived from the job/user identity
+            # downstream (see _process_claimed_job_with_deadline fallbacks),
+            # so we do not hard-fail here. This branch only runs while
+            # ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID is set.
+            if not self_hosted_fresh_uid_relax_enabled():
+                assert invitation_admission is not None
+        elif self_hosted_required:
             # The current invitation, entitlement, consent epoch, and target
             # chain were resolved before identity, job, or provider side effects.
             assert invitation_admission is not None
