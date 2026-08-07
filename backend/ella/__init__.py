@@ -459,6 +459,14 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Invitation redemption not available: {e}", flush=True)
 
+    # Legacy iOS app onboarding compatibility endpoint
+    try:
+        from ella.routers.legacy_onboarding import router as legacy_onboarding_router
+        app.include_router(legacy_onboarding_router, tags=["Legacy Onboarding"])
+        print("  /api/onboarding - Legacy iOS onboarding compatibility", flush=True)
+    except ImportError as e:
+        print(f"  Legacy onboarding not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
