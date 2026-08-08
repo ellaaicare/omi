@@ -21,8 +21,12 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
+from ella.routers.canonical_events import _get_pool
 from ella.routers.invites import router as invite_router
 from ella.routers.onboarding import configure_firestore_db, router as onboarding_router
+from ella.routers.today_cards import create_today_cards_router
+from ella.services.today_card import TodayCardMaterializer
+from ella.services.today_card_postgres import PostgresTodayCardRepository
 
 # =============================================================================
 # CONFIGURATION
@@ -318,11 +322,6 @@ def _register_routers(app) -> None:
 
     # Canonical app-facing daily companion card and materializer.
     try:
-        from ella.routers.canonical_events import _get_pool
-        from ella.routers.today_cards import create_today_cards_router
-        from ella.services.today_card import TodayCardMaterializer
-        from ella.services.today_card_postgres import PostgresTodayCardRepository
-
         today_card_repository = PostgresTodayCardRepository(_get_pool)
         app.include_router(
             create_today_cards_router(
@@ -338,7 +337,6 @@ def _register_routers(app) -> None:
     # Durable post-session memory reinterpretation outbox and status API
     try:
         from database.memory_reinterpretations import PostgresMemoryReinterpretationRepository
-        from ella.routers.canonical_events import _get_pool
         from ella.routers.memory_reinterpretation import create_memory_reinterpretation_router
         from ella.services.memory_reinterpretation import (
             MemoryReinterpretationWorker,

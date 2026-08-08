@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 import database.memories as memories_db
 import database.conversations as conversations_db
@@ -1016,7 +1017,7 @@ async def delete_conversation_endpoint(
 
     - **conversation_id**: The ID of the conversation to delete
     """
-    conversation = conversations_db.get_conversation(uid, conversation_id)
+    conversation = await run_in_threadpool(conversations_db.get_conversation, uid, conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -1024,7 +1025,7 @@ async def delete_conversation_endpoint(
         await invalidate_deleted_conversation_source(uid, conversation_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"code": "today_card_source_invalidation_failed"}) from exc
-    conversations_db.delete_conversation(uid, conversation_id)
+    await run_in_threadpool(conversations_db.delete_conversation, uid, conversation_id)
     return {"success": True}
 
 

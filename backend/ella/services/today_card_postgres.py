@@ -25,7 +25,9 @@ from ella.services.today_card import (
     TodayCardState,
     TodayCardUserContext,
     deterministic_card_id,
+    materialization_window,
     sha256_ref,
+    today_card_source_pack,
 )
 
 logger = logging.getLogger("ella.today_card")
@@ -229,7 +231,18 @@ async def _sources_are_current(queryable: Any, card: TodayCardRecord) -> bool:
     if card.invalidated_at is not None:
         return False
     if not card.source_refs:
-        return card.state in {TodayCardState.new_user, TodayCardState.degraded}
+        if card.state not in {TodayCardState.new_user, TodayCardState.degraded}:
+            return False
+        previous_day_start, previous_day_end = materialization_window(card.local_date, card.timezone)
+        evidence = await _load_evidence(
+            queryable,
+            uid=card.uid,
+            previous_day_start=previous_day_start,
+            previous_day_end=previous_day_end,
+            history_start=previous_day_start - timedelta(days=365),
+        )
+        _, current_watermark = today_card_source_pack(evidence)
+        return card.source_watermark == current_watermark
     for source in card.source_refs:
         if source.source_type != "conversation_summary" or not source.conversation_id:
             continue
@@ -240,6 +253,12 @@ async def _sources_are_current(queryable: Any, card: TodayCardRecord) -> bool:
             WHERE uid = $1
               AND source_ref ->> 'conversation_id' = $2
               AND COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM ella_today_card_source_tombstones tombstone
+                    WHERE tombstone.uid = canonical_events.uid
+                      AND tombstone.source_id = source_ref ->> 'conversation_id'
+              )
             ORDER BY inserted_at DESC
             LIMIT 1
             """,
@@ -251,6 +270,55 @@ async def _sources_are_current(queryable: Any, card: TodayCardRecord) -> bool:
         ):
             return False
     return True
+
+
+async def _load_evidence(
+    queryable: Any,
+    *,
+    uid: str,
+    previous_day_start: datetime,
+    previous_day_end: datetime,
+    history_start: datetime,
+) -> list[TodayCardEvidence]:
+    rows = await queryable.fetch(
+        """
+        SELECT event_id, text, started_at, privacy_scope, scan_policy, source_ref, metadata
+        FROM canonical_events
+        WHERE uid = $1
+          AND started_at >= $2
+          AND (
+                COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
+                OR metadata ? 'today_card'
+          )
+          AND NOT EXISTS (
+                SELECT 1
+                FROM ella_today_card_source_tombstones tombstone
+                WHERE tombstone.uid = canonical_events.uid
+                  AND tombstone.source_id = COALESCE(
+                        canonical_events.source_ref ->> 'conversation_id',
+                        canonical_events.metadata #>> '{today_card,source_id}'
+                  )
+          )
+        ORDER BY started_at DESC, event_id ASC
+        LIMIT 500
+        """,
+        uid,
+        history_start,
+    )
+    evidence: list[TodayCardEvidence] = []
+    for row in rows:
+        try:
+            item = _evidence_from_row(
+                row,
+                previous_day_start=previous_day_start,
+                previous_day_end=previous_day_end,
+            )
+        except (TypeError, ValueError):
+            logger.warning("[FLOW:TODAY-CARD] malformed canonical evidence skipped")
+            continue
+        if item is not None:
+            evidence.append(item)
+    return evidence
 
 
 class PostgresTodayCardRepository:
@@ -389,36 +457,13 @@ class PostgresTodayCardRepository:
         history_start: datetime,
     ) -> list[TodayCardEvidence]:
         pool = await self._pool()
-        rows = await pool.fetch(
-            """
-            SELECT event_id, text, started_at, privacy_scope, scan_policy, source_ref, metadata
-            FROM canonical_events
-            WHERE uid = $1
-              AND started_at >= $2
-              AND (
-                    COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
-                    OR metadata ? 'today_card'
-              )
-            ORDER BY started_at DESC, event_id ASC
-            LIMIT 500
-            """,
-            uid,
-            history_start,
+        return await _load_evidence(
+            pool,
+            uid=uid,
+            previous_day_start=previous_day_start,
+            previous_day_end=previous_day_end,
+            history_start=history_start,
         )
-        evidence: list[TodayCardEvidence] = []
-        for row in rows:
-            try:
-                item = _evidence_from_row(
-                    row,
-                    previous_day_start=previous_day_start,
-                    previous_day_end=previous_day_end,
-                )
-            except (TypeError, ValueError):
-                logger.warning("[FLOW:TODAY-CARD] malformed canonical evidence skipped")
-                continue
-            if item is not None:
-                evidence.append(item)
-        return evidence
 
     async def load_avoidance(self, uid: str, local_date: date) -> TodayCardAvoidance:
         pool = await self._pool()
@@ -476,6 +521,14 @@ class PostgresTodayCardRepository:
             WHERE card_id = $1::uuid
               AND version = $2
               AND state = 'preparing'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM ella_today_card_source_tombstones tombstone
+                    WHERE tombstone.uid = ella_today_cards.uid
+                      AND $6::jsonb @> jsonb_build_array(
+                            jsonb_build_object('source_id', tombstone.source_id)
+                      )
+              )
             RETURNING *
             """,
             card.card_id,
@@ -658,14 +711,53 @@ class PostgresTodayCardRepository:
 
 
 async def invalidate_deleted_conversation_source(uid: str, conversation_id: str) -> int:
-    """Invalidate exact owned cards before the legacy source is deleted."""
+    """Tombstone and remove exact canonical evidence before source deletion."""
     repository = PostgresTodayCardRepository(get_ella_postgres_pool)
     try:
-        return await repository.invalidate_source(
+        pool = await repository._pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO ella_today_card_source_tombstones (uid, source_id, reason)
+                    VALUES ($1, $2, 'source_deleted')
+                    ON CONFLICT (uid, source_id) DO NOTHING
+                    """,
+                    uid,
+                    conversation_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM canonical_event_sessions
+                    WHERE uid = $1
+                      AND source_ref ->> 'conversation_id' = $2
+                    """,
+                    uid,
+                    conversation_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM canonical_events
+                    WHERE uid = $1
+                      AND source_ref ->> 'conversation_id' = $2
+                    """,
+                    uid,
+                    conversation_id,
+                )
+                invalidated = await repository.invalidate_source_in_connection(
+                    conn,
+                    uid=uid,
+                    source_id=conversation_id,
+                    reason="source_deleted",
+                )
+        # Close the claim/save race: a save after the transaction sees the
+        # committed tombstone; a save before it is caught by this final pass.
+        invalidated += await repository.invalidate_source(
             uid=uid,
             source_id=conversation_id,
             reason="source_deleted",
         )
+        return invalidated
     except asyncpg.UndefinedTableError:
         # Preserve the additive migration compatibility window. Once migration
         # 016 exists, every other failure blocks deletion before content can be

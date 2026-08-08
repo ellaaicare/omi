@@ -346,6 +346,28 @@ ROUTE_GROUPS = (
         ("GET", "/v1/ella/settings/effective/voice", "get_effective_voice_settings"),
     ),
     _group(
+        "today_cards",
+        "firebase_exact_owner_with_consent",
+        "staged_public",
+        ("GET", "/v1/ella/today-card", "get_today_card"),
+        ("GET", "/v1/ella/today-card/health", "get_today_card_health"),
+        ("GET", "/v1/ella/today-cards/{card_id}", "get_today_card_by_id"),
+        ("POST", "/v1/ella/today-cards/{card_id}/feedback", "submit_today_card_feedback"),
+    ),
+    _group(
+        "today_cards",
+        "today_card_service_exact_subject",
+        "internal_only",
+        ("POST", "/v1/ella/internal/today-cards/materialize", "materialize_today_card"),
+        ("POST", "/v1/ella/internal/today-cards/invalidate-source", "invalidate_today_card_source"),
+    ),
+    _group(
+        "today_cards",
+        "fixed_today_card_service",
+        "internal_only",
+        ("POST", "/v1/ella/internal/today-cards/materialize-due", "materialize_due_today_cards"),
+    ),
+    _group(
         "voice",
         "firebase_exact_owner",
         "staged_public",

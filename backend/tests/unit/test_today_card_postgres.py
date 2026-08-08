@@ -1,6 +1,9 @@
 import asyncio
+import ast
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from ella.routers import canonical_events
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
@@ -12,6 +15,7 @@ from ella.services.today_card import (
     TodayCardSourceRef,
     TodayCardState,
     sha256_ref,
+    today_card_source_pack,
 )
 from ella.services.today_card_postgres import PostgresTodayCardRepository
 
@@ -87,6 +91,7 @@ def test_sources_are_current_requires_exact_owner_conversation_and_active_versio
             "kind": None,
             "content": None,
             "source_refs": [],
+            "source_watermark": today_card_source_pack([])[1],
             "reason_code": "no_safe_source",
         }
     )
@@ -96,6 +101,45 @@ def test_sources_are_current_requires_exact_owner_conversation_and_active_versio
         )
         is True
     )
+
+
+def test_source_less_card_becomes_stale_when_delayed_canonical_evidence_arrives():
+    class DelayedEvidencePool(Pool):
+        async def fetch(self, query, *_args):
+            assert "ella_today_card_source_tombstones" in query
+            return [
+                {
+                    "event_id": "omi:conversation-late:summary",
+                    "text": "A delayed but eligible source.",
+                    "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+                    "privacy_scope": "user_private",
+                    "scan_policy": "none",
+                    "source_ref": {
+                        "conversation_id": "conversation-late",
+                        "active_summary_version_id": "summary-v1",
+                    },
+                    "metadata": {
+                        "adapter": "omi-enriched-conversation",
+                        "structured": {"title": "Late source", "overview": "A delayed but eligible source."},
+                    },
+                }
+            ]
+
+    card = _card().model_copy(
+        update={
+            "state": TodayCardState.degraded,
+            "kind": None,
+            "content": None,
+            "source_refs": [],
+            "source_watermark": today_card_source_pack([])[1],
+            "reason_code": "no_safe_source",
+        }
+    )
+    current = asyncio.run(
+        PostgresTodayCardRepository(lambda: asyncio.sleep(0, result=DelayedEvidencePool())).sources_are_current(card)
+    )
+
+    assert current is False
 
 
 def test_fresh_preparing_row_is_not_reported_as_acquired():
@@ -162,18 +206,67 @@ def test_fresh_preparing_row_is_not_reported_as_acquired():
 
 
 def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
-    pool = Pool()
+    executions = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, query, *args):
+            executions.append((query, args))
+            return "UPDATE 1" if "UPDATE ella_today_cards" in query else "DELETE 1"
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class DeletionPool:
+        def acquire(self):
+            return Acquire()
+
+        async def execute(self, query, *args):
+            executions.append((query, args))
+            return "UPDATE 0"
+
+    pool = DeletionPool()
     monkeypatch.setattr(today_card_postgres, "get_ella_postgres_pool", lambda: asyncio.sleep(0, result=pool))
 
     count = asyncio.run(today_card_postgres.invalidate_deleted_conversation_source("uid-a", "conversation-a"))
 
     assert count == 1
-    query, args = pool.executions[0]
-    assert "WHERE uid = $1" in query
-    assert "source_refs @> $2::jsonb" in query
-    assert args[0] == "uid-a"
-    assert '"source_id": "conversation-a"' in args[1]
-    assert args[2] == "source_deleted"
+    rendered = "\n".join(query for query, _args in executions)
+    assert "INSERT INTO ella_today_card_source_tombstones" in rendered
+    assert "DELETE FROM canonical_events" in rendered
+    assert "DELETE FROM canonical_event_sessions" in rendered
+    assert rendered.count("UPDATE ella_today_cards") == 2
+    assert all(args[:2] == ("uid-a", "conversation-a") for query, args in executions[:3])
+    invalidation_args = [args for query, args in executions if "UPDATE ella_today_cards" in query]
+    assert all(args[0] == "uid-a" for args in invalidation_args)
+    assert all('"source_id": "conversation-a"' in args[1] for args in invalidation_args)
+    assert all(args[2] == "source_deleted" for args in invalidation_args)
+
+
+def test_materialized_save_fails_closed_when_selected_source_is_tombstoned():
+    class TombstonePool:
+        async def fetchrow(self, query, *_args):
+            assert "ella_today_card_source_tombstones" in query
+            assert "jsonb_build_object('source_id', tombstone.source_id)" in query
+            return None
+
+    repository = PostgresTodayCardRepository(lambda: asyncio.sleep(0, result=TombstonePool()))
+
+    with pytest.raises(RuntimeError, match="today_card_materialization_conflict"):
+        asyncio.run(repository.save_materialized(_card()))
 
 
 def test_canonical_summary_correction_invalidates_card_in_same_transaction(monkeypatch):
@@ -321,7 +414,24 @@ def test_migration_defines_versioned_authority_and_source_indexes():
     assert "ella_today_cards_new_user_shape_check" in migration
     assert "source_refs jsonb_path_ops" in migration
     assert "ella_today_card_feedback" in migration
+    assert "ella_today_card_source_tombstones" in migration
+    assert "PRIMARY KEY (uid, source_id)" in migration
     assert "ON DELETE CASCADE" in migration
+
+
+def test_today_card_router_registration_has_no_function_local_imports():
+    source = (Path(__file__).parents[2] / "ella" / "__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    register = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_register_routers"
+    )
+    local_imports = [
+        node
+        for node in ast.walk(register)
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and "today" in ast.unparse(node).lower()
+    ]
+
+    assert local_imports == []
 
 
 def test_malformed_canonical_evidence_is_skipped_without_failing_materialization():

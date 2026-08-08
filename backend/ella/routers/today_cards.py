@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Literal
@@ -13,6 +12,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from database.honcho_attestation import authority_credential
 from ella.services.ai_consent import require_current_ai_consent
 from ella.services.today_card import (
     TODAY_CARD_CONTRACT_VERSION,
@@ -23,6 +23,7 @@ from ella.services.today_card import (
     TodayCardState,
 )
 from ella.services.today_card_postgres import PostgresTodayCardRepository
+from utils.ella.exact_firebase_auth import ELLA_SUBJECT_UID_HEADER, EllaRequestAuthority, get_exact_service_authority
 
 
 class TodayCardPublicSource(BaseModel):
@@ -140,8 +141,8 @@ def _envelope(card: TodayCardRecord) -> TodayCardEnvelope:
     )
 
 
-def _require_service_auth(request: Request) -> None:
-    expected = os.getenv("ELLA_TODAY_CARD_SERVICE_TOKEN", "").strip()
+def _service_token(request: Request) -> tuple[str, str]:
+    expected = authority_credential("ELLA_TODAY_CARD_SERVICE_TOKEN")
     if not expected:
         raise HTTPException(status_code=503, detail={"code": "today_card_service_auth_not_configured"})
     authorization = str(request.headers.get("Authorization") or "")
@@ -152,6 +153,21 @@ def _require_service_auth(request: Request) -> None:
         or not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
     ):
         raise HTTPException(status_code=403, detail={"code": "today_card_service_auth_invalid"})
+    return presented, expected
+
+
+def _require_service_auth(request: Request) -> None:
+    _service_token(request)
+
+
+def _require_subject_bound_service_auth(request: Request) -> EllaRequestAuthority:
+    presented, expected = _service_token(request)
+    return get_exact_service_authority(
+        provided_service_key=presented,
+        configured_service_key=expected,
+        service_subject_uid=request.headers.get(ELLA_SUBJECT_UID_HEADER),
+        service="today_card",
+    )
 
 
 def create_today_cards_router(
@@ -268,7 +284,8 @@ def create_today_cards_router(
 
     @router.post("/v1/ella/internal/today-cards/materialize")
     async def materialize_today_card(body: TodayCardMaterializeRequest, request: Request):
-        _require_service_auth(request)
+        authority = _require_subject_bound_service_auth(request)
+        body.uid = authority.require_uid(body.uid, feature="Today-card materialization")
         try:
             result = await materializer.materialize(body.uid, body.local_date)
         except LookupError as exc:
@@ -300,7 +317,8 @@ def create_today_cards_router(
 
     @router.post("/v1/ella/internal/today-cards/invalidate-source")
     async def invalidate_today_card_source(body: TodayCardInvalidateSourceRequest, request: Request):
-        _require_service_auth(request)
+        authority = _require_subject_bound_service_auth(request)
+        body.uid = authority.require_uid(body.uid, feature="Today-card invalidation")
         try:
             invalidated = await repository.invalidate_source(
                 uid=body.uid,

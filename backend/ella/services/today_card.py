@@ -244,6 +244,25 @@ def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
     return True
 
 
+def today_card_source_pack(evidence: list[TodayCardEvidence]) -> tuple[list[TodayCardEvidence], str]:
+    """Return the bounded eligible evidence set and its deterministic watermark."""
+    safe_evidence = sorted(
+        (item for item in evidence if evidence_is_safe(item)),
+        key=lambda item: (item.source.source_id, item.source.source_version_id or ""),
+    )[:100]
+    watermark = sha256_ref(
+        [
+            {
+                "source_id": item.source.source_id,
+                "source_version_id": item.source.source_version_id,
+                "evidence_hash": item.source.evidence_hash,
+            }
+            for item in safe_evidence
+        ]
+    )
+    return safe_evidence, watermark
+
+
 def _rank(evidence: TodayCardEvidence) -> tuple[float, float, str]:
     occurred = evidence.source.occurred_at
     timestamp = occurred.timestamp() if occurred is not None else 0.0
@@ -404,20 +423,7 @@ class TodayCardMaterializer:
             previous_day_end=previous_end,
             avoidance=avoidance,
         )
-        safe_evidence = sorted(
-            (item for item in evidence if evidence_is_safe(item)),
-            key=lambda item: (item.source.source_id, item.source.source_version_id or ""),
-        )[:100]
-        source_watermark = sha256_ref(
-            [
-                {
-                    "source_id": item.source.source_id,
-                    "source_version_id": item.source.source_version_id,
-                    "evidence_hash": item.source.evidence_hash,
-                }
-                for item in safe_evidence
-            ]
-        )
+        safe_evidence, source_watermark = today_card_source_pack(evidence)
         private_consolidation = {
             "contract_version": TODAY_CARD_CONTRACT_VERSION,
             "window": {"start": previous_start.isoformat(), "end": previous_end.isoformat()},

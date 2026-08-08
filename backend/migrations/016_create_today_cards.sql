@@ -66,6 +66,14 @@ CREATE INDEX IF NOT EXISTS ella_today_cards_invalidated_idx
     ON ella_today_cards (invalidated_at)
     WHERE invalidated_at IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS ella_today_card_source_tombstones (
+    uid TEXT COLLATE "C" NOT NULL,
+    source_id TEXT COLLATE "C" NOT NULL,
+    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('source_deleted')),
+    deleted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (uid, source_id)
+);
+
 CREATE TABLE IF NOT EXISTS ella_today_card_feedback (
     feedback_id UUID PRIMARY KEY,
     card_id UUID NOT NULL REFERENCES ella_today_cards(card_id) ON DELETE CASCADE,

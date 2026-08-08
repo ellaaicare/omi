@@ -169,6 +169,7 @@ from utils.conversations.failure_state import (
     clear_conversation_processing_error,
 )
 from routers import conversations as conversations_router
+from routers import developer as developer_router
 
 
 def _long_conversation() -> Conversation:
@@ -442,4 +443,35 @@ def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatc
 
     assert result == {"status": "Ok"}
     assert len(blocking_threads) == 3
+    assert all(thread_id != loop_thread for thread_id in blocking_threads)
+
+
+def test_developer_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatch):
+    loop_thread = None
+    blocking_threads = []
+
+    def blocking_get(*_args):
+        blocking_threads.append(threading.get_ident())
+        return {"id": "conversation-a"}
+
+    def blocking_delete(*_args):
+        blocking_threads.append(threading.get_ident())
+
+    async def invalidate(*_args):
+        assert threading.get_ident() == loop_thread
+        return 1
+
+    monkeypatch.setattr(developer_router.conversations_db, "get_conversation", blocking_get)
+    monkeypatch.setattr(developer_router.conversations_db, "delete_conversation", blocking_delete)
+    monkeypatch.setattr(developer_router, "invalidate_deleted_conversation_source", invalidate)
+
+    async def run():
+        nonlocal loop_thread
+        loop_thread = threading.get_ident()
+        return await developer_router.delete_conversation_endpoint("conversation-a", "uid-a")
+
+    result = asyncio.run(run())
+
+    assert result == {"success": True}
+    assert len(blocking_threads) == 2
     assert all(thread_id != loop_thread for thread_id in blocking_threads)

@@ -67,6 +67,7 @@ class Repository:
     def __init__(self, card):
         self.card = card
         self.feedback_ids = set()
+        self.invalidations = []
 
     async def get_user_context(self, uid):
         return TodayCardUserContext(uid=uid, timezone="UTC", canonical_event_count=1) if uid == UID else None
@@ -80,7 +81,8 @@ class Repository:
     async def sources_are_current(self, card):
         return card.invalidated_at is None
 
-    async def invalidate_source(self, **_kwargs):
+    async def invalidate_source(self, **kwargs):
+        self.invalidations.append(kwargs)
         return 1
 
     async def record_feedback(self, *, uid, card_id, expected_version, feedback_id, action):
@@ -213,10 +215,56 @@ def test_internal_materialization_fails_closed_without_exact_service_token(monke
     accepted = client.post(
         "/v1/ella/internal/today-cards/materialize",
         json={"uid": UID},
-        headers={"Authorization": "Bearer test-service-token"},
+        headers={
+            "Authorization": "Bearer test-service-token",
+            "X-Ella-Subject-Uid": UID,
+        },
+    )
+    wrong_subject = client.post(
+        "/v1/ella/internal/today-cards/materialize",
+        json={"uid": UID},
+        headers={
+            "Authorization": "Bearer test-service-token",
+            "X-Ella-Subject-Uid": "different-user",
+        },
     )
 
     assert missing_config.status_code == 503
     assert wrong.status_code == 403
+    assert wrong_subject.status_code == 403
     assert accepted.status_code == 200
     assert accepted.json()["state"] == "ready"
+
+
+def test_internal_uid_mutations_require_exact_service_subject_while_fixed_sweep_has_no_caller_uid(monkeypatch):
+    client, repository = _client(_card())
+    monkeypatch.setenv("ELLA_TODAY_CARD_SERVICE_TOKEN", "test-service-token")
+    payload = {"uid": UID, "source_id": "conversation-a", "reason": "source_deleted"}
+    token_header = {"Authorization": "Bearer test-service-token"}
+
+    missing_subject = client.post(
+        "/v1/ella/internal/today-cards/invalidate-source",
+        json=payload,
+        headers=token_header,
+    )
+    wrong_subject = client.post(
+        "/v1/ella/internal/today-cards/invalidate-source",
+        json=payload,
+        headers={**token_header, "X-Ella-Subject-Uid": OTHER_UID},
+    )
+    accepted = client.post(
+        "/v1/ella/internal/today-cards/invalidate-source",
+        json=payload,
+        headers={**token_header, "X-Ella-Subject-Uid": UID},
+    )
+    sweep = client.post(
+        "/v1/ella/internal/today-cards/materialize-due?limit=1",
+        headers=token_header,
+    )
+
+    assert missing_subject.status_code == 403
+    assert wrong_subject.status_code == 403
+    assert repository.invalidations == [{"uid": UID, "source_id": "conversation-a", "reason": "source_deleted"}]
+    assert accepted.status_code == 200
+    assert sweep.status_code == 200
+    assert sweep.json()["processed"] == 1
