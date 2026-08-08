@@ -2944,7 +2944,7 @@ class EllaProvisioningRepository:
                         health_receipt = EXCLUDED.health_receipt,
                         runtime_target_mode = COALESCE(
                             EXCLUDED.runtime_target_mode,
-                            ella_runtime_bindings.runtime_target_mode,
+                            ella_runtime_bindings.runtime_target_mode
                         ),
                         revision = ella_runtime_bindings.revision + 1,
                         active = ella_runtime_bindings.active,
