@@ -389,6 +389,33 @@ def stable_payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _ensure_self_hosted_grok_voice_mode(uid: str) -> None:
+    """Seed Firestore voice_mode=grok-voice only if absent (no clobber).
+
+    The public onboarding receipt surfaces ``effective_voice_mode`` from the
+    Firestore-backed voice settings (onboarding._resolved_voice_mode ->
+    app_settings.get_voice_settings), and the client routes to the Grok lane off
+    that receipt field. Seeding it only-if-absent keeps the receipt consistent
+    with the DB entitlement created at provision
+    (seed_voice_entitlement_if_absent) while preserving a returning user's own
+    voice choice. Never allowed to break provisioning on a settings write.
+    """
+    if not uid:
+        return
+    try:
+        from database import app_settings as app_settings_db
+
+        current = app_settings_db.get_voice_settings(uid) or {}
+        if str((current.get("voice_mode") or "").strip()):
+            return  # preserve existing choice; do not clobber
+        app_settings_db.save_voice_settings(uid, {"voice_mode": "grok-voice"})
+    except Exception:  # noqa: BLE001 - settings seed must never fail provisioning
+        logger.warning(
+            "grok voice-mode provisioning seed failed for uid=%s; DB entitlement still seeded",
+            uid,
+        )
+
+
 def public_receipt(
     job: dict[str, Any],
     binding: Optional[dict[str, Any]] = None,
@@ -1302,6 +1329,17 @@ class ProvisioningCoordinator:
                     "binding_revision": binding["revision"],
                 },
             )
+            deadline_check()
+            # Seed the fresh self-hosted user's grok voice entitlement (DB,
+            # create-if-absent) and Firestore voice_mode (only-if-absent) so the
+            # first voice/chat session is not entitlement-gated and the public
+            # receipt carries effective_voice_mode=grok-voice for the client.
+            await self._repository_call(
+                authority_snapshot,
+                self.repository.seed_voice_entitlement_if_absent,
+                uid=identity.uid,
+            )
+            _ensure_self_hosted_grok_voice_mode(identity.uid)
             deadline_check()
             activated = await self._repository_call(
                 authority_snapshot,

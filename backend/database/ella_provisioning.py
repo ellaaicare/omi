@@ -2978,6 +2978,62 @@ class EllaProvisioningRepository:
             raise RuntimePoolClaimError("honcho_attestation_binding_mismatch")
         return dict(row)
 
+    async def seed_voice_entitlement_if_absent(self, *, uid: str) -> bool:
+        """Create-if-absent self-hosted grok voice entitlement.
+
+        Fresh self-hosted hermes user provisioning should carry a working
+        grok-voice entitlement so the first voice/chat session does not open
+        with ``no_entitlement``. Mirrors the shape proven live on the existing
+        self-hosted canary accounts (realcryptoplato etc.): status=active,
+        plan=canary, provider_allowlist={grok-voice}, mode_allowlist={v4},
+        explicit quota (daily 2700s / monthly 43200s / session 1200s).
+
+        No-clobber / row precedence: ``ON CONFLICT (uid) DO NOTHING`` — an
+        existing entitlement (e.g. a user with a prior voice row) is left
+        untouched. Returns True when a row was newly inserted.
+        """
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                result = await connection.execute(
+                    """
+                    INSERT INTO voice_entitlements (
+                        uid, status, plan, daily_limit_s, monthly_limit_s,
+                        max_session_s, max_concurrent,
+                        provider_allowlist, model_allowlist, mode_allowlist,
+                        fallback_policy, operator_note
+                    ) VALUES (
+                        $1, 'active', 'canary', $2, $3, $4, $5,
+                        $6::text[], $7::text[], $8::text[], $9::jsonb, $10
+                    )
+                    ON CONFLICT (uid) DO NOTHING
+                    """,
+                    uid,
+                    2700,
+                    43200,
+                    1200,
+                    1,
+                    ["grok-voice"],
+                    [],
+                    ["v4"],
+                    json.dumps({"enabled": False, "order": []}),
+                    "auto-provision self-hosted grok voice",
+                )
+                return result == "INSERT 0 1"
+
     async def activate_runtime_binding(
         self,
         *,

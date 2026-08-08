@@ -235,6 +235,7 @@ class FakeRepository:
             self_hosted_admission is not None if self_hosted_owned is None else bool(self_hosted_owned)
         )
         self.job_calls = []
+        self.voice_seed_calls = []
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -292,6 +293,10 @@ class FakeRepository:
     async def prepare_runtime_binding_identity(self, *, uid, provider, role):
         del uid, provider, role
         return "44444444-4444-4444-4444-444444444444"
+
+    async def seed_voice_entitlement_if_absent(self, *, uid):
+        self.voice_seed_calls.append(uid)
+        return True
 
     async def stage_runtime_binding(self, *, uid, binding):
         self.staged = dict(
@@ -1925,6 +1930,32 @@ def test_attestation_window_covers_max_slow_response_and_rejects_invalid_config(
     assert rejected_repository.staged is None
     assert rejected_repository.activation_calls == 0
     assert rejected_repository.job["error_code"] == "honcho_attestation_window_invalid"
+
+
+def test_fresh_self_hosted_provision_seeds_grok_voice(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    firestore_seeds = []
+    monkeypatch.setattr(
+        provisioning_service,
+        "_ensure_self_hosted_grok_voice_mode",
+        lambda uid: firestore_seeds.append(uid),
+    )
+
+    repository = FakeRepository()
+    client = FakeProvisionClient(_runtime_receipt())
+    asyncio.run(
+        ProvisioningCoordinator(repository, client).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    # Both server-side seeds ran for the fresh user, and provisioning completed
+    # to an active binding (the provisioned-active-row requirement).
+    assert repository.voice_seed_calls == ["user-a"]
+    assert firestore_seeds == ["user-a"]
+    assert repository.job["state"] == "ready"
+    assert repository.activation_calls == 1
+    assert repository.binding is not None and repository.binding["active"]
 
 
 def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monkeypatch):
