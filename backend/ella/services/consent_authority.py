@@ -39,6 +39,7 @@ async def submit_with_managed_cloud_authority(
     uid: str,
     submission: ConsentSubmission,
     service: AiConsentService,
+    verified_email: str = "",
 ) -> dict[str, Any]:
     """Record consent with asymmetric ordering that fails closed on partial work.
 
@@ -62,5 +63,6 @@ async def submit_with_managed_cloud_authority(
                 payload.get("receipt"),
             ),
             allow_fresh_uid_bootstrap=self_hosted_fresh_uid_relax_enabled(),
+            bootstrap_email=verified_email,
         )
     return payload

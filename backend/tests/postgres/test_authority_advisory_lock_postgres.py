@@ -1809,6 +1809,9 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         owner = authority_advisory_lock.provisional_identity_owner(uid)
 
         async with pool.acquire() as conn:
+            # Match production: a fresh authority bootstrap must provide the
+            # Firebase-verified email, not rely on a nullable test fixture.
+            await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
             before = await conn.fetchval(
                 "SELECT 1 FROM users WHERE omi_uid = $1",
                 uid,
@@ -1818,13 +1821,14 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         result = await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="one"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-consent@example.invalid",
         )
         assert result["user_id"] == owner.account_id
 
         async with pool.acquire() as observer:
             row = await observer.fetchrow(
                 """
-                SELECT id, omi_uid, name, timezone, status
+                SELECT id, omi_uid, email, name, timezone, status, identities
                 FROM users
                 WHERE omi_uid = $1
                 """,
@@ -1850,17 +1854,32 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         assert tuple(row.values()) == (
             owner.account_id,
             uid,
+            "fresh-consent@example.invalid",
             "Synthetic User",
             "UTC",
             "PENDING",
+            {"omi_uid": uid, "email": "fresh-consent@example.invalid"},
         )
         assert decision == "granted"
         assert receipt_ref and receipt_ref.startswith("sha256:")
+
+        # Normal provisioning must reconcile the bootstrap row without changing
+        # its deterministic owner or rejecting the same verified identity.
+        identity = await EllaProvisioningRepository(pool).ensure_user_identity(
+            uid=uid,
+            email="fresh-consent@example.invalid",
+            name="Fresh Consent User",
+            timezone_name="America/Los_Angeles",
+        )
+        assert identity["id"] == owner.account_id
+        assert identity["email"] == "fresh-consent@example.invalid"
+        assert identity["name"] == "Fresh Consent User"
 
         # Idempotent re-consent reconciles onto the same deterministic row.
         result_two = await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="two"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-consent@example.invalid",
         )
         assert result_two["user_id"] == owner.account_id
         async with pool.acquire() as observer:
@@ -1869,6 +1888,27 @@ def test_consent_bootstrap_creates_users_row_and_grant():
                 uid,
             )
         assert count == 1
+
+        blank_email_uid = "synthetic-consent-bootstrap-blank-email"
+        blank_email_owner = authority_advisory_lock.provisional_identity_owner(blank_email_uid)
+        with pytest.raises(
+            managed_cloud_consent.ManagedCloudAuthorityUnavailable,
+            match="managed_cloud_authority_unavailable",
+        ) as blank_email_error:
+            await managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(blank_email_uid),
+                allow_fresh_uid_bootstrap=True,
+            )
+        assert blank_email_error.value.__cause__.code == "authority_lock_bootstrap_email_missing"
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT 1 FROM users WHERE omi_uid = $1", blank_email_uid) is None
+            assert (
+                await observer.fetchval(
+                    "SELECT 1 FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    blank_email_owner.account_id,
+                )
+                is None
+            )
 
         # A different fresh UID with the relax flag off fails closed first.
         strict_uid = "synthetic-consent-bootstrap-strict"
@@ -1907,6 +1947,7 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
         await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="one"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-delete@example.invalid",
         )
 
         async with pool.acquire() as observer:
@@ -1948,6 +1989,7 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
         result = await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="two"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-delete@example.invalid",
         )
         assert result["user_id"] == owner.account_id
         async with pool.acquire() as observer:

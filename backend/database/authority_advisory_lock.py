@@ -425,6 +425,7 @@ async def verify_self_owner_after_lock_or_bootstrap(
     owner: AuthorityOwner,
     proof: AuthorityLockProof,
     allow_bootstrap: bool,
+    bootstrap_email: str = "",
 ) -> uuid.UUID:
     """Re-read and lock ownership inside the advisory-lock transaction, creating
     the deterministic ``users`` row for a fresh UID when ``allow_bootstrap``.
@@ -445,14 +446,21 @@ async def verify_self_owner_after_lock_or_bootstrap(
         uid,
     )
     if row is None and allow_bootstrap:
+        email = bootstrap_email.strip().lower()
+        if not email:
+            raise AuthorityLockError("authority_lock_bootstrap_email_missing")
         row = await connection.fetchrow(
             """
-            INSERT INTO users (id, omi_uid, name, timezone, status)
-            VALUES ($1, $2, 'Synthetic User', 'UTC', 'PENDING')
+            INSERT INTO users (id, email, omi_uid, name, timezone, status, identities)
+            VALUES (
+                $1, $2, $3, 'Synthetic User', 'UTC', 'PENDING',
+                jsonb_build_object('omi_uid', $3::text, 'email', $2::text)
+            )
             ON CONFLICT (omi_uid) DO NOTHING
             RETURNING id
             """,
             owner.account_id,
+            email,
             uid,
         )
         if row is None:

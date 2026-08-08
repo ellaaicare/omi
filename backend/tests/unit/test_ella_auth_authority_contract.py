@@ -80,6 +80,34 @@ def test_exact_firebase_boundary_never_accepts_admin_key(monkeypatch):
     assert error.value.status_code == 401
 
 
+def test_firebase_token_identity_exposes_only_verified_email(monkeypatch):
+    monkeypatch.setattr(
+        exact_firebase_auth.firebase_auth,
+        "verify_id_token",
+        lambda _token: {
+            "uid": "user-a",
+            "email": "User-A@Example.invalid",
+            "email_verified": True,
+        },
+    )
+
+    identity = exact_firebase_auth.get_firebase_token_identity("Bearer firebase")
+
+    assert identity == exact_firebase_auth.FirebaseTokenIdentity(
+        uid="user-a",
+        verified_email="user-a@example.invalid",
+    )
+
+    monkeypatch.setattr(
+        exact_firebase_auth.firebase_auth,
+        "verify_id_token",
+        lambda _token: {"uid": "user-a", "email": "user-a@example.invalid", "email_verified": False},
+    )
+    assert exact_firebase_auth.get_firebase_token_identity(
+        "Bearer firebase"
+    ) == exact_firebase_auth.FirebaseTokenIdentity(uid="user-a")
+
+
 def test_ella_lazy_exports_keep_imports_at_module_scope():
     source = (BACKEND / "utils" / "ella" / "__init__.py").read_text()
     tree = ast.parse(source)

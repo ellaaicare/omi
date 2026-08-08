@@ -10,7 +10,11 @@ from pydantic import ValidationError
 from ella.routers import ai_consent
 from ella.services import ai_consent as consent, consent_authority
 from database import managed_cloud_consent
-from utils.ella.exact_firebase_auth import get_exact_firebase_uid
+from utils.ella.exact_firebase_auth import (
+    FirebaseTokenIdentity,
+    get_exact_firebase_uid,
+    get_firebase_token_identity,
+)
 
 
 def _submission(
@@ -840,7 +844,15 @@ def test_router_returns_conflict_for_stale_grant(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(ai_consent.submit_ai_consent(request, uid="user-a"))
+        asyncio.run(
+            ai_consent.submit_ai_consent(
+                request,
+                identity=FirebaseTokenIdentity(
+                    uid="user-a",
+                    verified_email="user-a@example.invalid",
+                ),
+            )
+        )
 
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "ai_consent_policy_mismatch"
@@ -904,6 +916,36 @@ def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
         "postgres:revoked",
         "firestore:revoked",
     ]
+
+
+def test_self_hosted_grant_passes_only_verified_email_to_authority(monkeypatch):
+    uid = "user-a"
+    service = _service()
+    captured = {}
+
+    async def grant(**kwargs):
+        captured.update(kwargs)
+        return {"decision": "granted"}
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_grant",
+        grant,
+    )
+
+    asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            verified_email="User-A@Example.invalid",
+            submission=_submission(request_id="request-verified-email-propagation"),
+            service=service,
+        )
+    )
+
+    assert captured["allow_fresh_uid_bootstrap"] is True
+    assert captured["bootstrap_email"] == "User-A@Example.invalid"
 
 
 def test_managed_cloud_denial_authority_error_prevents_firestore_mutation(
@@ -1017,7 +1059,10 @@ def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     app = FastAPI()
     app.include_router(ai_consent.router)
-    app.dependency_overrides[get_exact_firebase_uid] = lambda: "user-a"
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(
+        uid="user-a",
+        verified_email="user-a@example.invalid",
+    )
     client = TestClient(app)
 
     response = client.post(
@@ -1048,3 +1093,34 @@ def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
     assert body["receipt"]["scope_version"] == consent.CURRENT_SCOPE_VERSION
     assert body["receipt"]["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert body["receipt"]["server_decided_at"] == "2026-07-26T23:45:00+00:00"
+
+
+@pytest.mark.parametrize("decision", ("declined", "revoked"))
+def test_authenticated_api_allows_terminal_decisions_without_verified_email(monkeypatch, decision):
+    service = _service()
+    monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
+    monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", raising=False)
+    monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", raising=False)
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", raising=False)
+    app = FastAPI()
+    app.include_router(ai_consent.router)
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-a")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/users/ai-consent",
+        json={
+            "decision": decision,
+            "policy_version": consent.CURRENT_POLICY_VERSION,
+            "processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
+            "scope_version": consent.CURRENT_SCOPE_VERSION,
+            "scope_hash": consent.CURRENT_SCOPE_HASH,
+            "request_id": f"request-api-{decision}",
+            "app_version": "1.0.0",
+            "build_number": "804",
+            "locale": "en-US",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["receipt"]["decision"] == decision

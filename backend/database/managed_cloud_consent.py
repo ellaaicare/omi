@@ -245,6 +245,7 @@ async def synchronize_grant(
     *,
     grant: ManagedCloudGrant,
     allow_fresh_uid_bootstrap: bool = False,
+    bootstrap_email: str = "",
 ) -> dict[str, Any]:
     """Publish a Firestore grant into the PostgreSQL ordering authority.
 
@@ -277,6 +278,7 @@ async def synchronize_grant(
                     owner=owner,
                     proof=owner_lock,
                     allow_bootstrap=allow_fresh_uid_bootstrap,
+                    bootstrap_email=bootstrap_email,
                 )
                 row = await conn.fetchrow(
                     """
