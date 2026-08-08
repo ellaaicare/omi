@@ -159,7 +159,16 @@ class AuthService {
     }
   }
 
-  Future<void> signOut() => runIdentityTransition(FirebaseAuth.instance.signOut);
+  /// Quiesce account-scoped producers once, run the caller's local cleanup,
+  /// then mutate Firebase identity. Cleanup remains inside the transition so
+  /// caches cannot survive into the next account, while callers that already
+  /// need cleanup do not invoke the full shutdown sequence a second time.
+  Future<void> signOutWithQuiescedCleanup(Future<void> Function() cleanup) => runIdentityTransition(() async {
+    await cleanup();
+    await FirebaseAuth.instance.signOut();
+  });
+
+  Future<void> signOut() => signOutWithQuiescedCleanup(() async {});
 
   Future<String?> getIdToken() async {
     try {
