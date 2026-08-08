@@ -2883,6 +2883,14 @@ class EllaProvisioningRepository:
 
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
         requested_binding_id = str(binding.get("binding_id") or uuid.uuid4())
+        runtime_target_mode = binding.get("runtime_target_mode") or None
+        if runtime_target_mode is None and binding.get("role", "user") == "user":
+            # Self-hosted hermes chat requires a valid target mode on the
+            # binding (see runtime_resolver._self_hosted_target_mode). Fresh
+            # user provisioning historically left it NULL, so every first chat
+            # turn raised self_hosted_runtime_target_mode_required. Default the
+            # user chat lane to 'hermes-chat' unless the provider pins a mode.
+            runtime_target_mode = "hermes-chat"
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -2907,11 +2915,11 @@ class EllaProvisioningRepository:
                         internal_gateway_url, gateway_port, service_label, credential_ref,
                         honcho_workspace, observed_peer, observer_peer, template_version,
                         model_policy_version, voice_policy_version, health_state,
-                        health_receipt, revision, active
+                        health_receipt, runtime_target_mode, revision, active
                     )
                     SELECT
                         $1, u.id, u.id, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
+                        $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, 1, false
                     FROM users u
                     WHERE u.omi_uid = $2
                     ON CONFLICT (user_id, role, provider)
@@ -2934,6 +2942,10 @@ class EllaProvisioningRepository:
                         voice_policy_version = EXCLUDED.voice_policy_version,
                         health_state = EXCLUDED.health_state,
                         health_receipt = EXCLUDED.health_receipt,
+                        runtime_target_mode = COALESCE(
+                            EXCLUDED.runtime_target_mode,
+                            ella_runtime_bindings.runtime_target_mode,
+                        ),
                         revision = ella_runtime_bindings.revision + 1,
                         active = ella_runtime_bindings.active,
                         updated_at = CURRENT_TIMESTAMP
@@ -2958,6 +2970,7 @@ class EllaProvisioningRepository:
                     binding["voice_policy_version"],
                     binding.get("health_state", "pending"),
                     json.dumps(binding.get("health_receipt") or {}),
+                    runtime_target_mode,
                 )
         if not row:
             raise LookupError("user_not_found")

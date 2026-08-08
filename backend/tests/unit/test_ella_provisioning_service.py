@@ -3311,3 +3311,51 @@ def test_legacy_8210_receipt_cannot_activate(monkeypatch):
     assert repository.job["retryable"] is True
     assert repository.job["error_code"] == "runtime_receipt_missing"
     assert repository.binding is None
+
+
+def test_fresh_provision_stages_user_binding_with_hermes_chat_mode(monkeypatch):
+    # Sophia review criterion for the fresh-provision fix: a fresh provision
+    # must produce a binding whose runtime_target_mode lets the first chat
+    # turn pass. Regression guard for self_hosted_runtime_target_mode_required
+    # (binding created with NULL mode -> every chat turn failed authority).
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
+    asyncio.run(
+        coordinator.process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    assert repository.staged["runtime_target_mode"] == "hermes-chat"
+    assert repository.binding["runtime_target_mode"] == "hermes-chat"
+
+
+@pytest.mark.parametrize("key", ["runtimeTargetMode", "runtime_target_mode"])
+def test_provider_pinned_mode_is_staged_and_honored(monkeypatch, key):
+    # Mode-source decision: if the provision result pins a valid self-hosted
+    # mode, that wins over the user default (e.g. a hermes-voice lane).
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"][key] = "hermes-voice"
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(receipt))
+    asyncio.run(
+        coordinator.process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    assert repository.staged["runtime_target_mode"] == "hermes-voice"
+    assert repository.binding["runtime_target_mode"] == "hermes-voice"
+
+
+def test_extract_runtime_binding_rejects_unknown_provider_mode():
+    # A provider-pinned mode outside the self-hosted set must fail loudly at
+    # receipt extraction, not persist a mode that re-triggers
+    # self_hosted_runtime_target_mode_required on every chat turn.
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"]["runtimeTargetMode"] = "banana-mode"
+    with pytest.raises(ProvisioningError, match="invalid_runtime_target_mode") as error:
+        _extract(receipt)
+    assert error.value.retryable is False

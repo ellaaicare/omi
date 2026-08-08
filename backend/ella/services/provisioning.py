@@ -671,6 +671,10 @@ def extract_runtime_binding(
     provider = str(raw.get("provider") or "").lower()
     profile_name = str(raw.get("profileName") or raw.get("profile_name") or "")
     agent_id = str(raw.get("agentId") or raw.get("agent_id") or "")
+    raw_mode = str(raw.get("runtimeTargetMode") or raw.get("runtime_target_mode") or "").strip()
+    runtime_target_mode = raw_mode or None
+    if runtime_target_mode is not None and runtime_target_mode not in SELF_HOSTED_RUNTIME_TARGET_MODES:
+        raise ProvisioningError("invalid_runtime_target_mode", retryable=False)
     workspace_root = raw.get("workspaceRoot") or raw.get("workspace_root")
     internal_gateway_url = raw.get("internalGatewayUrl") or raw.get("internal_gateway_url")
     gateway_port = raw.get("gatewayPort") or raw.get("gateway_port")
@@ -826,6 +830,7 @@ def extract_runtime_binding(
         "provider": "hermes",
         "profile_name": profile_name,
         "agent_id": agent_id,
+        "runtime_target_mode": runtime_target_mode,
         "workspace_root": str(workspace_root),
         "internal_gateway_url": gateway_url,
         "gateway_port": parsed_port,
@@ -1269,6 +1274,13 @@ class ProvisioningCoordinator:
                 expected_template_version=str(job["target_schema_version"]),
                 now=int(self.clock()),
             )
+            # Mode-source decision: a provider-pinned mode (validated by
+            # extract_runtime_binding) wins; absent mode defaults the user chat
+            # lane to 'hermes-chat'. Without a valid mode, every first chat
+            # turn raises self_hosted_runtime_target_mode_required (the fresh
+            # signup replay defect this corrects).
+            if binding_data.get("runtime_target_mode") is None and binding_data.get("role", "user") == "user":
+                binding_data["runtime_target_mode"] = "hermes-chat"
             deadline_check()
             binding = await self._repository_call(
                 authority_snapshot,
