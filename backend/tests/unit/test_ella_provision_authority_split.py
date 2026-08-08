@@ -856,6 +856,11 @@ class _RecordingRepository:
         self.job.update(kwargs)
         return dict(self.job)
 
+    async def seed_voice_entitlement_if_absent(self, *, uid):
+        del uid
+        self._record("seed_voice_entitlement_if_absent")
+        return False
+
     async def activate_runtime_binding(self, **_kwargs):
         self._record("activate_runtime_binding")
         return {**self.staged, "revision": 2, "active": True}
@@ -963,6 +968,11 @@ def test_real_claimed_worker_stops_after_inflight_http_authority_drift(monkeypat
     [
         ("stage_runtime_binding", 1, {"stage_runtime_binding", "update_job", "activate_runtime_binding"}),
         ("update_job", 1, {"update_job", "activate_runtime_binding"}),
+        (
+            "seed_voice_entitlement_if_absent",
+            1,
+            {"seed_voice_entitlement_if_absent", "activate_runtime_binding"},
+        ),
         ("activate_runtime_binding", 1, {"activate_runtime_binding"}),
         ("update_job", 2, set()),
     ],

@@ -720,7 +720,7 @@ jobs:
               tests/unit/test_ella_plato_mcp.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 443
+          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 448
           required_authority_split_ids=(
             "tests/unit/test_ella_provision_authority_split.py::test_new_user_auto_provision_posts_only_to_hermes_authority"
             "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_url_swap]"
@@ -732,7 +732,8 @@ jobs:
             "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_reject_before_http_database_state_or_thread[metadata_destination-reconcile]"
             "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_revalidates_after_client_entry_before_send[url]"
             "tests/unit/test_ella_provision_authority_split.py::test_real_claimed_worker_stops_after_inflight_http_authority_drift[token]"
-            "tests/unit/test_ella_provision_authority_split.py::test_claimed_worker_rechecks_before_every_post_http_mutation[activate_runtime_binding-1-forbidden2-binding_reference]"
+            "tests/unit/test_ella_provision_authority_split.py::test_claimed_worker_rechecks_before_every_post_http_mutation[seed_voice_entitlement_if_absent-1-forbidden2-binding_reference]"
+            "tests/unit/test_ella_provision_authority_split.py::test_claimed_worker_rechecks_before_every_post_http_mutation[activate_runtime_binding-1-forbidden3-binding_reference]"
             "tests/unit/test_ella_provision_authority_split.py::test_auto_provision_stops_database_write_after_inflight_http_drift[destination_policy]"
             "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_detects_inflight_http_drift_before_later_effects[binding_secret-async]"
             "tests/unit/test_ella_provision_authority_split.py::test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport[url-sync]"
