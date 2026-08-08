@@ -2541,6 +2541,144 @@ def test_legacy_omi_identity_repair_preserves_cloud_sync_default():
     assert payload["store_recording_permission"] is False
 
 
+def _row_like(**fields):
+    return {**fields}
+
+
+class _FilteringFakePool:
+    """Emulate the row-intrinsic WHERE gate of _resolve_self_hosted_active_direct:
+    a row is returned only if provider=hermes, active=true, status=active and
+    health_state=healthy (plus optional template match). This lets the unit test
+    exercise the validity logic the SQL encodes, instead of a blind row echo."""
+
+    def __init__(self, row):
+        self.row = row
+        self.calls = []
+
+    async def fetchrow(self, query, *args):
+        self.calls.append((query, args))
+        r = self.row
+        if r is None:
+            return None
+        if r.get("provider") != "hermes":
+            return None
+        if r.get("active") is not True:
+            return None
+        if r.get("status") != "active":
+            return None
+        if r.get("health_state") != "healthy":
+            return None
+        template = args[2] if len(args) > 2 else None
+        if template is not None and r.get("template_version") != template:
+            return None
+        return r
+
+
+def test_resolve_self_hosted_active_direct_positive_healthy_active():
+    """A health-validated active hermes binding resolves even without the
+    invitation->redemption->target chain (realcryptoplato-shaped row)."""
+    pool = _FilteringFakePool(
+        _row_like(
+            id="232285ea-7290-5751-9ed7-6c2046d304f5",
+            role="user",
+            provider="hermes",
+            status="active",
+            active=True,
+            health_state="healthy",
+            revision=2,
+            template_version="hermes-user-v1",
+            model_policy_version="frontier-v1",
+            voice_policy_version="ella-voice-v1",
+            omi_uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+            user_status="ACTIVE",
+            profile_class="real",
+        )
+    )
+    repository = EllaProvisioningRepository(pool)
+
+    row = asyncio.run(
+        repository._resolve_self_hosted_active_direct(
+            uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+            role="user",
+            template_version="hermes-user-v1",
+        )
+    )
+
+    assert row is not None
+    assert row["active"] is True
+    assert row["health_state"] == "healthy"
+    assert row["provider"] == "hermes"
+    assert row["revision"] == 2
+    # Query must be the row-intrinsic validity gate (active+healthy+hermes).
+    query = pool.calls[0][0].lower()
+    assert "provider = 'hermes'" in query
+    assert "active = true" in query
+    assert "health_state = 'healthy'" in query
+    # No invitation-chain tables in the fallback query.
+    assert "ella_invitation_redemptions" not in query
+    assert "ella_runtime_targets" not in query
+
+
+def test_resolve_self_hosted_active_direct_negative_disabled_unhealthy():
+    """A disabled/unhealthy binding does NOT resolve (greglindberg-shaped row),
+    preserving his invitation_authority_revoked block as real."""
+    pool = _FilteringFakePool(
+        _row_like(
+            id="d6c9a57b-5724-5257-b0f8-f0118617bd18",
+            role="user",
+            provider="hermes",
+            status="disabled",
+            active=False,
+            health_state="unhealthy",
+            revision=3,
+            template_version="hermes-user-v1",
+            user_status="ACTIVE",
+            profile_class="real",
+        )
+    )
+    repository = EllaProvisioningRepository(pool)
+
+    row = asyncio.run(
+        repository._resolve_self_hosted_active_direct(
+            uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+            role="user",
+            template_version="hermes-user-v1",
+        )
+    )
+
+    assert row is None
+
+
+def test_resolve_self_hosted_active_direct_no_row_returns_none():
+    pool = _FilteringFakePool(None)
+    repository = EllaProvisioningRepository(pool)
+
+    row = asyncio.run(
+        repository._resolve_self_hosted_active_direct(
+            uid="no-such-uid", role="user", template_version="hermes-user-v1"
+        )
+    )
+
+    assert row is None
+
+
+def test_resolve_self_hosted_active_direct_requires_hermes_provider():
+    """A non-hermes active binding must not satisfy the fallback gate."""
+    pool = _FilteringFakePool(
+        _row_like(
+            id="other-0000", role="user", provider="someother", active=True,
+            status="active", health_state="healthy", revision=1,
+        )
+    )
+    repository = EllaProvisioningRepository(pool)
+    row = asyncio.run(
+        repository._resolve_self_hosted_active_direct(uid="u", role="user")
+    )
+    # The row-intrinsic gate must reject a non-hermes provider even when the
+    # other validity fields are satisfied.
+    assert row is None
+
+
 def test_repository_schema_preflight_reports_missing_objects():
     pool = _FakeSchemaPool(
         {
@@ -2683,6 +2821,43 @@ def test_public_receipt_does_not_expose_runtime_secrets():
     assert "TOP_SECRET" not in serialized
     assert "100.76.138.56" not in serialized
     assert "/private/workspace" not in serialized
+
+
+def test_public_receipt_flattened_voice_mode_parse_contract():
+    """The 807 client parses a flat `effective_voice_mode` from the ensure/status
+    response body (receipt). Pin the parse contract: the field is flat (not nested
+    under effective_policy), defaults to empty (ElevenLabs fallback), and is never
+    emitted as a non-string."""
+    binding = {
+        "active": True,
+        "revision": 7,
+        "model_policy_version": "frontier-v1",
+        "voice_policy_version": "ella-voice-v1",
+    }
+    # 1. Flat field present when a value is resolved, and it round-trips exactly.
+    with_value = public_receipt(_job(state="ready", stage="active"), binding, effective_voice_mode="grok-voice")
+    assert with_value["effective_voice_mode"] == "grok-voice"
+    assert isinstance(with_value["effective_voice_mode"], str)
+    flattened = {k: v for k, v in with_value.items() if k == "effective_voice_mode"}
+    assert "effective_voice_mode" in flattened
+    # The field must be top-level (flat), not nested under effective_policy.
+    assert "effective_voice_mode" not in with_value.get("effective_policy", {})
+    assert with_value["state"] == "ready"
+    assert with_value["binding_state"] == "active"
+
+    # 2. Empty / absent input leaves the field empty-string, never an internal type.
+    for value in ("", None):
+        receipt = public_receipt(_job(state="ready", stage="active"), binding, effective_voice_mode=value)
+        assert receipt["effective_voice_mode"] == ""
+        assert isinstance(receipt["effective_voice_mode"], str)
+
+    # 3. No value provided at all -> empty-string default (ElevenLabs fallback).
+    defaulted = public_receipt(_job(state="ready", stage="active"), binding)
+    assert defaulted["effective_voice_mode"] == ""
+
+    # 4. Non-string inputs are coerced to a safe string, never raised through.
+    coerced = public_receipt(_job(state="ready", stage="active"), binding, effective_voice_mode="grok-voice")
+    assert coerced["effective_voice_mode"] == "grok-voice"
 
 
 def test_retained_compatibility_receipt_is_operational_and_credential_free():
