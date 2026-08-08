@@ -3315,6 +3315,11 @@ class EllaProvisioningRepository:
         (e.g. migrated Plato accounts). It validates the binding on its own terms
         (active, healthy, hermes) and does NOT relax any of the row's own validity
         fields nor the invitation/consent chain for accounts that have one.
+
+        `template_version` is an OPTIONAL extra filter for direct callers; the
+        resolver wiring passes authoritative-yes (does NOT forward the job-target
+        schema), so a migrated account's healthy active binding resolves on both
+        `POST /ensure` and `GET /status` regardless of a stale job target schema.
         """
         row = await self.pool.fetchrow(
             """
@@ -3571,8 +3576,15 @@ class EllaProvisioningRepository:
                         # binding when it is valid on its own terms (active, healthy,
                         # hermes) instead of manufacturing an incomplete ready
                         # receipt (`binding_state=inactive`) for an unrouted job.
+                        # Authoritative-yes for schema routing: do NOT gate the
+                        # fallback on the job-target serializer's template_version.
+                        # A migrated account's healthy active binding is the source
+                        # of truth for its own schema; `GET /status` passes the
+                        # (possibly stale) job-target schema here, and requiring a
+                        # match would reproduce the "incomplete on status" bug the
+                        # fallback exists to fix. `POST /ensure` passes None (inert).
                         fallback = await self._resolve_self_hosted_active_direct(
-                            uid=uid, role=role, template_version=template_version
+                            uid=uid, role=role
                         )
                         return fallback
                     decision = await voice_canary_db.revalidate_runtime_resolution_on_connection(
