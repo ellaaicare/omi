@@ -3302,6 +3302,39 @@ class EllaProvisioningRepository:
         )
         return bool(row and row["eligible"])
 
+    async def _resolve_self_hosted_active_direct(
+        self,
+        uid: str,
+        role: str = "user",
+        template_version: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return a health-validated active self-hosted binding row directly.
+
+        This is the row-intrinsic validity gate used as the authoritative fallback
+        for accounts that predate the invitation->redemption->target routing chain
+        (e.g. migrated Plato accounts). It validates the binding on its own terms
+        (active, healthy, hermes) and does NOT relax any of the row's own validity
+        fields nor the invitation/consent chain for accounts that have one.
+        """
+        row = await self.pool.fetchrow(
+            """
+            SELECT b.*, u.omi_uid, u.name, u.status AS user_status, u.profile_class
+            FROM ella_runtime_bindings b
+            JOIN users u ON u.id = b.user_id
+            WHERE u.omi_uid = $1
+              AND b.role = $2
+              AND b.provider = 'hermes'
+              AND b.active = true
+              AND b.status = 'active'
+              AND b.health_state = 'healthy'
+              AND ($3::text IS NULL OR b.template_version = $3)
+            """,
+            uid,
+            role,
+            template_version,
+        )
+        return _row_dict(row)
+
     async def resolve_active_runtime(
         self,
         uid: str,
@@ -3532,7 +3565,16 @@ class EllaProvisioningRepository:
                         list(SELF_HOSTED_RUNTIME_TARGET_MODES),
                     )
                     if not row:
-                        return None
+                        # Legacy/retained accounts predating the invitation chain may
+                        # hold a fully healthy active hermes binding with no
+                        # invitation/redemption/target rows. Fall back to the raw
+                        # binding when it is valid on its own terms (active, healthy,
+                        # hermes) instead of manufacturing an incomplete ready
+                        # receipt (`binding_state=inactive`) for an unrouted job.
+                        fallback = await self._resolve_self_hosted_active_direct(
+                            uid=uid, role=role, template_version=template_version
+                        )
+                        return fallback
                     decision = await voice_canary_db.revalidate_runtime_resolution_on_connection(
                         connection,
                         uid=uid,
