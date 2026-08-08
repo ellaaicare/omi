@@ -237,7 +237,7 @@ class FakeRepository:
         )
         self.job_calls = []
         self.voice_seed_calls = []
-        self.voice_seed_result = True
+        self.voice_seed_result = False
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -1944,6 +1944,7 @@ def test_fresh_self_hosted_provision_seeds_grok_voice(monkeypatch):
     )
 
     repository = FakeRepository()
+    repository.voice_seed_result = True
     client = FakeProvisionClient(_runtime_receipt())
     asyncio.run(
         ProvisioningCoordinator(repository, client).process_claimed_job(
