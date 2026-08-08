@@ -172,6 +172,39 @@ def test_entitlement_contract_defaults_are_canary_numbers():
     assert datetime.now(timezone.utc).tzinfo is not None
 
 
+class _NoRowConn:
+    async def fetchrow(self, *args, **kwargs):
+        return None
+
+
+def test_fresh_uid_entitlement_contract_respects_relax_flag(monkeypatch):
+    fixed = datetime(2026, 8, 8, 2, 0, 0, tzinfo=timezone.utc)
+
+    async def noop_lock(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(voice_canary, "lock_runtime_authority_on_connection", noop_lock)
+
+    async def build():
+        return await voice_canary.get_entitlement_contract_for_connection(
+            _NoRowConn(), "uid-fresh", now=fixed, expire_stale_sessions=False
+        )
+
+    # Flag unset -> status "none" (client invite gate stays up).
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
+    contract = asyncio.run(build())
+    assert contract["status"] == "none"
+    assert "plan" not in contract
+
+    # Flag set -> provisionable "invited" status so the client proceeds to ensure.
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    contract = asyncio.run(build())
+    assert contract["status"] == "invited"
+    assert contract["plan"] == "canary"
+    assert contract["revision"] == 0
+    assert "quota" in contract
+
+
 def test_operator_defaults_are_grok_only_and_have_no_fallback():
     assert voice_canary_admin.DEFAULT_PROVIDERS == ["grok-voice"]
     assert voice_canary_admin.DEFAULT_MODES == ["v4"]
