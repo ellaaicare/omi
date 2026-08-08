@@ -7,15 +7,15 @@ returned plan and report delivery status to trace tables.
 
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import asyncpg
-from firebase_admin.auth import InvalidIdTokenError
 from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, Field
-from utils.other import endpoints as auth_endpoints
 
+from database.honcho_attestation import authority_credential
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
@@ -24,12 +24,19 @@ from ella.services.escalation_policy import (
     build_plain_language_policy_view,
     evaluate_escalation_policy,
 )
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_firebase_uid,
+    get_exact_service_authority,
+)
 
 router = APIRouter(prefix="/v1/ella/escalations", tags=["Ella Escalations"])
 
-ESCALATION_WEBHOOK_KEY = os.getenv(
-    "ELLA_ESCALATION_WEBHOOK_KEY",
-    os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"),
+ESCALATION_WEBHOOK_KEY = (
+    authority_credential("ELLA_ESCALATION_WEBHOOK_KEY", strip=False)
+    if "ELLA_ESCALATION_WEBHOOK_KEY" in os.environ
+    else authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
 )
 
 _pool: Optional[asyncpg.Pool] = None
@@ -55,7 +62,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=1,
             max_size=5,
@@ -63,10 +70,35 @@ async def _get_pool() -> asyncpg.Pool:
     return _pool
 
 
-def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
+def _has_valid_service_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> bool:
     provided = x_escalation_key or x_guardian_key or key
-    if provided != ESCALATION_WEBHOOK_KEY:
+    configured = ESCALATION_WEBHOOK_KEY
+    return bool(
+        configured
+        and configured.strip()
+        and provided
+        and provided.strip()
+        and secrets.compare_digest(provided, configured)
+    )
+
+
+def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
+    if not _has_valid_service_key(x_guardian_key, x_escalation_key, key):
         raise HTTPException(status_code=403, detail="Invalid escalation key")
+
+
+def _service_authority(
+    x_guardian_key: Optional[str],
+    x_escalation_key: Optional[str],
+    key: Optional[str],
+    subject_uid: Optional[str],
+) -> EllaRequestAuthority:
+    return get_exact_service_authority(
+        provided_service_key=x_escalation_key or x_guardian_key or key,
+        configured_service_key=ESCALATION_WEBHOOK_KEY,
+        service_subject_uid=subject_uid,
+        service="ella_escalation",
+    )
 
 
 def _resolve_policy_view_uid(
@@ -75,32 +107,26 @@ def _resolve_policy_view_uid(
     x_guardian_key: Optional[str],
     x_escalation_key: Optional[str],
     key: Optional[str],
+    subject_uid: Optional[str],
+    x_app_version: Optional[str] = None,
+    x_ella_app_build: Optional[str] = None,
+    x_ella_client_version: Optional[str] = None,
 ) -> str:
     """Resolve the policy-view UID for either app auth or internal callers."""
-    provided_key = x_escalation_key or x_guardian_key or key
-    if provided_key == ESCALATION_WEBHOOK_KEY:
-        if not uid:
-            raise HTTPException(status_code=400, detail="uid is required for internal policy lookup")
-        return uid
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header not found")
-
-    parts = str(authorization).split(" ")
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
-        raise HTTPException(status_code=401, detail="Invalid authorization token")
-
-    try:
-        authenticated_uid = auth_endpoints.verify_token(parts[1])
-    except InvalidIdTokenError:
-        raise HTTPException(status_code=401, detail="Invalid authorization token")
-    except Exception as e:
-        print(f"Error verifying Firebase ID token: {type(e).__name__}: {e}", flush=True)
-        raise HTTPException(status_code=401, detail="Invalid authorization token")
-
-    if uid and uid != authenticated_uid:
-        raise HTTPException(status_code=403, detail="Authenticated user cannot read another user's escalation policy")
-    return authenticated_uid
+    if _has_valid_service_key(x_guardian_key, x_escalation_key, key):
+        return _service_authority(
+            x_guardian_key,
+            x_escalation_key,
+            key,
+            subject_uid,
+        ).require_uid(uid, feature="Escalation policy")
+    authenticated_uid = get_exact_firebase_uid(
+        authorization,
+        x_app_version,
+        x_ella_app_build,
+        x_ella_client_version,
+    )
+    return EllaRequestAuthority(firebase_uid=authenticated_uid).require_uid(uid, feature="Escalation policy")
 
 
 def _dict_value(data: Any, *keys: str) -> dict[str, Any]:
@@ -125,7 +151,7 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         """
         SELECT id, omi_uid, guardian_mode, email, phone_number, identities
         FROM users
-        WHERE LOWER(omi_uid) = LOWER($1)
+        WHERE omi_uid = $1
         """,
         uid,
     )
@@ -214,9 +240,11 @@ async def evaluate_escalation(
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     x_escalation_key: Optional[str] = Header(None, alias="X-Escalation-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
 ):
     """Evaluate a classified event and return a deterministic delivery plan."""
-    _verify_key(x_guardian_key, x_escalation_key, key)
+    authority = _service_authority(x_guardian_key, x_escalation_key, key, subject_uid)
+    req.uid = authority.require_uid(req.uid, feature="Escalation evaluation")
     user, caregivers = await _load_context(req.uid)
     event = EscalationEvent(
         uid=req.uid,
@@ -242,9 +270,23 @@ async def get_escalation_policy(
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     x_escalation_key: Optional[str] = Header(None, alias="X-Escalation-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
 ):
     """Return the read-only effective policy view for user/caregiver UI."""
-    resolved_uid = _resolve_policy_view_uid(uid, authorization, x_guardian_key, x_escalation_key, key)
+    resolved_uid = _resolve_policy_view_uid(
+        uid,
+        authorization,
+        x_guardian_key,
+        x_escalation_key,
+        key,
+        subject_uid,
+        x_app_version,
+        x_ella_app_build,
+        x_ella_client_version,
+    )
     user, caregivers = await _load_context(resolved_uid)
     policy = build_plain_language_policy_view(user, caregivers)
     return {
@@ -261,9 +303,23 @@ async def get_escalation_policy_markdown(
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     x_escalation_key: Optional[str] = Header(None, alias="X-Escalation-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
 ):
     """Return the effective policy as generated Markdown for agents/workspaces."""
-    resolved_uid = _resolve_policy_view_uid(uid, authorization, x_guardian_key, x_escalation_key, key)
+    resolved_uid = _resolve_policy_view_uid(
+        uid,
+        authorization,
+        x_guardian_key,
+        x_escalation_key,
+        key,
+        subject_uid,
+        x_app_version,
+        x_ella_app_build,
+        x_ella_client_version,
+    )
     user, caregivers = await _load_context(resolved_uid)
     markdown = build_policy_markdown_view(user, caregivers)
     return Response(content=markdown, media_type="text/markdown; charset=utf-8")

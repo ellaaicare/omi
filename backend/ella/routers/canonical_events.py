@@ -17,10 +17,18 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
 from database.ella_postgres import get_ella_postgres_pool
 from ella.services.today_card_postgres import PostgresTodayCardRepository
+from utils.ella.canonical_auth import CANONICAL_EVENT_SERVICE_HEADER
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_firebase_uid,
+    get_firebase_or_service_authority,
+)
 from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
@@ -107,21 +115,73 @@ def _completion_can_reinterpret(completion: SessionCompleteIn) -> bool:
 
 def _require_reinterpretation_completion_auth(
     completion: SessionCompleteIn,
-    authorization: str,
+    authority: EllaRequestAuthority,
 ) -> None:
     if not _reinterpretation_enabled() or not _completion_can_reinterpret(completion):
         return
-    expected = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "reinterpretation_completion_auth_not_configured"},
-        )
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token or not hmac.compare_digest(token.encode(), expected.encode()):
+    if not authority.is_service:
         raise HTTPException(
             status_code=401,
             detail={"code": "invalid_reinterpretation_completion_token"},
+        )
+
+
+def _canonical_event_authority(
+    authorization: Optional[str] = Header(default=None),
+    service_key: Optional[str] = Header(default=None, alias=CANONICAL_EVENT_SERVICE_HEADER),
+    service_subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
+) -> EllaRequestAuthority:
+    """Authenticate an exact Firebase subject or the dedicated ledger service."""
+    configured = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
+    provided_service_key = service_key
+    if provided_service_key is None and authorization:
+        scheme, _, token = authorization.partition(" ")
+        if configured and scheme.lower() == "bearer" and token and hmac.compare_digest(token, configured):
+            provided_service_key = token
+    if provided_service_key is not None:
+        return get_firebase_or_service_authority(
+            authorization=authorization,
+            provided_service_key=provided_service_key,
+            configured_service_key=configured,
+            service="canonical-event-ledger",
+            service_subject_uid=service_subject_uid,
+            x_app_version=x_app_version,
+            x_ella_app_build=x_ella_app_build,
+            x_ella_client_version=x_ella_client_version,
+        )
+    return EllaRequestAuthority(
+        firebase_uid=get_exact_firebase_uid(
+            authorization,
+            x_app_version,
+            x_ella_app_build,
+            x_ella_client_version,
+        )
+    )
+
+
+def _authorize_canonical_owner(
+    authority: EllaRequestAuthority,
+    *,
+    uid: Optional[str],
+    canonical_identity: Optional[str],
+    feature: str,
+) -> str:
+    exact_uid = authority.require_uid(uid, feature=feature)
+    if not canonical_identity or canonical_identity != exact_uid:
+        raise HTTPException(status_code=403, detail=f"{feature} canonical identity does not match authority")
+    return exact_uid
+
+
+def _authorize_event_batch(authority: EllaRequestAuthority, events: list[CanonicalEventIn]) -> None:
+    for event in events:
+        _authorize_canonical_owner(
+            authority,
+            uid=event.uid,
+            canonical_identity=event.canonical_identity,
+            feature="Canonical event",
         )
 
 
@@ -723,7 +783,10 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
     default_store = store or PostgresCanonicalEventStore()
 
     @router.post("/v1/ella/events")
-    async def write_events(batch: CanonicalEventsBatch):
+    async def write_events(
+        batch: CanonicalEventsBatch,
+        authority: EllaRequestAuthority = Depends(_canonical_event_authority),
+    ):
         """
         Idempotently write raw canonical events.
 
@@ -732,19 +795,28 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         existing raw text/metadata is never overwritten by summaries,
         corrections, retries, or downstream enrichment.
         """
+        _authorize_event_batch(authority, batch.events)
         return await default_store.write_batch(batch.events)
 
     @router.post("/v1/ella/sessions/{session_id}/complete")
     async def complete_session(
         session_id: str,
         completion: SessionCompleteIn,
-        request: Request,
+        authority: EllaRequestAuthority = Depends(_canonical_event_authority),
     ):
         """Record source session completion without converting sessions into OMI objects."""
+        exact_uid = _authorize_canonical_owner(
+            authority,
+            uid=completion.uid,
+            canonical_identity=completion.canonical_identity,
+            feature="Canonical session completion",
+        )
         _require_reinterpretation_completion_auth(
             completion,
-            request.headers.get("Authorization", ""),
+            authority,
         )
+        if completion.uid != exact_uid:
+            raise HTTPException(status_code=403, detail="Canonical session completion UID does not match authority")
         return await default_store.complete_session(session_id, completion)
 
     @router.get("/v1/ella/timeline")
@@ -754,6 +826,7 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         limit: int = Query(default=DEFAULT_TIMELINE_LIMIT),
         channels: Optional[str] = None,
         timezone: Optional[str] = Query(default=None, alias="timezone"),
+        authority: EllaRequestAuthority = Depends(_canonical_event_authority),
     ):
         """
         Read a single chronological timeline across channels for one uid.
@@ -763,6 +836,7 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         remain separate durable session objects; this endpoint returns the raw
         canonical turn ledger used for memory hydration and reconciliation.
         """
+        uid = authority.require_uid(uid, feature="Canonical timeline")
         parsed_since = _parse_datetime(since, "since") if since else None
         events = await default_store.timeline(
             uid=uid,

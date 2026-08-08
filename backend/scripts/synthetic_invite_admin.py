@@ -311,6 +311,55 @@ def prepare_protected_code_file(
         os.close(root_descriptor)
 
 
+def discard_uncommitted_protected_code_file(
+    *,
+    approved_root: str,
+    code_output_file: str,
+    prepared: PreparedProtectedCode,
+    expected_owner_uid: int = ROOT_UID,
+) -> None:
+    """Remove a newly-created code only when its protected proof still matches."""
+    if prepared.existed:
+        return
+    root = _lexical_absolute_path(
+        approved_root,
+        error_code="code_output_root_must_be_absolute",
+    )
+    output = _lexical_absolute_path(
+        code_output_file,
+        error_code="code_output_file_must_be_absolute",
+    )
+    if output.parent != root or not SAFE_CODE_FILENAME_RE.fullmatch(output.name):
+        raise ProtectedCodeFileError("code_output_file_outside_approved_root")
+    root_descriptor = _open_secure_root(root, expected_owner_uid=expected_owner_uid)
+    recovery_filename = _recovery_receipt_filename(output.name)
+    try:
+        if (
+            _read_existing_code(
+                root_descriptor,
+                output.name,
+                expected_owner_uid=expected_owner_uid,
+            )
+            != prepared.code
+        ):
+            raise ProtectedCodeFileError("code_output_file_cleanup_mismatch")
+        _read_recovery_receipt(
+            root_descriptor,
+            recovery_filename,
+            expected_owner_uid=expected_owner_uid,
+            expected_binding_hmac=prepared.recovery_binding_hmac,
+        )
+        os.unlink(output.name, dir_fd=root_descriptor)
+        os.unlink(recovery_filename, dir_fd=root_descriptor)
+        os.fsync(root_descriptor)
+    except ProtectedCodeFileError:
+        raise
+    except OSError as exc:
+        raise ProtectedCodeFileError("code_output_file_cleanup_failed") from exc
+    finally:
+        os.close(root_descriptor)
+
+
 def _parse_expiry(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))

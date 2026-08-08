@@ -16,12 +16,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from database import invitations
 from ella.services.invitation_authority import (
     authorize_invitation_pilot,
+    authorize_self_hosted_invitation,
     revalidate_invitation_pilot,
+    revalidate_self_hosted_invitation,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 router = APIRouter(prefix="/v1/invite", tags=["ella-invites"])
 logger = logging.getLogger("ella.invites")
+
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _self_hosted_enabled() -> bool:
+    return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false").strip().lower() in TRUE_VALUES
 
 
 class InviteRedeemRequest(BaseModel):
@@ -90,18 +99,35 @@ async def _validated_payload(request: Request) -> InviteRedeemRequest:
 )
 async def redeem_invite(
     request: Request,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
     app_build: str = Header(default="", alias="X-Ella-App-Build"),
 ) -> dict:
     payload = await _validated_payload(request)
     try:
-        pilot_admission = authorize_invitation_pilot(authenticated_uid)
+        firebase_user = auth.get_user(authenticated_uid)
+    except Exception as exc:
+        raise _invalid_request() from exc
+    user_email = str(getattr(firebase_user, "email", "") or "").strip().lower()
+    if not user_email or getattr(firebase_user, "email_verified", None) is not True:
+        raise _invalid_request()
+
+    try:
+        if _self_hosted_enabled():
+            pilot_admission = authorize_self_hosted_invitation(
+                authenticated_uid,
+                user_email,
+            )
+            revalidate = revalidate_self_hosted_invitation
+        else:
+            pilot_admission = authorize_invitation_pilot(authenticated_uid)
+            revalidate = revalidate_invitation_pilot
         return await invitations.redeem_invitation(
             uid=authenticated_uid,
             code=payload.code,
             source_address=_source_address(request),
             pilot_admission=pilot_admission,
-            pilot_admission_revalidator=revalidate_invitation_pilot,
+            user_email=user_email,
+            pilot_admission_revalidator=revalidate,
             app_build=app_build,
         )
     except invitations.InvitePilotGateDenied as exc:

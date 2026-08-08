@@ -341,7 +341,7 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
 
     response = client.post(
         "/v1/ella/observer/run",
-        headers={"X-Ella-Observer-Token": "observer-token"},
+        headers={"X-Ella-Observer-Token": "observer-token", "X-Ella-Subject-Uid": "user-1"},
         json={"uid": "user-1", "dry_run": True, "channels": ["ios_chat"], "limit": 10},
     )
 
@@ -353,11 +353,77 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
 
     run_id = body["run_id"]
     readback = client.get(
-        f"/v1/ella/observer/runs/{run_id}",
-        headers={"Authorization": "Bearer observer-token"},
+        f"/v1/ella/observer/runs/{run_id}?uid=user-1",
+        headers={"Authorization": "Bearer observer-token", "X-Ella-Subject-Uid": "user-1"},
     )
     assert readback.status_code == 200
     assert readback.json()["observer_run"]["run_id"] == run_id
+
+
+def test_observer_wrong_or_unbound_subject_fails_before_store_or_proposal_work(monkeypatch):
+    _install_proposal_stubs()
+    monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
+    sys.modules.pop("ella.routers.observer", None)
+    sys.modules.pop("ella.services.observer_apply", None)
+    router_module = importlib.import_module("ella.routers.observer")
+
+    class NoEffects:
+        def __init__(self):
+            self.calls = []
+
+        async def timeline(self, **kwargs):
+            self.calls.append(("timeline", kwargs))
+            raise AssertionError("timeline must not run for denied authority")
+
+        async def write_batch(self, events):
+            self.calls.append(("write", events))
+            raise AssertionError("write must not run for denied authority")
+
+        async def get(self, run_id):
+            self.calls.append(("get", run_id))
+            raise AssertionError("log read must not run for denied authority")
+
+        async def save(self, log):
+            self.calls.append(("save", log))
+            raise AssertionError("log write must not run for denied authority")
+
+    effects = NoEffects()
+    app = FastAPI()
+    app.include_router(router_module.create_observer_router(event_store=effects, log_store=effects))
+    client = TestClient(app)
+    denied_headers = (
+        {},
+        {"X-Ella-Observer-Token": "wrong", "X-Ella-Subject-Uid": "user-1"},
+        {"X-Ella-Observer-Token": "observer-token"},
+        {"X-Ella-Observer-Token": "observer-token", "X-Ella-Subject-Uid": "user-2"},
+    )
+
+    for headers in denied_headers:
+        assert (
+            client.post(
+                "/v1/ella/observer/run",
+                headers=headers,
+                json={"uid": "user-1", "dry_run": False},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/v1/ella/observer/apply-pending",
+                headers=headers,
+                json={"uid": "user-1", "dry_run": False},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                "/v1/ella/observer/runs/run-a?uid=user-1",
+                headers=headers,
+            ).status_code
+            == 403
+        )
+
+    assert effects.calls == []
 
 
 def test_observer_router_can_use_extraction_result(monkeypatch):
@@ -411,7 +477,7 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
 
     response = client.post(
         "/v1/ella/observer/run",
-        headers={"X-Ella-Observer-Token": "observer-token"},
+        headers={"X-Ella-Observer-Token": "observer-token", "X-Ella-Subject-Uid": "user-1"},
         json={"uid": "user-1", "dry_run": True, "extractor_mode": "heuristic", "limit": 10},
     )
 
@@ -442,10 +508,13 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
         captured.update(kwargs)
         return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
 
+    async def authority_enabled(uid=None):
+        return uid == "uid-isolated"
+
     monkeypatch.setattr(
         extractor_module.runtime_resolver,
         "runtime_authority_enabled",
-        lambda uid=None: uid == "uid-isolated",
+        authority_enabled,
     )
     monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)
     authority = extractor_module.runtime_resolver.CloudRuntimeAuthorityIdentity(
@@ -597,7 +666,7 @@ def test_observer_apply_pending_writes_safe_memory_event(monkeypatch):
 
     response = client.post(
         "/v1/ella/observer/apply-pending",
-        headers={"X-Ella-Observer-Token": "observer-token"},
+        headers={"X-Ella-Observer-Token": "observer-token", "X-Ella-Subject-Uid": "user-1"},
         json={"uid": "user-1", "dry_run": False, "min_confidence": 0.9},
     )
 
@@ -652,7 +721,7 @@ def test_observer_apply_pending_accepts_trusted_mcp_memory_proposal(monkeypatch)
 
     response = client.post(
         "/v1/ella/observer/apply-pending",
-        headers={"X-Ella-Observer-Token": "observer-token"},
+        headers={"X-Ella-Observer-Token": "observer-token", "X-Ella-Subject-Uid": "user-1"},
         json={"uid": "user-1", "dry_run": False, "min_confidence": 0.9},
     )
 

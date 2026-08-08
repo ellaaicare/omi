@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import posixpath
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -13,14 +15,25 @@ import asyncpg
 
 from database import authority_advisory_lock
 from database import voice_canary as voice_canary_db
+from database.honcho_attestation import (
+    ATTESTATION_VERSION,
+    HonchoAttestationError,
+    authority_credential,
+    observed_runtime_fields,
+    verify_persisted_attestation,
+)
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
     CLOUD_RUNTIME_TARGET_MODES,
     RuntimeTargetLineage,
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 
 _pool: Optional[asyncpg.Pool] = None
+_SELF_HOSTED_BINDING_NAMESPACE = uuid.UUID("fa9b67e0-982d-4cab-9814-d38e992ecf6a")
 REQUIRED_PROVISIONING_INDEXES = (
     "ella_provisioning_jobs_user_schema_key",
     "ella_provisioning_jobs_state_updated_idx",
@@ -122,6 +135,37 @@ REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "voice_entitlements_invitation_consent_lineage_check",
     "users_profile_class_check",
 )
+REQUIRED_SELF_HOSTED_INVITE_COLUMNS = (
+    ("ella_invitations", "allowed_email_hash"),
+    ("ella_invitation_redemptions", "consent_pending"),
+    ("ella_invitation_redemptions", "user_id"),
+    ("ella_invitation_redemptions", "user_mapping_state"),
+    ("ella_invitation_targets", "revoked_at"),
+    ("voice_entitlements", "invitation_consent_pending"),
+    ("ella_runtime_targets", "invitation_target_id"),
+)
+
+
+def deterministic_runtime_binding_id(*, uid: str, provider: str, role: str) -> str:
+    """Return one stable, non-authorizing binding identity for retry reconciliation."""
+    parts = (str(uid), str(provider), str(role))
+    if not all(parts):
+        raise ValueError("runtime_binding_identity_incomplete")
+    return str(uuid.uuid5(_SELF_HOSTED_BINDING_NAMESPACE, "\0".join(parts)))
+
+
+REQUIRED_SELF_HOSTED_INVITE_CONSTRAINTS = (
+    "ella_invitation_targets_required_profile_class_check",
+    "ella_invitation_redemptions_consent_shape_check",
+    "ella_runtime_targets_provider_check",
+    "ella_runtime_targets_status_check",
+    "ella_runtime_targets_shape_check",
+    "voice_entitlements_invitation_authority_epoch_check",
+)
+REQUIRED_SELF_HOSTED_INVITE_INDEXES = (
+    "ella_runtime_targets_invitation_target_key",
+    "ella_runtime_targets_active_hermes_profile_key",
+)
 
 
 class IdentityConflictError(RuntimeError):
@@ -144,6 +188,148 @@ class RuntimePoolClaimError(RuntimeError):
         super().__init__(code)
 
 
+async def invalidate_self_hosted_authority_on_connection(
+    connection: asyncpg.Connection,
+    *,
+    uid: str,
+    user_id: uuid.UUID,
+    reason: str,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
+    invitation_id: Optional[uuid.UUID] = None,
+) -> dict[str, int]:
+    """Atomically make an invitation-owned local Hermes runtime unusable."""
+    await authority_advisory_lock.require_self_owner_lock(
+        connection,
+        owner_lock,
+        user_id=user_id,
+    )
+    if not await connection.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND omi_uid = $2)",
+        user_id,
+        uid,
+    ):
+        raise RuntimePoolClaimError("self_hosted_authority_owner_drift")
+
+    entitlement_rows = await connection.fetch(
+        """
+        UPDATE voice_entitlements entitlement
+        SET status = 'revoked',
+            revision = revision + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE entitlement.uid = $1
+          AND entitlement.status <> 'revoked'
+          AND ($3::uuid IS NULL OR entitlement.invitation_id = $3)
+          AND EXISTS (
+              SELECT 1
+              FROM ella_invitation_redemptions redemption
+              JOIN ella_runtime_targets target
+                ON target.invitation_target_id = redemption.invitation_target_id
+               AND target.provider = 'hermes'
+              WHERE redemption.user_id = $2
+                AND redemption.invitation_id = entitlement.invitation_id
+          )
+        RETURNING entitlement.invitation_id
+        """,
+        uid,
+        user_id,
+        invitation_id,
+    )
+    session_result = await connection.execute(
+        "DELETE FROM voice_active_sessions WHERE uid = $1",
+        uid,
+    )
+    target_rows = await connection.fetch(
+        """
+        UPDATE ella_runtime_targets target
+        SET status = 'revoked',
+            revoked_at = COALESCE(target.revoked_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP
+        FROM ella_invitation_redemptions redemption
+        WHERE target.invitation_target_id = redemption.invitation_target_id
+          AND redemption.user_id = $1
+          AND ($2::uuid IS NULL OR redemption.invitation_id = $2)
+          AND target.provider = 'hermes'
+          AND target.status IN ('reserved', 'ready')
+        RETURNING target.runtime_binding_id
+        """,
+        user_id,
+        invitation_id,
+    )
+    invitation_target_rows = await connection.fetch(
+        """
+        UPDATE ella_invitation_targets invitation_target
+        SET revoked_at = COALESCE(invitation_target.revoked_at, CURRENT_TIMESTAMP)
+        FROM ella_invitation_redemptions redemption
+        WHERE invitation_target.id = redemption.invitation_target_id
+          AND redemption.user_id = $1
+          AND ($2::uuid IS NULL OR redemption.invitation_id = $2)
+          AND invitation_target.revoked_at IS NULL
+        RETURNING invitation_target.id
+        """,
+        user_id,
+        invitation_id,
+    )
+    runtime_session_result = await connection.execute(
+        """
+        DELETE FROM ella_runtime_session_scopes scope
+        USING ella_runtime_bindings binding
+        WHERE scope.binding_id = binding.id
+          AND binding.user_id = $1
+          AND binding.provider = 'hermes'
+        """,
+        user_id,
+    )
+    binding_rows = await connection.fetch(
+        """
+        UPDATE ella_runtime_bindings
+        SET status = 'disabled',
+            active = false,
+            health_state = 'unhealthy',
+            health_receipt = $2::jsonb,
+            disabled_at = COALESCE(disabled_at, CURRENT_TIMESTAMP),
+            quarantine_reason = $3,
+            revision = revision + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+          AND provider = 'hermes'
+          AND (active = true OR status <> 'disabled' OR health_state <> 'unhealthy')
+        RETURNING id
+        """,
+        user_id,
+        json.dumps({"content_free": True, "reason": reason}),
+        reason,
+    )
+    job_rows = await connection.fetch(
+        """
+        UPDATE ella_provisioning_jobs
+        SET state = 'blocked',
+            stage = 'runtime_ready',
+            retryable = false,
+            error_code = 'invitation_authority_revoked',
+            error_detail = $2::jsonb,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+          AND state NOT IN ('blocked', 'rolling_back', 'manual_intervention')
+        RETURNING id
+        """,
+        user_id,
+        json.dumps({"content_free": True, "reason": reason}),
+    )
+
+    def affected(command_tag: str) -> int:
+        return int(command_tag.rsplit(" ", 1)[-1])
+
+    return {
+        "entitlements": len(entitlement_rows),
+        "voice_sessions": affected(session_result),
+        "runtime_targets": len(target_rows),
+        "invitation_targets": len(invitation_target_rows),
+        "runtime_sessions": affected(runtime_session_result),
+        "bindings": len(binding_rows),
+        "jobs": len(job_rows),
+    }
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
@@ -151,7 +337,7 @@ async def get_pool() -> asyncpg.Pool:
             host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
             port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
             user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
             min_size=1,
             max_size=10,
@@ -331,6 +517,173 @@ class EllaProvisioningRepository:
             missing.append("cloud_runtime_schema_probe")
         if missing:
             raise ProvisioningSchemaNotReadyError(missing)
+
+    async def assert_self_hosted_invite_schema_ready(self) -> None:
+        """Require migration 015 before any invited self-hosted side effect."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                ARRAY(
+                    SELECT required.table_name || '.' || required.column_name
+                    FROM unnest($1::text[], $2::text[])
+                        AS required(table_name, column_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = required.table_name
+                          AND column_name = required.column_name
+                    )
+                    ORDER BY required.table_name, required.column_name
+                ) AS missing_columns,
+                ARRAY(
+                    SELECT required.constraint_name
+                    FROM unnest($3::text[]) AS required(constraint_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE connamespace = current_schema()::regnamespace
+                          AND conname = required.constraint_name
+                    )
+                    ORDER BY required.constraint_name
+                ) AS missing_constraints,
+                ARRAY(
+                    SELECT required.index_name
+                    FROM unnest($4::text[]) AS required(index_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE schemaname = current_schema()
+                          AND indexname = required.index_name
+                    )
+                    ORDER BY required.index_name
+                ) AS missing_indexes
+            """,
+            [table for table, _column in REQUIRED_SELF_HOSTED_INVITE_COLUMNS],
+            [column for _table, column in REQUIRED_SELF_HOSTED_INVITE_COLUMNS],
+            list(REQUIRED_SELF_HOSTED_INVITE_CONSTRAINTS),
+            list(REQUIRED_SELF_HOSTED_INVITE_INDEXES),
+        )
+        missing: list[str] = []
+        if not row:
+            missing.append("self_hosted_invite_schema_probe")
+        else:
+            missing.extend(f"column:{value}" for value in (row["missing_columns"] or []))
+            missing.extend(f"constraint:{value}" for value in (row["missing_constraints"] or []))
+            missing.extend(f"index:{value}" for value in (row["missing_indexes"] or []))
+        if missing:
+            raise ProvisioningSchemaNotReadyError(missing)
+
+    async def get_self_hosted_invitation_admission(self, uid: str) -> Optional[dict[str, Any]]:
+        """Return one consent-complete invitation target for local Hermes."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                entitlement.*,
+                target.id AS runtime_target_id,
+                target.invitation_target_id AS attestation_runtime_target_id,
+                target.status AS runtime_target_status,
+                target.entitlement_revision AS runtime_target_entitlement_revision,
+                authority.decision AS consent_decision,
+                authority.authority_epoch AS current_authority_epoch,
+                app_user.id AS user_id,
+                app_user.omi_uid,
+                app_user.profile_class
+            FROM users app_user
+            JOIN voice_entitlements entitlement ON entitlement.uid = app_user.omi_uid
+            JOIN ella_invitation_redemptions redemption
+              ON redemption.invitation_id = entitlement.invitation_id
+             AND redemption.user_id = app_user.id
+             AND redemption.user_mapping_state = 'mapped'
+            JOIN ella_invitations invitation
+              ON invitation.id = redemption.invitation_id
+            JOIN ella_invitation_targets invitation_target
+              ON invitation_target.id = redemption.invitation_target_id
+             AND invitation_target.invitation_id = invitation.id
+            JOIN ella_runtime_targets target
+              ON target.invitation_target_id = redemption.invitation_target_id
+             AND target.account_user_id = app_user.id
+             AND target.profile_user_id = app_user.id
+             AND target.mode = 'hermes-chat'
+            JOIN ella_runtime_targets voice_target
+              ON voice_target.invitation_target_id = redemption.invitation_target_id
+             AND voice_target.account_user_id = app_user.id
+             AND voice_target.profile_user_id = app_user.id
+             AND voice_target.mode = 'hermes-voice'
+            JOIN ella_managed_cloud_consent_authority authority
+              ON authority.user_id = app_user.id
+            WHERE app_user.omi_uid = $1
+              AND app_user.profile_class = 'real'
+              AND invitation.delivery_state = 'sent'
+              AND (
+                    (invitation.kind = 'ordinary' AND invitation.state = 'redeemed')
+                    OR (invitation.kind = 'app_review' AND invitation.state = 'sent')
+                  )
+              AND invitation_target.required_profile_class = 'real'
+              AND invitation_target.consumed_at IS NOT NULL
+              AND invitation_target.revoked_at IS NULL
+              AND entitlement.status IN ('invited', 'active')
+              AND entitlement.invitation_consent_pending = FALSE
+              AND entitlement.consent_authority_epoch = authority.authority_epoch
+              AND authority.decision = 'granted'
+              AND authority.consent_receipt_ref IS NOT NULL
+              AND authority.profile_binding_id IS NOT NULL
+              AND redemption.consent_pending = FALSE
+              AND target.provider = $2
+              AND target.status IN ('reserved', 'ready')
+              AND target.entitlement_revision = entitlement.revision
+              AND target.policy_version = entitlement.consent_policy_version
+              AND target.processor_set_hash = entitlement.consent_processor_set_hash
+              AND target.scope_version = entitlement.consent_scope_version
+              AND target.scope_hash = entitlement.consent_scope_hash
+              AND voice_target.role = target.role
+              AND voice_target.provider = target.provider
+              AND voice_target.status = target.status
+              AND voice_target.runtime_binding_id IS NOT DISTINCT FROM target.runtime_binding_id
+              AND voice_target.entitlement_revision = target.entitlement_revision
+              AND voice_target.policy_version = target.policy_version
+              AND voice_target.processor_set_hash = target.processor_set_hash
+              AND voice_target.scope_version = target.scope_version
+              AND voice_target.scope_hash = target.scope_hash
+              AND authority.policy_version = entitlement.consent_policy_version
+              AND authority.processor_set_hash = entitlement.consent_processor_set_hash
+              AND authority.scope_version = entitlement.consent_scope_version
+              AND authority.scope_hash = entitlement.consent_scope_hash
+              AND invitation.required_consent_policy_version = entitlement.consent_policy_version
+              AND invitation.required_consent_processor_set_hash = entitlement.consent_processor_set_hash
+              AND invitation.required_consent_scope_version = entitlement.consent_scope_version
+              AND invitation.required_consent_scope_hash = entitlement.consent_scope_hash
+              AND entitlement.provider_allowlist = ARRAY['hermes']::text[]
+              AND entitlement.model_allowlist = ARRAY[$3]::text[]
+              AND entitlement.mode_allowlist = $4::text[]
+              AND entitlement.fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+            """,
+            uid,
+            SELF_HOSTED_RUNTIME_PROVIDER,
+            SELF_HOSTED_RUNTIME_MODEL,
+            list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+        )
+        return _row_dict(row)
+
+    async def has_invitation_owned_self_hosted_runtime(self, uid: str) -> bool:
+        """Return sticky invitation ownership even after authority or owner drift."""
+        return bool(
+            await self.pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM users app_user
+                    JOIN ella_invitation_redemptions redemption
+                      ON redemption.user_id = app_user.id
+                     AND redemption.user_mapping_state = 'mapped'
+                    JOIN ella_runtime_targets target
+                      ON target.invitation_target_id = redemption.invitation_target_id
+                     AND target.provider = $2
+                    WHERE app_user.omi_uid = $1
+                )
+                """,
+                uid,
+                SELF_HOSTED_RUNTIME_PROVIDER,
+            )
+        )
 
     async def ensure_user_identity(
         self,
@@ -2394,6 +2747,10 @@ class EllaProvisioningRepository:
                 END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
+              AND (
+                    state NOT IN ('ready', 'blocked', 'rolling_back', 'manual_intervention')
+                    OR state = $2
+                  )
             RETURNING *
             """,
             uuid.UUID(str(job_id)),
@@ -2405,10 +2762,127 @@ class EllaProvisioningRepository:
             json.dumps(receipt or {}),
         )
         if not row:
+            existing = await self.pool.fetchrow(
+                "SELECT * FROM ella_provisioning_jobs WHERE id = $1",
+                uuid.UUID(str(job_id)),
+            )
+            if existing and str(existing["state"]) in {"ready", "blocked", "rolling_back", "manual_intervention"}:
+                return dict(existing)
             raise LookupError("provisioning_job_not_found")
         return dict(row)
 
+    async def prepare_runtime_binding_identity(self, *, uid: str, provider: str, role: str = "user") -> str:
+        """Reserve the exact binding identity included in the provision challenge."""
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                existing = await connection.fetchval(
+                    """
+                    SELECT b.id
+                    FROM ella_runtime_bindings b
+                    JOIN users u ON u.id = b.user_id
+                    WHERE u.omi_uid = $1 AND b.provider = $2 AND b.role = $3
+                    FOR SHARE OF b
+                    """,
+                    uid,
+                    provider,
+                    role,
+                )
+                return str(
+                    existing
+                    or deterministic_runtime_binding_id(
+                        uid=uid,
+                        provider=provider,
+                        role=role,
+                    )
+                )
+
+    async def _verify_self_hosted_honcho_attestation(
+        self,
+        connection,
+        *,
+        binding: dict[str, Any],
+        uid: str,
+        runtime_target_id: str,
+        allowed_job_states: set[tuple[str, str]],
+        require_current_freshness: bool,
+    ) -> None:
+        receipt = binding.get("health_receipt") or {}
+        if isinstance(receipt, str):
+            try:
+                receipt = json.loads(receipt)
+            except json.JSONDecodeError as exc:
+                raise RuntimePoolClaimError("honcho_attestation_evidence_malformed") from exc
+        evidence = receipt.get("honcho_isolation") if isinstance(receipt, dict) else None
+        attestation = evidence.get("attestation") if isinstance(evidence, dict) else None
+        if not isinstance(attestation, dict):
+            raise RuntimePoolClaimError("honcho_attestation_evidence_malformed")
+
+        profiles_root = os.getenv("ELLA_HERMES_PROFILES_ROOT", "/Users/ellaai/.hermes/profiles")
+        profile_name = str(binding.get("profile_name") or "")
+        expected_challenge = {
+            "version": ATTESTATION_VERSION,
+            "nonce": attestation.get("nonce"),
+            "issued_at": attestation.get("issued_at"),
+            "expires_at": attestation.get("expires_at"),
+            "firebase_uid": uid,
+            "account_owner_id": str(binding.get("account_user_id") or binding.get("user_id") or ""),
+            "runtime_target_id": str(runtime_target_id),
+            "binding_id": str(binding.get("id") or ""),
+            "job_id": str(attestation.get("job_id") or ""),
+        }
+        expected_config = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/honcho.json")
+        try:
+            verified_evidence = verify_persisted_attestation(
+                evidence,
+                expected_challenge=expected_challenge,
+                observed=observed_runtime_fields(
+                    profile_name=profile_name,
+                    config_path=expected_config,
+                    workspace_root=str(binding.get("workspace_root") or ""),
+                    honcho_workspace=str(binding.get("honcho_workspace") or ""),
+                    observed_peer_id=str(binding.get("observed_peer") or ""),
+                    observer_peer_id=str(binding.get("observer_peer") or ""),
+                    gateway_port=int(binding.get("gateway_port") or 0),
+                    gateway_target=str(binding.get("internal_gateway_url") or ""),
+                    credential_ref=str(binding.get("credential_ref") or ""),
+                    agent_id=str(binding.get("agent_id") or ""),
+                    service_label=str(binding.get("service_label") or ""),
+                ),
+            )
+        except (HonchoAttestationError, TypeError, ValueError) as exc:
+            code = exc.code if isinstance(exc, HonchoAttestationError) else "honcho_attestation_readback_mismatch"
+            raise RuntimePoolClaimError(code) from exc
+        if require_current_freshness and int(time.time()) > int(verified_evidence["attestation"]["expires_at"]):
+            raise RuntimePoolClaimError("honcho_attestation_stale")
+
+        try:
+            job_id = uuid.UUID(str(attestation["job_id"]))
+        except (TypeError, ValueError) as exc:
+            raise RuntimePoolClaimError("honcho_attestation_job_mismatch") from exc
+        job = await connection.fetchrow(
+            """
+            SELECT state, stage
+            FROM ella_provisioning_jobs
+            WHERE id = $1 AND user_id = $2 AND target_schema_version = $3
+            FOR UPDATE
+            """,
+            job_id,
+            binding["user_id"],
+            binding["template_version"],
+        )
+        if not job or (str(job["state"]), str(job["stage"])) not in allowed_job_states:
+            raise RuntimePoolClaimError("honcho_attestation_job_mismatch")
+
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
+        requested_binding_id = str(binding.get("binding_id") or uuid.uuid4())
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -2428,21 +2902,24 @@ class EllaProvisioningRepository:
                 row = await connection.fetchrow(
                     """
                     INSERT INTO ella_runtime_bindings (
-                        id, user_id, role, provider, profile_name, agent_id, workspace_root,
+                        id, user_id, account_user_id, profile_user_id,
+                        role, provider, profile_name, agent_id, workspace_root,
                         internal_gateway_url, gateway_port, service_label, credential_ref,
                         honcho_workspace, observed_peer, observer_peer, template_version,
                         model_policy_version, voice_policy_version, health_state,
                         health_receipt, revision, active
                     )
                     SELECT
-                        $1, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                        $1, u.id, u.id, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                         $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
                     FROM users u
                     WHERE u.omi_uid = $2
                     ON CONFLICT (user_id, role, provider)
                     WHERE provider <> 'hermes_cloud'
                     DO UPDATE
-                    SET profile_name = EXCLUDED.profile_name,
+                    SET account_user_id = EXCLUDED.account_user_id,
+                        profile_user_id = EXCLUDED.profile_user_id,
+                        profile_name = EXCLUDED.profile_name,
                         agent_id = EXCLUDED.agent_id,
                         workspace_root = EXCLUDED.workspace_root,
                         internal_gateway_url = EXCLUDED.internal_gateway_url,
@@ -2462,7 +2939,7 @@ class EllaProvisioningRepository:
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING *
                     """,
-                    uuid.uuid4(),
+                    uuid.UUID(requested_binding_id),
                     uid,
                     binding.get("role", "user"),
                     binding["provider"],
@@ -2484,6 +2961,8 @@ class EllaProvisioningRepository:
                 )
         if not row:
             raise LookupError("user_not_found")
+        if binding.get("binding_id") and str(row["id"]) != requested_binding_id:
+            raise RuntimePoolClaimError("honcho_attestation_binding_mismatch")
         return dict(row)
 
     async def activate_runtime_binding(
@@ -2492,7 +2971,19 @@ class EllaProvisioningRepository:
         uid: str,
         provider: str,
         role: str = "user",
+        require_invitation_target: bool = False,
+        authority_lineage: Optional[RuntimeTargetLineage] = None,
+        model: str = SELF_HOSTED_RUNTIME_MODEL,
     ) -> dict[str, Any]:
+        lineage = None
+        if require_invitation_target:
+            if provider != SELF_HOSTED_RUNTIME_PROVIDER:
+                raise ValueError("self_hosted_runtime_provider_required")
+            if model != SELF_HOSTED_RUNTIME_MODEL:
+                raise ValueError("invalid_self_hosted_runtime_policy")
+            if authority_lineage is None:
+                raise ValueError("self_hosted_runtime_lineage_required")
+            lineage = authority_lineage.validate()
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -2508,6 +2999,12 @@ class EllaProvisioningRepository:
                     uid=uid,
                     owner=owner,
                     proof=owner_lock,
+                )
+                await voice_canary_db.lock_runtime_authority_on_connection(
+                    connection,
+                    uid=uid,
+                    provider=provider,
+                    mode="hermes-chat" if require_invitation_target else None,
                 )
                 selected = await connection.fetchrow(
                     """
@@ -2526,26 +3023,195 @@ class EllaProvisioningRepository:
                 if selected["health_state"] != "healthy":
                     raise RuntimeError("runtime_binding_not_healthy")
 
+                if require_invitation_target:
+                    authority = await connection.fetchrow(
+                        """
+                        SELECT
+                            target.id AS target_id,
+                            target.invitation_target_id,
+                            target.entitlement_revision,
+                            target.status AS target_status,
+                            target.runtime_binding_id,
+                            entitlement.status AS entitlement_status,
+                            entitlement.revision AS current_entitlement_revision,
+                            entitlement.consent_authority_epoch,
+                            invitation.id AS invitation_id
+                        FROM ella_runtime_targets target
+                        JOIN ella_runtime_targets voice_target
+                          ON voice_target.invitation_target_id = target.invitation_target_id
+                         AND voice_target.account_user_id = target.account_user_id
+                         AND voice_target.profile_user_id = target.profile_user_id
+                         AND voice_target.role = target.role
+                         AND voice_target.provider = target.provider
+                         AND voice_target.mode = 'hermes-voice'
+                        JOIN ella_invitation_targets invitation_target
+                          ON invitation_target.id = target.invitation_target_id
+                        JOIN ella_invitation_redemptions redemption
+                          ON redemption.invitation_target_id = invitation_target.id
+                         AND redemption.user_id = $1
+                         AND redemption.user_mapping_state = 'mapped'
+                         AND redemption.consent_pending = FALSE
+                        JOIN ella_invitations invitation
+                          ON invitation.id = redemption.invitation_id
+                         AND invitation.id = invitation_target.invitation_id
+                        JOIN voice_entitlements entitlement
+                          ON entitlement.uid = $2
+                         AND entitlement.invitation_id = invitation.id
+                        JOIN ella_managed_cloud_consent_authority consent
+                          ON consent.user_id = $1
+                        WHERE target.account_user_id = $1
+                          AND target.profile_user_id = $1
+                          AND target.role = $3
+                          AND target.provider = 'hermes'
+                          AND target.mode = 'hermes-chat'
+                          AND target.status IN ('reserved', 'ready')
+                          AND (target.runtime_binding_id IS NULL OR target.runtime_binding_id = $4)
+                          AND target.entitlement_revision = entitlement.revision
+                          AND target.policy_version = $5
+                          AND target.processor_set_hash = $6
+                          AND target.scope_version = $7
+                          AND target.scope_hash = $8
+                          AND voice_target.status = target.status
+                          AND voice_target.runtime_binding_id IS NOT DISTINCT FROM target.runtime_binding_id
+                          AND voice_target.entitlement_revision = target.entitlement_revision
+                          AND voice_target.policy_version = target.policy_version
+                          AND voice_target.processor_set_hash = target.processor_set_hash
+                          AND voice_target.scope_version = target.scope_version
+                          AND voice_target.scope_hash = target.scope_hash
+                          AND invitation_target.required_profile_class = 'real'
+                          AND invitation_target.consumed_at IS NOT NULL
+                          AND invitation_target.revoked_at IS NULL
+                          AND invitation.delivery_state = 'sent'
+                          AND (
+                                (invitation.kind = 'ordinary' AND invitation.state = 'redeemed')
+                                OR (invitation.kind = 'app_review' AND invitation.state = 'sent')
+                              )
+                          AND invitation.required_consent_policy_version = target.policy_version
+                          AND invitation.required_consent_processor_set_hash = target.processor_set_hash
+                          AND invitation.required_consent_scope_version = target.scope_version
+                          AND invitation.required_consent_scope_hash = target.scope_hash
+                          AND entitlement.status IN ('invited', 'active')
+                          AND entitlement.invitation_consent_pending = FALSE
+                          AND entitlement.consent_authority_epoch = consent.authority_epoch
+                          AND entitlement.consent_policy_version = target.policy_version
+                          AND entitlement.consent_processor_set_hash = target.processor_set_hash
+                          AND entitlement.consent_scope_version = target.scope_version
+                          AND entitlement.consent_scope_hash = target.scope_hash
+                          AND entitlement.provider_allowlist = ARRAY['hermes']::text[]
+                          AND entitlement.model_allowlist = ARRAY[$9]::text[]
+                          AND entitlement.mode_allowlist = $10::text[]
+                          AND entitlement.fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                          AND consent.decision = 'granted'
+                          AND consent.consent_receipt_ref IS NOT NULL
+                          AND consent.profile_binding_id IS NOT NULL
+                          AND consent.policy_version = target.policy_version
+                          AND consent.processor_set_hash = target.processor_set_hash
+                          AND consent.scope_version = target.scope_version
+                          AND consent.scope_hash = target.scope_hash
+                        FOR UPDATE OF target, voice_target, invitation_target, redemption,
+                            invitation, entitlement, consent
+                        """,
+                        selected["user_id"],
+                        uid,
+                        role,
+                        selected["id"],
+                        lineage.policy_version,
+                        lineage.processor_set_hash,
+                        lineage.scope_version,
+                        lineage.scope_hash,
+                        model,
+                        list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+                    )
+                    if not authority:
+                        raise RuntimePoolClaimError("invitation_runtime_target_missing")
+                    await self._verify_self_hosted_honcho_attestation(
+                        connection,
+                        binding=dict(selected),
+                        uid=uid,
+                        runtime_target_id=str(authority["invitation_target_id"]),
+                        allowed_job_states={("provisioning", "smoke_passed")},
+                        require_current_freshness=True,
+                    )
+                    decision = await voice_canary_db.revalidate_runtime_activation_on_connection(
+                        connection,
+                        uid=uid,
+                        admitted_entitlement_revision=int(authority["entitlement_revision"]),
+                        provider=provider,
+                        model=model,
+                        required_modes=SELF_HOSTED_RUNTIME_TARGET_MODES,
+                        require_active=str(authority["entitlement_status"]) == "active",
+                    )
+                    if not decision.allowed:
+                        raise RuntimePoolClaimError(f"runtime_admission_{decision.code}")
+                    entitlement_revision = int(authority["current_entitlement_revision"])
+                    if authority["entitlement_status"] == "invited":
+                        activated_entitlement = await connection.fetchrow(
+                            """
+                            UPDATE voice_entitlements
+                            SET status = 'active',
+                                revision = revision + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE uid = $1
+                              AND status = 'invited'
+                              AND revision = $2
+                              AND invitation_id = $3
+                              AND consent_authority_epoch = $4
+                            RETURNING revision
+                            """,
+                            uid,
+                            entitlement_revision,
+                            authority["invitation_id"],
+                            authority["consent_authority_epoch"],
+                        )
+                        if not activated_entitlement:
+                            raise RuntimePoolClaimError("invitation_entitlement_activation_stale")
+                        entitlement_revision = int(activated_entitlement["revision"])
+                    targets = await connection.fetch(
+                        """
+                        UPDATE ella_runtime_targets
+                        SET runtime_binding_id = $2,
+                            status = 'ready',
+                            entitlement_revision = $3,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE invitation_target_id = $1
+                          AND status IN ('reserved', 'ready')
+                          AND (runtime_binding_id IS NULL OR runtime_binding_id = $2)
+                          AND mode = ANY($4::text[])
+                        RETURNING id, mode
+                        """,
+                        authority["invitation_target_id"],
+                        selected["id"],
+                        entitlement_revision,
+                        list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+                    )
+                    if {str(target["mode"]) for target in targets} != set(SELF_HOSTED_RUNTIME_TARGET_MODES):
+                        raise RuntimePoolClaimError("invitation_runtime_target_stale")
+
                 await connection.execute(
                     """
                     UPDATE ella_runtime_bindings
                     SET active = false, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = $1 AND role = $2 AND active = true
+                    WHERE user_id = $1 AND role = $2 AND active = true AND id <> $3
                     """,
                     selected["user_id"],
                     role,
-                )
-                activated = await connection.fetchrow(
-                    """
-                    UPDATE ella_runtime_bindings
-                    SET active = true,
-                        revision = revision + 1,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $1
-                    RETURNING *
-                    """,
                     selected["id"],
                 )
+                if bool(selected["active"]) and (not require_invitation_target or str(selected["status"]) == "active"):
+                    activated = selected
+                else:
+                    activated = await connection.fetchrow(
+                        """
+                        UPDATE ella_runtime_bindings
+                        SET active = true,
+                            status = CASE WHEN provider = 'hermes' THEN 'active' ELSE status END,
+                            revision = revision + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                        RETURNING *
+                        """,
+                        selected["id"],
+                    )
                 await connection.execute(
                     """
                     UPDATE users
@@ -2583,6 +3249,39 @@ class EllaProvisioningRepository:
                 )
         if result == "UPDATE 0":
             raise LookupError("user_not_found")
+
+    async def update_guardian_mode(self, uid: str, guardian_mode: Optional[str]) -> Optional[str]:
+        """Update one active user's Guardian preference under owner authority."""
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE users
+                    SET guardian_mode = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE omi_uid = $1
+                      AND status = 'ACTIVE'
+                    RETURNING guardian_mode
+                    """,
+                    uid,
+                    guardian_mode,
+                )
+        if row is None:
+            raise LookupError("active_user_not_found")
+        return row["guardian_mode"]
 
     async def has_active_retained_runtime(self, uid: str) -> bool:
         """Return whether an authenticated legacy user still has usable routing."""
@@ -2713,6 +3412,154 @@ class EllaProvisioningRepository:
                     result["target_entitlement_revision"] = int(row["target_entitlement_revision"])
                     result["runtime_target_updated_at"] = str(row["resolved_target_updated_at"])
                     result["consent_authority_epoch"] = consent_authority_epoch
+                    return result
+        if required_provider == SELF_HOSTED_RUNTIME_PROVIDER and authority_lineage is not None:
+            if target_mode not in SELF_HOSTED_RUNTIME_TARGET_MODES:
+                raise ValueError("self_hosted_runtime_target_mode_required")
+            if model != SELF_HOSTED_RUNTIME_MODEL:
+                raise ValueError("invalid_self_hosted_runtime_policy")
+            lineage = authority_lineage.validate()
+            async with self.pool.acquire() as connection:
+                async with connection.transaction():
+                    await voice_canary_db.lock_runtime_authority_on_connection(
+                        connection,
+                        uid=uid,
+                        provider=SELF_HOSTED_RUNTIME_PROVIDER,
+                        mode=target_mode,
+                    )
+                    row = await connection.fetchrow(
+                        """
+                        SELECT
+                            binding.*, app_user.omi_uid, app_user.name,
+                            app_user.status AS user_status, app_user.profile_class,
+                            target.id AS resolved_target_id,
+                            target.invitation_target_id AS resolved_attestation_target_id,
+                            target.mode AS resolved_target_mode,
+                            target.endpoint_ref AS resolved_target_endpoint_ref,
+                            target.credential_ref AS resolved_target_credential_ref,
+                            target.policy_version AS target_policy_version,
+                            target.processor_set_hash AS target_processor_set_hash,
+                            target.scope_version AS target_scope_version,
+                            target.scope_hash AS target_scope_hash,
+                            target.entitlement_revision AS target_entitlement_revision,
+                            target.updated_at AS resolved_target_updated_at,
+                            authority.authority_epoch AS resolved_authority_epoch
+                        FROM users app_user
+                        JOIN voice_entitlements entitlement
+                          ON entitlement.uid = app_user.omi_uid
+                        JOIN ella_invitation_redemptions redemption
+                          ON redemption.invitation_id = entitlement.invitation_id
+                         AND redemption.user_id = app_user.id
+                         AND redemption.user_mapping_state = 'mapped'
+                         AND redemption.consent_pending = FALSE
+                        JOIN ella_invitations invitation
+                          ON invitation.id = redemption.invitation_id
+                        JOIN ella_invitation_targets invitation_target
+                          ON invitation_target.id = redemption.invitation_target_id
+                         AND invitation_target.invitation_id = invitation.id
+                        JOIN ella_runtime_targets target
+                          ON target.invitation_target_id = invitation_target.id
+                         AND target.account_user_id = app_user.id
+                         AND target.profile_user_id = app_user.id
+                        JOIN ella_runtime_bindings binding
+                          ON binding.id = target.runtime_binding_id
+                         AND binding.user_id = app_user.id
+                        JOIN ella_managed_cloud_consent_authority authority
+                          ON authority.user_id = app_user.id
+                        WHERE app_user.omi_uid = $1
+                          AND app_user.status = 'ACTIVE'
+                          AND app_user.profile_class = 'real'
+                          AND binding.role = $2
+                          AND binding.provider = 'hermes'
+                          AND binding.status = 'active'
+                          AND binding.active = TRUE
+                          AND binding.health_state = 'healthy'
+                          AND binding.account_user_id = app_user.id
+                          AND binding.profile_user_id = app_user.id
+                          AND ($3::text IS NULL OR binding.template_version = $3)
+                          AND target.role = binding.role
+                          AND target.provider = 'hermes'
+                          AND target.status = 'ready'
+                          AND target.mode = $4
+                          AND target.runtime_binding_id = binding.id
+                          AND target.entitlement_revision = entitlement.revision
+                          AND target.policy_version = $5
+                          AND target.processor_set_hash = $6
+                          AND target.scope_version = $7
+                          AND target.scope_hash = $8
+                          AND invitation_target.required_profile_class = 'real'
+                          AND invitation_target.consumed_at IS NOT NULL
+                          AND invitation_target.revoked_at IS NULL
+                          AND invitation.delivery_state = 'sent'
+                          AND (
+                                (invitation.kind = 'ordinary' AND invitation.state = 'redeemed')
+                                OR (invitation.kind = 'app_review' AND invitation.state = 'sent')
+                              )
+                          AND entitlement.status = 'active'
+                          AND entitlement.invitation_consent_pending = FALSE
+                          AND entitlement.consent_authority_epoch = authority.authority_epoch
+                          AND authority.decision = 'granted'
+                          AND authority.consent_receipt_ref IS NOT NULL
+                          AND authority.profile_binding_id IS NOT NULL
+                          AND authority.policy_version = target.policy_version
+                          AND authority.processor_set_hash = target.processor_set_hash
+                          AND authority.scope_version = target.scope_version
+                          AND authority.scope_hash = target.scope_hash
+                          AND invitation.required_consent_policy_version = target.policy_version
+                          AND invitation.required_consent_processor_set_hash = target.processor_set_hash
+                          AND invitation.required_consent_scope_version = target.scope_version
+                          AND invitation.required_consent_scope_hash = target.scope_hash
+                          AND entitlement.consent_policy_version = target.policy_version
+                          AND entitlement.consent_processor_set_hash = target.processor_set_hash
+                          AND entitlement.consent_scope_version = target.scope_version
+                          AND entitlement.consent_scope_hash = target.scope_hash
+                          AND entitlement.provider_allowlist = ARRAY['hermes']::text[]
+                          AND entitlement.model_allowlist = ARRAY[$9]::text[]
+                          AND entitlement.mode_allowlist = $10::text[]
+                          AND entitlement.fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                        FOR SHARE OF binding, app_user, target, invitation,
+                            invitation_target, redemption, authority
+                        """,
+                        uid,
+                        role,
+                        template_version,
+                        target_mode,
+                        lineage.policy_version,
+                        lineage.processor_set_hash,
+                        lineage.scope_version,
+                        lineage.scope_hash,
+                        model,
+                        list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+                    )
+                    if not row:
+                        return None
+                    decision = await voice_canary_db.revalidate_runtime_resolution_on_connection(
+                        connection,
+                        uid=uid,
+                        admitted_entitlement_revision=int(row["target_entitlement_revision"]),
+                        provider=SELF_HOSTED_RUNTIME_PROVIDER,
+                        model=model,
+                        mode=target_mode,
+                    )
+                    if not decision.allowed:
+                        raise RuntimePoolClaimError(f"runtime_admission_{decision.code}")
+                    await self._verify_self_hosted_honcho_attestation(
+                        connection,
+                        binding=dict(row),
+                        uid=uid,
+                        runtime_target_id=str(row["resolved_attestation_target_id"]),
+                        allowed_job_states={("provisioning", "smoke_passed"), ("ready", "active")},
+                        require_current_freshness=False,
+                    )
+                    result = dict(row)
+                    result["runtime_target_id"] = str(row["resolved_target_id"])
+                    result["attestation_runtime_target_id"] = str(row["resolved_attestation_target_id"])
+                    result["runtime_target_mode"] = str(row["resolved_target_mode"])
+                    result["target_endpoint_ref"] = str(row["resolved_target_endpoint_ref"] or "")
+                    result["target_credential_ref"] = str(row["resolved_target_credential_ref"] or "")
+                    result["target_entitlement_revision"] = int(row["target_entitlement_revision"])
+                    result["runtime_target_updated_at"] = str(row["resolved_target_updated_at"])
+                    result["consent_authority_epoch"] = str(row["resolved_authority_epoch"])
                     return result
         if required_provider not in {None, "hermes"}:
             raise ValueError("invalid_runtime_provider")

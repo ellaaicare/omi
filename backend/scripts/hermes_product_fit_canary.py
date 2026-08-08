@@ -1247,7 +1247,10 @@ class LiveCanaryAdapter:
             "client_interaction_id": client_interaction_id,
             "transcript_sha256": self.config.enrichment_transcript_sha256,
         }
-        headers = {"X-Ella-Hermes-Cloud-Enrichment-Token": token}
+        headers = {
+            "X-Ella-Hermes-Cloud-Enrichment-Token": token,
+            "X-Ella-Subject-Uid": self.config.uid,
+        }
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=False, trust_env=False) as client:
             first = await _request_json(
                 client,

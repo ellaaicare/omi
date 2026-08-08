@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Optional
 
@@ -14,7 +15,7 @@ from database.ella_provisioning import (
     IdentityConflictError,
     ProvisioningSchemaNotReadyError,
 )
-from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER
+from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER, SELF_HOSTED_RUNTIME_MODEL
 from ella.services.ai_consent import (
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
@@ -23,22 +24,31 @@ from ella.services.ai_consent import (
 from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.provisioning import (
     DEFAULT_TARGET_SCHEMA_VERSION,
+    HermesProvisionClient,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
     any_provisioning_enabled,
     cloud_provisioning_enabled,
+    current_self_hosted_runtime_lineage,
     effective_target_schema_version,
+    provisioning_enabled,
     public_receipt,
     retained_compatibility_receipt,
+    self_hosted_invitation_admission,
+    self_hosted_provisioning_configured,
+    self_hosted_provisioning_enabled,
+    self_hosted_runtime_authority_required,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 from utils.other import endpoints as auth
 
 logger = logging.getLogger("ella.onboarding")
 router = APIRouter(prefix="/v1/ella/onboarding", tags=["ella-onboarding"])
 SCHEMA_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 _firestore_db: Any = None
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def configure_firestore_db(firestore_db: Any) -> None:
@@ -69,11 +79,11 @@ def _verified_identity(uid: str, payload: OnboardingEnsureRequest) -> VerifiedId
     try:
         firebase_user = auth.get_user(uid)
     except Exception as exc:
-        logger.warning("Firebase user lookup failed for authenticated uid=%s: %s", uid, type(exc).__name__)
+        logger.warning("Firebase user lookup failed: %s", type(exc).__name__)
         raise HTTPException(status_code=401, detail={"code": "auth_required"}) from exc
 
     email = str(getattr(firebase_user, "email", "") or "").strip()
-    if not email:
+    if not email or getattr(firebase_user, "email_verified", None) is not True:
         raise HTTPException(status_code=409, detail={"code": "identity_missing_email"})
     name = str(getattr(firebase_user, "display_name", "") or "").strip() or email.split("@", 1)[0]
     return VerifiedIdentity(
@@ -95,10 +105,10 @@ async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[di
     try:
         repository = await EllaProvisioningRepository.create()
         if await repository.has_active_retained_runtime(uid):
-            logger.info("Using retained-account onboarding compatibility for uid=%s", uid)
+            logger.info("Using retained-account onboarding compatibility")
             return retained_compatibility_receipt(target_schema_version)
     except Exception as exc:
-        logger.exception("Retained-account onboarding lookup failed for uid=%s", uid)
+        logger.error("Retained-account onboarding lookup failed")
         raise HTTPException(status_code=503, detail={"code": "provisioning_unavailable"}) from exc
     return None
 
@@ -114,7 +124,7 @@ async def ensure_onboarding(
     payload: OnboardingEnsureRequest,
     background_tasks: BackgroundTasks,
     response: Response,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> dict[str, Any]:
     if not SCHEMA_VERSION_RE.fullmatch(payload.target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
@@ -122,13 +132,59 @@ async def ensure_onboarding(
         target_schema_version = effective_target_schema_version(uid, payload.target_schema_version)
     except ProvisioningError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
-    if not any_provisioning_enabled(uid):
+    self_hosted_configured = self_hosted_provisioning_configured() and not cloud_provisioning_enabled(uid)
+    authority_snapshot = None
+    if self_hosted_configured:
+        try:
+            authority_snapshot = HermesProvisionClient.snapshot_authority()
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+    coordinator = None
+    invitation_admission = None
+    invitation_owned = False
+    if not cloud_provisioning_enabled(uid):
+        try:
+            coordinator = await _coordinator()
+            invitation_owned = await self_hosted_runtime_authority_required(
+                uid,
+                repository=coordinator.repository,
+            )
+            if invitation_owned and not self_hosted_configured:
+                raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+            if self_hosted_configured:
+                invitation_admission = await self_hosted_invitation_admission(
+                    uid,
+                    repository=coordinator.repository,
+                )
+            if invitation_owned and not self_hosted_provisioning_enabled(uid, admission=invitation_admission):
+                raise ProvisioningError("invitation_authority_required", retryable=False)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "self_hosted_invitation_authority_unavailable"},
+            ) from exc
+    if not any_provisioning_enabled(uid, self_hosted_admission=invitation_admission):
         receipt = await _retained_receipt(uid, payload.target_schema_version)
         if receipt:
             return receipt
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
+    hermes_required = not cloud_provisioning_enabled(uid) and (
+        self_hosted_provisioning_enabled(uid, admission=invitation_admission) or provisioning_enabled(uid)
+    )
+    if hermes_required and authority_snapshot is None:
+        try:
+            authority_snapshot = HermesProvisionClient.snapshot_authority()
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     identity = _verified_identity(uid, payload)
-    coordinator = await _coordinator()
+    if authority_snapshot is not None:
+        try:
+            HermesProvisionClient.snapshot_authority(authority_snapshot)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+    coordinator = coordinator or await _coordinator()
     try:
         job, binding, claimed = await coordinator.ensure_job(
             identity=identity,
@@ -138,6 +194,7 @@ async def ensure_onboarding(
                 **_payload_dict(payload),
                 "effective_target_schema_version": target_schema_version,
             },
+            authority_snapshot=authority_snapshot,
         )
     except IdentityConflictError as exc:
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from exc
@@ -149,7 +206,17 @@ async def ensure_onboarding(
 
     receipt = public_receipt(job, binding)
     if claimed:
-        background_tasks.add_task(coordinator.process_claimed_job, job=job, identity=identity)
+        try:
+            if authority_snapshot is not None:
+                HermesProvisionClient.snapshot_authority(authority_snapshot)
+            background_tasks.add_task(
+                coordinator.process_claimed_job,
+                job=job,
+                identity=identity,
+                authority_snapshot=authority_snapshot,
+            )
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
         response.status_code = 202
     elif receipt["state"] in {"queued", "provisioning", "retryable", "rolling_back"}:
         response.status_code = 202
@@ -161,7 +228,7 @@ async def ensure_onboarding(
 @router.get("/status")
 async def onboarding_status(
     target_schema_version: str = DEFAULT_TARGET_SCHEMA_VERSION,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> dict[str, Any]:
     if not SCHEMA_VERSION_RE.fullmatch(target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
@@ -169,23 +236,46 @@ async def onboarding_status(
         target_schema_version = effective_target_schema_version(uid, target_schema_version)
     except ProvisioningError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
-    if not any_provisioning_enabled(uid):
+    cloud_required = cloud_provisioning_enabled(uid)
+    self_hosted_configured = self_hosted_provisioning_configured() and not cloud_required
+    try:
+        repository = await EllaProvisioningRepository.create()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "self_hosted_invitation_authority_unavailable"},
+        ) from exc
+    invitation_admission = None
+    invitation_owned = False
+    if not cloud_required:
+        try:
+            invitation_owned = await self_hosted_runtime_authority_required(uid, repository=repository)
+            if invitation_owned and not self_hosted_configured:
+                raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+            if self_hosted_configured:
+                invitation_admission = await self_hosted_invitation_admission(uid, repository=repository)
+            if invitation_owned and not self_hosted_provisioning_enabled(uid, admission=invitation_admission):
+                raise ProvisioningError("invitation_authority_required", retryable=False)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    if not any_provisioning_enabled(uid, self_hosted_admission=invitation_admission):
         receipt = await _retained_receipt(uid, target_schema_version)
         if receipt:
             return receipt
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
-    repository = await EllaProvisioningRepository.create()
     try:
         await repository.assert_schema_ready()
-        if cloud_provisioning_enabled(uid):
+        if cloud_required:
             await repository.assert_cloud_schema_ready()
+        elif self_hosted_provisioning_enabled(uid, admission=invitation_admission):
+            await repository.assert_self_hosted_invite_schema_ready()
     except ProvisioningSchemaNotReadyError as exc:
         logger.error("Ella provisioning status schema is incomplete: %s", ", ".join(exc.missing))
         raise HTTPException(status_code=503, detail={"code": "provisioning_schema_not_ready"}) from exc
     job = await repository.get_job(uid, target_schema_version)
     if not job:
         raise HTTPException(status_code=404, detail={"code": "setup_not_started"})
-    if cloud_provisioning_enabled(uid):
+    if cloud_required:
         profile_class = await repository.get_cloud_profile_class(uid)
         authority = current_cloud_authority(
             uid,
@@ -205,11 +295,15 @@ async def onboarding_status(
             model=CLOUD_RUNTIME_MODEL,
         )
     else:
+        self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
         binding = await repository.resolve_active_runtime(
             uid,
             template_version=target_schema_version,
+            target_mode="hermes-chat" if self_hosted_required else None,
             required_provider="hermes",
+            authority_lineage=current_self_hosted_runtime_lineage() if self_hosted_required else None,
+            model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
         )
-    if not binding and cloud_provisioning_enabled(uid):
+    if not binding and cloud_required:
         binding = await repository.resolve_cloud_binding_state(uid)
     return public_receipt(job, binding)

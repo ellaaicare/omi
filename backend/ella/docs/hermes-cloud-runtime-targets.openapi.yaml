@@ -47,7 +47,7 @@ paths:
   /v1/ella/resolve:
     get:
       tags: [Runtime Resolution]
-      summary: Resolve retained or Cloud runtime routing for the authenticated UID.
+      summary: Return redacted isolated-runtime readiness for the authenticated UID.
       parameters:
         - name: uid
           in: query
@@ -56,7 +56,7 @@ paths:
           description: Must match the Firebase bearer subject.
       responses:
         "200":
-          description: Redacted route. Cloud returns only first-party backend URLs.
+          description: Redacted availability, status, and provider only; no endpoint, token, session, or workspace fields.
         "403":
           description: UID does not match the bearer subject.
         "409":
@@ -374,7 +374,7 @@ paths:
   /v1/ella/guardian/next-audio:
     get:
       tags: [Observer and Guardian]
-      summary: Consolidate and consume Guardian audio through the exact Guardian target.
+      summary: Consume Guardian audio for the exact Firebase bearer subject.
       x-ella-runtime-target:
         mode: hermes-cloud-guardian
         fallback: none

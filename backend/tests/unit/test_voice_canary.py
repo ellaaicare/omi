@@ -18,6 +18,14 @@ from ella.routers import voice
 from scripts import voice_canary_admin
 
 
+@pytest.fixture(autouse=True)
+def retained_runtime_not_invitation_owned(monkeypatch):
+    async def authority_disabled(_uid):
+        return False
+
+    monkeypatch.setattr(voice, "self_hosted_runtime_authority_required", authority_disabled)
+
+
 def _entitlement(**overrides):
     value = {
         "revision": 7,

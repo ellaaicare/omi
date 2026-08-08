@@ -1,4 +1,4 @@
-"""Shared lower-layer contract for exact Hermes Cloud runtime targets."""
+"""Shared lower-layer contract for exact runtime targets (both Cloud and self-hosted)."""
 
 from __future__ import annotations
 
@@ -15,10 +15,17 @@ CLOUD_RUNTIME_TARGET_MODES = (
     "hermes-cloud-photon",
 )
 
+SELF_HOSTED_RUNTIME_PROVIDER = "hermes"
+SELF_HOSTED_RUNTIME_MODEL = "gpt-5.6-sol"
+SELF_HOSTED_RUNTIME_TARGET_MODES = (
+    "hermes-chat",
+    "hermes-voice",
+)
+
 
 @dataclass(frozen=True)
 class RuntimeTargetLineage:
-    """Consent lineage that must exactly match a published Cloud target."""
+    """Consent lineage that must exactly match a published target."""
 
     policy_version: str
     processor_set_hash: str
@@ -34,7 +41,7 @@ class RuntimeTargetLineage:
                 self.scope_hash,
             )
         ):
-            raise ValueError("cloud_runtime_lineage_incomplete")
+            raise ValueError("runtime_lineage_incomplete")
         return self
 
     def as_dict(self) -> dict[str, str]:

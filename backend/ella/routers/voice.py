@@ -38,14 +38,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
+from database.honcho_attestation import authority_credential
+from database.runtime_targets import (
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+)
 from ella.services.ai_consent import (
     assert_current_ai_consent,
     require_current_ai_consent,
     require_current_ai_consent_or_internal_tts,
     resolve_processor,
 )
-from ella.services.provisioning import ProvisioningError, cloud_provisioning_enabled, rollout_enabled
-from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.provisioning import (
+    ProvisioningError,
+    cloud_provisioning_enabled,
+    self_hosted_runtime_authority_required,
+)
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_identity,
+    runtime_bindings_enabled,
+)
 from ella.services.today_card import TodayCardState
 from ella.services.today_card_postgres import PostgresTodayCardRepository
 from ella.services.voice_canary_alerts import (
@@ -58,7 +71,7 @@ from ella.services.voice_honcho import (
     search_voice_honcho,
 )
 from utils.ella.canonical_context import fetch_canonical_timeline
-from utils.other import endpoints as auth
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 # JWT handling
 try:
@@ -77,30 +90,28 @@ entitlement_router = APIRouter(tags=["voice"])
 
 # Configuration
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
-ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
+ELLA_SESSION_SECRET = authority_credential("ELLA_SESSION_SECRET", strip=False)
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 SESSION_EXPIRY_MINUTES = int(os.getenv("ELLA_SESSION_EXPIRY_MINUTES", "25"))
 VOICE_CANARY_ENFORCEMENT_ENABLED = os.getenv(
     "ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED",
     "true",
 ).strip().lower() in {"1", "true", "yes", "on"}
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+ELEVENLABS_API_KEY = authority_credential("ELEVENLABS_API_KEY", strip=False)
+XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_TTS_VOICE_ID = os.getenv("XAI_TTS_VOICE_ID", "eve")
 XAI_TTS_LANGUAGE = os.getenv("XAI_TTS_LANGUAGE", "en")
 XAI_TTS_OPTIMIZE_STREAMING_LATENCY = int(os.getenv("XAI_TTS_OPTIMIZE_STREAMING_LATENCY", "1"))
-INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
+INWORLD_API_KEY = authority_credential("INWORLD_API_KEY", strip=False)
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 ELLA_KOKORO_TTS_URL = os.getenv("ELLA_KOKORO_TTS_URL", "http://100.76.138.56:8931")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
-HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
+HERMES_VOICE_MEMORY_TOKEN = authority_credential("HERMES_VOICE_MEMORY_TOKEN", "ELLA_PROVISION_API_TOKEN", strip=False)
 HERMES_PROVISION_API_URL = os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
-HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").strip()
-VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
+HERMES_PROVISION_API_TOKEN = authority_credential("ELLA_HERMES_PROVISION_API_TOKEN")
+VOICE_PROXY_SERVICE_TOKEN = authority_credential("ELLA_VOICE_PROXY_SERVICE_TOKEN")
 VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
 VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
 VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS = float(
@@ -116,7 +127,7 @@ ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_T
     "on",
 }
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
 _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
 _SHA256_REF_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -130,12 +141,27 @@ def _valid_uuid_text(value: Any) -> bool:
 
 
 def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
-    """Keep isolated users off the legacy OpenClaw voice proxy until cutover."""
-    return rollout_enabled(
-        "ELLA_ISOLATED_VOICE_ROUTING_ENABLED",
-        "ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS",
-        uid,
-    )
+    """Require the voice master switch before honoring any exact UID selector."""
+    if os.getenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED", "false").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    allowed_uids = {
+        value.strip() for value in os.getenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS", "").split(",") if value.strip()
+    }
+    return not allowed_uids or bool(uid and uid in allowed_uids)
+
+
+async def _self_hosted_voice_required(uid: str) -> bool:
+    if cloud_provisioning_enabled(uid):
+        return False
+    try:
+        return await self_hosted_runtime_authority_required(uid)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
 
 @dataclass(frozen=True)
@@ -147,6 +173,7 @@ class VoiceProxyPrincipal:
     isolated_runtime: bool
     entitlement_revision: int = 0
     correlation_id: str = ""
+    runtime_authority_digest: str = ""
     scope_kind: Optional[str] = None
     conversation_id: Optional[str] = None
     active_summary_version_id: Optional[str] = None
@@ -250,6 +277,17 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         or not isinstance(claims.get("entitlement_revision"), int)
         or claims.get("entitlement_revision", 0) < 1
         or not str(claims.get("correlation_id") or "").strip()
+        or (
+            str(claims.get("provider") or "") == SELF_HOSTED_RUNTIME_PROVIDER
+            and str(claims.get("voice_mode") or "") == "hermes-voice"
+            and claims.get("isolated_runtime") is True
+            and not re.fullmatch(r"[0-9a-f]{64}", str(claims.get("runtime_authority_digest") or ""))
+        )
+        or (
+            bool(str(claims.get("runtime_authority_digest") or ""))
+            and not re.fullmatch(r"[0-9a-f]{64}", str(claims.get("runtime_authority_digest") or ""))
+        )
+        or (claims.get("isolated_runtime") is False and bool(str(claims.get("runtime_authority_digest") or "")))
     ):
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
@@ -302,6 +340,7 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         isolated_runtime=claims.get("isolated_runtime") is True,
         entitlement_revision=claims["entitlement_revision"],
         correlation_id=str(claims["correlation_id"]),
+        runtime_authority_digest=str(claims.get("runtime_authority_digest") or ""),
         scope_kind=scope_kind,
         conversation_id=str(claims.get("conversation_id") or "").strip() or None,
         active_summary_version_id=str(claims.get("active_summary_version_id") or "").strip() or None,
@@ -314,20 +353,40 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
 
 async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     """Resolve an isolated session to the exact active Hermes receipt."""
-    bindings_enabled = runtime_bindings_enabled(principal.uid) or cloud_provisioning_enabled(principal.uid)
+    self_hosted_required = await _self_hosted_voice_required(principal.uid)
+    authority_enabled = (
+        runtime_bindings_enabled(principal.uid) or cloud_provisioning_enabled(principal.uid) or self_hosted_required
+    )
     voice_enabled = isolated_voice_routing_enabled(principal.uid)
-    if bindings_enabled != voice_enabled:
+    if voice_enabled and not authority_enabled:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
-    if principal.isolated_runtime != bindings_enabled:
+    if authority_enabled and not voice_enabled:
+        raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
+    isolated_required = authority_enabled and voice_enabled
+    if principal.isolated_runtime != isolated_required:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
-    if not bindings_enabled:
+    if not isolated_required:
         return None
+    if self_hosted_required and (
+        principal.provider != SELF_HOSTED_RUNTIME_PROVIDER or principal.voice_mode != "hermes-voice"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "self_hosted_voice_claim_stale"})
     try:
-        runtime = await resolve_isolated_runtime(principal.uid, target_mode="hermes-cloud-voice")
+        runtime = await resolve_isolated_runtime(
+            principal.uid,
+            target_mode="hermes-voice" if self_hosted_required else "hermes-cloud-voice",
+        )
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
     if not runtime:
         raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
+    if self_hosted_required:
+        try:
+            current_identity = runtime_authority_identity(runtime)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        if not hmac.compare_digest(current_identity.digest, principal.runtime_authority_digest):
+            raise HTTPException(status_code=409, detail={"code": "voice_runtime_authority_changed"})
     return runtime
 
 
@@ -399,7 +458,7 @@ async def _get_pool() -> asyncpg.Pool:
             host="127.0.0.1",
             port=5433,
             user="postgres",
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database="ella_ai",
             min_size=2,
             max_size=10,
@@ -476,6 +535,8 @@ def _normalized_memory_scoped_voice_mode(value: str) -> str:
 def _memory_scoped_voice_provider_mode_error(provider: str, voice_mode: str) -> Optional[str]:
     provider = str(provider or "").strip().lower()
     raw_mode = str(voice_mode or "").strip().lower()
+    if provider == SELF_HOSTED_RUNTIME_PROVIDER:
+        return None if raw_mode == "hermes-voice" else "memory_scoped_voice_provider_mode_mismatch"
     if provider not in MEMORY_SCOPED_VOICE_PROVIDERS:
         return "memory_scoped_voice_provider_unsupported"
     if _normalized_memory_scoped_voice_mode(raw_mode) != "v4":
@@ -905,6 +966,7 @@ def create_session_token(
     session_id: Optional[str] = None,
     correlation_id: Optional[str] = None,
     entitlement_revision: int = 1,
+    runtime_authority_digest: str = "",
     session_scope: Optional[dict[str, Any]] = None,
 ) -> str:
     """
@@ -928,6 +990,13 @@ def create_session_token(
         raise HTTPException(status_code=500, detail="Session secret not configured")
     if VOICE_CANARY_ENFORCEMENT_ENABLED and entitlement_revision < 1:
         raise ValueError("active voice entitlement revision required")
+    invitation_voice = provider == SELF_HOSTED_RUNTIME_PROVIDER and voice_mode == "hermes-voice"
+    if invitation_voice and (not isolated_runtime or not re.fullmatch(r"[0-9a-f]{64}", runtime_authority_digest)):
+        raise ValueError("self-hosted voice runtime authority digest required")
+    if runtime_authority_digest and not re.fullmatch(r"[0-9a-f]{64}", runtime_authority_digest):
+        raise ValueError("runtime authority digest invalid")
+    if not isolated_runtime and runtime_authority_digest:
+        raise ValueError("non-isolated runtime authority digest forbidden")
 
     if session_scope:
         scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, voice_mode)
@@ -948,6 +1017,7 @@ def create_session_token(
         "jti": session_id or str(uuid.uuid4()),
         "correlation_id": correlation_id or str(uuid.uuid4()),
         "entitlement_revision": entitlement_revision,
+        "runtime_authority_digest": runtime_authority_digest,
         "exp": datetime.utcnow() + timedelta(minutes=SESSION_EXPIRY_MINUTES),
         "iat": datetime.utcnow(),
         "iss": "omi-backend",
@@ -1009,7 +1079,7 @@ def create_session_token(
 
 
 @router.get("/providers")
-async def get_voice_providers():
+async def get_voice_providers(_authenticated_uid: str = Depends(get_exact_firebase_uid)):
     """
     List available voice providers for iOS settings toggle.
 
@@ -1135,36 +1205,57 @@ async def create_voice_session(
     voice_mode = (body.voice_mode if body else None) or voice_mode
     requested_scope = body.session_scope if body else None
 
-    runtime_bound = runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid)
+    cloud_required = cloud_provisioning_enabled(uid)
+    self_hosted_required = await _self_hosted_voice_required(uid)
+    runtime_bound = runtime_bindings_enabled(uid) or cloud_required or self_hosted_required
     voice_rollout_enabled = isolated_voice_routing_enabled(uid)
     if voice_rollout_enabled and not runtime_bound:
         raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
     isolated_runtime = runtime_bound and voice_rollout_enabled
+    runtime = None
+    runtime_authority_digest = ""
     if runtime_bound:
+        if not isolated_runtime:
+            # Invitation-owned users remain authority-bound even while voice is
+            # disabled; they cannot enter the legacy provider registry.
+            raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
         try:
-            await resolve_isolated_runtime(uid, target_mode="hermes-cloud-voice")
+            runtime = await resolve_isolated_runtime(
+                uid,
+                target_mode="hermes-voice" if self_hosted_required else "hermes-cloud-voice",
+            )
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
-        if not isolated_runtime:
-            # Runtime-bound users must never fall through to legacy voice while
-            # their explicit isolated-voice rollout gate remains disabled.
-            raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
-    # Validate provider
-    if provider not in V2V_PROVIDERS:
-        valid = list(V2V_PROVIDERS.keys())
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown V2V provider: {provider!r}. Valid: {valid}",
-        )
-    if resolve_processor(provider) is None:
-        raise HTTPException(status_code=503, detail={"code": "ai_processor_not_disclosed"})
+        if not runtime:
+            raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
+        if self_hosted_required:
+            try:
+                runtime_authority_digest = runtime_authority_identity(runtime).digest
+            except ProvisioningError as exc:
+                raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
 
-    provider_info = V2V_PROVIDERS[provider]
-    provider_model = str(provider_info.get("model") or "")
+    provider_info: Optional[dict[str, Any]] = None
+    if self_hosted_required:
+        provider = SELF_HOSTED_RUNTIME_PROVIDER
+        provider_model = SELF_HOSTED_RUNTIME_MODEL
+        resolved_mode = "hermes-voice"
+    else:
+        # Legacy and managed-Cloud voice retain their existing explicit V2V
+        # registry. Invitation-authoritative self-hosted users never enter it.
+        if provider not in V2V_PROVIDERS:
+            valid = list(V2V_PROVIDERS.keys())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown V2V provider: {provider!r}. Valid: {valid}",
+            )
+        if resolve_processor(provider) is None:
+            raise HTTPException(status_code=503, detail={"code": "ai_processor_not_disclosed"})
+        provider_info = V2V_PROVIDERS[provider]
+        provider_model = str(provider_info.get("model") or "")
+        resolved_mode = voice_mode or provider_info["default_mode"]
 
     # Resolve and validate the complete scoped pair before memory lookup or
     # provider setup. Unscoped sessions retain their existing behavior.
-    resolved_mode = voice_mode or provider_info["default_mode"]
     if requested_scope:
         scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, resolved_mode)
         if scope_pair_error:
@@ -1174,7 +1265,7 @@ async def create_voice_session(
             )
 
     # Check provider availability
-    if not provider_info["key_check"]():
+    if provider_info is not None and not provider_info["key_check"]():
         raise HTTPException(
             status_code=503,
             detail=f"Provider {provider!r} is not configured (missing API key)",
@@ -1190,7 +1281,7 @@ async def create_voice_session(
     _start = time.time()
     session_id = str(uuid.uuid4())
     correlation_id = str(uuid.uuid4())
-    entitlement_revision = 1
+    entitlement_revision = int(getattr(runtime, "target_entitlement_revision", 0) or 1)
     quota_state = "ok"
     quota: dict[str, Any] = {}
     if VOICE_CANARY_ENFORCEMENT_ENABLED:
@@ -1220,6 +1311,24 @@ async def create_voice_session(
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-SESSION] name lookup failed for {uid}: {e}")
 
+    if self_hosted_required and runtime is not None:
+        try:
+            current_runtime = await resolve_isolated_runtime(
+                uid,
+                target_mode="hermes-voice",
+            )
+            if current_runtime is None:
+                raise ProvisioningError("isolated_voice_runtime_required", retryable=False)
+            current_identity = runtime_authority_identity(current_runtime)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+        if (
+            not hmac.compare_digest(current_identity.digest, runtime_authority_digest)
+            or int(current_runtime.target_entitlement_revision) != entitlement_revision
+        ):
+            raise HTTPException(status_code=409, detail={"code": "voice_runtime_authority_changed"})
+        runtime = current_runtime
+
     try:
         token = create_session_token(
             uid=uid,
@@ -1231,11 +1340,16 @@ async def create_voice_session(
             session_id=session_id,
             correlation_id=correlation_id,
             entitlement_revision=entitlement_revision,
+            runtime_authority_digest=runtime_authority_digest,
             session_scope=resolved_scope,
         )
 
         # Build endpoint URL with mode query param
-        endpoint = os.getenv(provider_info["endpoint_env"], ELLA_VOICE_ENDPOINT)
+        endpoint = (
+            ELLA_VOICE_ENDPOINT
+            if provider_info is None
+            else os.getenv(provider_info["endpoint_env"], ELLA_VOICE_ENDPOINT)
+        )
         endpoint_with_mode = f"{endpoint}?mode={resolved_mode}"
 
         _elapsed = int((time.time() - _start) * 1000)
@@ -1289,7 +1403,7 @@ async def create_voice_session(
 @entitlement_router.get("/v1/entitlement")
 @router.get("/entitlement")
 async def get_voice_entitlement(
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """Return the stable frontend contract without exposing operator notes."""
     contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)
@@ -1313,6 +1427,16 @@ async def accept_voice_canary_session(
             status_code=403,
             detail={"code": "voice_session_claim_mismatch"},
         )
+    runtime = await _resolve_voice_runtime(principal)
+    if principal.isolated_runtime and runtime is None:
+        raise HTTPException(status_code=409, detail={"code": "isolated_voice_runtime_required"})
+    if runtime is not None and getattr(runtime, "runtime_target_mode", "") == "hermes-voice":
+        if (
+            principal.provider != SELF_HOSTED_RUNTIME_PROVIDER
+            or principal.voice_mode != "hermes-voice"
+            or body.model != SELF_HOSTED_RUNTIME_MODEL
+        ):
+            raise HTTPException(status_code=409, detail={"code": "self_hosted_voice_claim_stale"})
     if not VOICE_CANARY_ENFORCEMENT_ENABLED:
         return {"allowed": True, "state": "enforcement_disabled", "quota": {}, "limits": {}}
     decision = await voice_canary_db.accept_session(
@@ -1628,27 +1752,9 @@ async def synthesize_speech(
 
 
 @router.get("/health")
-async def voice_health():
-    """Health check for voice endpoints."""
-    v2v_status = {
-        pid: {
-            "available": info["key_check"](),
-            "default_mode": info["default_mode"],
-        }
-        for pid, info in V2V_PROVIDERS.items()
-    }
-
-    return {
-        "status": "ok",
-        "service": "ella-voice",
-        "voice_endpoint": ELLA_VOICE_ENDPOINT,
-        "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_providers": ["elevenlabs", "fish-audio", "kokoro", "inworld", "xai-tts"],
-        "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
-        "tts_xai_configured": bool(XAI_API_KEY),
-        "tts_local_url": ELLA_TTS_URL,
-        "v2v_providers": v2v_status,
-    }
+async def voice_health(_authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    """Return minimal authenticated health; provider diagnostics stay private."""
+    return {"status": "ok", "service": "ella-voice"}
 
 
 # ============================================================================
@@ -2081,6 +2187,9 @@ async def execute_voice_tool(request: Request):
         raise HTTPException(status_code=400, detail={"code": "uid_required"})
 
     principal = authenticate_voice_proxy_request(request, uid)
+    requested_session_id = str(body.get("session_id") or "").strip()
+    if requested_session_id and requested_session_id != principal.session_id:
+        raise HTTPException(status_code=403, detail={"code": "voice_session_claim_mismatch"})
     runtime = await _resolve_voice_runtime(principal)
     if not runtime:
         raise HTTPException(status_code=409, detail={"code": "isolated_runtime_required"})
@@ -2102,7 +2211,7 @@ async def execute_voice_tool(request: Request):
                 headers=_hermes_workspace_headers(principal.uid),
                 json={
                     "prompt": prompt,
-                    "session_id": str(body.get("session_id") or principal.session_id),
+                    "session_id": principal.session_id,
                     "max_tokens": 320,
                 },
             )

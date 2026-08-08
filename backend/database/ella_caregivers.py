@@ -63,3 +63,40 @@ def delete_caregiver(uid: str, caregiver_id: str) -> bool:
         return False
     ref.delete()
     return True
+
+
+def set_emergency_caregiver(uid: str, caregiver_id: str) -> Optional[str]:
+    """Select at most one caregiver as the user's emergency contact."""
+    caregivers = list(_caregivers_ref(uid).stream())
+    if caregiver_id and not any(document.id == caregiver_id for document in caregivers):
+        return None
+    batch = db.batch()
+    for document in caregivers:
+        batch.update(document.reference, {'is_emergency_contact': document.id == caregiver_id})
+    batch.commit()
+    return caregiver_id
+
+
+def get_emergency_caregiver_id(uid: str) -> Optional[str]:
+    for document in _caregivers_ref(uid).stream():
+        if document.to_dict().get('is_emergency_contact') is True:
+            return document.id
+    return None
+
+
+def refresh_caregiver_invite(uid: str, caregiver_id: str) -> Optional[dict]:
+    ref = _caregivers_ref(uid).document(caregiver_id)
+    document = ref.get()
+    if not document.exists:
+        return None
+    now = datetime.now(timezone.utc)
+    ref.update(
+        {
+            'invite_code': ''.join(secrets.choice(string.digits) for _ in range(6)),
+            'invite_expires_at': (now + timedelta(days=7)).isoformat(),
+            'invited_at': now.isoformat(),
+            'status': 'invited',
+            'updated_at': now.isoformat(),
+        }
+    )
+    return ref.get().to_dict()

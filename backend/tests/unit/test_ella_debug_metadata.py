@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.testclient import TestClient
+from utils.ella import exact_firebase_auth
 
 sys.modules.setdefault("asyncpg", MagicMock())
 sys.modules.setdefault("database._client", MagicMock())
@@ -41,9 +43,17 @@ def test_list_conversation_metadata_proxies_by_resolved_agent(monkeypatch):
 
     monkeypatch.setattr(debug_metadata, "resolve_user_routing", fake_resolve_user_routing)
     monkeypatch.setattr(debug_metadata, "_fetch_provision_metadata", fake_fetch)
+    monkeypatch.setattr(debug_metadata, "DEBUG_METADATA_ENABLED", True)
 
     response = Response()
-    result = asyncio.run(debug_metadata.list_conversation_metadata(response, uid="user-123", limit=25))
+    result = asyncio.run(
+        debug_metadata.list_conversation_metadata(
+            response,
+            uid="user-123",
+            limit=25,
+            authenticated_uid="user-123",
+        )
+    )
 
     assert result["uid"] == "user-123"
     assert result["agent_id"] == "ella-omi-test"
@@ -58,8 +68,54 @@ def test_read_conversation_metadata_requires_resolved_agent(monkeypatch):
         return {"routing": {}}
 
     monkeypatch.setattr(debug_metadata, "resolve_user_routing", fake_resolve_user_routing)
+    monkeypatch.setattr(debug_metadata, "DEBUG_METADATA_ENABLED", True)
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(debug_metadata.read_conversation_metadata("conv-123", Response(), uid="user-123"))
+        asyncio.run(
+            debug_metadata.read_conversation_metadata(
+                "conv-123",
+                Response(),
+                uid="user-123",
+                authenticated_uid="user-123",
+            )
+        )
 
     assert excinfo.value.status_code == 404
+
+
+def test_mounted_debug_metadata_defaults_off_and_rejects_cross_owner_before_resolution(monkeypatch):
+    effects = []
+
+    def verify(token):
+        if token == "token-a":
+            return {"uid": "uid-a"}
+        raise ValueError("invalid")
+
+    async def forbidden_resolve(_uid):
+        effects.append("resolve")
+        raise AssertionError("unauthorized debug request reached routing resolution")
+
+    monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify)
+    monkeypatch.setattr(debug_metadata, "resolve_user_routing", forbidden_resolve)
+    app = FastAPI()
+    app.include_router(debug_metadata.router)
+    client = TestClient(app)
+
+    monkeypatch.setattr(debug_metadata, "DEBUG_METADATA_ENABLED", False)
+    assert (
+        client.get(
+            "/v1/ella/debug/conversations/metadata?uid=uid-a",
+            headers={"Authorization": "Bearer token-a"},
+        ).status_code
+        == 404
+    )
+    monkeypatch.setattr(debug_metadata, "DEBUG_METADATA_ENABLED", True)
+    assert client.get("/v1/ella/debug/conversations/metadata?uid=uid-a").status_code == 401
+    assert (
+        client.get(
+            "/v1/ella/debug/conversations/metadata?uid=uid-b",
+            headers={"Authorization": "Bearer token-a"},
+        ).status_code
+        == 403
+    )
+    assert effects == []

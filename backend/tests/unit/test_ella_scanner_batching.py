@@ -20,6 +20,36 @@ def teardown_function():
     scanner.reset_scanner_batch_state()
 
 
+def test_guardian_trace_service_caller_uses_scoped_key(monkeypatch):
+    posts = []
+
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs))
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(scanner, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-service-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    scanner._log_trace_event("trace-a", "uid-a", "scanner_dispatched", "success")
+
+    assert len(posts) == 1
+    assert posts[0][0] == scanner.GUARDIAN_TRACE_LOG_URL
+    assert posts[0][1]["headers"] == {
+        "X-Guardian-Key": "configured-guardian-service-key",
+        "X-Ella-Subject-Uid": "uid-a",
+    }
+
+
+def test_guardian_trace_service_caller_fails_closed_without_configured_key(monkeypatch):
+    posts = []
+    monkeypatch.setattr(scanner, "GUARDIAN_WEBHOOK_KEY", "")
+    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+
+    scanner._log_trace_event("trace-a", "uid-a", "scanner_dispatched", "success")
+
+    assert posts == []
+
+
 def test_wake_word_bypasses_ambient_batching(monkeypatch):
     posts = []
 

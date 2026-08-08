@@ -7,6 +7,8 @@ from typing import Optional
 
 import asyncpg
 
+from database.honcho_attestation import authority_credential
+
 _pool: Optional[asyncpg.Pool] = None
 
 
@@ -17,7 +19,7 @@ async def get_ella_postgres_pool() -> asyncpg.Pool:
             host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
             port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
             user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
             database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
             min_size=1,
             max_size=10,

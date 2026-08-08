@@ -14,7 +14,7 @@ from ella.services.ai_consent import (
 )
 from ella.services.consent_authority import submit_with_managed_cloud_authority
 from database.managed_cloud_consent import ManagedCloudAuthorityUnavailable
-from utils.other import endpoints as auth
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 router = APIRouter(tags=["AI Consent"])
 
@@ -40,12 +40,12 @@ def get_ai_consent_policy():
 
 
 @router.get("/v1/users/ai-consent")
-def get_ai_consent_status(uid: str = Depends(auth.get_current_user_uid)):
+def get_ai_consent_status(uid: str = Depends(get_exact_firebase_uid)):
     return get_ai_consent_service().status(uid)
 
 
 @router.get("/v1/users/ai-consent/receipts/{receipt_id}")
-def get_ai_consent_receipt(receipt_id: str, uid: str = Depends(auth.get_current_user_uid)):
+def get_ai_consent_receipt(receipt_id: str, uid: str = Depends(get_exact_firebase_uid)):
     receipt = get_ai_consent_service().receipt(uid, receipt_id)
     if receipt is None:
         raise HTTPException(status_code=404, detail={"code": "ai_consent_receipt_not_found"})
@@ -55,7 +55,7 @@ def get_ai_consent_receipt(receipt_id: str, uid: str = Depends(auth.get_current_
 @router.post("/v1/users/ai-consent")
 async def submit_ai_consent(
     request: AiConsentSubmissionRequest,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ):
     try:
         return await submit_with_managed_cloud_authority(

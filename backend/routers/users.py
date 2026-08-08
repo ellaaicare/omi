@@ -56,8 +56,12 @@ from utils.llm.followup import followup_question_prompt
 from utils.notifications import send_notification, send_training_data_submitted_notification
 from utils.llm.external_integrations import generate_comprehensive_daily_summary
 from models.notification_message import NotificationMessage
-from ella.services.ai_consent import build_account_deletion_receipt
 from utils.other import endpoints as auth
+from database.managed_cloud_consent import (
+    ManagedCloudAuthorityUnavailable,
+    unlink_self_owner_account_on_deletion,
+)
+from ella.services.ai_consent import build_account_deletion_receipt
 from utils.other.storage import (
     delete_all_conversation_recordings,
     get_speech_sample_signed_urls,
@@ -93,19 +97,40 @@ def get_user_profile_endpoint(uid: str = Depends(auth.get_current_user_uid)):
 
 
 @router.delete('/v1/users/delete-account', tags=['v1'])
-def delete_account(uid: str = Depends(auth.get_current_user_uid)):
+async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
+    """Unlink the confirmed account from its data and issue a deletion receipt.
+
+    Confirmation path (Plato re-authorization): upon a confirmed request we
+    actually unlink the account from its protected server data under the
+    per-UID authority advisory lock (consent authority, entitlement/runtime
+    links, and the ``users`` row, freeing the UID) and then issue a deletion
+    receipt in the exact shape the client enforces (HTTP 200, top-level
+    ``status == 'ok'``, ``deletion_receipt.status == 'completed'`` with
+    ``scope == 'account_and_user_data'``). The deep data wipe (Firestore
+    subcollections + user doc, voice data, GCS recordings, Firebase auth
+    identity) is deferred to the GC/retention pipeline, so a relogin from the
+    same Firebase UID bootstraps a fresh account and any orphaned
+    Hermes/honcho data persists until the GC/retention pass.
+    """
     try:
-        delete_user_data(uid)
-        # delete user from firebase auth
-        auth.delete_account(uid)
-        return {
-            'status': 'ok',
-            'message': 'Account deleted successfully',
-            'deletion_receipt': build_account_deletion_receipt(),
-        }
+        await unlink_self_owner_account_on_deletion(uid=uid)
+    except ManagedCloudAuthorityUnavailable as exc:
+        print('delete_account', str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'account_deletion_authority_unavailable',
+                'retryable': True,
+            },
+        )
     except Exception as e:
         print('delete_account', str(e))
         raise HTTPException(status_code=500, detail=str(e))
+    return {
+        'status': 'ok',
+        'message': 'Account deleted successfully',
+        'deletion_receipt': build_account_deletion_receipt(),
+    }
 
 
 @router.patch('/v1/users/geolocation', tags=['v1'])

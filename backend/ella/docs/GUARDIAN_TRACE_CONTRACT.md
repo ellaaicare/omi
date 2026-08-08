@@ -50,6 +50,10 @@ Issue #598 should use:
 
 `POST /v1/ella/guardian/trace/log`
 
+This service callback requires the scoped Guardian service key in
+`X-Guardian-Key`. The backend scanner uses the same scoped authority for its
+Guardian service writes.
+
 ```json
 {
   "trace_id": "conversation-uuid",
@@ -95,6 +99,9 @@ The backend persists these stages:
 
 `GET /v1/ella/guardian/next-audio` returns:
 
+The native app sends a current Firebase bearer. The backend derives the exact
+queue owner from that verified subject; no caller-selected UID is accepted.
+
 ```json
 {
   "url": "https://...",
@@ -118,7 +125,6 @@ Issue #599 should call:
 
 ```json
 {
-  "uid": "omi-user-id",
   "queue_item_id": "guardian_abc123",
   "trace_id": "conversation-uuid",
   "event_type": "started",
@@ -134,7 +140,6 @@ Issue #599 should call:
 
 Required fields:
 
-- `uid`
 - `event_type`: `started`, `completed`, or `failed`
 - `queue_item_id` or `trace_id`
 - `port_type`
@@ -142,9 +147,17 @@ Required fields:
 The backend persists stages named `ios_playback_started`,
 `ios_playback_completed`, and `ios_playback_failed`.
 
+The native app authenticates this receipt with a current Firebase bearer. The
+backend derives the owner from the exact token subject and rejects any optional
+body UID that does not exactly match it.
+
 For `failed`, include the failure reason in `metadata.error`.
 
 ## Trace Readback
 
 `GET /v1/ella/guardian/trace/{trace_id}` returns ordered stages plus aggregate
 latency. This is the readback endpoint for #589 canary proof.
+
+Native owner reads require a Firebase bearer and derive the exact owner from the
+token. Scoped internal reads require `X-Guardian-Key` plus an explicit UID; the
+query enforces both trace id and owner.

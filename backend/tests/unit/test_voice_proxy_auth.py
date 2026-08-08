@@ -28,6 +28,8 @@ from ella.services.today_card import (
     sha256_ref,
 )
 
+RUNTIME_AUTHORITY_DIGEST = "a" * 64
+
 
 def _request(body: dict, *, token: str = "", service_token: str = "") -> Request:
     raw = json.dumps(body).encode("utf-8")
@@ -58,18 +60,22 @@ def _token(
     isolated: bool = True,
     expired: bool = False,
     scope: dict | None = None,
+    provider: str = "grok-voice",
+    voice_mode: str = "v4",
+    runtime_authority_digest: str = RUNTIME_AUTHORITY_DIGEST,
 ) -> str:
     now = datetime.now(timezone.utc)
     claims = {
         "sub": uid,
         "uid": uid,
         "firebase_uid": uid,
-        "provider": "grok-voice",
-        "voice_mode": "v4",
+        "provider": provider,
+        "voice_mode": voice_mode,
         "isolated_runtime": isolated,
         "jti": f"session-{uid}",
         "correlation_id": f"correlation-{uid}",
         "entitlement_revision": 3,
+        "runtime_authority_digest": runtime_authority_digest if isolated else "",
         "aud": voice.VOICE_SESSION_AUDIENCE,
         "iss": "omi-backend",
         "iat": now - timedelta(minutes=2),
@@ -106,6 +112,20 @@ def voice_auth(monkeypatch):
     monkeypatch.setattr(voice, "HERMES_PROVISION_API_URL", "http://hermes-8210")
     monkeypatch.setattr(voice, "HERMES_PROVISION_API_TOKEN", "test-hermes-secret")
     monkeypatch.setattr(voice, "ALLOW_LEGACY_VOICE_SESSION_TOKENS", True)
+    monkeypatch.setattr(
+        voice,
+        "runtime_authority_identity",
+        lambda _runtime: SimpleNamespace(digest=RUNTIME_AUTHORITY_DIGEST),
+    )
+
+    async def retained_runtime_not_invitation_owned(_uid):
+        return False
+
+    monkeypatch.setattr(
+        voice,
+        "self_hosted_runtime_authority_required",
+        retained_runtime_not_invitation_owned,
+    )
 
 
 def test_voice_session_token_has_firebase_subject_and_proxy_audience():
@@ -115,6 +135,7 @@ def test_voice_session_token_has_firebase_subject_and_proxy_audience():
         voice_mode="v4",
         provider="grok-voice",
         isolated_runtime=True,
+        runtime_authority_digest=RUNTIME_AUTHORITY_DIGEST,
     )
 
     claims = jwt.decode(
@@ -140,6 +161,7 @@ def test_voice_session_token_binds_memory_scope_without_memory_content():
         voice_mode="v4",
         provider="grok-voice",
         isolated_runtime=True,
+        runtime_authority_digest=RUNTIME_AUTHORITY_DIGEST,
         session_id="session-a",
         session_scope={
             "kind": "memory",
@@ -173,6 +195,7 @@ def test_voice_session_token_rejects_empty_memory_version():
             voice_mode="v4",
             provider="grok-voice",
             isolated_runtime=True,
+            runtime_authority_digest=RUNTIME_AUTHORITY_DIGEST,
             session_scope={
                 "kind": "memory",
                 "conversation_id": "legacy-memory",
@@ -495,6 +518,190 @@ def test_voice_proxy_rechecks_current_consent_after_token_issuance(monkeypatch):
     assert error.value.detail == {"code": "ai_consent_required", "decision": "revoked"}
 
 
+def test_self_hosted_voice_proxy_re_resolves_exact_voice_target(monkeypatch):
+    runtime = SimpleNamespace(
+        agent_id="isolated-agent-a",
+        revision=7,
+        runtime_target_mode="hermes-voice",
+    )
+    resolved = []
+    provider_http_calls = []
+
+    async def resolve(uid, **kwargs):
+        resolved.append((uid, kwargs))
+        return runtime
+
+    async def self_hosted_required(_uid):
+        return True
+
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
+
+    with pytest.raises(HTTPException) as unpinned:
+        voice.authenticate_voice_proxy_request(
+            _request(
+                {"uid": "uid-a"},
+                token=_token(
+                    "uid-a",
+                    provider="hermes",
+                    voice_mode="hermes-voice",
+                    runtime_authority_digest="",
+                ),
+                service_token="test-proxy-secret",
+            ),
+            "uid-a",
+        )
+    assert unpinned.value.status_code == 401
+    assert resolved == []
+
+    principal = voice.authenticate_voice_proxy_request(
+        _request(
+            {"uid": "uid-a"},
+            token=_token("uid-a", provider="hermes", voice_mode="hermes-voice"),
+            service_token="test-proxy-secret",
+        ),
+        "uid-a",
+    )
+    current = asyncio.run(voice._resolve_voice_runtime(principal))
+
+    assert current is runtime
+    assert resolved == [("uid-a", {"target_mode": "hermes-voice"})]
+
+    class ForbiddenAsyncClient:
+        def __init__(self, *args, **kwargs):
+            provider_http_calls.append(("forbidden", args, kwargs))
+            raise AssertionError("provider HTTP must not be constructed for a session mismatch")
+
+    monkeypatch.setattr(voice.httpx, "AsyncClient", ForbiddenAsyncClient)
+    with pytest.raises(HTTPException) as mismatch:
+        asyncio.run(
+            voice.execute_voice_tool(
+                _request(
+                    {
+                        "uid": "uid-a",
+                        "session_id": "attacker-selected-session",
+                        "tool_name": "ask_ella",
+                        "arguments": {"query": "hello"},
+                    },
+                    token=_token("uid-a", provider="hermes", voice_mode="hermes-voice"),
+                    service_token="test-proxy-secret",
+                )
+            )
+        )
+    assert mismatch.value.status_code == 403
+    assert mismatch.value.detail == {"code": "voice_session_claim_mismatch"}
+    assert provider_http_calls == []
+    assert resolved == [("uid-a", {"target_mode": "hermes-voice"})]
+
+    class ProviderResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"answer": "synthetic answer"}
+
+    class RecordingAsyncClient:
+        def __init__(self, *args, **kwargs):
+            provider_http_calls.append(("init", args, kwargs))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, *, headers, json):
+            provider_http_calls.append(("post", url, headers, json))
+            return ProviderResponse()
+
+    monkeypatch.setattr(voice.httpx, "AsyncClient", RecordingAsyncClient)
+    result = asyncio.run(
+        voice.execute_voice_tool(
+            _request(
+                {
+                    "uid": "uid-a",
+                    "session_id": "session-uid-a",
+                    "tool_name": "ask_ella",
+                    "arguments": {"query": "hello"},
+                },
+                token=_token("uid-a", provider="hermes", voice_mode="hermes-voice"),
+                service_token="test-proxy-secret",
+            )
+        )
+    )
+    assert result["answer"] == "synthetic answer"
+    posts = [call for call in provider_http_calls if call[0] == "post"]
+    assert len(posts) == 1
+    assert posts[0][3]["session_id"] == "session-uid-a"
+
+
+@pytest.mark.parametrize(
+    ("drift", "expected_code"),
+    [
+        ("authority_digest", "voice_runtime_authority_changed"),
+        ("provider", "self_hosted_voice_claim_stale"),
+        ("mode", "self_hosted_voice_claim_stale"),
+        ("model", "self_hosted_voice_claim_stale"),
+        ("session", "voice_session_claim_mismatch"),
+        ("correlation", "voice_session_claim_mismatch"),
+    ],
+)
+def test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call(monkeypatch, drift, expected_code):
+    runtime = SimpleNamespace(runtime_target_mode="hermes-voice")
+    accept_calls = []
+
+    async def resolve(_uid, **_kwargs):
+        return runtime
+
+    async def forbidden_accept(**kwargs):
+        accept_calls.append(kwargs)
+        raise AssertionError("provider/session acceptance must not run")
+
+    async def self_hosted_required(_uid):
+        return True
+
+    provider = "gemini-live" if drift == "provider" else "hermes"
+    mode = "v4" if drift == "mode" else "hermes-voice"
+    model = "drifted-model" if drift == "model" else voice.SELF_HOSTED_RUNTIME_MODEL
+    if drift == "authority_digest":
+        monkeypatch.setattr(
+            voice,
+            "runtime_authority_identity",
+            lambda _runtime: SimpleNamespace(digest="b" * 64),
+        )
+    monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(voice.voice_canary_db, "accept_session", forbidden_accept)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.accept_voice_canary_session(
+                voice.VoiceCanaryAcceptRequest(
+                    uid="uid-a",
+                    session_id="drifted-session" if drift == "session" else "session-uid-a",
+                    correlation_id="drifted-correlation" if drift == "correlation" else "correlation-uid-a",
+                    model=model,
+                ),
+                _request(
+                    {"uid": "uid-a"},
+                    token=_token("uid-a", provider=provider, voice_mode=mode),
+                    service_token="test-proxy-secret",
+                ),
+            )
+        )
+
+    assert error.value.status_code == (403 if drift in {"session", "correlation"} else 409)
+    assert error.value.detail == {"code": expected_code}
+    assert accept_calls == []
+
+
 @pytest.mark.parametrize("endpoint", ["context", "search", "tool"])
 def test_two_uid_request_is_denied_before_any_data_lookup(endpoint):
     bodies = {
@@ -591,19 +798,25 @@ def test_voice_proxy_legacy_bridge_is_bounded_to_nonisolated_tokens(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("bindings_enabled", "voice_enabled", "isolated_claim"),
+    ("self_hosted_required", "voice_enabled", "isolated_claim", "status_code", "error_code"),
     [
-        (True, False, True),
-        (False, True, False),
+        (True, False, True, 503, "isolated_voice_not_ready"),
+        (False, True, False, 409, "voice_runtime_claim_stale"),
     ],
 )
 def test_voice_runtime_rechecks_rollout_gate_on_every_request(
     monkeypatch,
-    bindings_enabled,
+    self_hosted_required,
     voice_enabled,
     isolated_claim,
+    status_code,
+    error_code,
 ):
-    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: bindings_enabled)
+    async def invitation_authority(_uid):
+        return self_hosted_required
+
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", invitation_authority)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: voice_enabled)
     principal = voice.VoiceProxyPrincipal(
         uid="uid-a",
@@ -616,8 +829,8 @@ def test_voice_runtime_rechecks_rollout_gate_on_every_request(
     with pytest.raises(HTTPException) as error:
         asyncio.run(voice._resolve_voice_runtime(principal))
 
-    assert error.value.status_code == 409
-    assert error.value.detail == {"code": "voice_runtime_claim_stale"}
+    assert error.value.status_code == status_code
+    assert error.value.detail == {"code": error_code}
 
 
 def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeypatch):

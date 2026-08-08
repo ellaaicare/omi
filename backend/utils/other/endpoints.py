@@ -1,11 +1,42 @@
 import json
+import logging
 import os
+import secrets
 import time
+from collections import Counter
 
 from fastapi import Header, HTTPException
 from fastapi import Request
 from firebase_admin import auth
 from firebase_admin.auth import InvalidIdTokenError
+
+logger = logging.getLogger(__name__)
+_ADMIN_BRANCH_COUNTS: Counter[str] = Counter()
+_ADMIN_BRANCH_COUNT_LIMIT = 1_000_000
+_ADMIN_CALLER_CLASSES = {"http", "websocket", "internal"}
+
+
+def _production_marker_enabled() -> bool:
+    return any(
+        os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on", "production", "prod"}
+        for name in ("ELLA_PRODUCTION", "PRODUCTION", "ENVIRONMENT", "DD_ENV")
+    )
+
+
+def _legacy_admin_subject_allowlist() -> set[str]:
+    return {item.strip() for item in os.getenv("ELLA_ADMIN_SUBJECT_ALLOWLIST", "").split(",") if item.strip()}
+
+
+def _observe_admin_subject_branch(caller_class: str) -> None:
+    normalized_class = caller_class if caller_class in _ADMIN_CALLER_CLASSES else "internal"
+    _ADMIN_BRANCH_COUNTS[normalized_class] = min(
+        _ADMIN_BRANCH_COUNTS[normalized_class] + 1,
+        _ADMIN_BRANCH_COUNT_LIMIT,
+    )
+    logger.info(
+        "Legacy ADMIN_KEY subject branch invoked",
+        extra={"caller_class": normalized_class, "invocation_count": _ADMIN_BRANCH_COUNTS[normalized_class]},
+    )
 
 
 def get_user(uid: str):
@@ -13,7 +44,7 @@ def get_user(uid: str):
     return user
 
 
-def verify_token(token: str) -> str:
+def verify_token(token: str, *, caller_class: str = "internal") -> str:
     """
     Verify a Firebase token or ADMIN_KEY and return the uid.
 
@@ -28,20 +59,26 @@ def verify_token(token: str) -> str:
     """
     # Check for ADMIN_KEY format
     admin_key = os.getenv('ADMIN_KEY')
-    if admin_key and admin_key in token:
-        return token.split(admin_key)[1]
+    if admin_key and token.startswith(admin_key):
+        _observe_admin_subject_branch(caller_class)
+        requested_subject = token[len(admin_key) :]
+        allowed_subjects = _legacy_admin_subject_allowlist()
+        for allowed_subject in allowed_subjects:
+            if requested_subject and secrets.compare_digest(requested_subject, allowed_subject):
+                return allowed_subject
+        raise InvalidIdTokenError("ADMIN_KEY subject is not allowlisted")
 
     # Verify Firebase token
     try:
         decoded_token = auth.verify_id_token(token)
         return decoded_token['uid']
     except InvalidIdTokenError:
-        if os.getenv('LOCAL_DEVELOPMENT') == 'true':
+        if os.getenv('LOCAL_DEVELOPMENT') == 'true' and not _production_marker_enabled():
             return '123'
         raise
     except Exception as e:
         print(f"Token verification error: {type(e).__name__}: {e}", flush=True)
-        if os.getenv('LOCAL_DEVELOPMENT') == 'true':
+        if os.getenv('LOCAL_DEVELOPMENT') == 'true' and not _production_marker_enabled():
             return '123'
         raise InvalidIdTokenError(str(e))
 
@@ -57,7 +94,7 @@ def get_current_user_uid(authorization: str = Header(None)):
         token = authorization.split(' ')[1]
         if not token:
             raise HTTPException(status_code=401, detail="Empty authorization token")
-        return verify_token(token)
+        return verify_token(token, caller_class="http")
     except InvalidIdTokenError as e:
         print(f"Error verifying Firebase ID token: {e}", flush=True)
         raise HTTPException(status_code=401, detail="Invalid authorization token")
@@ -95,7 +132,7 @@ def get_current_user_uid_from_ws_message(message: dict) -> str:
     if not token:
         raise ValueError("Missing token")
 
-    return verify_token(token)
+    return verify_token(token, caller_class="websocket")
 
 
 cached = {}

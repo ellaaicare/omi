@@ -36,6 +36,8 @@ from ella.services import proposal_ingest
 from ella.services.mcp_identity import validate_mcp_session_token
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_surface_prompt
+from ella.utils.provision_authority import ProvisionAuthorityError, legacy_provision_authority
+from utils.ella.canonical_auth import canonical_event_service_headers
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
 
 logger = logging.getLogger("ella.plato_mcp")
@@ -46,7 +48,6 @@ DEFAULT_PLATO_UID = "5aGC5YE9BnhcSoTxxtT4ar6ILQy2"
 DEFAULT_TIMELINE_URL = "https://api.ella-ai-care.com/v1/ella/timeline"
 DEFAULT_HERMES_GATEWAY_URL = "http://100.76.138.56:8642"
 DEFAULT_HERMES_AGENT_ID = "hermes"
-DEFAULT_PROVISION_API_URL = "http://100.76.138.56:8200"
 
 MAX_CONTEXT_LIMIT = 50
 MAX_WINDOW_CONTEXT_LIMIT = 500
@@ -570,7 +571,7 @@ async def _fetch_canonical_timeline(limit: int, channels: list[str], since: Opti
         params["since"] = since
     params["timezone"] = _plato_timezone()
     async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(timeline_url, params=params)
+        response = await client.get(timeline_url, params=params, headers=canonical_event_service_headers(_plato_uid()))
     if response.status_code != 200:
         raise RuntimeError(f"timeline_http_{response.status_code}")
     payload = response.json()
@@ -857,17 +858,16 @@ def _workspace_search_result_to_event(result: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _fetch_workspace_search(query: str, max_results: int) -> list[dict[str, Any]]:
-    provision_token = _env("ELLA_PROVISION_API_TOKEN")
-    if not provision_token:
-        logger.warning("plato_mcp workspace search skipped: ELLA_PROVISION_API_TOKEN is not configured")
-        return []
-    provision_url = _env("ELLA_PROVISION_API_URL", DEFAULT_PROVISION_API_URL).rstrip("/")
+    try:
+        authority = legacy_provision_authority()
+    except ProvisionAuthorityError as exc:
+        raise ToolExecutionError(exc.code, code=-32003) from exc
     limit = max(1, min(max_results, MAX_WORKSPACE_SEARCH_RESULTS))
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.post(
-                f"{provision_url}/workspace/{_plato_agent_id()}/search",
-                headers={"Authorization": f"Bearer {provision_token}"},
+                f"{authority.base_url}/workspace/{_plato_agent_id()}/search",
+                headers={"Authorization": f"Bearer {authority.token}"},
                 json={"query": query, "limit": limit, "excerpt_chars": 1400},
             )
         if response.status_code != 200:
@@ -948,10 +948,10 @@ async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _scanner_rules(arguments: dict[str, Any]) -> dict[str, Any]:
-    provision_token = _env("ELLA_PROVISION_API_TOKEN")
-    if not provision_token:
-        raise ToolExecutionError("ELLA_PROVISION_API_TOKEN is not configured", code=-32003)
-    provision_url = _env("ELLA_PROVISION_API_URL", DEFAULT_PROVISION_API_URL).rstrip("/")
+    try:
+        authority = legacy_provision_authority()
+    except ProvisionAuthorityError as exc:
+        raise ToolExecutionError(exc.code, code=-32003) from exc
     files = arguments.get("files") or ["scanner-presets.md", "scanner-tuning.md"]
     if not isinstance(files, list):
         raise ToolExecutionError("files must be a list", code=-32602)
@@ -962,8 +962,8 @@ async def _scanner_rules(arguments: dict[str, Any]) -> dict[str, Any]:
             if not re.fullmatch(r"[A-Za-z0-9._/-]+", safe_name) or ".." in safe_name:
                 raise ToolExecutionError(f"Invalid scanner rules file: {safe_name}", code=-32602)
             response = await client.get(
-                f"{provision_url}/workspace/{_plato_agent_id()}/files/{safe_name}",
-                headers={"Authorization": f"Bearer {provision_token}"},
+                f"{authority.base_url}/workspace/{_plato_agent_id()}/files/{safe_name}",
+                headers={"Authorization": f"Bearer {authority.token}"},
             )
             if response.status_code == 404:
                 results.append({"file": safe_name, "found": False})

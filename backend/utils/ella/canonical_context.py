@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
+from utils.ella.canonical_auth import canonical_event_service_headers
 from utils.ella.time_context import annotate_event_time, build_time_context, timezone_name
 
 DEFAULT_TIMELINE_URL = os.getenv("ELLA_CANONICAL_TIMELINE_URL", "http://127.0.0.1:8000/v1/ella/timeline")
@@ -96,7 +97,11 @@ async def fetch_canonical_timeline(
         params["timezone"] = user_timezone
 
     async with httpx.AsyncClient(timeout=timeout or DEFAULT_TIMEOUT_SECONDS) as client:
-        response = await client.get(DEFAULT_TIMELINE_URL, params=params)
+        response = await client.get(
+            DEFAULT_TIMELINE_URL,
+            params=params,
+            headers=canonical_event_service_headers(uid),
+        )
     response.raise_for_status()
 
     payload = response.json()

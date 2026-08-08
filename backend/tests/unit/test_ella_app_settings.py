@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 
 from ella.services import app_settings as service
-from utils.other import endpoints as auth
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 
 def test_extract_voice_settings_normalizes_ios_payload():
@@ -83,7 +83,7 @@ def _load_router(monkeypatch, stored_voice=None):
 
     app = FastAPI()
     app.include_router(module.router)
-    app.dependency_overrides[auth.get_current_user_uid] = lambda: "uid-1"
+    app.dependency_overrides[get_exact_firebase_uid] = lambda: "uid-1"
     return TestClient(app), state
 
 

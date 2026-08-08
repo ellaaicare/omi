@@ -11,12 +11,17 @@ from urllib.parse import quote
 
 import httpx
 
+from database.honcho_attestation import authority_credential
 from ella.services.correction_honcho_contract import resolve_companion_honcho_target
 
 logger = logging.getLogger(__name__)
 
 HONCHO_BASE_URL = os.getenv("ELLA_VOICE_HONCHO_BASE_URL", "http://100.76.138.56:8320").rstrip("/")
-HONCHO_API_KEY = os.getenv("ELLA_VOICE_HONCHO_API_KEY", os.getenv("HONCHO_API_KEY", "")).strip()
+HONCHO_API_KEY = (
+    authority_credential("ELLA_VOICE_HONCHO_API_KEY")
+    if "ELLA_VOICE_HONCHO_API_KEY" in os.environ
+    else authority_credential("HONCHO_API_KEY")
+)
 HONCHO_TIMEOUT_SECONDS = float(os.getenv("ELLA_VOICE_HONCHO_TIMEOUT_SECONDS", "1.5"))
 HONCHO_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_VOICE_HONCHO_CONTEXT_MAX_CHARS", "2400"))
 

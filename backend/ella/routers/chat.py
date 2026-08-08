@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import hashlib
+import time as _time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -34,6 +35,7 @@ from pydantic import BaseModel
 
 from ella.config import ELLA_CONFIG
 from database.ella_provisioning import EllaProvisioningRepository
+from database.honcho_attestation import authority_credential
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
@@ -46,7 +48,10 @@ from ella.services.ai_consent import require_current_ai_consent
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
+    revalidate_runtime_authority,
     resolve_isolated_runtime,
+    retained_owner_uid_configured,
+    runtime_authority_identity,
     runtime_authority_enabled,
 )
 from utils.ella.canonical_context import (
@@ -55,30 +60,32 @@ from utils.ella.canonical_context import (
     fetch_canonical_timeline,
     format_canonical_context,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.ella.time_context import timezone_name
-from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ella", tags=["ella-chat"])
 
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_CHAT_MODEL = os.getenv("ELLA_GROK_CHAT_MODEL", "grok-3-mini")
 
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "http://100.67.113.120:19001")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = authority_credential("OPENCLAW_GATEWAY_TOKEN", strip=False)
 CHAT_PLATFORM = os.getenv("ELLA_CHAT_PLATFORM", "hermes").strip().lower()
-HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642").rstrip("/")
-HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
+HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "").strip().rstrip("/")
+HERMES_GATEWAY_TOKEN = authority_credential("HERMES_API_SERVER_KEY", "API_SERVER_KEY", strip=False)
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
-HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
+HERMES_MODEL = os.getenv("HERMES_MODEL", "").strip()
 HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
 HERMES_CHAT_SESSION_SCOPE = os.getenv("ELLA_CHAT_HERMES_SESSION_SCOPE", "canonical").strip().lower()
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
 CHAT_TEMPORAL_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_MAX_CHARS", "9000"))
+CHAT_CLIENT_TYPE_ALLOWLIST = frozenset({"ios", "android", "web"})
+CHAT_SERVER_ROUTE_CATEGORY = "chat_stream"
 CHAT_USER_TIMEZONE = timezone_name(os.getenv("ELLA_USER_TIMEZONE", os.getenv("ELLA_PLATO_TIMEZONE", "")))
 CHAT_CONTEXT_CHANNELS = [
     channel.strip()
@@ -94,6 +101,11 @@ ELLA_SYSTEM_PROMPT = (
     "Keep responses concise and easy to understand. "
     "If someone seems confused or distressed, respond with extra gentleness and reassurance."
 )
+
+
+def _retained_owner_chat_configured(uid: str) -> bool:
+    """Permit the legacy retained route only with an explicit owner and full config."""
+    return bool(retained_owner_uid_configured(uid) and HERMES_GATEWAY_URL and HERMES_GATEWAY_TOKEN and HERMES_MODEL)
 
 
 def _hermes_chat_memory_key(uid: str) -> str:
@@ -268,10 +280,23 @@ def _resolve_debug_level(header_value: str = None) -> int:
             level = int(header_value)
             if 0 <= level <= 4:
                 return level
-            logger.warning(f"[FLOW:CHAT] Invalid debug level in header: {header_value}, using config default")
+            logger.warning("[FLOW:CHAT] Invalid debug level header; using config default")
         except (ValueError, TypeError):
-            logger.warning(f"[FLOW:CHAT] Non-integer debug level in header: {header_value}, using config default")
+            logger.warning("[FLOW:CHAT] Non-integer debug level header; using config default")
     return ELLA_CONFIG.debug_level
+
+
+def _bounded_client_type(header_value: str | None) -> str:
+    normalized = str(header_value or "").strip().lower()
+    return normalized if normalized in CHAT_CLIENT_TYPE_ALLOWLIST else "other"
+
+
+def _server_owned_client_metadata(header_value: str | None) -> dict[str, str]:
+    """Return the only caller-derived category allowed past the auth boundary."""
+    return {
+        "type": _bounded_client_type(header_value),
+        "route": CHAT_SERVER_ROUTE_CATEGORY,
+    }
 
 
 async def _fetch_chat_canonical_events(
@@ -399,8 +424,6 @@ async def _stream_level_1_ack(user_message: str):
 
 async def _stream_level_2_grok(user_message: str):
     """Level 2: Direct Grok API call via xAI."""
-    import time as _time
-
     _start = _time.time()
 
     if not XAI_API_KEY:
@@ -465,8 +488,6 @@ async def _stream_level_2_grok(user_message: str):
 
 async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str):
     """Level 3: Route through n8n webhook for full pipeline testing."""
-    import time as _time
-
     _start = _time.time()
 
     webhook_url = ELLA_CONFIG.n8n_chat_webhook
@@ -540,50 +561,31 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
     Sends SSE keep-alive comments (: keepalive) every 5s while waiting
     for OpenClaw to prevent proxy/client idle timeouts.
     """
-    import time as _time
-
     _start = _time.time()
 
     if not OPENCLAW_GATEWAY_TOKEN:
-        print(f"[FLOW:CHAT-L4] ERROR provider=openclaw token_missing=true uid={uid}", flush=True)
+        print("[FLOW:CHAT-L4] error=token_missing", flush=True)
         yield "data: Error: OPENCLAW_GATEWAY_TOKEN not configured\n\n"
         return
 
     # Dynamic agent resolution with tracing
     _l4_trace = RouteTrace()
-    _l4_trace.endpoint = "/v1/ella/chat/stream -> Level 4"
-    _l4_trace.uid = uid
+    del client_info
+    _l4_trace.endpoint_class = "chat"
+    _l4_trace.method = "POST"
     _l4_trace.debug_level = 4
-    if client_info:
-        _l4_trace.client_type = client_info.get("type", "")
-        _l4_trace.client_version = client_info.get("version", "")
-        _l4_trace.client_ip = client_info.get("ip", "")
-        _l4_trace.client_route = client_info.get("route", "")
-        _l4_trace.client_headers = client_info.get("headers", {})
 
     resolved = await resolve_user_routing(uid)
     if resolved and resolved.get("routing"):
         agent_id = resolved["routing"]["agentId"]
         gateway_url = resolved["routing"]["gatewayUrl"]
         session_key = resolved["routing"]["sessionKey"]
-        _l4_trace.resolved_agent = agent_id
-        _l4_trace.resolved_gateway = gateway_url
-        _l4_trace.resolved_session_key = session_key
-        _l4_trace.resolve_source = "database"
-        print(
-            f"[FLOW:CHAT-L4] provider=openclaw uid={uid} agent={agent_id} gateway={gateway_url} source=database",
-            flush=True,
-        )
+        print("[FLOW:CHAT-L4] routing=database", flush=True)
     else:
         agent_id = "main"
         gateway_url = OPENCLAW_URL
         session_key = f"ella:{uid}"
-        _l4_trace.resolved_agent = "main (FALLBACK)"
-        _l4_trace.resolved_gateway = gateway_url
-        _l4_trace.resolved_session_key = session_key
-        _l4_trace.resolve_source = "fallback"
-        _l4_trace.notes.append("WARNING: No cluster found, using fallback")
-        print(f"[FLOW:CHAT-L4] provider=openclaw uid={uid} agent=main source=FALLBACK (no cluster)", flush=True)
+        print("[FLOW:CHAT-L4] routing=fallback", flush=True)
 
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
@@ -607,10 +609,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
             }
         )
     else:
-        print(
-            f"[FLOW:CHAT-L4] uid={uid} canonical_context=empty fallback=openclaw_session_history_migration",
-            flush=True,
-        )
+        print("[FLOW:CHAT-L4] canonical_context=empty", flush=True)
     if temporal_context:
         messages.append(
             {
@@ -661,10 +660,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         _elapsed = int((_time.time() - _start) * 1000)
 
         if response.status_code != 200:
-            print(
-                f"[FLOW:CHAT-L4] ERROR provider=openclaw agent={agent_id} status={response.status_code} latency={_elapsed}ms keepalives={keepalive_count}",
-                flush=True,
-            )
+            print(f"[FLOW:CHAT-L4] error=provider_status latency_ms={_elapsed}", flush=True)
             yield f"data: Error: OpenClaw returned {response.status_code}\n\n"
             return
 
@@ -675,17 +671,11 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         # Strip <think>...</think> blocks that some reasoning models include
         reply = re.sub(r'<think>.*?</think>\s*', '', reply, flags=re.DOTALL).strip()
 
-        _l4_trace.openclaw_status = response.status_code
-        _l4_trace.openclaw_latency_ms = _elapsed
         _l4_trace.total_latency_ms = _elapsed
         _l4_trace.response_status = 200
         record_trace(_l4_trace)
 
-        reply_preview = reply[:80] if reply else "(empty)"
-        print(
-            f"[FLOW:CHAT-L4] OK provider=openclaw agent={agent_id} uid={uid} latency={_elapsed}ms keepalives={keepalive_count} reply={reply_preview}",
-            flush=True,
-        )
+        print(f"[FLOW:CHAT-L4] status=ok latency_ms={_elapsed} keepalives={keepalive_count}", flush=True)
 
         # Emit in OMI format: data: <text> then done: <base64 json>
         encoded_reply = reply.replace(chr(10), '__CRLF__')
@@ -711,12 +701,12 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
 
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
-        print(f"[FLOW:CHAT-L4] TIMEOUT provider=openclaw agent={agent_id} latency={_elapsed}ms", flush=True)
+        print(f"[FLOW:CHAT-L4] error=timeout latency_ms={_elapsed}", flush=True)
         yield "data: Error: OpenClaw request timed out\n\n"
-    except Exception as e:
+    except Exception:
         _elapsed = int((_time.time() - _start) * 1000)
-        print(f"[FLOW:CHAT-L4] ERROR provider=openclaw agent={agent_id} error={e} latency={_elapsed}ms", flush=True)
-        yield f"data: Error: {str(e)}\n\n"
+        print(f"[FLOW:CHAT-L4] error=unexpected latency_ms={_elapsed}", flush=True)
+        yield "data: Error: OpenClaw request failed\n\n"
 
 
 async def _stream_hermes_chat(
@@ -729,18 +719,22 @@ async def _stream_hermes_chat(
     runtime: IsolatedRuntime | None = None,
 ):
     """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
-    import time as _time
-
     _start = _time.time()
-    if runtime is None and runtime_authority_enabled(uid):
+    if runtime is None and not _retained_owner_chat_configured(uid):
+        yield "data: Error: hermes_runtime_required\n\n"
+        return
+    if runtime is None and await runtime_authority_enabled(uid):
         yield "data: Error: isolated runtime required\n\n"
         return
 
-    gateway_url = runtime.gateway_url if runtime else HERMES_GATEWAY_URL
-    gateway_token = runtime.gateway_token if runtime else HERMES_GATEWAY_TOKEN
-    agent_id = runtime.agent_id if runtime else HERMES_MODEL
-
-    if not gateway_token:
+    runtime_identity = None
+    if runtime is not None:
+        try:
+            runtime_identity = runtime_authority_identity(runtime)
+        except ProvisioningError as exc:
+            yield f"data: Error: {exc.code}\n\n"
+            return
+    elif not HERMES_GATEWAY_TOKEN:
         print(f"[FLOW:CHAT-HERMES] ERROR token_missing=true uid={uid}", flush=True)
         yield "data: Error: HERMES_API_SERVER_KEY not configured\n\n"
         return
@@ -805,6 +799,16 @@ async def _stream_hermes_chat(
     )
 
     try:
+        send_runtime = runtime
+        if runtime_identity is not None:
+            send_runtime = await revalidate_runtime_authority(runtime_identity)
+            if send_runtime.provider != "hermes":
+                raise ProvisioningError("self_hosted_runtime_required", retryable=False)
+        gateway_url = send_runtime.gateway_url if send_runtime else HERMES_GATEWAY_URL
+        gateway_token = send_runtime.gateway_token if send_runtime else HERMES_GATEWAY_TOKEN
+        agent_id = send_runtime.agent_id if send_runtime else HERMES_MODEL
+        if not gateway_token:
+            raise ProvisioningError("hermes_runtime_credential_missing", retryable=False)
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
@@ -847,13 +851,18 @@ async def _stream_hermes_chat(
 
         full_text = "".join(text).strip()
         if not full_text:
+            recovery_runtime = send_runtime
+            if runtime_identity is not None:
+                recovery_runtime = await revalidate_runtime_authority(runtime_identity)
+                if recovery_runtime.provider != "hermes":
+                    raise ProvisioningError("self_hosted_runtime_required", retryable=False)
             recovery_text = await _hermes_nonstream_completion(
                 messages,
                 session_key,
                 memory_key,
-                gateway_url=gateway_url,
-                gateway_token=gateway_token,
-                agent_id=agent_id,
+                gateway_url=recovery_runtime.gateway_url if recovery_runtime else HERMES_GATEWAY_URL,
+                gateway_token=recovery_runtime.gateway_token if recovery_runtime else HERMES_GATEWAY_TOKEN,
+                agent_id=recovery_runtime.agent_id if recovery_runtime else HERMES_MODEL,
             )
             if recovery_text:
                 text.append(recovery_text)
@@ -902,6 +911,10 @@ async def _stream_hermes_chat(
             flush=True,
         )
 
+    except ProvisioningError as exc:
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] AUTHORITY_ERROR uid={uid} code={exc.code} latency={_elapsed}ms", flush=True)
+        yield f"data: Error: {exc.code}\n\n"
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
         print(f"[FLOW:CHAT-HERMES] TIMEOUT uid={uid} latency={_elapsed}ms", flush=True)
@@ -1032,8 +1045,6 @@ async def ella_chat_stream(
 
     Set via env ELLA_DEBUG_LEVEL or header X-Ella-Debug-Level.
     """
-    import time as _time
-
     _trace_start = _time.time()
 
     if request.uid and request.uid != authenticated_uid:
@@ -1046,47 +1057,33 @@ async def ella_chat_stream(
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
+    if runtime is None and not _retained_owner_chat_configured(uid):
+        raise HTTPException(status_code=409, detail={"code": "hermes_runtime_required"})
+
     debug_level = _resolve_debug_level(x_ella_debug_level)
 
-    # Comprehensive flow entry log
-    client_ip = raw_request.client.host if raw_request.client else "unknown"
-    client_type = x_ella_client_type or "unknown"
-    print(
-        f"[FLOW:CHAT] uid={uid} level={debug_level} client={client_type} ip={client_ip} msg_len={len(request.message)}",
-        flush=True,
-    )
+    # Discard raw version, route, and debug metadata before every downstream
+    # branch. Only the fixed client enum and server-owned route category remain.
+    client_metadata = _server_owned_client_metadata(x_ella_client_type)
+    del x_ella_client_version, x_ella_route
+    print(f"[FLOW:CHAT] level={debug_level} request_received=true", flush=True)
 
     # Create routing trace
     trace = RouteTrace()
-    trace.endpoint = "/v1/ella/chat/stream"
+    trace.endpoint_class = "chat"
     trace.method = "POST"
-    trace.client_ip = client_ip
-    trace.client_type = x_ella_client_type or ""
-    trace.client_version = x_ella_client_version or ""
-    trace.client_route = x_ella_route or ""
-    trace.uid = uid
     trace.debug_level = debug_level
-    trace.notes.append(f"message_length={len(request.message)}")
     client_sent_at = _parse_client_sent_at(request.client_sent_at)
     turn_id = _canonical_turn_id(uid, request, client_sent_at)
-    trace.notes.append(f"canonical_turn_id={turn_id}")
-    # Capture all X-Ella-* headers for debugging
-    trace.client_headers = {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")}
 
     if CHAT_PLATFORM == "hermes" or runtime is not None:
-        trace.resolved_agent = runtime.agent_id if runtime else HERMES_AGENT_ID
-        trace.resolve_source = "isolated_runtime_binding" if runtime else "hermes_platform"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         stream = (
             _stream_hermes_cloud_chat(
                 request.message,
                 uid,
-                {
-                    "type": x_ella_client_type or "",
-                    "version": x_ella_client_version or "",
-                    "route": x_ella_route or "",
-                },
+                client_metadata,
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
                 runtime=runtime,
@@ -1095,13 +1092,7 @@ async def ella_chat_stream(
             else _stream_hermes_chat(
                 request.message,
                 uid,
-                {
-                    "type": x_ella_client_type or "",
-                    "version": x_ella_client_version or "",
-                    "ip": raw_request.client.host if raw_request.client else "",
-                    "route": x_ella_route or "",
-                    "headers": trace.client_headers,
-                },
+                client_metadata,
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
                 runtime=runtime,
@@ -1113,8 +1104,6 @@ async def ella_chat_stream(
         )
 
     if debug_level == 1:
-        trace.resolved_agent = "N/A (ACK)"
-        trace.resolve_source = "level_1_ack"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
@@ -1123,8 +1112,6 @@ async def ella_chat_stream(
         )
 
     if debug_level == 2:
-        trace.resolved_agent = "grok-direct"
-        trace.resolve_source = "level_2_grok"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
@@ -1133,8 +1120,6 @@ async def ella_chat_stream(
         )
 
     if debug_level == 3:
-        trace.resolved_agent = "n8n-webhook"
-        trace.resolve_source = "level_3_n8n"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
@@ -1143,26 +1128,18 @@ async def ella_chat_stream(
         )
 
     if debug_level == 4:
-        # L4 traces are recorded inside _stream_level_4_openclaw with full resolution data
+        # L4 records the same fixed, content-free trace schema after completion.
         return StreamingResponse(
             _stream_level_4_openclaw(
                 request.message,
                 uid,
-                {
-                    "type": x_ella_client_type or "",
-                    "version": x_ella_client_version or "",
-                    "ip": raw_request.client.host if raw_request.client else "",
-                    "route": x_ella_route or "",
-                    "headers": {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")},
-                },
+                client_metadata,
             ),
             media_type="text/event-stream",
         )
 
     # Level 0 (production): Direct Grok call as default production path
-    print(f"[FLOW:CHAT-L0] uid={uid} production path -> grok direct", flush=True)
-    trace.resolved_agent = "grok-direct (level 0)"
-    trace.resolve_source = "level_0_production"
+    print("[FLOW:CHAT-L0] route=grok_direct", flush=True)
     trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
     record_trace(trace)
     return StreamingResponse(
@@ -1181,7 +1158,7 @@ class EllaChatHistoryRequest(BaseModel):
 
 
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
 
 
 @router.get("/chat/history")
@@ -1189,7 +1166,7 @@ async def ella_chat_history(
     uid: str = "",
     limit: int = 50,
     before: str = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """Return recent chat/context messages for a user from canonical timeline.
 
@@ -1204,14 +1181,10 @@ async def ella_chat_history(
         limit: Max messages to return (default 50, max 200)
         before: ISO timestamp — only return messages before this time
     """
-    import time as _time
-
     _start = _time.time()
 
-    if uid and uid != authenticated_uid:
-        raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
-    uid = authenticated_uid
-    runtime_bound = runtime_authority_enabled(authenticated_uid)
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Chat history")
+    runtime_bound = await runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:
             await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")
@@ -1323,7 +1296,10 @@ async def ella_chat_history(
         _elapsed = int((_time.time() - _start) * 1000)
         logger.error(f"[FLOW:HISTORY] uid={uid} timeout latency={_elapsed}ms")
         return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
-    except Exception as e:
+    except Exception:
         _elapsed = int((_time.time() - _start) * 1000)
-        logger.error(f"[FLOW:HISTORY] uid={uid} error={e} latency={_elapsed}ms")
+        logger.error(
+            "[FLOW:HISTORY] code=ella_legacy_history_unavailable classification=unexpected latency=%sms",
+            _elapsed,
+        )
         return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}

@@ -6,11 +6,15 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import asyncpg
+import httpx
 import pytest
+from fastapi import FastAPI
 
 from database import authority_advisory_lock, managed_cloud_consent, voice_canary
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
+from ella.routers import guardian
+from utils.ella import exact_firebase_auth
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -37,6 +41,7 @@ CREATE TABLE users (
     identities JSONB NOT NULL DEFAULT '{}'::jsonb,
     settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    guardian_mode TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -112,6 +117,8 @@ async def _run_with_database(scenario):
                 "011_create_invitation_redemption.sql",
                 "012_create_account_profile_runtime_targets.sql",
                 "013_create_managed_cloud_consent_authority.sql",
+                "014_add_synthetic_invitation_operator_audit.sql",
+                "015_add_invitation_allowed_email_hash.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         await scenario(pool)
@@ -158,6 +165,173 @@ async def _seed_grant(pool, uid):
             "sha256:" + ("3" * 64),
         )
     return authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+
+
+def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
+    async def scenario(pool):
+        await pool.execute("""
+            INSERT INTO users (omi_uid, guardian_mode)
+            VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
+            """)
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        try:
+            upper = await guardian.get_guardian_mode(authenticated_uid="CaseUID")
+            lower = await guardian.get_guardian_mode(authenticated_uid="caseuid")
+        finally:
+            guardian._pool = previous_pool
+
+        assert upper["currentMode"] == "EMERGENCY_ONLY"
+        assert lower["currentMode"] == "ACTIVE_SUPPORT"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
+    async def scenario(pool):
+        await pool.execute("""
+            CREATE TABLE guardian_queue (
+                id TEXT PRIMARY KEY,
+                uid TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL,
+                message TEXT,
+                trigger_type TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                consumed_at TIMESTAMPTZ
+            );
+
+            CREATE TABLE guardian_pipeline_events (
+                id BIGSERIAL PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                latency_ms INTEGER,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE guardian_delivery_log (
+                id BIGSERIAL PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                target TEXT NOT NULL,
+                caregiver_id TEXT,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            INSERT INTO users (omi_uid, timezone)
+            VALUES ('CaseUID', 'UTC'), ('caseuid', 'America/Los_Angeles');
+
+            INSERT INTO guardian_queue (
+                id, uid, priority, message, trigger_type, metadata, created_at
+            ) VALUES
+                (
+                    'upper-private', 'CaseUID', 'urgent', 'UPPER_QUEUE_PRIVATE', 'safety',
+                    '{"trace_id":"owner-local-trace","private":"UPPER_QUEUE_METADATA"}',
+                    '2026-08-03T12:01:00Z'
+                ),
+                (
+                    'lower-private', 'caseuid', 'normal', 'LOWER_QUEUE_PRIVATE', 'safety',
+                    '{"trace_id":"owner-local-trace","private":"LOWER_QUEUE_METADATA"}',
+                    '2026-08-03T12:00:00Z'
+                );
+
+            INSERT INTO guardian_pipeline_events (
+                trace_id, uid, stage, status, metadata, created_at
+            ) VALUES
+                (
+                    'owner-local-trace', 'CaseUID', 'upper-private-event', 'success',
+                    '{"private":"UPPER_EVENT_PRIVATE"}', '2026-08-03T12:01:10Z'
+                ),
+                (
+                    'owner-local-trace', 'caseuid', 'lower-private-event', 'success',
+                    '{"private":"LOWER_EVENT_PRIVATE"}', '2026-08-03T12:00:10Z'
+                );
+
+            INSERT INTO guardian_delivery_log (
+                trace_id, uid, channel, target, status, error_message, created_at, updated_at
+            ) VALUES
+                (
+                    'owner-local-trace', 'CaseUID', 'email', 'upper-private-target', 'sent',
+                    'UPPER_DELIVERY_PRIVATE', '2026-08-03T12:01:20Z', '2026-08-03T12:01:20Z'
+                ),
+                (
+                    'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
+                    'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
+                );
+            """)
+
+        before = {
+            table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("guardian_queue", "guardian_pipeline_events", "guardian_delivery_log")
+        }
+
+        def verify_token(token):
+            if token == "valid-lower":
+                return {"uid": "caseuid"}
+            if token == "valid-upper":
+                return {"uid": "CaseUID"}
+            raise ValueError("invalid bearer")
+
+        monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        app = FastAPI()
+        app.include_router(guardian.alerts_router)
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                lower_response = await client.get(
+                    "/v1/ella/guardian-alerts?limit=50&uid=CaseUID",
+                    headers={"Authorization": "Bearer valid-lower"},
+                )
+                upper_response = await client.get(
+                    "/v1/ella/guardian-alerts?limit=50",
+                    headers={"Authorization": "Bearer valid-upper"},
+                )
+        finally:
+            guardian._pool = previous_pool
+
+        assert lower_response.status_code == 200
+        lower = lower_response.json()
+        assert lower["uid"] == "caseuid"
+        assert [alert["queue_item_id"] for alert in lower["alerts"]] == ["lower-private"]
+        assert [event["stage"] for event in lower["alerts"][0]["events"]] == ["lower-private-event"]
+        assert [delivery["target"] for delivery in lower["alerts"][0]["deliveries"]] == ["lower-private-target"]
+        lower_serialized = str(lower)
+        assert "LOWER_QUEUE_PRIVATE" in lower_serialized
+        for upper_private in (
+            "upper-private",
+            "UPPER_QUEUE_PRIVATE",
+            "UPPER_QUEUE_METADATA",
+            "upper-private-event",
+            "UPPER_EVENT_PRIVATE",
+            "upper-private-target",
+            "UPPER_DELIVERY_PRIVATE",
+        ):
+            assert upper_private not in lower_serialized
+
+        assert upper_response.status_code == 200
+        upper = upper_response.json()
+        assert upper["uid"] == "CaseUID"
+        assert [alert["queue_item_id"] for alert in upper["alerts"]] == ["upper-private"]
+        assert [event["stage"] for event in upper["alerts"][0]["events"]] == ["upper-private-event"]
+        assert [delivery["target"] for delivery in upper["alerts"][0]["deliveries"]] == ["upper-private-target"]
+
+        after = {
+            table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("guardian_queue", "guardian_pipeline_events", "guardian_delivery_log")
+        }
+        assert after == before
+
+    asyncio.run(_run_with_database(scenario))
 
 
 def _prompt_receipt() -> dict[str, Any]:
@@ -396,23 +570,19 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """
-            )
+                """)
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -625,7 +795,7 @@ async def _prepare_writer_case(
             expected_after=0,
         )
 
-    if name in {"identity_create", "identity_update", "identity_bind", "user_activate"}:
+    if name in {"identity_create", "identity_update", "identity_bind", "user_activate", "guardian_mode"}:
         email = f"{uid}@example.invalid"
         if name == "identity_create":
             owner = authority_advisory_lock.provisional_identity_owner(uid)
@@ -671,6 +841,11 @@ async def _prepare_writer_case(
                     uid,
                     email,
                 )
+                if name == "guardian_mode":
+                    await conn.execute(
+                        "UPDATE users SET status = 'ACTIVE' WHERE id = $1",
+                        user_id,
+                    )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
         if name == "identity_bind":
 
@@ -722,6 +897,22 @@ async def _prepare_writer_case(
                 snapshot=snapshot,
                 expected_before="Synthetic Before",
                 expected_after="Synthetic After",
+            )
+
+        if name == "guardian_mode":
+
+            async def guardian_mode_snapshot():
+                return await pool.fetchval(
+                    "SELECT guardian_mode FROM users WHERE id = $1",
+                    user_id,
+                )
+
+            return _WriterCase(
+                owner=owner,
+                writer=lambda: repository.update_guardian_mode(uid, "ACTIVE_SUPPORT"),
+                snapshot=guardian_mode_snapshot,
+                expected_before=None,
+                expected_after="ACTIVE_SUPPORT",
             )
 
         async def status_snapshot():
@@ -970,6 +1161,7 @@ async def _prepare_writer_case(
         "identity_update",
         "identity_bind",
         "user_activate",
+        "guardian_mode",
         "runtime_stage",
         "runtime_activate",
         "cloud_claim",
@@ -1006,6 +1198,7 @@ def _authority_error_code(error: BaseException) -> str | None:
         "entitlement_status",
         "entitlement_delete",
         "user_activate",
+        "guardian_mode",
         "runtime_stage",
         "runtime_activate",
         "cloud_claim",
@@ -1592,5 +1785,188 @@ def test_new_identity_owner_collision_after_lookup_fails_closed():
                 "status": "PENDING",
             }
         ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_consent_bootstrap_creates_users_row_and_grant():
+    """A fresh UID with no users row completes consent via the bootstrap path,
+    creating the deterministic users row inside the advisory-lock transaction,
+    and later idempotent re-consent reconciles onto the same row. Without the
+    relax flag the strict authority_lock_owner_missing behavior is preserved.
+    """
+
+    async def scenario(pool):
+        uid = "synthetic-consent-bootstrap-fresh"
+        owner = authority_advisory_lock.provisional_identity_owner(uid)
+
+        async with pool.acquire() as conn:
+            before = await conn.fetchval(
+                "SELECT 1 FROM users WHERE omi_uid = $1",
+                uid,
+            )
+        assert before is None
+
+        result = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="one"),
+            allow_fresh_uid_bootstrap=True,
+        )
+        assert result["user_id"] == owner.account_id
+
+        async with pool.acquire() as observer:
+            row = await observer.fetchrow(
+                """
+                SELECT id, omi_uid, name, timezone, status
+                FROM users
+                WHERE omi_uid = $1
+                """,
+                uid,
+            )
+            decision = await observer.fetchval(
+                """
+                SELECT decision
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                owner.account_id,
+            )
+            receipt_ref = await observer.fetchval(
+                """
+                SELECT consent_receipt_ref
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                owner.account_id,
+            )
+        assert row is not None
+        assert tuple(row.values()) == (
+            owner.account_id,
+            uid,
+            "Synthetic User",
+            "UTC",
+            "PENDING",
+        )
+        assert decision == "granted"
+        assert receipt_ref and receipt_ref.startswith("sha256:")
+
+        # Idempotent re-consent reconciles onto the same deterministic row.
+        result_two = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="two"),
+            allow_fresh_uid_bootstrap=True,
+        )
+        assert result_two["user_id"] == owner.account_id
+        async with pool.acquire() as observer:
+            count = await observer.fetchval(
+                "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                uid,
+            )
+        assert count == 1
+
+        # A different fresh UID with the relax flag off fails closed first.
+        strict_uid = "synthetic-consent-bootstrap-strict"
+        with pytest.raises(
+            managed_cloud_consent.ManagedCloudAuthorityUnavailable,
+            match="managed_cloud_authority_unavailable",
+        ) as raised:
+            await managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(strict_uid),
+                allow_fresh_uid_bootstrap=False,
+            )
+        assert raised.value.__cause__.code == "authority_lock_owner_missing"
+        async with pool.acquire() as observer:
+            strict_count = await observer.fetchval(
+                "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                strict_uid,
+            )
+        assert strict_count == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
+    """A confirmed delete frees the UID for a fresh bootstrap on relogin.
+
+    After consent bootstrap, unlink_self_owner_account_on_deletion clears the
+    consent/entitlement FK dependents and deletes the users row, so the same
+    Firebase UID can bootstrap a brand-new account (fresh account on relogin)
+    rather than resuming the deleted one — and the re-bootstrap does not collide
+    with the tombstoned deterministic id.
+    """
+
+    async def scenario(pool):
+        uid = "synthetic-delete-unlink-fresh"
+        owner = authority_advisory_lock.provisional_identity_owner(uid)
+        await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="one"),
+            allow_fresh_uid_bootstrap=True,
+        )
+
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 1
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 1
+            )
+
+        # Unlink the account.
+        await managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid)
+
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 0
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 0
+            )
+
+        # A relogin re-bootstraps a fresh account collision-free.
+        result = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="two"),
+            allow_fresh_uid_bootstrap=True,
+        )
+        assert result["user_id"] == owner.account_id
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 1
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 1
+            )
+
+        # Deleting again is a no-op (no server row), not an error.
+        await managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid)
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
+                    uid,
+                )
+                == 0
+            )
 
     asyncio.run(_run_with_database(scenario))

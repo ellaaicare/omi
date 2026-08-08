@@ -38,7 +38,7 @@ from ella.services.summary_recovery import (
 from ella.services.summary_writeback import ConcurrentConversationSummaryChangeError
 from ella.services import proposal_ingest
 from models.conversation import Conversation, ConversationStatus
-from utils.other import endpoints as auth
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 logger = logging.getLogger(__name__)
 
@@ -1371,7 +1371,7 @@ async def _submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     background_tasks: Optional[BackgroundTasks] = None,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionResponse:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -1704,7 +1704,7 @@ async def _submit_conversation_correction(
 )
 def get_conversation_processing_retry_plan(
     conversation_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationProcessingRetryPlan:
     plan = build_conversation_processing_retry_plan(uid, conversation_id)
     if plan is None:
@@ -1721,7 +1721,7 @@ def retry_failed_conversation_processing(
     conversation_id: str,
     request: RetryConversationProcessingRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> RetryConversationProcessingResponse:
     """Atomically queue generic recovery followed by canonical Hermes enrichment."""
 
@@ -1807,7 +1807,7 @@ async def submit_conversation_correction_ella(
 def get_conversation_correction_receipt(
     conversation_id: str,
     correction_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionReceiptResponse:
     return _correction_receipt(
         uid=uid,
@@ -1823,7 +1823,7 @@ def get_conversation_correction_receipt(
 async def undo_conversation_correction(
     conversation_id: str,
     correction_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionReceiptResponse:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:

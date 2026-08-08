@@ -28,6 +28,15 @@ The Plato/Grok MCP bridge uses this read path through
 `ELLA_PLATO_TIMELINE_URL`, which defaults to
 `https://api.ella-ai-care.com/v1/ella/timeline`.
 
+## Authority
+
+User-facing calls require a Firebase bearer and may read or write only the
+exact token subject. Internal adapters use the distinct
+`X-Ella-Event-Ledger-Key` header backed by `ELLA_EVENT_LEDGER_TOKEN`; every
+event and session completion in a service batch is still checked for a
+non-empty, matching `uid` and `canonical_identity`. Missing configuration,
+mixed user authority, and caller-selected cross-user identifiers fail closed.
+
 ## What "Unified" Means
 
 All consumer surfaces should hydrate recent context from `GET /v1/ella/timeline`

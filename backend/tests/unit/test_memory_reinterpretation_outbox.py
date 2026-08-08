@@ -535,7 +535,10 @@ def test_reinterpretation_completion_requires_configured_ledger_bearer(monkeypat
     )
     accepted = client.post(
         f"/v1/ella/sessions/{session_id}/complete",
-        headers={"Authorization": "Bearer ledger-secret"},
+        headers={
+            "Authorization": "Bearer ledger-secret",
+            "X-Ella-Subject-Uid": UID,
+        },
         json=body,
     )
 
@@ -1252,7 +1255,7 @@ def test_authenticated_status_is_identifier_only_and_missing_nonowned_have_parit
     repository, job = asyncio.run(seed())
     app = FastAPI()
     app.include_router(reinterpretation_router.create_memory_reinterpretation_router(repository))
-    app.dependency_overrides[reinterpretation_router.auth.get_current_user_uid] = lambda: UID
+    app.dependency_overrides[reinterpretation_router.get_exact_firebase_uid] = lambda: UID
     monkeypatch.setattr(
         reinterpretation_router.conversations_db,
         "get_conversation",
@@ -1269,7 +1272,7 @@ def test_authenticated_status_is_identifier_only_and_missing_nonowned_have_parit
     assert "proposal_plan" not in body
 
     missing = client.get("/v1/ella/conversations/missing/reinterpretations/latest")
-    app.dependency_overrides[reinterpretation_router.auth.get_current_user_uid] = lambda: UID.lower()
+    app.dependency_overrides[reinterpretation_router.get_exact_firebase_uid] = lambda: UID.lower()
     nonowned = client.get(f"/v1/ella/conversations/{CONVERSATION_ID}/reinterpretations/latest")
     assert (missing.status_code, missing.json()) == (
         nonowned.status_code,
@@ -1524,7 +1527,7 @@ def test_worker_reinterpretation_receipt_and_authenticated_undo_restore_prior_su
 
     app = FastAPI()
     app.include_router(corrections.router)
-    app.dependency_overrides[corrections.auth.get_current_user_uid] = lambda: UID
+    app.dependency_overrides[corrections.get_exact_firebase_uid] = lambda: UID
     client = TestClient(app)
 
     receipt = client.get(f"/v1/ella/conversations/{CONVERSATION_ID}/corrections/{correction_id}")

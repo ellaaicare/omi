@@ -16,6 +16,7 @@ from typing import Any, Optional
 import asyncpg
 
 from database import authority_advisory_lock
+from database.honcho_attestation import authority_credential, retain_authority_credential
 
 DEFAULT_DAILY_LIMIT_S = 45 * 60
 DEFAULT_MONTHLY_LIMIT_S = 12 * 60 * 60
@@ -245,13 +246,14 @@ async def get_pool() -> asyncpg.Pool:
     if _pool is None:
         dsn = os.getenv("ELLA_POSTGRES_DSN", "").strip()
         if dsn:
+            retain_authority_credential(dsn)
             _pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10)
         else:
             _pool = await asyncpg.create_pool(
                 host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
                 port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
                 user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-                password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+                password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
                 database=os.getenv("ELLA_POSTGRES_DATABASE", os.getenv("ELLA_POSTGRES_DB", "ella_ai")),
                 min_size=1,
                 max_size=10,
