@@ -389,7 +389,11 @@ def stable_payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def public_receipt(
+    job: dict[str, Any],
+    binding: Optional[dict[str, Any]] = None,
+    effective_voice_mode: str = "",
+) -> dict[str, Any]:
     state = str(job.get("state") or "pending")
     stage = str(job.get("stage") or "identity_ready")
     public_state = {
@@ -425,6 +429,7 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         ),
         "runtime_provider": str(binding.get("provider") or "") if binding else None,
         "runtime_status": str(binding.get("status") or "") if binding else None,
+        "effective_voice_mode": str(effective_voice_mode or ""),
     }
     if job.get("error_code"):
         result["error_code"] = job["error_code"]
