@@ -830,7 +830,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 69
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 71
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
