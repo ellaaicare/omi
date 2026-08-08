@@ -236,6 +236,7 @@ class FakeRepository:
         )
         self.job_calls = []
         self.voice_seed_calls = []
+        self.voice_seed_result = True
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -296,7 +297,7 @@ class FakeRepository:
 
     async def seed_voice_entitlement_if_absent(self, *, uid):
         self.voice_seed_calls.append(uid)
-        return True
+        return self.voice_seed_result
 
     async def stage_runtime_binding(self, *, uid, binding):
         self.staged = dict(
@@ -1938,7 +1939,7 @@ def test_fresh_self_hosted_provision_seeds_grok_voice(monkeypatch):
     monkeypatch.setattr(
         provisioning_service,
         "_ensure_self_hosted_grok_voice_mode",
-        lambda uid: firestore_seeds.append(uid),
+        lambda uid, **_: firestore_seeds.append(uid),
     )
 
     repository = FakeRepository()
@@ -1956,6 +1957,49 @@ def test_fresh_self_hosted_provision_seeds_grok_voice(monkeypatch):
     assert repository.job["state"] == "ready"
     assert repository.activation_calls == 1
     assert repository.binding is not None and repository.binding["active"]
+
+
+def test_grok_voice_firestore_seed_gated_on_fresh_entitlement_row(monkeypatch):
+    """The Firestore voice_mode write only happens when a fresh DB entitlement
+    row was actually inserted, so a returning/operator-seeded user's voice state
+    is never auto-written (row precedence). Injects a fake database.app_settings
+    so the lazy import inside _ensure_self_hosted_grok_voice_mode resolves to a
+    controllable stub without touching real Firestore."""
+
+    class _FakeAppSettings:
+        def __init__(self):
+            self.calls = []
+
+        def get_voice_settings(self, uid):
+            self.calls.append(("get", uid))
+            return {}
+
+        def save_voice_settings(self, uid, voice):
+            self.calls.append(("save", uid, voice))
+
+    fake = _FakeAppSettings()
+    monkeypatch.setitem(sys.modules, "database.app_settings", fake)
+
+    # No fresh row -> firestore is never even read.
+    provisioning_service._ensure_self_hosted_grok_voice_mode("u1", fresh_entitlement_created=False)
+    assert fake.calls == []
+
+    # Empty uid -> no-op even if a row was flagged fresh.
+    provisioning_service._ensure_self_hosted_grok_voice_mode("", fresh_entitlement_created=True)
+    assert fake.calls == []
+
+    # Fresh row + no existing voice_mode -> seed grok-voice.
+    provisioning_service._ensure_self_hosted_grok_voice_mode("u2", fresh_entitlement_created=True)
+    assert fake.calls == [("get", "u2"), ("save", "u2", {"voice_mode": "grok-voice"})]
+
+    # Fresh row but the user already picked a voice mode -> preserved, no clobber.
+    fake.get_voice_settings = lambda uid: fake.calls.append(("get", uid)) or {"voice_mode": "elevenlabs"}
+    provisioning_service._ensure_self_hosted_grok_voice_mode("u3", fresh_entitlement_created=True)
+    assert fake.calls == [
+        ("get", "u2"),
+        ("save", "u2", {"voice_mode": "grok-voice"}),
+        ("get", "u3"),
+    ]
 
 
 def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monkeypatch):

@@ -389,18 +389,28 @@ def stable_payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _ensure_self_hosted_grok_voice_mode(uid: str) -> None:
-    """Seed Firestore voice_mode=grok-voice only if absent (no clobber).
+def _ensure_self_hosted_grok_voice_mode(
+    uid: str,
+    *,
+    fresh_entitlement_created: bool = False,
+) -> None:
+    """Seed Firestore voice_mode=grok-voice only when a fresh DB row was inserted.
 
     The public onboarding receipt surfaces ``effective_voice_mode`` from the
     Firestore-backed voice settings (onboarding._resolved_voice_mode ->
     app_settings.get_voice_settings), and the client routes to the Grok lane off
-    that receipt field. Seeding it only-if-absent keeps the receipt consistent
-    with the DB entitlement created at provision
-    (seed_voice_entitlement_if_absent) while preserving a returning user's own
-    voice choice. Never allowed to break provisioning on a settings write.
+    that receipt field.
+
+    Gated on ``fresh_entitlement_created`` so the two side effects stay atomic
+    for genuinely fresh users: the receipt only advertises grok-voice when
+    ``seed_voice_entitlement_if_absent`` actually inserted an active row (i.e.
+    the entitlement really permits grok). A returning self-hosted user with an
+    existing revoked/suspended (non-grok) entitlement row, or an operator-seeded
+    row, is left untouched -- auto-provision never writes their voice mode. The
+    only-if-absent write also preserves an existing user voice choice. Never
+    allowed to break provisioning on a settings write.
     """
-    if not uid:
+    if not uid or not fresh_entitlement_created:
         return
     try:
         from database import app_settings as app_settings_db
@@ -1334,12 +1344,18 @@ class ProvisioningCoordinator:
             # create-if-absent) and Firestore voice_mode (only-if-absent) so the
             # first voice/chat session is not entitlement-gated and the public
             # receipt carries effective_voice_mode=grok-voice for the client.
-            await self._repository_call(
+            voice_entitlement_created = await self._repository_call(
                 authority_snapshot,
                 self.repository.seed_voice_entitlement_if_absent,
                 uid=identity.uid,
             )
-            _ensure_self_hosted_grok_voice_mode(identity.uid)
+            # Firestore voice_mode only when a fresh DB entitlement row was
+            # actually inserted -- keeps a returning/operator-seeded user's own
+            # voice state untouched and the receipt consistent with the row.
+            _ensure_self_hosted_grok_voice_mode(
+                identity.uid,
+                fresh_entitlement_created=bool(voice_entitlement_created),
+            )
             deadline_check()
             activated = await self._repository_call(
                 authority_snapshot,
