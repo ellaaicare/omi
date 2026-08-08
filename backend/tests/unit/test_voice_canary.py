@@ -177,6 +177,32 @@ class _NoRowConn:
         return None
 
 
+class _RowConn:
+    def __init__(self, row):
+        self._row = row
+
+    async def fetchrow(self, *args, **kwargs):
+        return self._row
+
+
+async def _noop(*args, **kwargs):
+    return None
+
+
+def _zero_rollup(fixed):
+    async def rollup(conn, uid, now):
+        return {
+            "daily_used_s": 0,
+            "monthly_used_s": 0,
+            "daily_cost_microusd": 0,
+            "monthly_cost_microusd": 0,
+            "daily_resets_at": fixed.isoformat(),
+            "monthly_resets_at": fixed.isoformat(),
+        }
+
+    return rollup
+
+
 def test_fresh_uid_entitlement_contract_respects_relax_flag(monkeypatch):
     fixed = datetime(2026, 8, 8, 2, 0, 0, tzinfo=timezone.utc)
 
@@ -203,6 +229,61 @@ def test_fresh_uid_entitlement_contract_respects_relax_flag(monkeypatch):
     assert contract["plan"] == "canary"
     assert contract["revision"] == 0
     assert "quota" in contract
+
+
+def test_existing_revoked_row_unaffected_by_relax_flag(monkeypatch):
+    # Sophia criterion 3: the relax lives strictly in the `if not row:` branch.
+    # An existing row (revoked/suspended) keeps its real status even with the
+    # relax flag on - it must NOT become provisionable through this change.
+    fixed = datetime(2026, 8, 8, 2, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(voice_canary, "lock_runtime_authority_on_connection", _noop)
+    monkeypatch.setattr(voice_canary, "_usage_rollup", _zero_rollup(fixed))
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    revoked = {
+        "status": "revoked",
+        "plan": "canary",
+        "revision": 3,
+        "daily_limit_s": 2700,
+        "monthly_limit_s": 43200,
+        "max_session_s": 1200,
+        "max_concurrent": 1,
+        "soft_limit_ratio": voice_canary.DEFAULT_SOFT_LIMIT_RATIO,
+    }
+
+    async def build():
+        return await voice_canary.get_entitlement_contract_for_connection(
+            _RowConn(revoked), "uid-existing", now=fixed, expire_stale_sessions=False
+        )
+
+    contract = asyncio.run(build())
+    assert contract["status"] == "revoked"
+    assert contract["revision"] == 3
+    assert contract["plan"] == "canary"
+
+
+def test_fresh_contract_relax_alone_does_not_open_voice_session(monkeypatch):
+    # Sophia criterion 2 / 5: gate pass (contract "invited") is NOT session-open.
+    # Session-open reads the real voice_entitlements row; a genuinely fresh no-row
+    # user is still denied (no_entitlement) even with the relax flag on. This pins
+    # that real fresh-user voice availability is a separate concern from the
+    # contract status - proving `active` from this contract could not un-brick it
+    # either.
+    monkeypatch.setattr(voice_canary, "lock_runtime_authority_on_connection", _noop)
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+
+    async def run():
+        return await voice_canary._runtime_activation_decision(
+            _NoRowConn(),
+            uid="uid-fresh",
+            provider="grok-voice",
+            model="grok-4",
+            require_active=True,
+        )
+
+    decision = asyncio.run(run())
+    assert decision.allowed is False
+    assert decision.code == "no_entitlement"
 
 
 def test_operator_defaults_are_grok_only_and_have_no_fallback():
