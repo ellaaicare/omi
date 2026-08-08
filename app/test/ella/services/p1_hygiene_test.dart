@@ -213,8 +213,14 @@ void main() {
     final auth = File('${lib.path}/services/auth_service.dart').readAsStringSync();
     expect(auth, contains('Future<T> runIdentityTransition<T>'));
     expect(auth.indexOf('stopForAccountTransition()'), lessThan(auth.indexOf('return mutation();')));
-    expect(auth, contains('Future<void> signOut() => runIdentityTransition(FirebaseAuth.instance.signOut)'));
+    expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
+    expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
     expect(auth, contains('replaceIdentityWithCredential'));
+
+    final authUtils = File('${lib.path}/utils/auth_utils.dart').readAsStringSync();
+    expect(authUtils, contains('signOutWithQuiescedCleanup(() async {'));
+    expect(authUtils, isNot(contains('stopForAccountTransition()')));
+    expect(authUtils, isNot(contains('AuthService.instance.signOut()')));
 
     final provider = File('${lib.path}/providers/auth_provider.dart').readAsStringSync();
     expect(provider, contains('runIdentityTransition(_auth.signInAnonymously)'));

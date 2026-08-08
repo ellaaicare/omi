@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
-import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/ella_entitlement_provider.dart';
@@ -39,39 +38,32 @@ Future<void> signOutAndClearUserData(BuildContext context) async {
   try {
     entitlementProvider = context.read<EllaEntitlementProvider>();
   } catch (_) {}
-  await EllaAccountIsolationService(
-    stopCapture: () async {
-      await captureProvider?.stopStreamDeviceRecording(cleanDevice: true);
-      await captureProvider?.stopStreamRecording();
-    },
-  ).stopForAccountTransition();
+  await AuthService.instance.signOutWithQuiescedCleanup(() async {
+    // Clear in-memory provider state only after every account producer has
+    // quiesced. Firebase sign-out follows this callback in the same transition.
+    try {
+      conversationProvider?.reset();
+    } catch (_) {}
+    try {
+      messageProvider?.reset();
+    } catch (_) {}
+    try {
+      captureProvider?.reset();
+    } catch (_) {}
+    try {
+      peopleProvider?.reset();
+    } catch (_) {}
+    try {
+      memoriesProvider?.reset();
+    } catch (_) {}
+    try {
+      entitlementProvider?.reset();
+    } catch (_) {}
 
-  // Clear in-memory provider state
-  try {
-    conversationProvider?.reset();
-  } catch (_) {}
-  try {
-    messageProvider?.reset();
-  } catch (_) {}
-  try {
-    captureProvider?.reset();
-  } catch (_) {}
-  try {
-    peopleProvider?.reset();
-  } catch (_) {}
-  try {
-    memoriesProvider?.reset();
-  } catch (_) {}
-  try {
-    entitlementProvider?.reset();
-  } catch (_) {}
+    // Explicitly clear conversation/message caches first (prevents cross-account data leak)
+    SharedPreferencesUtil().clearUserCaches();
 
-  // Explicitly clear conversation/message caches first (prevents cross-account data leak)
-  SharedPreferencesUtil().clearUserCaches();
-
-  // Clear all persisted local data
-  await SharedPreferencesUtil().clear();
-
-  // Sign out of Firebase
-  await AuthService.instance.signOut();
+    // Clear all persisted local data before Firebase changes identity.
+    await SharedPreferencesUtil().clear();
+  });
 }
