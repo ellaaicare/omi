@@ -3583,9 +3583,7 @@ class EllaProvisioningRepository:
                         # (possibly stale) job-target schema here, and requiring a
                         # match would reproduce the "incomplete on status" bug the
                         # fallback exists to fix. `POST /ensure` passes None (inert).
-                        fallback = await self._resolve_self_hosted_active_direct(
-                            uid=uid, role=role
-                        )
+                        fallback = await self._resolve_self_hosted_active_direct(uid=uid, role=role)
                         return fallback
                     decision = await voice_canary_db.revalidate_runtime_resolution_on_connection(
                         connection,

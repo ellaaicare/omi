@@ -15,7 +15,6 @@ from database.ella_provisioning import (
     IdentityConflictError,
     ProvisioningSchemaNotReadyError,
 )
-from database import app_settings as app_settings_db
 from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER, SELF_HOSTED_RUNTIME_MODEL
 from ella.services.ai_consent import (
     MANAGED_CLOUD_MEMORY_PROVIDER,
@@ -112,6 +111,13 @@ def _resolved_voice_mode(uid: str) -> str:
     if not uid:
         return ""
     try:
+        # Import lazily inside the function: the module-level import in this
+        # router runs `database._client.db = firestore.Client()` transitively at
+        # import time, which breaks test collection / jobs that lack a
+        # FIRESTORE_EMULATOR_HOST (DefaultCredentialsError on import). Runtime
+        # degradation is already graceful under the try/except below.
+        from database import app_settings as app_settings_db
+
         voice = app_settings_db.get_voice_settings(uid) or {}
         raw = str(voice.get("voice_mode") or "").strip()
         if not raw:

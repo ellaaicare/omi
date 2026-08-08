@@ -170,7 +170,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 174
+          test "$collected" -eq 180
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -212,6 +212,11 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation"
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_positive_healthy_active"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_negative_disabled_unhealthy"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_no_row_returns_none"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_requires_hermes_provider"
+            "tests/unit/test_ella_provisioning_service.py::test_public_receipt_flattened_voice_mode_parse_contract"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope"

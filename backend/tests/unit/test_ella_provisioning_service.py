@@ -2654,9 +2654,7 @@ def test_resolve_self_hosted_active_direct_no_row_returns_none():
     repository = EllaProvisioningRepository(pool)
 
     row = asyncio.run(
-        repository._resolve_self_hosted_active_direct(
-            uid="no-such-uid", role="user", template_version="hermes-user-v1"
-        )
+        repository._resolve_self_hosted_active_direct(uid="no-such-uid", role="user", template_version="hermes-user-v1")
     )
 
     assert row is None
@@ -2666,14 +2664,17 @@ def test_resolve_self_hosted_active_direct_requires_hermes_provider():
     """A non-hermes active binding must not satisfy the fallback gate."""
     pool = _FilteringFakePool(
         _row_like(
-            id="other-0000", role="user", provider="someother", active=True,
-            status="active", health_state="healthy", revision=1,
+            id="other-0000",
+            role="user",
+            provider="someother",
+            active=True,
+            status="active",
+            health_state="healthy",
+            revision=1,
         )
     )
     repository = EllaProvisioningRepository(pool)
-    row = asyncio.run(
-        repository._resolve_self_hosted_active_direct(uid="u", role="user")
-    )
+    row = asyncio.run(repository._resolve_self_hosted_active_direct(uid="u", role="user"))
     # The row-intrinsic gate must reject a non-hermes provider even when the
     # other validity fields are satisfied.
     assert row is None
