@@ -299,6 +299,12 @@ ROUTE_GROUPS = (
         ("GET", "/v1/ella/onboarding/status", "onboarding_status"),
     ),
     _group(
+        "legacy_onboarding",
+        "unauthenticated_caller_claimed_subject",
+        "deprecated_legacy_public",
+        ("POST", "/api/onboarding", "legacy_onboarding"),
+    ),
+    _group(
         "photon",
         "photon_service_exact_subject",
         "internal_only",

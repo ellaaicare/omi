@@ -53,6 +53,7 @@ async def submit_with_managed_cloud_authority(
         await managed_cloud_consent.synchronize_denial(
             uid=uid,
             decision=submission.decision,
+            verified_email=verified_email,
         )
 
     payload = service.submit(uid, submission)

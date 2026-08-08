@@ -1098,10 +1098,21 @@ def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
 @pytest.mark.parametrize("decision", ("declined", "revoked"))
 def test_authenticated_api_allows_terminal_decisions_without_verified_email(monkeypatch, decision):
     service = _service()
+    denials = []
+
+    async def deny(**kwargs):
+        denials.append(kwargs)
+        return {"decision": kwargs["decision"], "authority_absent": True}
+
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", raising=False)
     monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", raising=False)
-    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", raising=False)
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_denial",
+        deny,
+    )
     app = FastAPI()
     app.include_router(ai_consent.router)
     app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-a")
@@ -1124,3 +1135,10 @@ def test_authenticated_api_allows_terminal_decisions_without_verified_email(monk
 
     assert response.status_code == 200
     assert response.json()["receipt"]["decision"] == decision
+    assert denials == [
+        {
+            "uid": "user-a",
+            "decision": decision,
+            "verified_email": "",
+        }
+    ]

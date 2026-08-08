@@ -529,6 +529,10 @@ jobs:
             "tests/unit/test_ella_auth_authority_contract.py::test_admin_key_suffix_cannot_mint_arbitrary_subject"
             "tests/unit/test_ella_auth_authority_contract.py::test_admin_branch_observation_is_bounded_and_content_free"
             "tests/unit/test_ella_auth_authority_contract.py::test_exact_firebase_boundary_never_accepts_admin_key"
+            "tests/unit/test_ella_auth_authority_contract.py::test_firebase_token_identity_exposes_only_verified_email"
+            "tests/unit/test_ella_auth_authority_contract.py::test_exact_firebase_uid_delegates_to_single_token_identity_boundary"
+            "tests/unit/test_ella_auth_authority_contract.py::test_firebase_boundaries_share_malformed_token_and_client_gate[get_firebase_token_identity]"
+            "tests/unit/test_ella_auth_authority_contract.py::test_firebase_boundaries_share_malformed_token_and_client_gate[get_exact_firebase_uid]"
             "tests/unit/test_ella_auth_authority_contract.py::test_ella_lazy_exports_keep_imports_at_module_scope"
             "tests/unit/test_ella_auth_authority_contract.py::test_minimum_client_build_is_fail_closed_and_version_aware"
             "tests/unit/test_ella_auth_authority_contract.py::test_service_authority_is_constant_time_bound_to_one_subject"
@@ -557,7 +561,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 54
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 58
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
@@ -756,7 +760,25 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 69
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_consent_bootstrap_reconciles_email_owner_and_rejects_conflicting_owners" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_consent_bootstrap_serializes_concurrent_email_owner_claims" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_managed_terminal_decisions_without_email_leave_zero_usable_authority" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_managed_terminal_decision_reconciles_email_owner_before_quarantine[declined]" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_managed_terminal_decision_reconciles_email_owner_before_quarantine[revoked]" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_seed_voice_entitlement_if_absent_creates_once_without_clobber" \
+            <<<"$authority_lock_ids"
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 77
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
