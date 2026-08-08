@@ -1811,8 +1811,10 @@ def test_consent_bootstrap_creates_users_row_and_grant():
 
         async with pool.acquire() as conn:
             # Match production: a fresh authority bootstrap must provide the
-            # Firebase-verified email, not rely on a nullable test fixture.
+            # Firebase-verified email and explicitly persist updated_at; neither
+            # production column has a default that can mask an incomplete INSERT.
             await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+            await conn.execute("ALTER TABLE users ALTER COLUMN updated_at DROP DEFAULT")
             before = await conn.fetchval(
                 "SELECT 1 FROM users WHERE omi_uid = $1",
                 uid,
@@ -1829,7 +1831,8 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         async with pool.acquire() as observer:
             row = await observer.fetchrow(
                 """
-                SELECT id, omi_uid, email, name, timezone, status, identities
+                SELECT id, omi_uid, email, name, timezone, status, identities,
+                       updated_at
                 FROM users
                 WHERE omi_uid = $1
                 """,
@@ -1853,7 +1856,7 @@ def test_consent_bootstrap_creates_users_row_and_grant():
             )
         assert row is not None
         identities = json.loads(row["identities"]) if isinstance(row["identities"], str) else row["identities"]
-        assert tuple(row.values())[:-1] == (
+        assert tuple(row.values())[:-2] == (
             owner.account_id,
             uid,
             "fresh-consent@example.invalid",
@@ -1862,6 +1865,7 @@ def test_consent_bootstrap_creates_users_row_and_grant():
             "PENDING",
         )
         assert identities == {"omi_uid": uid, "email": "fresh-consent@example.invalid"}
+        assert row["updated_at"] is not None
         assert decision == "granted"
         assert receipt_ref and receipt_ref.startswith("sha256:")
 

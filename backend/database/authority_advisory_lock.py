@@ -500,10 +500,13 @@ async def verify_self_owner_after_lock_or_bootstrap(
     else:
         row = await connection.fetchrow(
             """
-            INSERT INTO users (id, email, omi_uid, name, timezone, status, identities)
+            INSERT INTO users (
+                id, email, omi_uid, name, timezone, status, identities, updated_at
+            )
             VALUES (
                 $1, $2, $3, 'Synthetic User', 'UTC', 'PENDING',
-                jsonb_build_object('omi_uid', $3::text, 'email', $2::text)
+                jsonb_build_object('omi_uid', $3::text, 'email', $2::text),
+                CURRENT_TIMESTAMP
             )
             RETURNING id
             """,
