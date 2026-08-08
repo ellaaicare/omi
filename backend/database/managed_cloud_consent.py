@@ -245,6 +245,7 @@ async def synchronize_grant(
     *,
     grant: ManagedCloudGrant,
     allow_fresh_uid_bootstrap: bool = False,
+    bootstrap_email: str = "",
 ) -> dict[str, Any]:
     """Publish a Firestore grant into the PostgreSQL ordering authority.
 
@@ -257,15 +258,16 @@ async def synchronize_grant(
     try:
         pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
-            owner = await authority_advisory_lock.resolve_self_owner_unlocked_or_bootstrap(
+            resolution = await authority_advisory_lock.resolve_self_owner_unlocked_or_bootstrap(
                 conn,
                 uid=grant.account_uid,
                 allow_bootstrap=allow_fresh_uid_bootstrap,
+                bootstrap_email=bootstrap_email,
             )
             async with conn.transaction():
                 owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     conn,
-                    owner=owner,
+                    owner=resolution.owner,
                 )
                 await voice_canary.lock_runtime_authority_on_connection(
                     conn,
@@ -274,9 +276,10 @@ async def synchronize_grant(
                 user_id = await authority_advisory_lock.verify_self_owner_after_lock_or_bootstrap(
                     conn,
                     uid=grant.account_uid,
-                    owner=owner,
+                    resolution=resolution,
                     proof=owner_lock,
                     allow_bootstrap=allow_fresh_uid_bootstrap,
+                    bootstrap_email=bootstrap_email,
                 )
                 row = await conn.fetchrow(
                     """
@@ -502,30 +505,106 @@ async def synchronize_denial(
     *,
     uid: str,
     decision: Literal["declined", "revoked"],
+    verified_email: str = "",
 ) -> dict[str, Any]:
     """Order denial before Firestore and quarantine all durable Cloud authority."""
     try:
         pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
-            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
-                conn,
-                uid=uid,
-            )
+            email = verified_email.strip().lower()
+            if email:
+                resolution = await authority_advisory_lock.resolve_identity_owner_unlocked(
+                    conn,
+                    uid=uid,
+                    email=email,
+                )
+            else:
+                try:
+                    owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                        conn,
+                        uid=uid,
+                    )
+                    resolution = authority_advisory_lock.IdentityOwnerResolution(
+                        owner=owner,
+                        allow_create=False,
+                    )
+                except authority_advisory_lock.AuthorityLockError as exc:
+                    if exc.code != "authority_lock_owner_missing":
+                        raise
+                    resolution = authority_advisory_lock.IdentityOwnerResolution(
+                        owner=authority_advisory_lock.provisional_identity_owner(uid),
+                        allow_create=True,
+                    )
             async with conn.transaction():
                 owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     conn,
-                    owner=owner,
+                    owner=resolution.owner,
                 )
                 await voice_canary.lock_runtime_authority_on_connection(
                     conn,
                     uid=uid,
                 )
-                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                identity_rows = await authority_advisory_lock.verify_identity_owner_after_lock(
                     conn,
                     uid=uid,
-                    owner=owner,
+                    email=email,
+                    resolution=resolution,
                     proof=owner_lock,
                 )
+                by_uid = next((row for row in identity_rows if row["omi_uid"] == uid), None)
+                by_email = next(
+                    (row for row in identity_rows if email and str(row["email"] or "").strip().lower() == email),
+                    None,
+                )
+                identity_row = by_uid or by_email
+                if identity_row is None:
+                    await conn.execute(
+                        """
+                        UPDATE voice_entitlements
+                        SET status = 'revoked',
+                            revision = revision + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE uid = $1
+                          AND status <> 'revoked'
+                        """,
+                        uid,
+                    )
+                    await conn.execute(
+                        "DELETE FROM voice_active_sessions WHERE uid = $1",
+                        uid,
+                    )
+                    return {
+                        "decision": decision,
+                        "authority_absent": True,
+                    }
+
+                if by_uid is None and by_email is not None:
+                    identity_row = await conn.fetchrow(
+                        """
+                        UPDATE users
+                        SET omi_uid = $1,
+                            identities = COALESCE(identities, '{}'::jsonb)
+                                || jsonb_build_object('omi_uid', $1::text, 'email', $2::text),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $3
+                          AND (omi_uid IS NULL OR omi_uid = '' OR omi_uid = $1)
+                        RETURNING id, omi_uid, email, name, timezone, status
+                        """,
+                        uid,
+                        email,
+                        resolution.owner.account_id,
+                    )
+                    if identity_row is None:
+                        raise authority_advisory_lock.AuthorityLockError("authority_lock_owner_drift")
+
+                existing_uid = str(identity_row["omi_uid"] or "").strip()
+                if existing_uid and existing_uid != uid:
+                    raise authority_advisory_lock.AuthorityLockError("authority_lock_identity_conflict")
+                if by_uid is not None and email:
+                    stored_email = str(by_uid["email"] or "").strip().lower()
+                    if stored_email != email:
+                        raise authority_advisory_lock.AuthorityLockError("authority_lock_uid_email_mismatch")
+                user_id = uuid.UUID(str(identity_row["id"]))
                 row = await conn.fetchrow(
                     """
                     SELECT *

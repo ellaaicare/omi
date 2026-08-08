@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import database
 from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_MODEL,
     SELF_HOSTED_RUNTIME_PROVIDER,
@@ -236,7 +237,7 @@ class FakeRepository:
         )
         self.job_calls = []
         self.voice_seed_calls = []
-        self.voice_seed_result = True
+        self.voice_seed_result = False
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -1943,6 +1944,7 @@ def test_fresh_self_hosted_provision_seeds_grok_voice(monkeypatch):
     )
 
     repository = FakeRepository()
+    repository.voice_seed_result = True
     client = FakeProvisionClient(_runtime_receipt())
     asyncio.run(
         ProvisioningCoordinator(repository, client).process_claimed_job(
@@ -1979,6 +1981,7 @@ def test_grok_voice_firestore_seed_gated_on_fresh_entitlement_row(monkeypatch):
 
     fake = _FakeAppSettings()
     monkeypatch.setitem(sys.modules, "database.app_settings", fake)
+    monkeypatch.setattr(database, "app_settings", fake, raising=False)
 
     # No fresh row -> firestore is never even read.
     provisioning_service._ensure_self_hosted_grok_voice_mode("u1", fresh_entitlement_created=False)

@@ -346,17 +346,30 @@ async def verify_identity_owner_after_lock(
         proof,
         owner=resolution.owner,
     )
-    rows = await connection.fetch(
-        """
-        SELECT id, omi_uid, email, name, timezone, status
-        FROM users
-        WHERE omi_uid = $1 OR lower(email) = lower($2)
-        ORDER BY id
-        FOR UPDATE
-        """,
-        uid,
-        email,
-    )
+    normalized_email = email.strip().lower()
+    if normalized_email:
+        rows = await connection.fetch(
+            """
+            SELECT id, omi_uid, email, name, timezone, status
+            FROM users
+            WHERE omi_uid = $1 OR lower(email) = $2
+            ORDER BY id
+            FOR UPDATE
+            """,
+            uid,
+            normalized_email,
+        )
+    else:
+        rows = await connection.fetch(
+            """
+            SELECT id, omi_uid, email, name, timezone, status
+            FROM users
+            WHERE omi_uid = $1
+            ORDER BY id
+            FOR UPDATE
+            """,
+            uid,
+        )
     owner_ids = {_validated_database_uuid(row["id"], field="user_id") for row in rows}
     if len(owner_ids) > 1 or (owner_ids and owner_ids != {resolution.owner.account_id}):
         raise AuthorityLockError("authority_lock_owner_drift")
@@ -397,72 +410,112 @@ async def resolve_self_owner_unlocked_or_bootstrap(
     *,
     uid: str,
     allow_bootstrap: bool,
-) -> AuthorityOwner:
-    """Resolve an existing self-owner, or return the deterministic not-yet-created
-    owner when ``allow_bootstrap`` (the reversible fresh-UID consent relax).
+    bootstrap_email: str = "",
+) -> IdentityOwnerResolution:
+    """Resolve the exact UID/email owner for a fresh consent bootstrap.
 
-    Mirrors :func:`resolve_self_owner_unlocked` but instead of raising
-    ``authority_lock_owner_missing`` for a UID with no ``users`` row, it returns
-    the deterministic provisional owner so the caller can bootstrap the row
-    inside the advisory-lock transaction. Without ``allow_bootstrap`` the strict
-    ``authority_lock_owner_missing`` behavior is preserved byte-for-byte.
+    Strict callers retain UID-only resolution. The reversible fresh-UID path
+    additionally resolves the Firebase-verified email so a legacy email-owned
+    row is reconciled instead of colliding with its independent unique key.
     """
+    if not allow_bootstrap:
+        owner = await resolve_self_owner_unlocked(connection, uid=uid)
+        return IdentityOwnerResolution(owner=owner, allow_create=False)
+
+    email = bootstrap_email.strip().lower()
+    if email:
+        return await resolve_identity_owner_unlocked(
+            connection,
+            uid=uid,
+            email=email,
+        )
+
     row = await connection.fetchrow(
         "SELECT id FROM users WHERE omi_uid = $1",
         uid,
     )
     if row:
-        return AuthorityOwner.from_values(row["id"], row["id"])
-    if not allow_bootstrap:
-        raise AuthorityLockError("authority_lock_owner_missing")
-    return provisional_identity_owner(uid)
+        owner = AuthorityOwner.from_values(row["id"], row["id"])
+        return IdentityOwnerResolution(owner=owner, allow_create=False)
+    raise AuthorityLockError("authority_lock_bootstrap_email_missing")
 
 
 async def verify_self_owner_after_lock_or_bootstrap(
     connection: asyncpg.Connection,
     *,
     uid: str,
-    owner: AuthorityOwner,
+    resolution: IdentityOwnerResolution,
     proof: AuthorityLockProof,
     allow_bootstrap: bool,
+    bootstrap_email: str = "",
 ) -> uuid.UUID:
-    """Re-read and lock ownership inside the advisory-lock transaction, creating
-    the deterministic ``users`` row for a fresh UID when ``allow_bootstrap``.
-
-    The INSERT only runs while the per-UID advisory lock is held (matching the
-    codebase's write discipline), uses the deterministic provisional owner id so
-    a later redemption/ensure reconciles onto the same row, and is idempotent via
-    ``ON CONFLICT (omi_uid) DO NOTHING``.
-    """
+    """Re-read exact identity ownership and bind or create the fresh UID row."""
+    email = bootstrap_email.strip().lower()
     owner_lock = proof
-    await require_self_owner_lock(
+    rows = await verify_identity_owner_after_lock(
         connection,
-        owner_lock,
-        user_id=owner.account_id,
+        uid=uid,
+        email=email,
+        resolution=resolution,
+        proof=owner_lock,
     )
-    row = await connection.fetchrow(
-        "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
-        uid,
+
+    by_uid = next((row for row in rows if row["omi_uid"] == uid), None)
+    if by_uid is not None:
+        stored_email = str(by_uid["email"] or "").strip().lower()
+        if email and stored_email != email:
+            raise AuthorityLockError("authority_lock_uid_email_mismatch")
+        return _validated_database_uuid(by_uid["id"], field="user_id")
+
+    if not allow_bootstrap:
+        raise AuthorityLockError("authority_lock_owner_missing")
+    if not email:
+        raise AuthorityLockError("authority_lock_bootstrap_email_missing")
+
+    by_email = next(
+        (row for row in rows if str(row["email"] or "").strip().lower() == email),
+        None,
     )
-    if row is None and allow_bootstrap:
+    if by_email is not None:
+        existing_uid = str(by_email["omi_uid"] or "").strip()
+        if existing_uid and existing_uid != uid:
+            raise AuthorityLockError("authority_lock_identity_conflict")
         row = await connection.fetchrow(
             """
-            INSERT INTO users (id, omi_uid, name, timezone, status)
-            VALUES ($1, $2, 'Synthetic User', 'UTC', 'PENDING')
-            ON CONFLICT (omi_uid) DO NOTHING
+            UPDATE users
+            SET omi_uid = $1,
+                identities = COALESCE(identities, '{}'::jsonb)
+                    || jsonb_build_object('omi_uid', $1::text, 'email', $2::text),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $3
+              AND (omi_uid IS NULL OR omi_uid = '' OR omi_uid = $1)
             RETURNING id
             """,
-            owner.account_id,
             uid,
+            email,
+            resolution.owner.account_id,
         )
         if row is None:
-            row = await connection.fetchrow(
-                "SELECT id FROM users WHERE omi_uid = $1",
-                uid,
+            raise AuthorityLockError("authority_lock_owner_drift")
+    else:
+        row = await connection.fetchrow(
+            """
+            INSERT INTO users (
+                id, email, omi_uid, name, timezone, status, identities, updated_at
             )
-    if not row:
-        raise AuthorityLockError("authority_lock_owner_missing")
+            VALUES (
+                $1, $2, $3, 'Synthetic User', 'UTC', 'PENDING',
+                jsonb_build_object('omi_uid', $3::text, 'email', $2::text),
+                CURRENT_TIMESTAMP
+            )
+            RETURNING id
+            """,
+            resolution.owner.account_id,
+            email,
+            uid,
+        )
+
     current = _validated_database_uuid(row["id"], field="user_id")
-    if current != owner.account_id or current != owner.profile_id:
+    if current != resolution.owner.account_id or current != resolution.owner.profile_id:
         raise AuthorityLockError("authority_lock_owner_drift")
     return current

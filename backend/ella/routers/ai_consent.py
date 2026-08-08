@@ -14,7 +14,11 @@ from ella.services.ai_consent import (
 )
 from ella.services.consent_authority import submit_with_managed_cloud_authority
 from database.managed_cloud_consent import ManagedCloudAuthorityUnavailable
-from utils.ella.exact_firebase_auth import get_exact_firebase_uid
+from utils.ella.exact_firebase_auth import (
+    FirebaseTokenIdentity,
+    get_exact_firebase_uid,
+    get_firebase_token_identity,
+)
 
 router = APIRouter(tags=["AI Consent"])
 
@@ -55,11 +59,12 @@ def get_ai_consent_receipt(receipt_id: str, uid: str = Depends(get_exact_firebas
 @router.post("/v1/users/ai-consent")
 async def submit_ai_consent(
     request: AiConsentSubmissionRequest,
-    uid: str = Depends(get_exact_firebase_uid),
+    identity: FirebaseTokenIdentity = Depends(get_firebase_token_identity),
 ):
     try:
         return await submit_with_managed_cloud_authority(
-            uid=uid,
+            uid=identity.uid,
+            verified_email=identity.verified_email,
             service=get_ai_consent_service(),
             submission=ConsentSubmission(
                 decision=request.decision,

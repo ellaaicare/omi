@@ -33,6 +33,7 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "promote_cloud_binding"),
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
+    ("database/ella_provisioning.py", "seed_voice_entitlement_if_absent"),
     ("database/ella_provisioning.py", "stage_runtime_binding"),
     ("database/ella_provisioning.py", "update_guardian_mode"),
     ("database/invitation_operator.py", "_cleanup_locked"),
@@ -77,6 +78,7 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/ella_provisioning.py", "update_guardian_mode"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/managed_cloud_consent.py", "synchronize_denial"),
     ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
@@ -123,6 +125,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"cloud_quarantine"',
+    ),
+    ("database/ella_provisioning.py", "seed_voice_entitlement_if_absent"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_seed_voice_entitlement_if_absent_creates_once_without_clobber",
     ),
     ("database/ella_provisioning.py", "stage_runtime_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",

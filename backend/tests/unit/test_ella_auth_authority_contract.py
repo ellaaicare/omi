@@ -80,6 +80,90 @@ def test_exact_firebase_boundary_never_accepts_admin_key(monkeypatch):
     assert error.value.status_code == 401
 
 
+def test_firebase_token_identity_exposes_only_verified_email(monkeypatch):
+    monkeypatch.setattr(
+        exact_firebase_auth.firebase_auth,
+        "verify_id_token",
+        lambda _token: {
+            "uid": "user-a",
+            "email": "User-A@Example.invalid",
+            "email_verified": True,
+        },
+    )
+
+    identity = exact_firebase_auth.get_firebase_token_identity("Bearer firebase")
+
+    assert identity == exact_firebase_auth.FirebaseTokenIdentity(
+        uid="user-a",
+        verified_email="user-a@example.invalid",
+    )
+
+    monkeypatch.setattr(
+        exact_firebase_auth.firebase_auth,
+        "verify_id_token",
+        lambda _token: {"uid": "user-a", "email": "user-a@example.invalid", "email_verified": False},
+    )
+    assert exact_firebase_auth.get_firebase_token_identity(
+        "Bearer firebase"
+    ) == exact_firebase_auth.FirebaseTokenIdentity(uid="user-a")
+
+
+def test_exact_firebase_uid_delegates_to_single_token_identity_boundary(monkeypatch):
+    calls = []
+
+    def identity(*args):
+        calls.append(args)
+        return exact_firebase_auth.FirebaseTokenIdentity(
+            uid="user-a",
+            verified_email="user-a@example.invalid",
+        )
+
+    monkeypatch.setattr(exact_firebase_auth, "get_firebase_token_identity", identity)
+
+    assert (
+        exact_firebase_auth.get_exact_firebase_uid(
+            "Bearer firebase",
+            "1.0.529+807",
+            "807",
+            "1.0.529",
+        )
+        == "user-a"
+    )
+    assert calls == [
+        (
+            "Bearer firebase",
+            "1.0.529+807",
+            "807",
+            "1.0.529",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "resolver",
+    (
+        exact_firebase_auth.get_firebase_token_identity,
+        exact_firebase_auth.get_exact_firebase_uid,
+    ),
+)
+def test_firebase_boundaries_share_malformed_token_and_client_gate(monkeypatch, resolver):
+    with pytest.raises(HTTPException) as missing:
+        resolver(None, None, None, None)
+    assert missing.value.status_code == 401
+
+    monkeypatch.setattr(
+        exact_firebase_auth.firebase_auth,
+        "verify_id_token",
+        lambda _token: {"uid": "user-a", "email": "user-a@example.invalid", "email_verified": True},
+    )
+    monkeypatch.setenv("ELLA_MIN_SUPPORTED_CLIENT_BUILD", "807")
+
+    with pytest.raises(HTTPException) as old:
+        resolver("Bearer firebase", None, "806", None)
+    assert old.value.status_code == 426
+    assert resolver("Bearer firebase", None, "807", None)
+
+
 def test_ella_lazy_exports_keep_imports_at_module_scope():
     source = (BACKEND / "utils" / "ella" / "__init__.py").read_text()
     tree = ast.parse(source)
