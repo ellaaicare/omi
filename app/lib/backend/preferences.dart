@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/schema/app.dart';
@@ -1155,4 +1156,21 @@ class SharedPreferencesUtil {
     _invalidateAiConsentAuthority();
     return await _preferences?.clear() ?? false;
   }
+
+  /// Clears every persisted account value and verifies that no key survived.
+  /// Firebase identity must not change if this operation cannot be confirmed.
+  Future<void> clearAndVerifyForLogout() async {
+    _invalidateAiConsentAuthority();
+    final preferences = _preferences;
+    if (preferences == null) {
+      throw StateError('logout_cache_not_initialized');
+    }
+    final cleared = await preferences.clear();
+    if (!cleared || preferences.getKeys().isNotEmpty) {
+      throw StateError('logout_cache_purge_failed');
+    }
+  }
+
+  @visibleForTesting
+  Set<String> get keysForTesting => Set.unmodifiable(_preferences?.getKeys() ?? const <String>{});
 }

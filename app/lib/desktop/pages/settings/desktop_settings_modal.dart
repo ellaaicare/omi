@@ -40,11 +40,11 @@ import 'package:omi/pages/settings/widgets/developer_api_keys_section.dart';
 import 'package:omi/pages/speech_profile/page.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/providers/home_provider.dart';
-import 'package:omi/services/auth_service.dart';
 import 'package:omi/services/shortcut_service.dart';
 import 'package:omi/ui/atoms/omi_checkbox.dart';
 import 'package:omi/ui/atoms/omi_icon_button.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
@@ -2562,10 +2562,9 @@ class _DesktopSettingsModalState extends State<DesktopSettingsModal> {
           ),
           TextButton(
             onPressed: () async {
-              await SharedPreferencesUtil().clear();
               Navigator.of(dialogContext).pop();
               Navigator.of(context).pop(); // Close settings modal
-              await AuthService.instance.signOut();
+              await signOutAndClearUserData(context);
               if (mounted) {
                 routeToPage(context, const DesktopOnboardingWrapper(), replace: true);
               }
