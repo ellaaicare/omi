@@ -26,7 +26,7 @@ void main() {
   );
 
   test('typed envelope accepts only the exact contract, matching ETag, and evidence-backed card', () {
-    final response = HttpTodayCardRepository.parseEnvelope({
+    final envelope = {
       'contract_version': todayCardContractVersion,
       'state': 'ready',
       'etag': 'today-2',
@@ -43,10 +43,43 @@ void main() {
           {'source_type': 'hermes_memory', 'source_id': 'memory-1', 'source_version_id': 'memory-v1'},
         ],
       },
-    }, headerEtag: 'today-2', headerCacheControl: 'private, max-age=60, must-revalidate');
+    };
+    final response = HttpTodayCardRepository.parseEnvelope(
+      envelope,
+      headerEtag: 'today-2',
+      headerCacheControl: 'private, max-age=60, must-revalidate',
+    );
 
     expect(response.isValid, isTrue);
     expect(response.cacheMaxAge, const Duration(seconds: 60));
+    expect(
+      HttpTodayCardRepository.parseEnvelope(
+        envelope,
+        headerEtag: 'today-2',
+        headerCacheControl: 'max-age=60',
+      ).cacheMaxAge,
+      Duration.zero,
+    );
+    expect(
+      HttpTodayCardRepository.parseEnvelope(envelope, headerEtag: 'today-2').cacheMaxAge,
+      Duration.zero,
+    );
+    expect(
+      HttpTodayCardRepository.parseEnvelope(
+        envelope,
+        headerEtag: 'today-2',
+        headerCacheControl: 'private, max-age=invalid, must-revalidate',
+      ).cacheMaxAge,
+      Duration.zero,
+    );
+    expect(
+      HttpTodayCardRepository.parseEnvelope(
+        envelope,
+        headerEtag: 'today-2',
+        headerCacheControl: 'private, no-cache, max-age=60, must-revalidate',
+      ).cacheMaxAge,
+      Duration.zero,
+    );
     expect(response.card?.sourceRefs.single.kind, 'hermes_memory');
     expect(
       HttpTodayCardRepository.parseEnvelope({
@@ -116,7 +149,7 @@ void main() {
     final commitStarted = Completer<void>();
     final releaseCommit = Completer<void>();
     final cache = SharedPreferencesTodayCardCache(
-      beforeCommit: () async {
+      beforeCommit: (_) async {
         if (!commitStarted.isCompleted) commitStarted.complete();
         await releaseCommit.future;
       },
@@ -145,6 +178,61 @@ void main() {
     expect(controller.state.card, isNull);
   });
 
+  test('a late obsolete same-UID write cannot erase the replacement authority cache', () async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
+    final oldCommitStarted = Completer<void>();
+    final releaseOldCommit = Completer<void>();
+    final replacementCard = TodayCard(
+      id: 'today-2',
+      version: 3,
+      kind: card.kind,
+      eyebrow: card.eyebrow,
+      headline: 'The replacement authority memo',
+      body: card.body,
+      generatedAt: card.generatedAt,
+      sourceRefs: card.sourceRefs,
+    );
+    final cache = SharedPreferencesTodayCardCache(
+      beforeCommit: (authorityKey) async {
+        if (authorityKey != 'authority-a') return;
+        oldCommitStarted.complete();
+        await releaseOldCommit.future;
+      },
+    );
+    final controller = TodayCardController(
+      repository: _QueueTodayCardRepository([
+        TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card),
+        TodayCardResponse(
+          contractVersion: todayCardContractVersion,
+          status: TodayCardStatus.ready,
+          card: replacementCard,
+        ),
+      ]),
+      cache: cache,
+    );
+    addTearDown(controller.dispose);
+
+    final oldLoad = controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    await oldCommitStarted.future;
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-b',
+      isProvisioningReady: true,
+    );
+    expect((await cache.read(uid: 'account-a', authorityKey: 'authority-b'))?.card.id, 'today-2');
+
+    releaseOldCommit.complete();
+    await oldLoad;
+
+    expect((await cache.read(uid: 'account-a', authorityKey: 'authority-b'))?.card.id, 'today-2');
+    expect(SharedPreferencesUtil().getString('ellaTodayCardCache:account-a'), isNotEmpty);
+  });
+
   test('cache is authority-bound, expires at the server max-age, and removes stale entries', () async {
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
@@ -162,7 +250,7 @@ void main() {
       ),
       isTrue,
     );
-    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-a'), isNotNull);
+    expect((await cache.read(uid: 'account-a', authorityKey: 'authority-a'))?.card, isNotNull);
     expect(await cache.read(uid: 'account-a', authorityKey: 'authority-b'), isNull);
 
     expect(
@@ -176,7 +264,7 @@ void main() {
       isTrue,
     );
     expect(await cache.read(uid: 'account-a', authorityKey: 'authority-a'), isNull);
-    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-b'), isNotNull);
+    expect((await cache.read(uid: 'account-a', authorityKey: 'authority-b'))?.card, isNotNull);
     now = now.add(const Duration(seconds: 61));
     expect(await cache.read(uid: 'account-a', authorityKey: 'authority-b'), isNull);
     expect(SharedPreferencesUtil().getString('ellaTodayCardCache:account-a'), isEmpty);
@@ -205,6 +293,105 @@ void main() {
 
     expect(controller.state.card, isNull);
     expect(cache.cards['account-a'], isNull);
+  });
+
+  test('a ready response without the private revalidation policy stays hidden', () async {
+    final cache = _MemoryTodayCardCache();
+    final controller = TodayCardController(
+      repository: _QueueTodayCardRepository([
+        TodayCardResponse(
+          contractVersion: todayCardContractVersion,
+          status: TodayCardStatus.ready,
+          card: card,
+          cacheMaxAge: Duration.zero,
+        ),
+      ]),
+      cache: cache,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+
+    expect(controller.state.status, TodayCardStatus.degraded);
+    expect(controller.state.errorCode, 'invalid_today_card_cache_policy');
+    expect(controller.state.card, isNull);
+    expect(cache.cards['account-a'], isNull);
+  });
+
+  test('foreground expiry hides the memo before authoritative revalidation completes', () async {
+    final tombstone = Completer<TodayCardResponse>();
+    final repository = _FutureQueueTodayCardRepository([
+      Future.value(
+        TodayCardResponse(
+          contractVersion: todayCardContractVersion,
+          status: TodayCardStatus.ready,
+          card: card,
+          cacheMaxAge: const Duration(seconds: 60),
+        ),
+      ),
+      tombstone.future,
+    ]);
+    final cache = _MemoryTodayCardCache();
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: cache,
+      expiryScheduler: scheduler.schedule,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    expect(controller.state.card?.id, 'today-1');
+    expect(scheduler.latestDuration, const Duration(seconds: 60));
+
+    scheduler.fireLatest();
+    expect(controller.state.card, isNull);
+    expect(controller.state.isLoading, isTrue);
+    await Future<void>.delayed(Duration.zero);
+    tombstone.complete(
+      const TodayCardResponse(
+        contractVersion: todayCardContractVersion,
+        status: TodayCardStatus.degraded,
+        errorCode: 'today_card_source_retracted',
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.state.card, isNull);
+    expect(controller.state.status, TodayCardStatus.degraded);
+    expect(cache.cards['account-a'], isNull);
+  });
+
+  test('disposing the controller cancels foreground revalidation', () async {
+    final repository = _QueueTodayCardRepository([
+      TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card),
+    ]);
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      expiryScheduler: scheduler.schedule,
+    );
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    controller.dispose();
+    scheduler.fireLatest();
+
+    expect(scheduler.latestIsActive, isFalse);
+    expect(repository.fetches, 1);
   });
 
   test('daily-card stale scope refresh stays daily-card and never loads a conversation', () async {
@@ -275,6 +462,16 @@ class _DeferredTodayCardRepository implements TodayCardRepository {
   Future<TodayCardResponse> fetch({required String uid}) => response;
 }
 
+class _FutureQueueTodayCardRepository implements TodayCardRepository {
+  _FutureQueueTodayCardRepository(this.responses);
+
+  final List<Future<TodayCardResponse>> responses;
+  int fetches = 0;
+
+  @override
+  Future<TodayCardResponse> fetch({required String uid}) => responses[fetches++];
+}
+
 class _MemoryTodayCardCache implements TodayCardCache {
   final Map<String, TodayCard> cards = {};
 
@@ -284,7 +481,10 @@ class _MemoryTodayCardCache implements TodayCardCache {
   }
 
   @override
-  Future<TodayCard?> read({required String uid, required String authorityKey}) async => cards[uid];
+  Future<TodayCardCacheEntry?> read({required String uid, required String authorityKey}) async {
+    final card = cards[uid];
+    return card == null ? null : TodayCardCacheEntry(card: card, freshnessRemaining: const Duration(seconds: 60));
+  }
 
   @override
   Future<bool> write({
@@ -297,6 +497,46 @@ class _MemoryTodayCardCache implements TodayCardCache {
     if (!isCurrent()) return false;
     cards[uid] = card;
     return true;
+  }
+}
+
+class _ManualExpiryScheduler {
+  final List<_ManualTimer> timers = [];
+  Duration? latestDuration;
+
+  Timer schedule(Duration duration, void Function() callback) {
+    latestDuration = duration;
+    final timer = _ManualTimer(callback);
+    timers.add(timer);
+    return timer;
+  }
+
+  bool get latestIsActive => timers.last.isActive;
+
+  void fireLatest() => timers.last.fire();
+}
+
+class _ManualTimer implements Timer {
+  _ManualTimer(this._callback);
+
+  final void Function() _callback;
+  bool _isActive = true;
+  int _tick = 0;
+
+  @override
+  bool get isActive => _isActive;
+
+  @override
+  int get tick => _tick;
+
+  @override
+  void cancel() => _isActive = false;
+
+  void fire() {
+    if (!_isActive) return;
+    _isActive = false;
+    _tick++;
+    _callback();
   }
 }
 

@@ -112,7 +112,8 @@ class _MemoryTodayCardCache implements TodayCardCache {
   Future<void> clear({required String uid, String authorityKey = ''}) async => card = null;
 
   @override
-  Future<TodayCard?> read({required String uid, required String authorityKey}) async => card;
+  Future<TodayCardCacheEntry?> read({required String uid, required String authorityKey}) async =>
+      card == null ? null : TodayCardCacheEntry(card: card!, freshnessRemaining: const Duration(seconds: 60));
 
   @override
   Future<bool> write({
@@ -416,6 +417,13 @@ void main() {
     final captureProvider = CaptureProvider();
     final deviceProvider = DeviceProvider();
     final audioRouteProvider = AudioRouteProvider();
+    final homeProvider = HomeProvider();
+    final authorityChanges = ValueNotifier<int>(0);
+    TodayCardAuthoritySnapshot authoritySnapshot = (
+      uid: 'test-user',
+      authorityKey: 'test-authority:active',
+      isProvisioningReady: true,
+    );
 
     await tester.binding.setSurfaceSize(const Size(1200, 2000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -423,7 +431,7 @@ void main() {
     await tester.pumpWidget(
       MultiProvider(
         providers: [
-          ChangeNotifierProvider(create: (_) => HomeProvider()),
+          ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
           ChangeNotifierProvider<ActionItemsProvider>.value(value: actionItemsProvider),
           ChangeNotifierProvider<AudioRouteProvider>.value(value: audioRouteProvider),
           ChangeNotifierProvider<CaptureProvider>.value(value: captureProvider),
@@ -452,8 +460,8 @@ void main() {
                   onFetch: () => todayCardCalls++,
                 ),
                 todayCardCache: _MemoryTodayCardCache(),
-                todayCardUidOverride: 'test-user',
-                todayCardReadyOverride: true,
+                todayCardAuthoritySnapshotProvider: () => authoritySnapshot,
+                todayCardAuthorityChanges: authorityChanges,
                 guardianAvailability: () =>
                     (SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured,
                 guardianModeLoader: () async => const guardian_model.GuardianModeInfo(
@@ -515,6 +523,24 @@ void main() {
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
     }
+
+    // The real Home keeps Today mounted in an IndexedStack. A same-UID
+    // consent/binding revocation must remove the private card while offstage,
+    // before navigation returns to Home.
+    homeProvider.setIndex(3);
+    await tester.pump();
+    authoritySnapshot = (
+      uid: 'test-user',
+      authorityKey: '',
+      isProvisioningReady: false,
+    );
+    authorityChanges.value++;
+    await tester.pump();
+    expect(find.text(todayCard.headline, skipOffstage: false), findsNothing);
+    homeProvider.setIndex(0);
+    await tester.pump();
+    expect(find.text(todayCard.headline), findsNothing);
+    expect(find.byKey(const Key('today-card-talk')), findsNothing);
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -523,7 +549,9 @@ void main() {
     captureProvider.dispose();
     conversationProvider.dispose();
     deviceProvider.dispose();
+    homeProvider.dispose();
     messageProvider.dispose();
+    authorityChanges.dispose();
   });
 
   test('notification dispatch denies every hidden public alias and preserves internal routes', () async {

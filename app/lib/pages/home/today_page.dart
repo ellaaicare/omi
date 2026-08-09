@@ -42,6 +42,8 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, TodayCard card);
 typedef TodayCardAuthorityProvider = ExactAccountAuthorityVerifier? Function(String uid);
+typedef TodayCardAuthoritySnapshot = ({String uid, String authorityKey, bool isProvisioningReady});
+typedef TodayCardAuthoritySnapshotProvider = TodayCardAuthoritySnapshot Function();
 typedef TodayCardSpeaker = Future<void> Function(String text, ExactAccountAuthorityVerifier authority);
 typedef TodayCardSpeechStopper = Future<void> Function();
 typedef TodayNowProvider = DateTime Function();
@@ -81,6 +83,8 @@ class TodayPage extends StatefulWidget {
     this.todayCardAuthorityKeyOverride,
     this.todayCardReadyOverride,
     this.todayCardAuthorityProvider,
+    this.todayCardAuthoritySnapshotProvider,
+    this.todayCardAuthorityChanges,
     this.todayCardSpeaker,
     this.todayCardSpeechStopper,
     this.nowProvider,
@@ -98,6 +102,8 @@ class TodayPage extends StatefulWidget {
   final String? todayCardAuthorityKeyOverride;
   final bool? todayCardReadyOverride;
   final TodayCardAuthorityProvider? todayCardAuthorityProvider;
+  final TodayCardAuthoritySnapshotProvider? todayCardAuthoritySnapshotProvider;
+  final Listenable? todayCardAuthorityChanges;
   final TodayCardSpeaker? todayCardSpeaker;
   final TodayCardSpeechStopper? todayCardSpeechStopper;
   final TodayNowProvider? nowProvider;
@@ -160,6 +166,7 @@ class TodayPage extends StatefulWidget {
 class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   final ScrollController _scrollController = ScrollController();
   late final TodayCardController _todayCardController;
+  late final Listenable _todayCardAuthorityChanges;
   EllaProvisioningProvider? _provisioningProvider;
   bool _isReading = false;
   bool _whispersOn = false;
@@ -178,7 +185,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               ? const _DemoTodayCardRepository()
               : HttpTodayCardRepository()),
       cache: widget.todayCardCache ?? SharedPreferencesTodayCardCache(),
+      onRevalidationRequired: () => _syncTodayCardAuthority(forceReload: true),
     )..addListener(_onTodayCardChanged);
+    _todayCardAuthorityChanges = widget.todayCardAuthorityChanges ?? SharedPreferencesUtil.aiConsentAuthorityChanges;
+    _todayCardAuthorityChanges.addListener(_onTodayCardAuthorityChanged);
     if (_guardianAvailable) {
       _loadWhisperState();
     }
@@ -193,14 +203,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     super.didChangeDependencies();
     final nextProvider = Provider.of<EllaProvisioningProvider?>(context, listen: false);
     if (!identical(nextProvider, _provisioningProvider)) {
-      _provisioningProvider?.removeListener(_syncTodayCardAuthority);
+      _provisioningProvider?.removeListener(_onProvisioningChanged);
       _provisioningProvider = nextProvider;
-      _provisioningProvider?.addListener(_syncTodayCardAuthority);
+      _provisioningProvider?.addListener(_onProvisioningChanged);
     }
-    _syncTodayCardAuthority();
+    unawaited(_syncTodayCardAuthority());
   }
 
-  void _syncTodayCardAuthority() {
+  TodayCardAuthoritySnapshot _captureTodayCardAuthority() {
+    final injected = widget.todayCardAuthoritySnapshotProvider;
+    if (injected != null) return injected();
     const isPreview = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
     final uid = widget.todayCardUidOverride ?? (isPreview ? 'today-card-preview' : SharedPreferencesUtil().uid);
     final authority = isPreview || widget.todayCardUidOverride != null ? null : WalOwnerAuthority.active();
@@ -214,13 +226,26 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     : '');
     final isReady = widget.todayCardReadyOverride ??
         (isPreview || (_provisioningProvider?.isOperational == true && authority?.uid == uid));
-    unawaited(
-      _todayCardController.updateAuthority(
-        uid: uid,
-        authorityKey: authorityKey,
-        isProvisioningReady: isReady,
-      ),
+    return (uid: uid, authorityKey: authorityKey, isProvisioningReady: isReady);
+  }
+
+  Future<void> _syncTodayCardAuthority({bool forceReload = false}) async {
+    final snapshot = _captureTodayCardAuthority();
+    await _todayCardController.updateAuthority(
+      uid: snapshot.uid,
+      authorityKey: snapshot.authorityKey,
+      isProvisioningReady: snapshot.isProvisioningReady,
+      forceReload: forceReload,
     );
+  }
+
+  void _onProvisioningChanged() => unawaited(_syncTodayCardAuthority());
+
+  void _onTodayCardAuthorityChanged() {
+    // In-memory content disappears synchronously; the exact replacement
+    // authority is recaptured only after the old card is no longer renderable.
+    _todayCardController.invalidateAuthority();
+    unawaited(_syncTodayCardAuthority(forceReload: true));
   }
 
   void _onTodayCardChanged() {
@@ -229,13 +254,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(_todayCardController.onResumed());
+    if (state == AppLifecycleState.resumed) unawaited(_syncTodayCardAuthority(forceReload: true));
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _provisioningProvider?.removeListener(_syncTodayCardAuthority);
+    _provisioningProvider?.removeListener(_onProvisioningChanged);
+    _todayCardAuthorityChanges.removeListener(_onTodayCardAuthorityChanged);
     _todayCardController
       ..removeListener(_onTodayCardChanged)
       ..dispose();
@@ -289,6 +315,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (mounted) setState(() => _isReading = false);
       return;
     }
+    await _syncTodayCardAuthority();
+    if (!mounted) return;
     final text = _todayCardController.state.card?.textForSpeech ?? '';
     final uid = _todayCardController.uid;
     if (text.isEmpty || uid.isEmpty) return;
@@ -346,6 +374,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _openTodayCardTalk() async {
+    await _syncTodayCardAuthority();
+    if (!mounted) return;
     final card = _todayCardController.state.card;
     if (card == null) return;
     final routeOpener = widget.todayCardTalkRouteOpener;

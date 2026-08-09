@@ -101,8 +101,23 @@ class HttpTodayCardRepository implements TodayCardRepository {
   }
 
   static Duration _cacheMaxAge(String value) {
-    final match = RegExp(r'(?:^|,)\s*max-age\s*=\s*(\d+)\s*(?:,|$)', caseSensitive: false).firstMatch(value);
-    final seconds = int.tryParse(match?.group(1) ?? '') ?? 60;
+    final directives = value
+        .split(',')
+        .map((directive) => directive.trim().toLowerCase())
+        .where((directive) => directive.isNotEmpty)
+        .toList(growable: false);
+    if (!directives.contains('private') ||
+        !directives.contains('must-revalidate') ||
+        directives.contains('public') ||
+        directives.contains('no-store') ||
+        directives.contains('no-cache')) {
+      return Duration.zero;
+    }
+    final maxAge = directives.where((directive) => RegExp(r'^max-age\s*=').hasMatch(directive)).toList();
+    if (maxAge.length != 1) return Duration.zero;
+    final match = RegExp(r'^max-age\s*=\s*(\d+)$').firstMatch(maxAge.single);
+    final seconds = int.tryParse(match?.group(1) ?? '');
+    if (seconds == null) return Duration.zero;
     return Duration(seconds: seconds.clamp(0, 300));
   }
 
@@ -125,7 +140,7 @@ class HttpTodayCardRepository implements TodayCardRepository {
 }
 
 abstract interface class TodayCardCache {
-  Future<TodayCard?> read({required String uid, required String authorityKey});
+  Future<TodayCardCacheEntry?> read({required String uid, required String authorityKey});
 
   Future<bool> write({
     required String uid,
@@ -138,11 +153,19 @@ abstract interface class TodayCardCache {
   Future<void> clear({required String uid, String authorityKey = ''});
 }
 
+@immutable
+class TodayCardCacheEntry {
+  const TodayCardCacheEntry({required this.card, required this.freshnessRemaining});
+
+  final TodayCard card;
+  final Duration freshnessRemaining;
+}
+
 class SharedPreferencesTodayCardCache implements TodayCardCache {
   SharedPreferencesTodayCardCache({
     SharedPreferencesUtil? preferences,
     DateTime Function()? now,
-    Future<void> Function()? beforeCommit,
+    Future<void> Function(String authorityKey)? beforeCommit,
   })  : _preferences = preferences ?? SharedPreferencesUtil(),
         _now = now ?? DateTime.now,
         _beforeCommit = beforeCommit;
@@ -151,12 +174,12 @@ class SharedPreferencesTodayCardCache implements TodayCardCache {
   static int _writeSequence = 0;
   final SharedPreferencesUtil _preferences;
   final DateTime Function() _now;
-  final Future<void> Function()? _beforeCommit;
+  final Future<void> Function(String authorityKey)? _beforeCommit;
 
   String _key(String uid) => 'ellaTodayCardCache:$uid';
 
   @override
-  Future<TodayCard?> read({required String uid, required String authorityKey}) async {
+  Future<TodayCardCacheEntry?> read({required String uid, required String authorityKey}) async {
     if (uid.isEmpty || authorityKey.isEmpty) return null;
     final encoded = _preferences.getString(_key(uid));
     if (encoded.isEmpty) return null;
@@ -176,7 +199,15 @@ class SharedPreferencesTodayCardCache implements TodayCardCache {
         await clear(uid: uid, authorityKey: authorityKey);
         return null;
       }
-      return TodayCard.fromCacheJson(decoded['card']);
+      final card = TodayCard.fromCacheJson(decoded['card']);
+      if (card == null) {
+        await clear(uid: uid, authorityKey: authorityKey);
+        return null;
+      }
+      return TodayCardCacheEntry(
+        card: card,
+        freshnessRemaining: expiresAt.toUtc().difference(_now().toUtc()),
+      );
     } catch (_) {
       await clear(uid: uid);
       return null;
@@ -198,7 +229,10 @@ class SharedPreferencesTodayCardCache implements TodayCardCache {
       return isCurrent();
     }
     final writeToken = '${_now().microsecondsSinceEpoch}:${_writeSequence++}';
-    await _beforeCommit?.call();
+    await _beforeCommit?.call(authorityKey);
+    // All awaited pre-commit work must finish before the final authority
+    // fence. An obsolete same-UID writer must never touch the shared key.
+    if (!isCurrent()) return false;
     await _preferences.saveString(
       _key(uid),
       jsonEncode({
