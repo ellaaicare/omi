@@ -17289,6 +17289,18 @@ abstract class AppLocalizations {
   /// **'Tell Ella about a person, place, or interest you would like to talk about.'**
   String get todayCardNewUserBody;
 
+  /// No description provided for @todayCardFirstNoteHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Your first note arrives this evening'**
+  String get todayCardFirstNoteHeadline;
+
+  /// No description provided for @todayCardFirstNoteBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Record a moment today. Ella will bring back something meaningful when there is enough to be useful.'**
+  String get todayCardFirstNoteBody;
+
   /// No description provided for @todayCardNoSafeSourceHeadline.
   ///
   /// In en, this message translates to:
@@ -17324,6 +17336,102 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'From a recent memory'**
   String get todayCardProvenanceRecentMemory;
+
+  /// No description provided for @todayRecordMoment.
+  ///
+  /// In en, this message translates to:
+  /// **'Record a moment'**
+  String get todayRecordMoment;
+
+  /// No description provided for @todayRecordStarting.
+  ///
+  /// In en, this message translates to:
+  /// **'Starting…'**
+  String get todayRecordStarting;
+
+  /// No description provided for @todayRecordListening.
+  ///
+  /// In en, this message translates to:
+  /// **'Listening… tap to finish'**
+  String get todayRecordListening;
+
+  /// No description provided for @todayRecordOnPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Records on this iPhone'**
+  String get todayRecordOnPhone;
+
+  /// No description provided for @todayRecordWithNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Records with your necklace'**
+  String get todayRecordWithNecklace;
+
+  /// No description provided for @todayRecordingUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording isn\'t available right now.'**
+  String get todayRecordingUnavailable;
+
+  /// No description provided for @todayControlsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella controls'**
+  String get todayControlsTitle;
+
+  /// No description provided for @todayControlsButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Open recording and Whisper controls'**
+  String get todayControlsButton;
+
+  /// No description provided for @todayRecordingSource.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording source'**
+  String get todayRecordingSource;
+
+  /// No description provided for @todayManageNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Manage necklace'**
+  String get todayManageNecklace;
+
+  /// No description provided for @todayRecentMemories.
+  ///
+  /// In en, this message translates to:
+  /// **'Recent memories'**
+  String get todayRecentMemories;
+
+  /// No description provided for @todayMemoryPhotoLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Photo from this memory'**
+  String get todayMemoryPhotoLabel;
+
+  /// No description provided for @todayFirstMemoryHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Your journal begins with one moment'**
+  String get todayFirstMemoryHeadline;
+
+  /// No description provided for @todayFirstMemoryBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Record something you want to remember. Ella will bring meaningful moments back here.'**
+  String get todayFirstMemoryBody;
+
+  /// No description provided for @scopedTalkUnavailableTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Talk isn\'t available for this item'**
+  String get scopedTalkUnavailableTitle;
+
+  /// No description provided for @scopedTalkUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella can\'t open this item in Talk right now. Close this window and keep browsing.'**
+  String get scopedTalkUnavailableBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

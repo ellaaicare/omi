@@ -9,8 +9,6 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
-import 'package:omi/pages/home/today_page.dart';
-import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   const source = TodayCardSourceRef(kind: 'hermes_memory', id: 'memory-1', versionId: 'memory-v1');
@@ -394,6 +392,106 @@ void main() {
     expect(repository.fetches, 1);
   });
 
+  test('provisioning that never becomes ready ends in a truthful terminal state', () async {
+    final repository = _QueueTodayCardRepository([
+      TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card),
+    ]);
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      pollScheduler: scheduler.schedule,
+      authorityWaitTimeout: const Duration(seconds: 7),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: false,
+    );
+
+    expect(controller.state.status, TodayCardStatus.preparing);
+    expect(scheduler.latestDuration, const Duration(seconds: 7));
+    scheduler.fireLatest();
+
+    expect(repository.fetches, 0);
+    expect(controller.state.status, TodayCardStatus.degraded);
+    expect(controller.state.errorCode, 'today_card_authority_unavailable');
+    expect(controller.state.card, isNull);
+  });
+
+  test('preparing response honors retry-after and polls into ready', () async {
+    final repository = _QueueTodayCardRepository([
+      const TodayCardResponse(
+        contractVersion: todayCardContractVersion,
+        status: TodayCardStatus.preparing,
+        retryAfter: Duration(seconds: 2),
+      ),
+      TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card),
+    ]);
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      pollScheduler: scheduler.schedule,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+
+    expect(controller.state.status, TodayCardStatus.preparing);
+    expect(scheduler.latestDuration, const Duration(seconds: 5));
+    scheduler.fireLatest();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(repository.fetches, 2);
+    expect(controller.state.status, TodayCardStatus.ready);
+    expect(controller.state.card?.id, card.id);
+  });
+
+  test('preparing polling is bounded and ends without invented content', () async {
+    final repository = _QueueTodayCardRepository(
+      List.generate(
+        3,
+        (_) => const TodayCardResponse(
+          contractVersion: todayCardContractVersion,
+          status: TodayCardStatus.preparing,
+          retryAfter: Duration(seconds: 30),
+        ),
+      ),
+    );
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      pollScheduler: scheduler.schedule,
+      maxPreparingPolls: 2,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    for (var poll = 0; poll < 2; poll++) {
+      scheduler.fireLatest();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(repository.fetches, 3);
+    expect(controller.state.status, TodayCardStatus.degraded);
+    expect(controller.state.errorCode, 'today_card_preparing_timeout');
+    expect(controller.state.card, isNull);
+  });
+
   test('daily-card stale scope refresh stays daily-card and never loads a conversation', () async {
     final refreshed = await EllaVoiceChatPage.refreshSessionScope(
       const V2VSessionScope.dailyCard(cardId: 'today-1', expectedVersion: 1),
@@ -421,25 +519,6 @@ void main() {
     expect(refreshed?.cardId, 'today-1');
     expect(refreshed?.expectedVersion, 3);
     expect(refreshed?.conversationId, isEmpty);
-  });
-
-  test('Daily Memo read-aloud stops when exact account authority drifts mid-utterance', () async {
-    final authority = _MutableAuthority('account-a');
-    var stops = 0;
-    final spoken = await TodayPage.readAloudWithAuthority(
-      uid: 'account-a',
-      text: 'A bounded daily thought.',
-      authorityProvider: (_) => authority,
-      speaker: (_, exactAuthority) async {
-        expect(exactAuthority, same(authority));
-        authority.current = false;
-        throw ExactAccountAuthorityChangedException('test drift');
-      },
-      stop: () async => stops++,
-    );
-
-    expect(spoken, isFalse);
-    expect(stops, 1);
   });
 }
 
@@ -538,15 +617,4 @@ class _ManualTimer implements Timer {
     _tick++;
     _callback();
   }
-}
-
-class _MutableAuthority implements ExactAccountAuthorityVerifier {
-  _MutableAuthority(this.uid);
-
-  @override
-  final String uid;
-  bool current = true;
-
-  @override
-  bool isExactCurrent() => current;
 }

@@ -111,3 +111,32 @@ The final pass checked the hardware strip, daily-note typography and inline link
 ## Result
 
 passed
+
+---
+
+# Ella Home — Memory Mosaic design QA
+
+- Selected reference: `/Users/ellaai/.buzz/RESEARCH/ELLA_HOME_REFINED_MEMORY_MOSAIC_2026_08_09.png`
+- Implementation capture: `app/test/pages/home/goldens/ella_home_memory_mosaic.png`
+- Combined comparison: `/private/tmp/home-design-comparison.png`
+- Matched viewport: 390 × 844 points
+
+## Visual inspection
+
+- P0: none.
+- P1: none.
+- P2: none.
+- Hierarchy matches the selected synthesis: date and greeting, editorial Daily Note, one intentional Record action, then the two-up memory journal.
+- The implementation intentionally adds the final requested date anchor, signed-in name, state-aware phone/necklace caption, distinct Talk label/icon, and compact controls button.
+- Fraunces remains the editorial family for the Note and journal hierarchy. Generated botanical art is decorative only; source media is shown only when attached to the actual memory.
+- The longer real greeting wraps safely instead of truncating, while the Daily Note, recording action, and first memory row remain visible at 390 × 844.
+
+## States and accessibility
+
+- Ready, preparing, degraded/no-note, day-one empty, phone capture, necklace capture, starting, and live recording states have widget coverage.
+- 320-point width at 200% text scale has no clipping or ellipsis; the memory layout stacks at large text.
+- Capture and controls targets meet the 48 × 48 point minimum. Semantic order follows the visual hierarchy and the capture control announces its active source.
+- Reduce Motion removes the capture transition duration and disables the breathing animation.
+- Checked contrast ratios: ink/paper 15.06:1; teal/pale capture 4.73:1; teal/paper 5.82:1; ink/card 14.47:1; soft/card 5.62:1; warning/card 4.54:1.
+
+final result: passed

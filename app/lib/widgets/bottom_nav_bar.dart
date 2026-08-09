@@ -8,7 +8,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 
-/// Ella 4-tab bottom navigation: Home, Chat, Voice, Settings.
+/// Ella 4-tab bottom navigation: Home, Chat, Talk, Settings.
 ///
 /// - Text labels always visible (elder-friendly)
 /// - Teal active color, no center record button
@@ -64,12 +64,12 @@ class BottomNavBar extends StatelessWidget {
                       },
                     ),
                     _NavTab(
-                      icon: FontAwesomeIcons.microphone,
-                      label: 'Voice',
+                      icon: FontAwesomeIcons.waveSquare,
+                      label: 'Talk',
                       isSelected: home.selectedIndex == 2,
                       onTap: () {
                         HapticFeedback.mediumImpact();
-                        MixpanelManager().bottomNavigationTabClicked('Voice');
+                        MixpanelManager().bottomNavigationTabClicked('Talk');
                         primaryFocus?.unfocus();
                         onTabTap(2, home.selectedIndex == 2);
                       },

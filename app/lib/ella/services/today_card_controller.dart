@@ -13,10 +13,16 @@ class TodayCardController extends ChangeNotifier {
     required TodayCardCache cache,
     Future<void> Function()? onRevalidationRequired,
     TodayCardExpiryScheduler expiryScheduler = _defaultExpiryScheduler,
+    TodayCardExpiryScheduler pollScheduler = _defaultExpiryScheduler,
+    Duration authorityWaitTimeout = const Duration(seconds: 12),
+    int maxPreparingPolls = 3,
   })  : _repository = repository,
         _cache = cache,
         _onRevalidationRequired = onRevalidationRequired,
-        _expiryScheduler = expiryScheduler;
+        _expiryScheduler = expiryScheduler,
+        _pollScheduler = pollScheduler,
+        _authorityWaitTimeout = authorityWaitTimeout,
+        _maxPreparingPolls = maxPreparingPolls;
 
   static Timer _defaultExpiryScheduler(Duration duration, void Function() callback) => Timer(duration, callback);
 
@@ -24,6 +30,9 @@ class TodayCardController extends ChangeNotifier {
   final TodayCardCache _cache;
   final Future<void> Function()? _onRevalidationRequired;
   final TodayCardExpiryScheduler _expiryScheduler;
+  final TodayCardExpiryScheduler _pollScheduler;
+  final Duration _authorityWaitTimeout;
+  final int _maxPreparingPolls;
 
   TodayCardViewState state = const TodayCardViewState.preparing();
 
@@ -33,6 +42,9 @@ class TodayCardController extends ChangeNotifier {
   int _generation = 0;
   bool _disposed = false;
   Timer? _expiryTimer;
+  Timer? _pollTimer;
+  Timer? _authorityTimer;
+  int _preparingPolls = 0;
 
   String get uid => _uid;
 
@@ -57,7 +69,7 @@ class TodayCardController extends ChangeNotifier {
     }
 
     if (accountChanged || authorityChanged || lostAuthority) {
-      _cancelExpiry();
+      _cancelTimers();
       final previousUid = _uid;
       final previousAuthorityKey = _authorityKey;
       final transitionGeneration = ++_generation;
@@ -78,7 +90,19 @@ class TodayCardController extends ChangeNotifier {
     } else {
       _isProvisioningReady = isProvisioningReady;
     }
-    if (_uid.isEmpty || _authorityKey.isEmpty || !_isProvisioningReady) return;
+    if (_uid.isEmpty || _authorityKey.isEmpty) {
+      _applyDegraded(null, 'today_card_authority_unavailable', isCached: false);
+      return;
+    }
+    if (!_isProvisioningReady) {
+      _scheduleAuthorityTimeout(uid: _uid, authorityKey: _authorityKey);
+      return;
+    }
+    _authorityTimer?.cancel();
+    _authorityTimer = null;
+    if (accountChanged || authorityChanged || becameReady || forceReload) {
+      _preparingPolls = 0;
+    }
     await _load();
   }
 
@@ -86,11 +110,14 @@ class TodayCardController extends ChangeNotifier {
     if (_disposed) return;
     final previousUid = _uid;
     final previousAuthorityKey = _authorityKey;
-    _cancelExpiry();
+    _cancelTimers();
     _generation++;
     _isProvisioningReady = false;
     state = const TodayCardViewState.preparing();
     _notify();
+    if (_uid.isNotEmpty && _authorityKey.isNotEmpty) {
+      _scheduleAuthorityTimeout(uid: _uid, authorityKey: _authorityKey);
+    }
     if (previousUid.isNotEmpty) {
       unawaited(_cache.clear(uid: previousUid, authorityKey: previousAuthorityKey));
     }
@@ -98,6 +125,9 @@ class TodayCardController extends ChangeNotifier {
 
   Future<void> retry() async {
     if (_uid.isEmpty || _authorityKey.isEmpty || !_isProvisioningReady) return;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _preparingPolls = 0;
     await _load();
   }
 
@@ -142,6 +172,8 @@ class TodayCardController extends ChangeNotifier {
 
       switch (response.status) {
         case TodayCardStatus.ready:
+          _cancelPoll();
+          _preparingPolls = 0;
           final card = response.card!;
           final stored = await _cache.write(
             uid: uid,
@@ -164,7 +196,16 @@ class TodayCardController extends ChangeNotifier {
           if (response.card != null) {
             _scheduleExpiry(response.cacheMaxAge, uid: uid, authorityKey: authorityKey);
           }
+          _schedulePreparingPoll(
+            response.retryAfter,
+            uid: uid,
+            authorityKey: authorityKey,
+            retainedCard: retained,
+            isCached: retained == cached,
+          );
         case TodayCardStatus.newUser:
+          _cancelPoll();
+          _preparingPolls = 0;
           _cancelExpiry();
           await _cache.clear(uid: uid, authorityKey: authorityKey);
           if (!_isCurrent(uid, authorityKey, generation)) return;
@@ -173,6 +214,8 @@ class TodayCardController extends ChangeNotifier {
             _scheduleExpiry(response.cacheMaxAge, uid: uid, authorityKey: authorityKey);
           }
         case TodayCardStatus.degraded:
+          _cancelPoll();
+          _preparingPolls = 0;
           final invalidatesCache = response.isAuthoritative || response.invalidatesCachedCard;
           if (invalidatesCache && response.card == null) {
             _cancelExpiry();
@@ -205,6 +248,47 @@ class TodayCardController extends ChangeNotifier {
       errorCode: errorCode,
     );
     _notify();
+  }
+
+  void _scheduleAuthorityTimeout({required String uid, required String authorityKey}) {
+    _authorityTimer?.cancel();
+    if (_disposed || _authorityWaitTimeout <= Duration.zero) {
+      _showAuthorityUnavailable(uid: uid, authorityKey: authorityKey);
+      return;
+    }
+    _authorityTimer = _pollScheduler(
+      _authorityWaitTimeout,
+      () => _showAuthorityUnavailable(uid: uid, authorityKey: authorityKey),
+    );
+  }
+
+  void _showAuthorityUnavailable({required String uid, required String authorityKey}) {
+    _authorityTimer = null;
+    if (_disposed || _uid != uid || _authorityKey != authorityKey || _isProvisioningReady) return;
+    _applyDegraded(null, 'today_card_authority_unavailable', isCached: false);
+  }
+
+  void _schedulePreparingPoll(
+    Duration retryAfter, {
+    required String uid,
+    required String authorityKey,
+    required TodayCard? retainedCard,
+    required bool isCached,
+  }) {
+    _cancelPoll();
+    if (_preparingPolls >= _maxPreparingPolls) {
+      _applyDegraded(retainedCard, 'today_card_preparing_timeout', isCached: isCached);
+      return;
+    }
+    final delay = retryAfter <= Duration.zero
+        ? const Duration(seconds: 30)
+        : Duration(seconds: retryAfter.inSeconds.clamp(5, 60));
+    _pollTimer = _pollScheduler(delay, () {
+      _pollTimer = null;
+      if (_disposed || _uid != uid || _authorityKey != authorityKey || !_isProvisioningReady) return;
+      _preparingPolls++;
+      unawaited(_load());
+    });
   }
 
   void _scheduleExpiry(Duration duration, {required String uid, required String authorityKey}) {
@@ -245,6 +329,18 @@ class TodayCardController extends ChangeNotifier {
     _expiryTimer = null;
   }
 
+  void _cancelPoll() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  void _cancelTimers() {
+    _cancelExpiry();
+    _cancelPoll();
+    _authorityTimer?.cancel();
+    _authorityTimer = null;
+  }
+
   bool _isCurrent(String uid, String authorityKey, int generation) =>
       !_disposed && _uid == uid && _authorityKey == authorityKey && _isProvisioningReady && _generation == generation;
 
@@ -256,7 +352,7 @@ class TodayCardController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _generation++;
-    _cancelExpiry();
+    _cancelTimers();
     super.dispose();
   }
 }

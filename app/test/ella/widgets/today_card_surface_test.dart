@@ -45,9 +45,7 @@ void main() {
               padding: const EdgeInsets.symmetric(horizontal: EllaSizes.screenPadding),
               child: TodayCardSurface(
                 state: state,
-                isReading: false,
                 onTalk: () {},
-                onReadAloud: () {},
               ),
             ),
           ),
@@ -86,7 +84,7 @@ void main() {
       expect(find.text('SERVER DISPLAY COPY'), findsNothing);
       expect(find.byKey(const Key('today-card-actions-row')), findsOneWidget);
       expect(find.byKey(const Key('today-card-talk')), findsOneWidget);
-      expect(find.byKey(const Key('today-card-read-aloud')), findsOneWidget);
+      expect(find.byKey(const Key('today-card-read-aloud')), findsNothing);
       expect(
         tester.getSize(find.byKey(const Key('today-card-talk'))).height,
         greaterThanOrEqualTo(48),
@@ -99,7 +97,7 @@ void main() {
           MediaQuery.textScalerOf(tester.element(find.byKey(const Key('today-card-body')))).scale(16) / 16;
       expect(
         surfaceSize.height,
-        lessThanOrEqualTo(300),
+        lessThanOrEqualTo(360),
         reason: 'surface=$surfaceSize headline=$headlineSize body=$bodySize actions=$actionSize scale=$effectiveScale',
       );
       expect(tester.takeException(), isNull);

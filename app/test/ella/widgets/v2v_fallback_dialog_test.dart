@@ -36,7 +36,7 @@ void main() {
     expect(find.byKey(const ValueKey('v2v-failure-cancel')), findsOneWidget);
   });
 
-  testWidgets('memory-scoped failures offer retry or stop without an unscoped fallback', (tester) async {
+  testWidgets('scoped failures are truthful and close-only after automatic refresh is exhausted', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -46,9 +46,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text("Talk isn't available for this item"), findsOneWidget);
+    expect(find.textContaining('Close this window'), findsOneWidget);
     expect(find.text('Use ElevenLabs'), findsNothing);
-    expect(find.text('Retry'), findsOneWidget);
-    expect(find.text('Cancel'), findsOneWidget);
+    expect(find.text('Retry'), findsNothing);
+    expect(find.text('Close'), findsOneWidget);
   });
 
   testWidgets('explicit cancel returns stop instead of forcing another retry', (tester) async {

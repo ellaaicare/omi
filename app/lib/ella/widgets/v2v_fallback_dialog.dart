@@ -28,13 +28,15 @@ class V2VFallbackDialog extends StatelessWidget {
     return AlertDialog(
       backgroundColor: EllaColors.card,
       title: Text(
-        context.l10n.voiceV2vUnavailableTitle(providerName),
+        allowStandardFallback
+            ? context.l10n.voiceV2vUnavailableTitle(providerName)
+            : context.l10n.scopedTalkUnavailableTitle,
         style: EllaTextStyles.display.copyWith(fontSize: 22),
       ),
       content: Text(
         allowStandardFallback
             ? context.l10n.voiceV2vUnavailableBody(receipt.stage.name, receipt.safeDetail)
-            : context.l10n.memoryTalkUnavailable,
+            : context.l10n.scopedTalkUnavailableBody,
         style: EllaTextStyles.body,
       ),
       actions: [
@@ -42,7 +44,7 @@ class V2VFallbackDialog extends StatelessWidget {
           key: const ValueKey('v2v-failure-cancel'),
           onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop),
           icon: const Icon(Icons.close),
-          label: Text(context.l10n.cancel),
+          label: Text(allowStandardFallback ? context.l10n.cancel : context.l10n.close),
         ),
         if (allowStandardFallback)
           TextButton(
@@ -50,11 +52,12 @@ class V2VFallbackDialog extends StatelessWidget {
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
             child: Text(context.l10n.voiceUseElevenLabs),
           ),
-        FilledButton(
-          key: const ValueKey('v2v-failure-retry'),
-          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
-          child: Text(context.l10n.retry),
-        ),
+        if (allowStandardFallback)
+          FilledButton(
+            key: const ValueKey('v2v-failure-retry'),
+            onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
+            child: Text(context.l10n.retry),
+          ),
       ],
     );
   }
