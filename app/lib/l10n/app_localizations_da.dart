@@ -9253,13 +9253,13 @@ class AppLocalizationsDa extends AppLocalizations {
   String get aiConsentGrantNetworkBody => 'Ella couldn\'t reach the server. Check your connection and try again.';
 
   @override
-  String get todayCardPreparingEyebrow => 'FOR YOU TODAY';
+  String get todayCardPreparingEyebrow => 'ELLA\'S DAILY NOTE';
 
   @override
-  String get todayCardPreparingHeadline => 'Ella is putting something together for you.';
+  String get todayCardPreparingHeadline => 'Preparing today\'s note';
 
   @override
-  String get todayCardPreparingBody => 'Pull down in a little while to check again.';
+  String get todayCardPreparingBody => 'Ella is finding one useful moment from your recent memories.';
 
   @override
   String get todayCardNewUserHeadline => 'What matters to you?';
@@ -9268,11 +9268,11 @@ class AppLocalizationsDa extends AppLocalizations {
   String get todayCardNewUserBody => 'Tell Ella about a person, place, or interest you would like to talk about.';
 
   @override
-  String get todayCardDegradedHeadline => 'Ella could not refresh this just now.';
+  String get todayCardDegradedHeadline => 'No new note yet';
 
   @override
-  String get todayCardDegradedBody => 'Pull down to try again.';
+  String get todayCardDegradedBody => 'Ella will add one when there is enough recent memory to be useful.';
 
   @override
-  String get todayCardSavedStatus => 'Showing the last item Ella saved for you.';
+  String get todayCardSavedStatus => 'Showing the last note while Ella checks for an update.';
 }

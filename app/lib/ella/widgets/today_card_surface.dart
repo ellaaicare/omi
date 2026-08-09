@@ -21,7 +21,7 @@ class TodayCardSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final card = state.card;
-    final content = card == null ? _fallbackContent(context, state.status) : _TodayCardContent.fromCard(card);
+    final content = card == null ? _fallbackContent(context, state.status) : _TodayCardContent.fromCard(context, card);
 
     return EllaCardSurface(
       child: Semantics(
@@ -29,30 +29,66 @@ class TodayCardSurface extends StatelessWidget {
         container: true,
         explicitChildNodes: true,
         child: Padding(
-          padding: const EdgeInsets.all(EllaSizes.notePadding),
+          padding: const EdgeInsets.all(EllaSizes.spacingM),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(content.eyebrow, key: const Key('today-card-eyebrow'), style: EllaTextStyles.eyebrow),
-              const SizedBox(height: 12),
+              Text(
+                content.eyebrow,
+                key: const Key('today-card-eyebrow'),
+                style: EllaTextStyles.eyebrow,
+              ),
+              const SizedBox(height: 8),
               Semantics(
                 header: true,
                 child: Text(
                   content.headline,
                   key: const Key('today-card-headline'),
-                  style: Theme.of(context).textTheme.titleLarge,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 20, height: 1.25),
                 ),
               ),
-              const SizedBox(height: 10),
-              Text(content.body, key: const Key('today-card-body'), style: EllaTextStyles.noteBody),
+              const SizedBox(height: 6),
+              Text(
+                content.body,
+                key: const Key('today-card-body'),
+                style: EllaTextStyles.noteBody.copyWith(fontSize: 18, height: 1.35),
+              ),
+              if (content.provenance != null) ...[
+                const SizedBox(height: 8),
+                Row(
+                  key: const Key('today-card-provenance'),
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(
+                        Icons.history_rounded,
+                        size: 18,
+                        color: EllaColors.inkSoft,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        content.provenance!,
+                        style: EllaTextStyles.caption,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               if (state.isCached) ...[
-                const SizedBox(height: 14),
+                const SizedBox(height: 10),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Padding(
-                      padding: EdgeInsets.only(top: 4),
-                      child: Icon(Icons.history_rounded, size: 18, color: EllaColors.inkSoft),
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(
+                        Icons.cloud_off_outlined,
+                        size: 18,
+                        color: EllaColors.inkSoft,
+                      ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -72,38 +108,20 @@ class TodayCardSurface extends StatelessWidget {
                   child: SizedBox(
                     width: 20,
                     height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: EllaColors.tealDeep,
+                    ),
                   ),
                 ),
               ],
               if (card != null) ...[
-                const SizedBox(height: 22),
-                Semantics(
-                  button: true,
-                  label: context.l10n.memoryTalkAction,
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      key: const Key('today-card-talk'),
-                      onPressed: onTalk,
-                      icon: const Icon(Icons.graphic_eq_rounded),
-                      label: Text(context.l10n.memoryTalkAction),
-                    ),
-                  ),
+                const SizedBox(height: 12),
+                _TodayCardActions(
+                  isReading: isReading,
+                  onTalk: onTalk,
+                  onReadAloud: onReadAloud,
                 ),
-                if (onReadAloud != null) ...[
-                  const SizedBox(height: 6),
-                  TextButton.icon(
-                    key: const Key('today-card-read-aloud'),
-                    onPressed: onReadAloud,
-                    icon: Icon(isReading ? Icons.stop_circle_outlined : Icons.volume_up_outlined),
-                    label: Text(isReading ? context.l10n.stopReading : context.l10n.readAloud),
-                    style: TextButton.styleFrom(
-                      foregroundColor: EllaColors.tealDeep,
-                      minimumSize: const Size.fromHeight(EllaSizes.minTouchTarget),
-                    ),
-                  ),
-                ],
               ],
             ],
           ),
@@ -112,32 +130,119 @@ class TodayCardSurface extends StatelessWidget {
     );
   }
 
-  _TodayCardContent _fallbackContent(BuildContext context, TodayCardStatus status) => switch (status) {
-    TodayCardStatus.newUser => _TodayCardContent(
-      eyebrow: context.l10n.todayCardPreparingEyebrow,
-      headline: context.l10n.todayCardNewUserHeadline,
-      body: context.l10n.todayCardNewUserBody,
-    ),
-    TodayCardStatus.degraded => _TodayCardContent(
-      eyebrow: context.l10n.todayCardPreparingEyebrow,
-      headline: context.l10n.todayCardDegradedHeadline,
-      body: context.l10n.todayCardDegradedBody,
-    ),
-    TodayCardStatus.ready || TodayCardStatus.preparing => _TodayCardContent(
-      eyebrow: context.l10n.todayCardPreparingEyebrow,
-      headline: context.l10n.todayCardPreparingHeadline,
-      body: context.l10n.todayCardPreparingBody,
-    ),
-  };
+  _TodayCardContent _fallbackContent(
+    BuildContext context,
+    TodayCardStatus status,
+  ) =>
+      switch (status) {
+        TodayCardStatus.newUser => _TodayCardContent(
+            eyebrow: context.l10n.todayCardPreparingEyebrow,
+            headline: context.l10n.todayCardNewUserHeadline,
+            body: context.l10n.todayCardNewUserBody,
+          ),
+        TodayCardStatus.degraded => _TodayCardContent(
+            eyebrow: context.l10n.todayCardPreparingEyebrow,
+            headline: context.l10n.todayCardDegradedHeadline,
+            body: context.l10n.todayCardDegradedBody,
+          ),
+        TodayCardStatus.ready || TodayCardStatus.preparing => _TodayCardContent(
+            eyebrow: context.l10n.todayCardPreparingEyebrow,
+            headline: context.l10n.todayCardPreparingHeadline,
+            body: context.l10n.todayCardPreparingBody,
+          ),
+      };
+}
+
+class _TodayCardActions extends StatelessWidget {
+  const _TodayCardActions({
+    required this.isReading,
+    required this.onTalk,
+    required this.onReadAloud,
+  });
+
+  final bool isReading;
+  final VoidCallback? onTalk;
+  final VoidCallback? onReadAloud;
+
+  @override
+  Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final shouldStack = textScale > 1.3 || constraints.maxWidth < 310;
+        final talk = Semantics(
+          button: true,
+          label: context.l10n.memoryTalkAction,
+          child: FilledButton.icon(
+            key: const Key('today-card-talk'),
+            onPressed: onTalk,
+            icon: const Icon(Icons.graphic_eq_rounded),
+            label: Text(context.l10n.memoryTalkAction),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(0, EllaSizes.minTouchTarget),
+            ),
+          ),
+        );
+        final readAloud = onReadAloud == null
+            ? null
+            : TextButton.icon(
+                key: const Key('today-card-read-aloud'),
+                onPressed: onReadAloud,
+                icon: Icon(
+                  isReading ? Icons.stop_circle_outlined : Icons.volume_up_outlined,
+                ),
+                label: Text(
+                  isReading ? context.l10n.stopReading : context.l10n.readAloud,
+                ),
+                style: TextButton.styleFrom(
+                  foregroundColor: EllaColors.tealDeep,
+                  minimumSize: const Size(0, EllaSizes.minTouchTarget),
+                ),
+              );
+
+        if (shouldStack) {
+          return Column(
+            key: const Key('today-card-actions-stacked'),
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              talk,
+              if (readAloud != null) ...[const SizedBox(height: 4), readAloud],
+            ],
+          );
+        }
+
+        return Row(
+          key: const Key('today-card-actions-row'),
+          children: [
+            Expanded(child: talk),
+            if (readAloud != null) ...[
+              const SizedBox(width: 8),
+              Flexible(child: readAloud),
+            ],
+          ],
+        );
+      },
+    );
+  }
 }
 
 class _TodayCardContent {
-  const _TodayCardContent({required this.eyebrow, required this.headline, required this.body});
+  const _TodayCardContent({
+    required this.eyebrow,
+    required this.headline,
+    required this.body,
+    this.provenance,
+  });
 
-  factory _TodayCardContent.fromCard(TodayCard card) =>
-      _TodayCardContent(eyebrow: card.eyebrow, headline: card.headline, body: card.body);
+  factory _TodayCardContent.fromCard(BuildContext context, TodayCard card) => _TodayCardContent(
+        eyebrow: context.l10n.todayCardPreparingEyebrow,
+        headline: card.headline,
+        body: card.body,
+        provenance: card.kind == TodayCardKind.welcome ? null : card.eyebrow,
+      );
 
   final String eyebrow;
   final String headline;
   final String body;
+  final String? provenance;
 }

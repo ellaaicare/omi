@@ -17262,19 +17262,19 @@ abstract class AppLocalizations {
   /// No description provided for @todayCardPreparingEyebrow.
   ///
   /// In en, this message translates to:
-  /// **'FOR YOU TODAY'**
+  /// **'ELLA\'S DAILY NOTE'**
   String get todayCardPreparingEyebrow;
 
   /// No description provided for @todayCardPreparingHeadline.
   ///
   /// In en, this message translates to:
-  /// **'Ella is putting something together for you.'**
+  /// **'Preparing today\'s note'**
   String get todayCardPreparingHeadline;
 
   /// No description provided for @todayCardPreparingBody.
   ///
   /// In en, this message translates to:
-  /// **'Pull down in a little while to check again.'**
+  /// **'Ella is finding one useful moment from your recent memories.'**
   String get todayCardPreparingBody;
 
   /// No description provided for @todayCardNewUserHeadline.
@@ -17292,19 +17292,19 @@ abstract class AppLocalizations {
   /// No description provided for @todayCardDegradedHeadline.
   ///
   /// In en, this message translates to:
-  /// **'Ella could not refresh this just now.'**
+  /// **'No new note yet'**
   String get todayCardDegradedHeadline;
 
   /// No description provided for @todayCardDegradedBody.
   ///
   /// In en, this message translates to:
-  /// **'Pull down to try again.'**
+  /// **'Ella will add one when there is enough recent memory to be useful.'**
   String get todayCardDegradedBody;
 
   /// No description provided for @todayCardSavedStatus.
   ///
   /// In en, this message translates to:
-  /// **'Showing the last item Ella saved for you.'**
+  /// **'Showing the last note while Ella checks for an update.'**
   String get todayCardSavedStatus;
 }
 
