@@ -40,6 +40,7 @@ EXPECTED_WRITERS = {
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
     ("database/managed_cloud_consent.py", "synchronize_denial"),
     ("database/managed_cloud_consent.py", "synchronize_grant"),
@@ -58,6 +59,7 @@ DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 
@@ -67,6 +69,7 @@ PROOF_GATED_HELPERS = {
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 EXPECTED_GLOBAL_USER_WRITERS = {
@@ -149,6 +152,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"consent_regrant"',
+    ),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine",
     ),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"): (
         "tests/postgres/test_invitation_redemption_postgres.py",

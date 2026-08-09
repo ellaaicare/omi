@@ -1350,20 +1350,21 @@ class ProvisioningCoordinator:
                 uid=identity.uid,
             )
             # Firestore voice_mode only when a fresh DB entitlement row was
-            # actually inserted -- keeps a returning/operator-seeded user's own
-            # voice state untouched and the receipt consistent with the row.
+            # inserted or the exact auto-provisioned quarantine row was safely
+            # recovered -- keeps operator-seeded voice state untouched.
             _ensure_self_hosted_grok_voice_mode(
                 identity.uid,
                 fresh_entitlement_created=bool(voice_entitlement_created),
             )
             deadline_check()
+            invitation_target_required = invitation_admission is not None
             activated = await self._repository_call(
                 authority_snapshot,
                 self.repository.activate_runtime_binding,
                 uid=identity.uid,
                 provider="hermes",
-                require_invitation_target=self_hosted_required,
-                authority_lineage=(current_self_hosted_runtime_lineage() if self_hosted_required else None),
+                require_invitation_target=invitation_target_required,
+                authority_lineage=(current_self_hosted_runtime_lineage() if invitation_target_required else None),
                 model=SELF_HOSTED_RUNTIME_MODEL,
             )
             deadline_check()
