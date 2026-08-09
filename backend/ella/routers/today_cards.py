@@ -156,10 +156,6 @@ def _service_token(request: Request) -> tuple[str, str]:
     return presented, expected
 
 
-def _require_service_auth(request: Request) -> None:
-    _service_token(request)
-
-
 def _require_subject_bound_service_auth(request: Request) -> EllaRequestAuthority:
     presented, expected = _service_token(request)
     return get_exact_service_authority(
@@ -302,21 +298,6 @@ def create_today_cards_router(
             "version": result.card.version,
             "state": result.card.state.value,
             "created": result.created,
-        }
-
-    @router.post("/v1/ella/internal/today-cards/materialize-due")
-    async def materialize_due_today_cards(request: Request, limit: int = Query(default=100, ge=1, le=500)):
-        _require_service_auth(request)
-        try:
-            results = await materializer.materialize_due(limit)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail={"code": "today_card_sweep_failed"}) from exc
-        return {
-            "ok": True,
-            "processed": len(results),
-            "states": {
-                state.value: sum(1 for result in results if result.card.state == state) for state in TodayCardState
-            },
         }
 
     @router.post("/v1/ella/internal/today-cards/invalidate-source")

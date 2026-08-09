@@ -368,12 +368,6 @@ ROUTE_GROUPS = (
         ("POST", "/v1/ella/internal/today-cards/invalidate-source", "invalidate_today_card_source"),
     ),
     _group(
-        "today_cards",
-        "fixed_today_card_service",
-        "internal_only",
-        ("POST", "/v1/ella/internal/today-cards/materialize-due", "materialize_due_today_cards"),
-    ),
-    _group(
         "voice",
         "firebase_exact_owner",
         "staged_public",
