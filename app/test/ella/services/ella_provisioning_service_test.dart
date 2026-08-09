@@ -511,6 +511,90 @@ void main() {
     provider.dispose();
   });
 
+  test('receipt replacement quarantines an overlapping obsolete ensure before retrying with current authority',
+      () async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    final transport = _ReceiptReplacementEnsureTransport();
+    final provider = EllaProvisioningProvider(transport: transport);
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.524+800',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        clientRequestId: 'request-receipt-a',
+        consentReceiptId: 'aicr_receipt-a',
+      ),
+    );
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    await preferences.markEllaProvisioningVerified('uid-a');
+
+    final readyNotifications = <({int ensureCalls, int bindingRevision, bool authorityCurrent})>[];
+    provider.addListener(() {
+      if (provider.isOperational) {
+        final bindingRevision = provider.receipt?.bindingRevision ?? 0;
+        readyNotifications.add((
+          ensureCalls: transport.ensureCalls,
+          bindingRevision: bindingRevision,
+          authorityCurrent: preferences.hasCurrentEllaProvisioningAuthority(
+            uid: 'uid-a',
+            bindingRevision: bindingRevision,
+          ),
+        ));
+      }
+    });
+
+    final staleEnsure = provider.retry();
+    await transport.staleEnsureStarted.future;
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-b',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:01:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-b',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    provider.setConsentReceiptId('aicr_receipt-b');
+    transport.completeStaleEnsure();
+    await staleEnsure;
+    await transport.replacementEnsureStarted.future;
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.ensureContexts.map((context) => context.consentReceiptId), [
+      'aicr_receipt-a',
+      'aicr_receipt-a',
+      'aicr_receipt-b',
+    ]);
+    expect(readyNotifications, [
+      (ensureCalls: 3, bindingRevision: 2, authorityCurrent: true),
+    ]);
+    expect(provider.receipt?.bindingRevision, 2);
+    expect(preferences.getEllaProvisioningReceipt('uid-a')?['binding_revision'], 2);
+    provider.dispose();
+  });
+
   test('AI consent becomes authority only after an exact server v8 managed-cloud grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(policy: AiConsentPolicy.bundled, submitResponse: _consentStatus());
@@ -904,6 +988,47 @@ class _DeferredEnsureTransport implements EllaProvisioningTransport {
   @override
   Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
 }
+
+class _ReceiptReplacementEnsureTransport implements EllaProvisioningTransport {
+  final Completer<void> staleEnsureStarted = Completer<void>();
+  final Completer<void> replacementEnsureStarted = Completer<void>();
+  final Completer<EllaProvisioningResponse> _staleEnsure = Completer<EllaProvisioningResponse>();
+  final List<EllaProvisioningRequestContext> ensureContexts = [];
+
+  int get ensureCalls => ensureContexts.length;
+
+  @override
+  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) {
+    ensureContexts.add(context);
+    switch (ensureCalls) {
+      case 1:
+        return Future.value(_readyProvisioningResponse(bindingRevision: 1));
+      case 2:
+        staleEnsureStarted.complete();
+        return _staleEnsure.future;
+      case 3:
+        replacementEnsureStarted.complete();
+        return Future.value(_readyProvisioningResponse(bindingRevision: 2));
+      default:
+        throw StateError('unexpected ensure request');
+    }
+  }
+
+  void completeStaleEnsure() => _staleEnsure.complete(_readyProvisioningResponse(bindingRevision: 1));
+
+  @override
+  Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
+}
+
+EllaProvisioningResponse _readyProvisioningResponse({required int bindingRevision}) => EllaProvisioningResponse(
+      statusCode: 200,
+      receipt: EllaProvisioningReceipt.fromJson({
+        'state': 'ready',
+        'binding_state': 'active',
+        'binding_revision': bindingRevision,
+        'effective_policy_revision': 'policy-$bindingRevision',
+      }),
+    );
 
 class _FakeConsentTransport extends EllaAiConsentTransport {
   _FakeConsentTransport({required this.policy, this.statusResponse, this.submitResponse});
