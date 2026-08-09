@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +9,7 @@ import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
@@ -126,5 +128,74 @@ void main() {
     expect(result.isFailure, isTrue);
     expect(result.value, isNull);
     expect(result.failure?.kind, ClientApiFailureKind.updateRequired);
+  });
+
+  test('history accepts canonical text and created_at fields', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              {
+                'id': 'canonical-1',
+                'role': 'assistant',
+                'text': 'Persisted answer',
+                'created_at': '2026-08-09T03:00:00Z',
+              },
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value, hasLength(1));
+    expect(result.value!.single.id, 'canonical-1');
+    expect(result.value!.single.text, 'Persisted answer');
+    expect(result.value!.single.createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
+  });
+
+  test('history rejects a nonempty unsupported message shape so cache can be preserved', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              {'id': 'unknown-1', 'role': 'assistant', 'body': 'Not a supported contract'},
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.failure?.kind, ClientApiFailureKind.invalidResponse);
+  });
+
+  test('Ella chat inactivity timeout cancels an otherwise silent stream', () async {
+    final source = StreamController<ServerMessageChunk>();
+    final result = withEllaChatInactivityTimeout(
+      source.stream,
+      timeout: const Duration(milliseconds: 10),
+    ).toList();
+
+    await expectLater(
+      result,
+      throwsA(
+        isA<ClientApiFailure>()
+            .having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable)
+            .having((failure) => failure.retryable, 'retryable', isTrue),
+      ),
+    );
+    expect(source.hasListener, isFalse);
+    await source.close();
   });
 }
