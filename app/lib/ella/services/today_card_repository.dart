@@ -61,11 +61,19 @@ class HttpTodayCardRepository implements TodayCardRepository {
     } catch (_) {
       return _degraded('invalid_today_card_response');
     }
-    return parseEnvelope(decoded, headerEtag: response.headers['etag'] ?? '');
+    return parseEnvelope(
+      decoded,
+      headerEtag: response.headers['etag'] ?? '',
+      headerCacheControl: response.headers['cache-control'] ?? '',
+    );
   }
 
   @visibleForTesting
-  static TodayCardResponse parseEnvelope(Object? decoded, {String headerEtag = ''}) {
+  static TodayCardResponse parseEnvelope(
+    Object? decoded, {
+    String headerEtag = '',
+    String headerCacheControl = '',
+  }) {
     if (decoded is! Map) return _degraded('invalid_today_card_response');
     final contractVersion = decoded['contract_version']?.toString().trim() ?? '';
     final status = TodayCardStatus.tryParse(decoded['state']?.toString() ?? '');
@@ -88,7 +96,14 @@ class HttpTodayCardRepository implements TodayCardRepository {
       etag: bodyEtag,
       serverTime: serverTime,
       retryAfter: retryAfter is num ? Duration(seconds: retryAfter.toInt().clamp(0, 3600)) : Duration.zero,
+      cacheMaxAge: _cacheMaxAge(headerCacheControl),
     );
+  }
+
+  static Duration _cacheMaxAge(String value) {
+    final match = RegExp(r'(?:^|,)\s*max-age\s*=\s*(\d+)\s*(?:,|$)', caseSensitive: false).firstMatch(value);
+    final seconds = int.tryParse(match?.group(1) ?? '') ?? 60;
+    return Duration(seconds: seconds.clamp(0, 300));
   }
 
   static TodayCardResponse _degraded(String code, {String contractVersion = todayCardContractVersion}) =>
@@ -110,25 +125,39 @@ class HttpTodayCardRepository implements TodayCardRepository {
 }
 
 abstract interface class TodayCardCache {
-  Future<TodayCard?> read({required String uid});
+  Future<TodayCard?> read({required String uid, required String authorityKey});
 
-  Future<void> write({required String uid, required TodayCard card});
+  Future<bool> write({
+    required String uid,
+    required String authorityKey,
+    required TodayCard card,
+    required Duration maxAge,
+    required bool Function() isCurrent,
+  });
 
-  Future<void> clear({required String uid});
+  Future<void> clear({required String uid, String authorityKey = ''});
 }
 
 class SharedPreferencesTodayCardCache implements TodayCardCache {
-  SharedPreferencesTodayCardCache({SharedPreferencesUtil? preferences})
-      : _preferences = preferences ?? SharedPreferencesUtil();
+  SharedPreferencesTodayCardCache({
+    SharedPreferencesUtil? preferences,
+    DateTime Function()? now,
+    Future<void> Function()? beforeCommit,
+  })  : _preferences = preferences ?? SharedPreferencesUtil(),
+        _now = now ?? DateTime.now,
+        _beforeCommit = beforeCommit;
 
-  static const String _cacheSchemaVersion = 'today-card-cache-v1';
+  static const String _cacheSchemaVersion = 'today-card-cache-v2';
+  static int _writeSequence = 0;
   final SharedPreferencesUtil _preferences;
+  final DateTime Function() _now;
+  final Future<void> Function()? _beforeCommit;
 
   String _key(String uid) => 'ellaTodayCardCache:$uid';
 
   @override
-  Future<TodayCard?> read({required String uid}) async {
-    if (uid.isEmpty) return null;
+  Future<TodayCard?> read({required String uid, required String authorityKey}) async {
+    if (uid.isEmpty || authorityKey.isEmpty) return null;
     final encoded = _preferences.getString(_key(uid));
     if (encoded.isEmpty) return null;
     try {
@@ -137,31 +166,80 @@ class SharedPreferencesTodayCardCache implements TodayCardCache {
           decoded['cache_schema'] != _cacheSchemaVersion ||
           decoded['contract_version'] != todayCardContractVersion ||
           decoded['uid'] != uid) {
+        await clear(uid: uid);
+        return null;
+      }
+      // A stale reader must never erase a newer authority's same-UID cache.
+      if (decoded['authority_key'] != authorityKey) return null;
+      final expiresAt = DateTime.tryParse(decoded['expires_at']?.toString() ?? '');
+      if (expiresAt == null || !_now().toUtc().isBefore(expiresAt.toUtc())) {
+        await clear(uid: uid, authorityKey: authorityKey);
         return null;
       }
       return TodayCard.fromCacheJson(decoded['card']);
     } catch (_) {
+      await clear(uid: uid);
       return null;
     }
   }
 
   @override
-  Future<void> write({required String uid, required TodayCard card}) async {
-    if (uid.isEmpty || !card.isValid) return;
+  Future<bool> write({
+    required String uid,
+    required String authorityKey,
+    required TodayCard card,
+    required Duration maxAge,
+    required bool Function() isCurrent,
+  }) async {
+    if (uid.isEmpty || authorityKey.isEmpty || !card.isValid || !isCurrent()) return false;
+    final boundedAge = Duration(seconds: maxAge.inSeconds.clamp(0, 300));
+    if (boundedAge == Duration.zero) {
+      await clear(uid: uid, authorityKey: authorityKey);
+      return isCurrent();
+    }
+    final writeToken = '${_now().microsecondsSinceEpoch}:${_writeSequence++}';
+    await _beforeCommit?.call();
     await _preferences.saveString(
       _key(uid),
       jsonEncode({
         'cache_schema': _cacheSchemaVersion,
         'contract_version': todayCardContractVersion,
         'uid': uid,
+        'authority_key': authorityKey,
+        'write_token': writeToken,
+        'expires_at': _now().toUtc().add(boundedAge).toIso8601String(),
         'card': card.toCacheJson(),
       }),
     );
+    if (isCurrent()) return true;
+    await _clearMatchingWrite(uid: uid, authorityKey: authorityKey, writeToken: writeToken);
+    return false;
   }
 
   @override
-  Future<void> clear({required String uid}) async {
+  Future<void> clear({required String uid, String authorityKey = ''}) async {
     if (uid.isEmpty) return;
+    if (authorityKey.isNotEmpty) {
+      final encoded = _preferences.getString(_key(uid));
+      try {
+        final decoded = jsonDecode(encoded);
+        if (decoded is Map && decoded['authority_key'] != authorityKey) return;
+      } catch (_) {}
+    }
     await _preferences.remove(_key(uid));
+  }
+
+  Future<void> _clearMatchingWrite({
+    required String uid,
+    required String authorityKey,
+    required String writeToken,
+  }) async {
+    final encoded = _preferences.getString(_key(uid));
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is Map && decoded['authority_key'] == authorityKey && decoded['write_token'] == writeToken) {
+        await _preferences.remove(_key(uid));
+      }
+    } catch (_) {}
   }
 }

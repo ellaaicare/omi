@@ -9,12 +9,12 @@ enum TodayCardStatus {
   degraded;
 
   static TodayCardStatus? tryParse(String value) => switch (value) {
-    'ready' => TodayCardStatus.ready,
-    'preparing' => TodayCardStatus.preparing,
-    'new_user' => TodayCardStatus.newUser,
-    'degraded' => TodayCardStatus.degraded,
-    _ => null,
-  };
+        'ready' => TodayCardStatus.ready,
+        'preparing' => TodayCardStatus.preparing,
+        'new_user' => TodayCardStatus.newUser,
+        'degraded' => TodayCardStatus.degraded,
+        _ => null,
+      };
 }
 
 enum TodayCardKind {
@@ -24,12 +24,12 @@ enum TodayCardKind {
   welcome;
 
   static TodayCardKind? tryParse(String value) => switch (value) {
-    'recap' => TodayCardKind.recap,
-    'memory' => TodayCardKind.memory,
-    'interest' => TodayCardKind.interest,
-    'welcome' => TodayCardKind.welcome,
-    _ => null,
-  };
+        'recap' => TodayCardKind.recap,
+        'memory' => TodayCardKind.memory,
+        'interest' => TodayCardKind.interest,
+        'welcome' => TodayCardKind.welcome,
+        _ => null,
+      };
 }
 
 @immutable
@@ -49,12 +49,12 @@ class TodayCardSourceRef {
   final String conversationId;
 
   Map<String, dynamic> toCacheJson() => {
-    'kind': kind,
-    'id': id,
-    if (versionId.isNotEmpty) 'version_id': versionId,
-    if (occurredAt != null) 'occurred_at': occurredAt!.toUtc().toIso8601String(),
-    if (conversationId.isNotEmpty) 'conversation_id': conversationId,
-  };
+        'kind': kind,
+        'id': id,
+        if (versionId.isNotEmpty) 'version_id': versionId,
+        if (occurredAt != null) 'occurred_at': occurredAt!.toUtc().toIso8601String(),
+        if (conversationId.isNotEmpty) 'conversation_id': conversationId,
+      };
 
   static TodayCardSourceRef? fromCacheJson(Object? value) {
     if (value is! Map) return null;
@@ -128,28 +128,27 @@ class TodayCard {
   String get textForSpeech => spokenText.trim().isNotEmpty ? spokenText.trim() : body.trim();
 
   Map<String, dynamic> toCacheJson() => {
-    'id': id,
-    'version': version,
-    'kind': kind.name,
-    'eyebrow': eyebrow,
-    'headline': headline,
-    'body': body,
-    'spoken_text': spokenText,
-    'source_date': sourceDate,
-    'local_date': localDate,
-    'timezone': timezone,
-    'evidence_hash': evidenceHash,
-    'generated_at': generatedAt.toUtc().toIso8601String(),
-    'source_refs': sourceRefs.map((source) => source.toCacheJson()).toList(),
-  };
+        'id': id,
+        'version': version,
+        'kind': kind.name,
+        'eyebrow': eyebrow,
+        'headline': headline,
+        'body': body,
+        'spoken_text': spokenText,
+        'source_date': sourceDate,
+        'local_date': localDate,
+        'timezone': timezone,
+        'evidence_hash': evidenceHash,
+        'generated_at': generatedAt.toUtc().toIso8601String(),
+        'source_refs': sourceRefs.map((source) => source.toCacheJson()).toList(),
+      };
 
   static TodayCard? fromCacheJson(Object? value) {
     if (value is! Map) return null;
     final kind = TodayCardKind.tryParse(value['kind']?.toString() ?? '');
     final generatedAt = DateTime.tryParse(value['generated_at']?.toString() ?? '');
     final rawVersion = value['version'];
-    final sourceRefs =
-        (value['source_refs'] as List?)
+    final sourceRefs = (value['source_refs'] as List?)
             ?.map(TodayCardSourceRef.fromCacheJson)
             .whereType<TodayCardSourceRef>()
             .toList(growable: false) ??
@@ -179,8 +178,7 @@ class TodayCard {
     final kind = TodayCardKind.tryParse(value['kind']?.toString() ?? '');
     final generatedAt = DateTime.tryParse(value['generated_at']?.toString() ?? '');
     final rawVersion = value['version'];
-    final sourceRefs =
-        (value['source_refs'] as List?)
+    final sourceRefs = (value['source_refs'] as List?)
             ?.map(TodayCardSourceRef.fromApiJson)
             .whereType<TodayCardSourceRef>()
             .toList(growable: false) ??
@@ -216,6 +214,7 @@ class TodayCardResponse {
     this.etag = '',
     this.serverTime,
     this.retryAfter = Duration.zero,
+    this.cacheMaxAge = const Duration(seconds: 60),
   });
 
   final String contractVersion;
@@ -225,8 +224,16 @@ class TodayCardResponse {
   final String etag;
   final DateTime? serverTime;
   final Duration retryAfter;
+  final Duration cacheMaxAge;
 
   bool get hasCurrentContract => contractVersion == todayCardContractVersion;
+  bool get isAuthoritative => etag.isNotEmpty && serverTime != null;
+  bool get invalidatesCachedCard => const {
+        'today_card_source_stale',
+        'today_card_source_retracted',
+        'today_card_user_not_found',
+        'ai_consent_required',
+      }.contains(errorCode);
 
   bool get isValid {
     if (!hasCurrentContract) return false;
@@ -247,8 +254,8 @@ class TodayCardViewState {
   });
 
   const TodayCardViewState.preparing({this.card, this.isCached = false, this.isLoading = true})
-    : status = TodayCardStatus.preparing,
-      errorCode = '';
+      : status = TodayCardStatus.preparing,
+        errorCode = '';
 
   final TodayCardStatus status;
   final TodayCard? card;

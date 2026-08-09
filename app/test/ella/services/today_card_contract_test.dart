@@ -1,10 +1,16 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/today_card.dart';
+import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
+import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/pages/home/today_page.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   const source = TodayCardSourceRef(kind: 'hermes_memory', id: 'memory-1', versionId: 'memory-v1');
@@ -37,9 +43,10 @@ void main() {
           {'source_type': 'hermes_memory', 'source_id': 'memory-1', 'source_version_id': 'memory-v1'},
         ],
       },
-    }, headerEtag: 'today-2');
+    }, headerEtag: 'today-2', headerCacheControl: 'private, max-age=60, must-revalidate');
 
     expect(response.isValid, isTrue);
+    expect(response.cacheMaxAge, const Duration(seconds: 60));
     expect(response.card?.sourceRefs.single.kind, 'hermes_memory');
     expect(
       HttpTodayCardRepository.parseEnvelope({
@@ -71,10 +78,10 @@ void main() {
     final controller = TodayCardController(repository: repository, cache: cache);
     addTearDown(controller.dispose);
 
-    await controller.updateAuthority(uid: 'account-a', isProvisioningReady: false);
+    await controller.updateAuthority(uid: 'account-a', authorityKey: 'authority-a', isProvisioningReady: false);
     expect(repository.fetches, 0);
 
-    await controller.updateAuthority(uid: 'account-a', isProvisioningReady: true);
+    await controller.updateAuthority(uid: 'account-a', authorityKey: 'authority-a', isProvisioningReady: true);
     expect(repository.fetches, 1);
     expect(controller.state.status, TodayCardStatus.ready);
     expect(controller.state.card?.id, 'today-1');
@@ -88,15 +95,164 @@ void main() {
     final controller = TodayCardController(repository: repository, cache: cache);
     addTearDown(controller.dispose);
 
-    final oldLoad = controller.updateAuthority(uid: 'account-a', isProvisioningReady: true);
+    final oldLoad = controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
     await Future<void>.delayed(Duration.zero);
-    await controller.updateAuthority(uid: 'account-b', isProvisioningReady: false);
+    await controller.updateAuthority(uid: 'account-b', authorityKey: '', isProvisioningReady: false);
     delayed.complete(
         TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card));
     await oldLoad;
 
     expect(controller.state.card, isNull);
     expect(cache.cards['account-b'], isNull);
+  });
+
+  test('authority loss during a delayed cache commit cannot resurrect the old account card', () async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
+    final commitStarted = Completer<void>();
+    final releaseCommit = Completer<void>();
+    final cache = SharedPreferencesTodayCardCache(
+      beforeCommit: () async {
+        if (!commitStarted.isCompleted) commitStarted.complete();
+        await releaseCommit.future;
+      },
+    );
+    final controller = TodayCardController(
+      repository: _QueueTodayCardRepository([
+        TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card),
+      ]),
+      cache: cache,
+    );
+    addTearDown(controller.dispose);
+
+    final oldLoad = controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    await commitStarted.future;
+    await controller.updateAuthority(uid: 'account-b', authorityKey: '', isProvisioningReady: false);
+    releaseCommit.complete();
+    await oldLoad;
+
+    final preferences = SharedPreferencesUtil();
+    expect(preferences.getString('ellaTodayCardCache:account-a'), isEmpty);
+    expect(preferences.getString('ellaTodayCardCache:account-b'), isEmpty);
+    expect(controller.state.card, isNull);
+  });
+
+  test('cache is authority-bound, expires at the server max-age, and removes stale entries', () async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
+    var now = DateTime.utc(2032, 5, 6, 8);
+    final cache = SharedPreferencesTodayCardCache(now: () => now);
+    var current = true;
+
+    expect(
+      await cache.write(
+        uid: 'account-a',
+        authorityKey: 'authority-a',
+        card: card,
+        maxAge: const Duration(seconds: 60),
+        isCurrent: () => current,
+      ),
+      isTrue,
+    );
+    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-a'), isNotNull);
+    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-b'), isNull);
+
+    expect(
+      await cache.write(
+        uid: 'account-a',
+        authorityKey: 'authority-b',
+        card: card,
+        maxAge: const Duration(seconds: 60),
+        isCurrent: () => current,
+      ),
+      isTrue,
+    );
+    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-a'), isNull);
+    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-b'), isNotNull);
+    now = now.add(const Duration(seconds: 61));
+    expect(await cache.read(uid: 'account-a', authorityKey: 'authority-b'), isNull);
+    expect(SharedPreferencesUtil().getString('ellaTodayCardCache:account-a'), isEmpty);
+    current = false;
+  });
+
+  test('a typed source tombstone clears the cached Daily Memo immediately', () async {
+    final cache = _MemoryTodayCardCache()..cards['account-a'] = card;
+    final controller = TodayCardController(
+      repository: _QueueTodayCardRepository([
+        const TodayCardResponse(
+          contractVersion: todayCardContractVersion,
+          status: TodayCardStatus.degraded,
+          errorCode: 'today_card_source_stale',
+        ),
+      ]),
+      cache: cache,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+
+    expect(controller.state.card, isNull);
+    expect(cache.cards['account-a'], isNull);
+  });
+
+  test('daily-card stale scope refresh stays daily-card and never loads a conversation', () async {
+    final refreshed = await EllaVoiceChatPage.refreshSessionScope(
+      const V2VSessionScope.dailyCard(cardId: 'today-1', expectedVersion: 1),
+      uid: 'account-a',
+      todayCardRepository: _QueueTodayCardRepository([
+        TodayCardResponse(
+          contractVersion: todayCardContractVersion,
+          status: TodayCardStatus.ready,
+          card: TodayCard(
+            id: card.id,
+            version: 3,
+            kind: card.kind,
+            eyebrow: card.eyebrow,
+            headline: card.headline,
+            body: card.body,
+            generatedAt: card.generatedAt,
+            sourceRefs: card.sourceRefs,
+          ),
+        ),
+      ]),
+      memoryLoader: (_) => fail('daily-card refresh must not call the conversation endpoint'),
+    );
+
+    expect(refreshed?.kind, V2VSessionScopeKind.dailyCard);
+    expect(refreshed?.cardId, 'today-1');
+    expect(refreshed?.expectedVersion, 3);
+    expect(refreshed?.conversationId, isEmpty);
+  });
+
+  test('Daily Memo read-aloud stops when exact account authority drifts mid-utterance', () async {
+    final authority = _MutableAuthority('account-a');
+    var stops = 0;
+    final spoken = await TodayPage.readAloudWithAuthority(
+      uid: 'account-a',
+      text: 'A bounded daily thought.',
+      authorityProvider: (_) => authority,
+      speaker: (_, exactAuthority) async {
+        expect(exactAuthority, same(authority));
+        authority.current = false;
+        throw ExactAccountAuthorityChangedException('test drift');
+      },
+      stop: () async => stops++,
+    );
+
+    expect(spoken, isFalse);
+    expect(stops, 1);
   });
 }
 
@@ -123,15 +279,34 @@ class _MemoryTodayCardCache implements TodayCardCache {
   final Map<String, TodayCard> cards = {};
 
   @override
-  Future<void> clear({required String uid}) async {
+  Future<void> clear({required String uid, String authorityKey = ''}) async {
     cards.remove(uid);
   }
 
   @override
-  Future<TodayCard?> read({required String uid}) async => cards[uid];
+  Future<TodayCard?> read({required String uid, required String authorityKey}) async => cards[uid];
 
   @override
-  Future<void> write({required String uid, required TodayCard card}) async {
+  Future<bool> write({
+    required String uid,
+    required String authorityKey,
+    required TodayCard card,
+    required Duration maxAge,
+    required bool Function() isCurrent,
+  }) async {
+    if (!isCurrent()) return false;
     cards[uid] = card;
+    return true;
   }
+}
+
+class _MutableAuthority implements ExactAccountAuthorityVerifier {
+  _MutableAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isExactCurrent() => current;
 }

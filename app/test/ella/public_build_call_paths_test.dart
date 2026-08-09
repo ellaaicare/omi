@@ -12,6 +12,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
 import 'package:omi/ella/models/guardian_mode.dart' as guardian_model;
@@ -63,7 +64,12 @@ class _TestConnectivityPlatform extends ConnectivityPlatform {
 }
 
 class _NoRefreshMessageProvider extends MessageProvider {
-  _NoRefreshMessageProvider({required super.chatAppsRetriever});
+  _NoRefreshMessageProvider({required super.chatAppsRetriever, this.failure});
+
+  final ClientApiFailure? failure;
+
+  @override
+  ClientApiFailure? get lastStreamFailure => failure;
 
   @override
   Future<void> refreshMessages({bool dropdownSelected = false}) async {}
@@ -103,13 +109,23 @@ class _MemoryTodayCardCache implements TodayCardCache {
   TodayCard? card;
 
   @override
-  Future<void> clear({required String uid}) async => card = null;
+  Future<void> clear({required String uid, String authorityKey = ''}) async => card = null;
 
   @override
-  Future<TodayCard?> read({required String uid}) async => card;
+  Future<TodayCard?> read({required String uid, required String authorityKey}) async => card;
 
   @override
-  Future<void> write({required String uid, required TodayCard card}) async => this.card = card;
+  Future<bool> write({
+    required String uid,
+    required String authorityKey,
+    required TodayCard card,
+    required Duration maxAge,
+    required bool Function() isCurrent,
+  }) async {
+    if (!isCurrent()) return false;
+    this.card = card;
+    return true;
+  }
 }
 
 class _FailingEntitlementTransport implements EllaEntitlementTransport {
@@ -390,6 +406,7 @@ void main() {
       ),
     ]);
     final messageProvider = _NoRefreshMessageProvider(
+      failure: const ClientApiFailure(ClientApiFailureKind.workspaceRequired),
       chatAppsRetriever: () async {
         catalogCalls++;
         return [];
@@ -467,6 +484,9 @@ void main() {
     expect(find.byType(HomePage), findsOneWidget);
     expect(find.byType(TodayPage, skipOffstage: false), findsOneWidget);
     expect(find.byType(ChatPage, skipOffstage: false), findsOneWidget);
+    expect(find.text('Ella is still getting ready', skipOffstage: false), findsOneWidget);
+    expect(find.text('Your Ella workspace is not ready', skipOffstage: false), findsNothing);
+    expect(find.textContaining('private workspace', skipOffstage: false), findsNothing);
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
     final expectedNow = previewEnabled ? previewNow : runtimeNow;
     expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
@@ -537,8 +557,8 @@ void main() {
     final expectedHiddenDispatches = SharedPreferencesUtil.isPublicBuild
         ? const <String>[]
         : allowsGuardianSurface()
-        ? hiddenRoutes
-        : hiddenRoutes.take(9).toList(growable: false);
+            ? hiddenRoutes
+            : hiddenRoutes.take(9).toList(growable: false);
     expect(dispatched, expectedHiddenDispatches);
 
     final allowed = ReceivedAction().fromMap({

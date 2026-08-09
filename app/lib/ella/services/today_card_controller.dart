@@ -7,8 +7,8 @@ import 'package:omi/ella/services/today_card_repository.dart';
 
 class TodayCardController extends ChangeNotifier {
   TodayCardController({required TodayCardRepository repository, required TodayCardCache cache})
-    : _repository = repository,
-      _cache = cache;
+      : _repository = repository,
+        _cache = cache;
 
   final TodayCardRepository _repository;
   final TodayCardCache _cache;
@@ -16,30 +16,53 @@ class TodayCardController extends ChangeNotifier {
   TodayCardViewState state = const TodayCardViewState.preparing();
 
   String _uid = '';
+  String _authorityKey = '';
   bool _isProvisioningReady = false;
   int _generation = 0;
   bool _disposed = false;
 
-  Future<void> updateAuthority({required String uid, required bool isProvisioningReady}) async {
+  String get uid => _uid;
+
+  Future<void> updateAuthority({
+    required String uid,
+    required String authorityKey,
+    required bool isProvisioningReady,
+  }) async {
     final normalizedUid = uid.trim();
+    final normalizedAuthorityKey = authorityKey.trim();
     final accountChanged = normalizedUid != _uid;
+    final authorityChanged = normalizedAuthorityKey != _authorityKey;
     final becameReady = !_isProvisioningReady && isProvisioningReady;
     final lostAuthority = _isProvisioningReady && !isProvisioningReady;
-    if (!accountChanged && !becameReady && _isProvisioningReady == isProvisioningReady) return;
+    if (!accountChanged && !authorityChanged && !becameReady && _isProvisioningReady == isProvisioningReady) return;
 
-    if (accountChanged || lostAuthority) {
-      _generation++;
+    if (accountChanged || authorityChanged || lostAuthority) {
+      final previousUid = _uid;
+      final previousAuthorityKey = _authorityKey;
+      final transitionGeneration = ++_generation;
       _uid = normalizedUid;
+      _authorityKey = normalizedAuthorityKey;
+      _isProvisioningReady = isProvisioningReady;
       state = const TodayCardViewState.preparing();
       _notify();
+      if (previousUid.isNotEmpty) {
+        await _cache.clear(uid: previousUid, authorityKey: previousAuthorityKey);
+      }
+      if (_disposed ||
+          _generation != transitionGeneration ||
+          _uid != normalizedUid ||
+          _authorityKey != normalizedAuthorityKey) {
+        return;
+      }
+    } else {
+      _isProvisioningReady = isProvisioningReady;
     }
-    _isProvisioningReady = isProvisioningReady;
-    if (_uid.isEmpty || !_isProvisioningReady) return;
+    if (_uid.isEmpty || _authorityKey.isEmpty || !_isProvisioningReady) return;
     await _load();
   }
 
   Future<void> retry() async {
-    if (_uid.isEmpty || !_isProvisioningReady) return;
+    if (_uid.isEmpty || _authorityKey.isEmpty || !_isProvisioningReady) return;
     await _load();
   }
 
@@ -47,44 +70,69 @@ class TodayCardController extends ChangeNotifier {
 
   Future<void> _load() async {
     final uid = _uid;
+    final authorityKey = _authorityKey;
     final generation = ++_generation;
-    final cached = await _cache.read(uid: uid);
-    if (!_isCurrent(uid, generation)) return;
+    final cached = await _cache.read(uid: uid, authorityKey: authorityKey);
+    if (!_isCurrent(uid, authorityKey, generation)) return;
 
     state = TodayCardViewState.preparing(card: cached, isCached: cached != null);
     _notify();
 
     try {
       final response = await _repository.fetch(uid: uid);
-      if (!_isCurrent(uid, generation)) return;
+      if (!_isCurrent(uid, authorityKey, generation)) return;
       if (!response.isValid) {
-        _applyDegraded(cached, response.hasCurrentContract ? 'invalid_today_card_response' : 'stale_contract');
+        if (response.isAuthoritative) {
+          await _cache.clear(uid: uid, authorityKey: authorityKey);
+          if (!_isCurrent(uid, authorityKey, generation)) return;
+        }
+        _applyDegraded(
+          response.isAuthoritative ? null : cached,
+          response.hasCurrentContract ? 'invalid_today_card_response' : 'stale_contract',
+          isCached: !response.isAuthoritative && cached != null,
+        );
         return;
       }
 
       switch (response.status) {
         case TodayCardStatus.ready:
           final card = response.card!;
-          await _cache.write(uid: uid, card: card);
-          if (!_isCurrent(uid, generation)) return;
+          final stored = await _cache.write(
+            uid: uid,
+            authorityKey: authorityKey,
+            card: card,
+            maxAge: response.cacheMaxAge,
+            isCurrent: () => _isCurrent(uid, authorityKey, generation),
+          );
+          if (!stored || !_isCurrent(uid, authorityKey, generation)) return;
           state = TodayCardViewState(status: TodayCardStatus.ready, card: card);
         case TodayCardStatus.preparing:
-          state = TodayCardViewState(status: TodayCardStatus.preparing, card: cached, isCached: cached != null);
+          final retained = response.card ?? (response.isAuthoritative ? null : cached);
+          if (response.isAuthoritative && response.card == null) {
+            await _cache.clear(uid: uid, authorityKey: authorityKey);
+            if (!_isCurrent(uid, authorityKey, generation)) return;
+          }
+          state = TodayCardViewState(status: TodayCardStatus.preparing, card: retained, isCached: retained == cached);
         case TodayCardStatus.newUser:
-          await _cache.clear(uid: uid);
-          if (!_isCurrent(uid, generation)) return;
+          await _cache.clear(uid: uid, authorityKey: authorityKey);
+          if (!_isCurrent(uid, authorityKey, generation)) return;
           state = TodayCardViewState(status: TodayCardStatus.newUser, card: response.card);
         case TodayCardStatus.degraded:
+          final invalidatesCache = response.isAuthoritative || response.invalidatesCachedCard;
+          if (invalidatesCache && response.card == null) {
+            await _cache.clear(uid: uid, authorityKey: authorityKey);
+            if (!_isCurrent(uid, authorityKey, generation)) return;
+          }
           _applyDegraded(
-            response.card ?? cached,
+            response.card ?? (invalidatesCache ? null : cached),
             response.errorCode,
-            isCached: response.card == null && cached != null,
+            isCached: !invalidatesCache && response.card == null && cached != null,
           );
           return;
       }
       _notify();
     } catch (_) {
-      if (!_isCurrent(uid, generation)) return;
+      if (!_isCurrent(uid, authorityKey, generation)) return;
       _applyDegraded(cached, 'today_card_unavailable');
     }
   }
@@ -99,8 +147,8 @@ class TodayCardController extends ChangeNotifier {
     _notify();
   }
 
-  bool _isCurrent(String uid, int generation) =>
-      !_disposed && _uid == uid && _isProvisioningReady && _generation == generation;
+  bool _isCurrent(String uid, String authorityKey, int generation) =>
+      !_disposed && _uid == uid && _authorityKey == authorityKey && _isProvisioningReady && _generation == generation;
 
   void _notify() {
     if (!_disposed) notifyListeners();

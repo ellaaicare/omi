@@ -15,8 +15,10 @@ import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
@@ -24,6 +26,7 @@ import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/standard_voice_turn.dart';
+import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/services/voice_session_startup_guard.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
@@ -37,6 +40,8 @@ import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+
+typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
 
 /// Voice-to-voice chat page for Ella.
 ///
@@ -57,6 +62,7 @@ class EllaVoiceChatPage extends StatefulWidget {
     this.sessionScope,
     this.memoryTitle,
     this.onMemorySessionEnded,
+    this.todayCardRepository,
     this.modalPresentation = false,
     this.demoState,
   });
@@ -64,6 +70,7 @@ class EllaVoiceChatPage extends StatefulWidget {
   final V2VSessionScope? sessionScope;
   final String? memoryTitle;
   final ValueChanged<MemoryReceiptDiscoveryRequest>? onMemorySessionEnded;
+  final TodayCardRepository? todayCardRepository;
   final bool modalPresentation;
   final EllaVoiceDemoState? demoState;
 
@@ -76,6 +83,26 @@ class EllaVoiceChatPage extends StatefulWidget {
   @visibleForTesting
   static V2VSessionScope refreshedMemoryScope(V2VSessionScope current, String? activeSummaryVersionId) =>
       current.withExpectedActiveSummaryVersionId(activeSummaryVersionId);
+
+  @visibleForTesting
+  static Future<V2VSessionScope?> refreshSessionScope(
+    V2VSessionScope current, {
+    required String uid,
+    required TodayCardRepository todayCardRepository,
+    MemoryScopeConversationLoader memoryLoader = getConversationById,
+  }) async {
+    switch (current.kind) {
+      case V2VSessionScopeKind.memory:
+        final conversation = await memoryLoader(current.conversationId);
+        if (conversation == null) return null;
+        return refreshedMemoryScope(current, conversation.activeSummaryVersionId);
+      case V2VSessionScopeKind.dailyCard:
+        final response = await todayCardRepository.fetch(uid: uid);
+        final card = response.status == TodayCardStatus.ready && response.isValid ? response.card : null;
+        if (card == null || card.id != current.cardId) return null;
+        return V2VSessionScope.dailyCard(cardId: card.id, expectedVersion: card.version);
+    }
+  }
 
   @visibleForTesting
   static bool shouldCloseRouteAfterV2VFailure(V2VFailureChoice choice, {required bool modalPresentation}) =>
@@ -638,16 +665,20 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   // --- V2V (Voice-to-Voice) WebSocket mode ---
 
-  Future<bool> _refreshMemoryScope(int startupGeneration) async {
+  Future<bool> _refreshSessionScope(int startupGeneration) async {
     final currentScope = _sessionScope;
     if (currentScope == null || !_isCurrentV2VStartup(startupGeneration)) return false;
     setState(() {
       _orbState = VoiceOrbState.processing;
       _statusText = context.l10n.memoryTalkStale;
     });
-    final refreshed = await getConversationById(currentScope.conversationId);
+    final refreshed = await EllaVoiceChatPage.refreshSessionScope(
+      currentScope,
+      uid: SharedPreferencesUtil().uid,
+      todayCardRepository: widget.todayCardRepository ?? HttpTodayCardRepository(),
+    );
     if (!_isCurrentV2VStartup(startupGeneration) || refreshed == null) return false;
-    _sessionScope = EllaVoiceChatPage.refreshedMemoryScope(currentScope, refreshed.activeSummaryVersionId);
+    _sessionScope = refreshed;
     return true;
   }
 
@@ -724,7 +755,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _v2vClient = null;
       await client.disconnect();
       if (!_isCurrentV2VStartup(startupGeneration)) return;
-      if (allowScopeRefresh && receipt.shouldRefreshMemoryScope && await _refreshMemoryScope(startupGeneration)) {
+      if (allowScopeRefresh && receipt.shouldRefreshSessionScope && await _refreshSessionScope(startupGeneration)) {
         await _startV2V(provider, startupGeneration: startupGeneration, allowScopeRefresh: false);
         return;
       }

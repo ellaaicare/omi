@@ -8592,6 +8592,12 @@ class AppLocalizationsDa extends AppLocalizations {
   String get guardianAlertsHistorySubtitle => 'Recent Guardian alerts and playback status';
 
   @override
+  String get ellaWhisperHistoryTitle => 'What Ella has said';
+
+  @override
+  String get ellaWhisperHistorySubtitle => 'Helpful things Ella has said and why';
+
+  @override
   String get guardianAlertsLoadFailed => 'Could not load Guardian alerts';
 
   @override
@@ -9040,13 +9046,13 @@ class AppLocalizationsDa extends AppLocalizations {
 
   @override
   String get ellaClientUpdateRequiredBody =>
-      'Update Ella to continue securely. This version cannot connect to your private workspace.';
+      'Update Ella to continue securely. This version can no longer connect to Ella.';
 
   @override
-  String get ellaWorkspaceUnavailableTitle => 'Your Ella workspace is not ready';
+  String get ellaWorkspaceUnavailableTitle => 'Ella is still getting ready';
 
   @override
-  String get ellaWorkspaceUnavailableBody => 'Ella could not verify your private workspace. Try again shortly.';
+  String get ellaWorkspaceUnavailableBody => 'Ella could not finish getting ready. Try again shortly.';
 
   @override
   String get ellaChatUnavailableTitle => 'Ella could not connect';

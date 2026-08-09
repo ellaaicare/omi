@@ -355,8 +355,8 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               EllaSettingsRow(
                 key: const Key('guardian-history-settings-entry'),
                 icon: Icons.record_voice_over_rounded,
-                title: 'What Ella has said',
-                subtitle: 'Helpful things Ella has said and why',
+                title: context.l10n.ellaWhisperHistoryTitle,
+                subtitle: context.l10n.ellaWhisperHistorySubtitle,
                 onTap: () {
                   Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
                 },

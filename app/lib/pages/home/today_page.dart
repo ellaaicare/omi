@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -34,10 +36,14 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, TodayCard card);
+typedef TodayCardAuthorityProvider = ExactAccountAuthorityVerifier? Function(String uid);
+typedef TodayCardSpeaker = Future<void> Function(String text, ExactAccountAuthorityVerifier authority);
+typedef TodayCardSpeechStopper = Future<void> Function();
 typedef TodayNowProvider = DateTime Function();
 typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
 typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
@@ -72,7 +78,11 @@ class TodayPage extends StatefulWidget {
     this.todayCardCache,
     this.todayCardTalkRouteOpener,
     this.todayCardUidOverride,
+    this.todayCardAuthorityKeyOverride,
     this.todayCardReadyOverride,
+    this.todayCardAuthorityProvider,
+    this.todayCardSpeaker,
+    this.todayCardSpeechStopper,
     this.nowProvider,
     this.guardianModeLoader,
     this.guardianModeSetter,
@@ -85,7 +95,11 @@ class TodayPage extends StatefulWidget {
   final TodayCardCache? todayCardCache;
   final TodayCardTalkRouteOpener? todayCardTalkRouteOpener;
   final String? todayCardUidOverride;
+  final String? todayCardAuthorityKeyOverride;
   final bool? todayCardReadyOverride;
+  final TodayCardAuthorityProvider? todayCardAuthorityProvider;
+  final TodayCardSpeaker? todayCardSpeaker;
+  final TodayCardSpeechStopper? todayCardSpeechStopper;
   final TodayNowProvider? nowProvider;
   final GuardianModeLoader? guardianModeLoader;
   final GuardianModeSetter? guardianModeSetter;
@@ -96,6 +110,48 @@ class TodayPage extends StatefulWidget {
   @visibleForTesting
   static V2VSessionScope sessionScopeFor(TodayCard card) =>
       V2VSessionScope.dailyCard(cardId: card.id, expectedVersion: card.version);
+
+  @visibleForTesting
+  static String cacheAuthorityKey(ActiveWalAuthority authority) {
+    final owner = authority.owner;
+    return sha256
+        .convert(
+          utf8.encode(
+            '${owner.uid}\n${owner.profileBindingId}\n${owner.bindingRevision}\n'
+            '${owner.consentReceiptId}\n${owner.authorityGenerationAtCapture}',
+          ),
+        )
+        .toString();
+  }
+
+  @visibleForTesting
+  static Future<bool> readAloudWithAuthority({
+    required String uid,
+    required String text,
+    required TodayCardAuthorityProvider authorityProvider,
+    required TodayCardSpeaker speaker,
+    required TodayCardSpeechStopper stop,
+  }) async {
+    final authority = authorityProvider(uid);
+    if (uid.isEmpty ||
+        text.trim().isEmpty ||
+        authority == null ||
+        authority.uid != uid ||
+        !authority.isExactCurrent()) {
+      return false;
+    }
+    try {
+      await speaker(text, authority);
+      if (!authority.isExactCurrent()) {
+        await stop();
+        return false;
+      }
+      return true;
+    } on ExactAccountAuthorityChangedException {
+      await stop();
+      return false;
+    }
+  }
 
   @override
   State<TodayPage> createState() => TodayPageState();
@@ -147,8 +203,24 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   void _syncTodayCardAuthority() {
     const isPreview = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
     final uid = widget.todayCardUidOverride ?? (isPreview ? 'today-card-preview' : SharedPreferencesUtil().uid);
-    final isReady = widget.todayCardReadyOverride ?? (isPreview || _provisioningProvider?.isOperational == true);
-    unawaited(_todayCardController.updateAuthority(uid: uid, isProvisioningReady: isReady));
+    final authority = isPreview || widget.todayCardUidOverride != null ? null : WalOwnerAuthority.active();
+    final authorityKey = widget.todayCardAuthorityKeyOverride ??
+        (widget.todayCardUidOverride != null
+            ? 'test-authority:$uid'
+            : isPreview
+                ? 'today-card-preview'
+                : authority?.uid == uid
+                    ? TodayPage.cacheAuthorityKey(authority!)
+                    : '');
+    final isReady = widget.todayCardReadyOverride ??
+        (isPreview || (_provisioningProvider?.isOperational == true && authority?.uid == uid));
+    unawaited(
+      _todayCardController.updateAuthority(
+        uid: uid,
+        authorityKey: authorityKey,
+        isProvisioningReady: isReady,
+      ),
+    );
   }
 
   void _onTodayCardChanged() {
@@ -168,7 +240,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       ..removeListener(_onTodayCardChanged)
       ..dispose();
     _scrollController.dispose();
-    ElevenLabsTts.stopOnDevice();
+    unawaited((widget.todayCardSpeechStopper ?? ElevenLabsTts.stopOnDevice).call());
     super.dispose();
   }
 
@@ -213,15 +285,23 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _toggleReadAloud() async {
     if (_isReading) {
-      await ElevenLabsTts.stopOnDevice();
+      await (widget.todayCardSpeechStopper ?? ElevenLabsTts.stopOnDevice).call();
       if (mounted) setState(() => _isReading = false);
       return;
     }
     final text = _todayCardController.state.card?.textForSpeech ?? '';
-    if (text.isEmpty) return;
+    final uid = _todayCardController.uid;
+    if (text.isEmpty || uid.isEmpty) return;
     setState(() => _isReading = true);
     try {
-      await ElevenLabsTts.speakOnDevice(text);
+      await TodayPage.readAloudWithAuthority(
+        uid: uid,
+        text: text,
+        authorityProvider: widget.todayCardAuthorityProvider ?? (_) => WalOwnerAuthority.active(),
+        speaker: widget.todayCardSpeaker ??
+            (text, authority) => ElevenLabsTts.speakOnDevice(text, exactAuthority: authority),
+        stop: widget.todayCardSpeechStopper ?? ElevenLabsTts.stopOnDevice,
+      );
     } finally {
       if (mounted) setState(() => _isReading = false);
     }

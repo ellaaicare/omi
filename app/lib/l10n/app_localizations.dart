@@ -16053,6 +16053,18 @@ abstract class AppLocalizations {
   /// **'Recent Guardian alerts and playback status'**
   String get guardianAlertsHistorySubtitle;
 
+  /// No description provided for @ellaWhisperHistoryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'What Ella has said'**
+  String get ellaWhisperHistoryTitle;
+
+  /// No description provided for @ellaWhisperHistorySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Helpful things Ella has said and why'**
+  String get ellaWhisperHistorySubtitle;
+
   /// No description provided for @guardianAlertsLoadFailed.
   ///
   /// In en, this message translates to:
@@ -16860,19 +16872,19 @@ abstract class AppLocalizations {
   /// No description provided for @ellaClientUpdateRequiredBody.
   ///
   /// In en, this message translates to:
-  /// **'Update Ella to continue securely. This version cannot connect to your private workspace.'**
+  /// **'Update Ella to continue securely. This version can no longer connect to Ella.'**
   String get ellaClientUpdateRequiredBody;
 
   /// No description provided for @ellaWorkspaceUnavailableTitle.
   ///
   /// In en, this message translates to:
-  /// **'Your Ella workspace is not ready'**
+  /// **'Ella is still getting ready'**
   String get ellaWorkspaceUnavailableTitle;
 
   /// No description provided for @ellaWorkspaceUnavailableBody.
   ///
   /// In en, this message translates to:
-  /// **'Ella could not verify your private workspace. Try again shortly.'**
+  /// **'Ella could not finish getting ready. Try again shortly.'**
   String get ellaWorkspaceUnavailableBody;
 
   /// No description provided for @ellaChatUnavailableTitle.
