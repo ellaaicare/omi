@@ -80,6 +80,7 @@ HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "").strip()
 HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
 HERMES_CHAT_SESSION_SCOPE = os.getenv("ELLA_CHAT_HERMES_SESSION_SCOPE", "canonical").strip().lower()
+HERMES_CHAT_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ELLA_CHAT_HERMES_REQUEST_TIMEOUT_SECONDS", "60"))
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
@@ -809,7 +810,7 @@ async def _stream_hermes_chat(
         agent_id = send_runtime.agent_id if send_runtime else HERMES_MODEL
         if not gateway_token:
             raise ProvisioningError("hermes_runtime_credential_missing", retryable=False)
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=HERMES_CHAT_REQUEST_TIMEOUT_SECONDS) as client:
             async with client.stream(
                 "POST",
                 f"{gateway_url}/v1/chat/completions",
