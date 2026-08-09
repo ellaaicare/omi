@@ -10648,6 +10648,5 @@
   "todayCardDegradedHeadline": "Today's note isn't available right now",
   "todayCardDegradedBody": "Pull down to try again. If this keeps happening, contact support.",
   "todayCardSavedStatus": "Showing the last note while Ella checks for an update.",
-  "todayCardProvenanceRecentMemory": "From a recent memory",
-  "todayCardProvenanceUpdatedToday": "Updated today"
+  "todayCardProvenanceRecentMemory": "From a recent memory"
 }

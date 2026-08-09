@@ -382,6 +382,7 @@ void main() {
     var guardianServerEnabled = false;
     var guardianModeWriteSucceeds = true;
     var guardianReadbackSucceeds = true;
+    var guardianNativeStartSucceeds = true;
     guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
@@ -432,75 +433,79 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1200, 2000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    await tester.pumpWidget(
-      MultiProvider(
-        providers: [
-          ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
-          ChangeNotifierProvider<ActionItemsProvider>.value(value: actionItemsProvider),
-          ChangeNotifierProvider<AudioRouteProvider>.value(value: audioRouteProvider),
-          ChangeNotifierProvider<CaptureProvider>.value(value: captureProvider),
-          ChangeNotifierProvider<ConversationProvider>.value(value: conversationProvider),
-          ChangeNotifierProvider<DeviceProvider>.value(value: deviceProvider),
-          ChangeNotifierProvider<MessageProvider>.value(value: messageProvider),
-          ChangeNotifierProvider(create: (_) => AppProvider()),
-          ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
-          ChangeNotifierProvider(create: (_) => VoiceRecorderProvider()),
-          ChangeNotifierProvider(create: (_) => IntegrationProvider()),
-        ],
-        child: MaterialApp(
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          home: HomePage(
-            runtimeSideEffectsEnabled: false,
-            pagesOverride: [
-              TodayPage(
-                nowProvider: () => runtimeNow,
-                todayCardRepository: _FixedTodayCardRepository(
-                  TodayCardResponse(
-                    contractVersion: todayCardContractVersion,
-                    status: TodayCardStatus.ready,
-                    card: todayCard,
+    Widget buildHome({Key? todayKey}) => MultiProvider(
+          providers: [
+            ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
+            ChangeNotifierProvider<ActionItemsProvider>.value(value: actionItemsProvider),
+            ChangeNotifierProvider<AudioRouteProvider>.value(value: audioRouteProvider),
+            ChangeNotifierProvider<CaptureProvider>.value(value: captureProvider),
+            ChangeNotifierProvider<ConversationProvider>.value(value: conversationProvider),
+            ChangeNotifierProvider<DeviceProvider>.value(value: deviceProvider),
+            ChangeNotifierProvider<MessageProvider>.value(value: messageProvider),
+            ChangeNotifierProvider(create: (_) => AppProvider()),
+            ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
+            ChangeNotifierProvider(create: (_) => VoiceRecorderProvider()),
+            ChangeNotifierProvider(create: (_) => IntegrationProvider()),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: HomePage(
+              runtimeSideEffectsEnabled: false,
+              pagesOverride: [
+                TodayPage(
+                  key: todayKey,
+                  nowProvider: () => runtimeNow,
+                  todayCardRepository: _FixedTodayCardRepository(
+                    TodayCardResponse(
+                      contractVersion: todayCardContractVersion,
+                      status: TodayCardStatus.ready,
+                      card: todayCard,
+                    ),
+                    onFetch: () => todayCardCalls++,
                   ),
-                  onFetch: () => todayCardCalls++,
+                  todayCardCache: _MemoryTodayCardCache(),
+                  todayCardAuthoritySnapshotProvider: () => authoritySnapshot,
+                  todayCardAuthorityChanges: authorityChanges,
+                  guardianAvailability: () =>
+                      (SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured,
+                  guardianModeLoader: () async => guardianReadbackSucceeds
+                      ? guardian_model.GuardianModeInfo(
+                          currentMode: guardianServerEnabled
+                              ? guardian_model.GuardianModeKey.activeSupport
+                              : guardian_model.GuardianModeKey.off,
+                          twoTierState: guardianServerEnabled
+                              ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
+                              : const guardian_model.GuardianModeState(),
+                        )
+                      : null,
+                  guardianModeSetter: (state) async {
+                    guardianModeWrites++;
+                    writtenGuardianState = state;
+                    if (guardianModeWriteSucceeds) {
+                      guardianServerEnabled = !state.isOff;
+                    }
+                    return guardianModeWriteSucceeds;
+                  },
+                  guardianNativeStart: () async {
+                    guardianNativeStarts++;
+                    if (!guardianNativeStartSucceeds) {
+                      throw StateError('simulated native start failure');
+                    }
+                  },
+                  guardianNativeStop: () async {
+                    guardianNativeStops++;
+                  },
                 ),
-                todayCardCache: _MemoryTodayCardCache(),
-                todayCardAuthoritySnapshotProvider: () => authoritySnapshot,
-                todayCardAuthorityChanges: authorityChanges,
-                guardianAvailability: () =>
-                    (SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured,
-                guardianModeLoader: () async => guardianReadbackSucceeds
-                    ? guardian_model.GuardianModeInfo(
-                        currentMode: guardianServerEnabled
-                            ? guardian_model.GuardianModeKey.activeSupport
-                            : guardian_model.GuardianModeKey.off,
-                        twoTierState: guardianServerEnabled
-                            ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
-                            : const guardian_model.GuardianModeState(),
-                      )
-                    : null,
-                guardianModeSetter: (state) async {
-                  guardianModeWrites++;
-                  writtenGuardianState = state;
-                  if (guardianModeWriteSucceeds) {
-                    guardianServerEnabled = !state.isOff;
-                  }
-                  return guardianModeWriteSucceeds;
-                },
-                guardianNativeStart: () async {
-                  guardianNativeStarts++;
-                },
-                guardianNativeStop: () async {
-                  guardianNativeStops++;
-                },
-              ),
-              const ChatPage(isPivotBottom: true),
-              const _Marker('voice'),
-              const _Marker('settings'),
-            ],
+                const ChatPage(isPivotBottom: true),
+                const _Marker('voice'),
+                const _Marker('settings'),
+              ],
+            ),
           ),
-        ),
-      ),
-    );
+        );
+
+    await tester.pumpWidget(buildHome());
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
 
@@ -575,6 +580,31 @@ void main() {
       );
       expect(unavailableSwitch.value, isTrue);
       expect(unavailableSwitch.onChanged, isNull);
+      expect(find.textContaining('Whispers are off'), findsNothing);
+      expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
+
+      // Initial reconciliation must also fail closed. If the server says ON,
+      // native start fails, and the compensating server disable is rejected,
+      // Home must not publish a verified OFF state.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      final writesBeforeInitialFailure = guardianModeWrites;
+      guardianServerEnabled = true;
+      guardianReadbackSucceeds = true;
+      guardianModeWriteSucceeds = false;
+      guardianNativeStartSucceeds = false;
+      await tester.pumpWidget(buildHome(todayKey: UniqueKey()));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+
+      final initialFailureSwitch = tester.widget<Switch>(
+        find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+      );
+      expect(guardianModeWrites, writesBeforeInitialFailure + 1);
+      expect(guardianServerEnabled, isTrue);
+      expect(initialFailureSwitch.value, isTrue);
+      expect(initialFailureSwitch.onChanged, isNull);
+      expect(find.textContaining('Whispers are on'), findsNothing);
       expect(find.textContaining('Whispers are off'), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
     } else if (!allowsGuardianSurface()) {

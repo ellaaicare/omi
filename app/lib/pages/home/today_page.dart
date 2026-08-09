@@ -274,7 +274,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (!_guardianAvailable) return;
     final info = await _readWhisperState();
     if (info == null) {
-      await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      try {
+        await _reconcileWhisperNative(false);
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _whispersOn = false;
@@ -283,22 +285,32 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     if (!mounted) return;
-    var enabled = _whispersEnabled(info);
+    final serverEnabled = _whispersEnabled(info);
+    var resolvedEnabled = serverEnabled;
+    var resolvedVerified = false;
     try {
-      if (enabled) {
-        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
-      } else {
-        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-      }
+      await _reconcileWhisperNative(serverEnabled);
+      resolvedVerified = true;
     } catch (_) {
-      enabled = false;
-      await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
-          guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+      // If native capture cannot match an authoritative ON response, disable
+      // the server mode only when both the write and readback confirm OFF.
+      // Otherwise keep the last authoritative value behind an unavailable
+      // control and make no ON/OFF claim.
+      if (serverEnabled && await _writeWhisperState(const GuardianModeState())) {
+        final confirmed = await _readWhisperState();
+        if (confirmed != null && !_whispersEnabled(confirmed)) {
+          resolvedEnabled = false;
+          try {
+            await _reconcileWhisperNative(false);
+            resolvedVerified = true;
+          } catch (_) {}
+        }
+      }
     }
     if (!mounted) return;
     setState(() {
-      _whispersOn = enabled;
-      _whispersVerified = true;
+      _whispersOn = resolvedEnabled;
+      _whispersVerified = resolvedVerified;
     });
   }
 
@@ -319,6 +331,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _reconcileWhisperNative(bool enabled) => enabled
       ? (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start())
       : (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+
+  Future<bool> _writeWhisperState(GuardianModeState state) async {
+    try {
+      final setter = widget.guardianModeSetter;
+      if (setter != null) return setter(state);
+      return (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
+    } catch (_) {
+      return false;
+    }
+  }
 
   void scrollToTop() {
     if (!_scrollController.hasClients) return;
@@ -364,11 +386,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (!enabled) {
         await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
       }
-      if (widget.guardianModeSetter != null) {
-        success = await widget.guardianModeSetter!(state);
-      } else {
-        success = (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
-      }
+      success = await _writeWhisperState(state);
       if (success && enabled) {
         await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
       }
@@ -378,8 +396,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (!success && enabled) {
       try {
         await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-        await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
-            guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+        await _writeWhisperState(const GuardianModeState());
       } catch (_) {}
     }
     var resolvedEnabled = enabled;

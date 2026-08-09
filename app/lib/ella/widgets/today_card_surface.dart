@@ -241,16 +241,13 @@ class _TodayCardContent {
   });
 
   factory _TodayCardContent.fromCard(BuildContext context, TodayCard card) {
-    final provenanceParts = <String>[
-      if (card.kind != TodayCardKind.welcome && card.sourceRefs.isNotEmpty)
-        context.l10n.todayCardProvenanceRecentMemory,
-      if (card.kind != TodayCardKind.welcome && card.localDate.isNotEmpty) context.l10n.todayCardProvenanceUpdatedToday,
-    ];
     return _TodayCardContent(
       eyebrow: context.l10n.todayCardPreparingEyebrow,
       headline: card.headline,
       body: card.body,
-      provenance: provenanceParts.isEmpty ? null : provenanceParts.join(' • '),
+      provenance: card.kind != TodayCardKind.welcome && card.sourceRefs.isNotEmpty
+          ? context.l10n.todayCardProvenanceRecentMemory
+          : null,
     );
   }
 

@@ -17324,12 +17324,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'From a recent memory'**
   String get todayCardProvenanceRecentMemory;
-
-  /// No description provided for @todayCardProvenanceUpdatedToday.
-  ///
-  /// In en, this message translates to:
-  /// **'Updated today'**
-  String get todayCardProvenanceUpdatedToday;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

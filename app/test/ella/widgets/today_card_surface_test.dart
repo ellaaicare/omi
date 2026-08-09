@@ -54,7 +54,7 @@ void main() {
         ),
       );
 
-  TodayCard readyCard({TodayCardKind kind = TodayCardKind.memory}) => TodayCard(
+  TodayCard readyCard({TodayCardKind kind = TodayCardKind.memory, String localDate = '2026-08-09'}) => TodayCard(
         id: 'daily-card-1',
         version: 1,
         kind: kind,
@@ -64,7 +64,7 @@ void main() {
             'A little time outside stood out as a good moment yesterday. If it feels right, make space for that again today.',
         generatedAt: DateTime.utc(2026, 8, 9, 12),
         sourceDate: '2026-08-08',
-        localDate: '2026-08-09',
+        localDate: localDate,
         sourceRefs:
             kind == TodayCardKind.welcome ? const [] : const [TodayCardSourceRef(kind: 'memory', id: 'memory-1')],
       );
@@ -81,7 +81,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text("ELLA'S DAILY NOTE"), findsOneWidget);
-      expect(find.text('From a recent memory • Updated today'), findsOneWidget);
+      expect(find.text('From a recent memory'), findsOneWidget);
+      expect(find.textContaining('Updated today'), findsNothing);
       expect(find.text('SERVER DISPLAY COPY'), findsNothing);
       expect(find.byKey(const Key('today-card-actions-row')), findsOneWidget);
       expect(find.byKey(const Key('today-card-talk')), findsOneWidget);
@@ -119,7 +120,8 @@ void main() {
         find.byKey(Key(width == 320 ? 'today-card-actions-stacked' : 'today-card-actions-row')),
         findsOneWidget,
       );
-      expect(find.text('From a recent memory • Updated today'), findsOneWidget);
+      expect(find.text('From a recent memory'), findsOneWidget);
+      expect(find.textContaining('Updated today'), findsNothing);
       expect(tester.takeException(), isNull);
     });
   }
@@ -150,7 +152,7 @@ void main() {
         buildApp(
           TodayCardViewState(
             status: TodayCardStatus.preparing,
-            card: readyCard(),
+            card: readyCard(localDate: '2026-08-08'),
             isLoading: true,
             isCached: true,
           ),
@@ -159,6 +161,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Showing the last note while Ella checks for an update.'), findsOneWidget);
+      expect(find.text('From a recent memory'), findsOneWidget);
+      expect(find.textContaining('Updated today'), findsNothing);
       expect(find.byKey(const Key('today-card-talk')), findsOneWidget);
       expect(tester.takeException(), isNull);
     },

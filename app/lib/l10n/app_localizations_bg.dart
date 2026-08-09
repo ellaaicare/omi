@@ -9332,7 +9332,4 @@ class AppLocalizationsBg extends AppLocalizations {
 
   @override
   String get todayCardProvenanceRecentMemory => 'From a recent memory';
-
-  @override
-  String get todayCardProvenanceUpdatedToday => 'Updated today';
 }
