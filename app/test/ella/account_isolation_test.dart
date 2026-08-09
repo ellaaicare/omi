@@ -22,6 +22,7 @@ import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
+import 'package:omi/ella/services/ella_logout_cache_purge.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/standard_voice_turn.dart';
 import 'package:omi/ella/services/ella_workspace_status.dart';
@@ -36,6 +37,7 @@ import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
+import 'package:omi/utils/wal_file_manager.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -45,6 +47,81 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
+    WalFileManager.resetForTesting();
+  });
+
+  test('logout purge removes account caches and releases WAL ownership before the next login', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await prefs.saveString('email', 'account-a@example.com');
+    await prefs.saveStringList('cachedConversations', ['conversation-a']);
+    await prefs.saveString('cachedConversationsUid', 'uid-a');
+    await prefs.saveStringList('cachedMessages', ['message-a']);
+    await prefs.saveString('cachedMessagesUid', 'uid-a');
+    await prefs.saveStringList('cachedMemories', ['memory-a']);
+    await prefs.saveStringList('pendingMemories:uid-a', ['pending-a']);
+    await prefs.saveStringList('cachedPeople:uid-a', ['person-a']);
+    await prefs.saveString('modifiedConversationDetails:uid-a', 'conversation-detail-a');
+    await prefs.saveString('emergencyContactName:uid-a', 'Account A contact');
+    await prefs.saveString('emergencyContactPhone:uid-a', '+15555550100');
+    await prefs.saveString('pendingEmergency:uid-a', 'pending-a');
+    await prefs.saveString('ellaProvisioningReceipt:uid-a', '{"state":"ready"}');
+    await prefs.saveString('ellaProvisioningVerifiedAt:uid-a', '2026-08-08T00:00:00Z');
+    await _grantAuthority(prefs, 'uid-a');
+
+    const owner = WalOwner(
+      uid: 'uid-a',
+      profileBindingId: 'profile-uid-a',
+      bindingRevision: 3,
+      consentReceiptId: 'aicr_uid-a',
+      authorityGenerationAtCapture: 7,
+    );
+    final walRoot = await Directory.systemTemp.createTemp('ella_logout_wal_');
+    addTearDown(() async {
+      WalFileManager.resetForTesting();
+      if (walRoot.existsSync()) await walRoot.delete(recursive: true);
+    });
+    await WalFileManager.init(baseDirectory: walRoot, activeOwner: owner);
+    final ownerDirectory = Directory('${walRoot.path}/ella_wal_accounts/${owner.storageNamespace}');
+    final retainedAudio = File('${ownerDirectory.path}/audio_account_a.bin');
+    await retainedAudio.writeAsBytes([1, 2, 3]);
+
+    expect(prefs.keysForTesting, isNotEmpty);
+    expect(WalFileManager.activeOwnerForTesting?.uid, 'uid-a');
+
+    await const EllaLogoutCachePurge().purge();
+    await SharedPreferencesUtil.init(); // Simulate the next launch on the same device.
+
+    expect(prefs.keysForTesting, isEmpty);
+    expect(prefs.hasCurrentAiConsentAuthority(), isFalse);
+    expect(WalFileManager.activeOwnerForTesting, isNull);
+    expect(retainedAudio.existsSync(), isTrue, reason: 'logout must not silently delete recoverable owner data');
+
+    prefs.uid = 'uid-b';
+    await prefs.saveString('email', 'account-b@example.com');
+    expect(prefs.cachedMessages, isEmpty);
+    expect(prefs.pendingMemories, isEmpty);
+    expect(prefs.cachedPeople, isEmpty);
+    expect(prefs.modifiedConversationDetails, isNull);
+    expect(prefs.emergencyContactName, isEmpty);
+    expect(prefs.emergencyContactPhone, isEmpty);
+    expect(prefs.pendingEmergency, isEmpty);
+    final workspace = EllaWorkspaceStatus.current(preferences: prefs, uid: 'uid-b', email: 'account-b@example.com');
+    expect(workspace.workspaceVerified, isFalse);
+    expect(workspace.workspaceFingerprint, isEmpty);
+  });
+
+  test('logout purge does not release WAL authority when persisted cache clearing fails', () async {
+    var releasedWalOwner = false;
+    final purge = EllaLogoutCachePurge(
+      clearPreferences: () async => throw StateError('storage unavailable'),
+      releaseWalOwner: () async {
+        releasedWalOwner = true;
+      },
+    );
+
+    await expectLater(purge.purge(), throwsStateError);
+
+    expect(releasedWalOwner, isFalse);
   });
 
   test('account-scoped caches never appear under the next account', () async {

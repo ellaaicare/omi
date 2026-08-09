@@ -4,7 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
-import 'package:omi/services/auth_service.dart';
+import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class EllaWelcome extends StatefulWidget {
@@ -177,7 +177,7 @@ class _EllaWelcomeState extends State<EllaWelcome> {
                           if (widget.onSignOut != null)
                             GestureDetector(
                               onTap: () async {
-                                await AuthService.instance.signOut();
+                                await signOutAndClearUserData(context);
                                 widget.onSignOut?.call();
                               },
                               child: Text(

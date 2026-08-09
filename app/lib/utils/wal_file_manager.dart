@@ -66,6 +66,18 @@ class WalFileManager {
     _initialization = null;
   }
 
+  /// Releases process authority for account-owned WAL state without deleting
+  /// it. A later account must explicitly establish its own owner before use.
+  static Future<void> releaseActiveOwnerForLogout() async {
+    while (_initialization != null) {
+      await _initialization;
+    }
+    _activeOwner = null;
+  }
+
+  @visibleForTesting
+  static WalOwner? get activeOwnerForTesting => _activeOwner;
+
   static Future<List<Wal>> loadWals({WalOwner? activeOwner}) async {
     await init(activeOwner: activeOwner);
     final active = await _readWals(_activeWalFile);

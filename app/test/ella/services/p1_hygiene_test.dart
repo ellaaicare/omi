@@ -216,11 +216,44 @@ void main() {
     expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
     expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
     expect(auth, contains('replaceIdentityWithCredential'));
+    expect(auth, contains('await const EllaLogoutCachePurge().purge()'));
+    final replaceTransition = auth.substring(
+      auth.indexOf('Future<UserCredential> replaceIdentityWithCredential'),
+      auth.indexOf('bool isSignedIn()'),
+    );
+    expect(
+      replaceTransition.indexOf('await const EllaLogoutCachePurge().purge()'),
+      lessThan(replaceTransition.indexOf('await FirebaseAuth.instance.signOut()')),
+    );
+    final signOutTransition = auth.substring(auth.indexOf('Future<void> signOutWithQuiescedCleanup'));
+    expect(
+      signOutTransition.indexOf('await cleanup();'),
+      lessThan(signOutTransition.indexOf('await const EllaLogoutCachePurge().purge()')),
+    );
+    expect(
+      signOutTransition.indexOf('await const EllaLogoutCachePurge().purge()'),
+      lessThan(signOutTransition.indexOf('await FirebaseAuth.instance.signOut()')),
+    );
 
     final authUtils = File('${lib.path}/utils/auth_utils.dart').readAsStringSync();
     expect(authUtils, contains('signOutWithQuiescedCleanup(() async {'));
     expect(authUtils, isNot(contains('stopForAccountTransition()')));
     expect(authUtils, isNot(contains('AuthService.instance.signOut()')));
+    expect(authUtils, isNot(contains('clearUserCaches()')));
+
+    for (final relativePath in [
+      'pages/onboarding/ella/ella_welcome.dart',
+      'desktop/pages/settings/desktop_settings_modal.dart',
+    ]) {
+      final source = File('${lib.path}/$relativePath').readAsStringSync();
+      expect(source, contains('signOutAndClearUserData(context)'), reason: relativePath);
+      expect(source, isNot(contains('AuthService.instance.signOut()')), reason: relativePath);
+    }
+
+    final deletion = File('${lib.path}/pages/settings/delete_account.dart').readAsStringSync();
+    expect(deletion, contains('AuthService.instance.signOutWithQuiescedCleanup(() async {'));
+    final deleteTransition = deletion.substring(deletion.indexOf('signOutWithQuiescedCleanup(() async {'));
+    expect(deleteTransition, contains('WalFileManager.clearAll'));
 
     final provider = File('${lib.path}/providers/auth_provider.dart').readAsStringSync();
     expect(provider, contains('runIdentityTransition(_auth.signInAnonymously)'));

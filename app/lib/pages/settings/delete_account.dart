@@ -67,12 +67,23 @@ class _DeleteAccountState extends State<DeleteAccount> {
 
     try {
       (widget.onDeleteSucceeded ?? MixpanelManager().deleteUser).call();
-      await (widget.signOut ?? AuthService.instance.signOut).call();
-      await (widget.clearWal ?? WalFileManager.clearAll).call();
-      if (widget.clearPreferences != null) {
-        widget.clearPreferences!.call();
+      if (widget.signOut != null) {
+        // Test/integration overrides own their complete local cleanup contract.
+        await widget.signOut!.call();
+        await (widget.clearWal ?? WalFileManager.clearAll).call();
+        if (widget.clearPreferences != null) {
+          widget.clearPreferences!.call();
+        } else {
+          await SharedPreferencesUtil().clear();
+        }
       } else {
-        await SharedPreferencesUtil().clear();
+        // Delete the confirmed account's WAL while its owner is still active.
+        // The structural sign-out purge then clears preferences and releases
+        // that owner before Firebase can change identity.
+        await AuthService.instance.signOutWithQuiescedCleanup(() async {
+          await (widget.clearWal ?? WalFileManager.clearAll).call();
+          widget.clearPreferences?.call();
+        });
       }
       if (!mounted) return;
       setState(() {
