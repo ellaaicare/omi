@@ -10635,5 +10635,13 @@
   "ellaWorkspaceRouteExplanation": "Not verified does not mean another account is in use. It means Ella has not received route-specific proof yet.",
   "aiConsentGrantUnavailableBody": "Ella couldn't confirm your choice with the server, so nothing has been shared yet. Please try again in a few minutes.",
   "aiConsentGrantPolicyMismatchBody": "This version of Ella no longer matches the current privacy policy. Please update the app, then try again.",
-  "aiConsentGrantNetworkBody": "Ella couldn't reach the server. Check your connection and try again."
+  "aiConsentGrantNetworkBody": "Ella couldn't reach the server. Check your connection and try again.",
+  "todayCardPreparingEyebrow": "FOR YOU TODAY",
+  "todayCardPreparingHeadline": "Ella is putting something together for you.",
+  "todayCardPreparingBody": "Pull down in a little while to check again.",
+  "todayCardNewUserHeadline": "What matters to you?",
+  "todayCardNewUserBody": "Tell Ella about a person, place, or interest you would like to talk about.",
+  "todayCardDegradedHeadline": "Ella could not refresh this just now.",
+  "todayCardDegradedBody": "Pull down to try again.",
+  "todayCardSavedStatus": "Showing the last item Ella saved for you."
 }

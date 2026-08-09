@@ -184,6 +184,20 @@ void main() {
       );
     });
 
+    test('daily card scope sends identifiers and version only', () {
+      const scope = V2VSessionScope.dailyCard(cardId: 'today-card-42', expectedVersion: 3);
+
+      expect(
+        V2VClient.buildSessionRequestBody(
+          uid: 'firebase-user-1',
+          provider: 'grok-voice',
+          includeUid: false,
+          sessionScope: scope,
+        )['session_scope'],
+        {'kind': 'daily_card', 'card_id': 'today-card-42', 'expected_version': 3},
+      );
+    });
+
     test('accepts only a matching identifier-only resolved scope', () {
       const requested = V2VSessionScope.memory(
         conversationId: 'conversation-42',
@@ -206,8 +220,29 @@ void main() {
           'conversation_id': 'another-conversation',
           'active_summary_version_id': 'summary-v2',
           'can_reinterpret': true,
-        })!
-            .matches(requested),
+        })!.matches(requested),
+        isFalse,
+      );
+    });
+
+    test('accepts only the exact resolved daily card version', () {
+      const requested = V2VSessionScope.dailyCard(cardId: 'today-card-42', expectedVersion: 3);
+      final resolved = V2VResolvedSessionScope.tryParse({
+        'kind': 'daily_card',
+        'card_id': 'today-card-42',
+        'card_version': 3,
+        'can_reinterpret': false,
+      });
+
+      expect(resolved, isNotNull);
+      expect(resolved!.matches(requested), isTrue);
+      expect(
+        V2VResolvedSessionScope.tryParse({
+          'kind': 'daily_card',
+          'card_id': 'today-card-42',
+          'card_version': 4,
+          'can_reinterpret': false,
+        })!.matches(requested),
         isFalse,
       );
     });
@@ -258,6 +293,12 @@ void main() {
       expect(EllaVoiceChatPage.shouldInjectVoiceTurns(null), isTrue);
       expect(
         EllaVoiceChatPage.shouldInjectVoiceTurns(const V2VSessionScope.memory(conversationId: 'conversation-42')),
+        isFalse,
+      );
+      expect(
+        EllaVoiceChatPage.shouldInjectVoiceTurns(
+          const V2VSessionScope.dailyCard(cardId: 'today-card-42', expectedVersion: 3),
+        ),
         isFalse,
       );
     });
@@ -476,10 +517,7 @@ void main() {
         },
       );
 
-      final startFuture = client.startAuthorizedMicrophoneForTesting(
-        authority: authority!,
-        shouldContinue: () => true,
-      );
+      final startFuture = client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true);
       await boundaryReached.future;
       preferences.verifiedPersonaId = 'persona-b';
       releaseBoundary.complete();
@@ -511,10 +549,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       expect(microphoneStarts, 1);

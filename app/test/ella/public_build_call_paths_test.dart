@@ -13,9 +13,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/action_item.dart';
-import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
 import 'package:omi/ella/models/guardian_mode.dart' as guardian_model;
+import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
 import 'package:omi/ella/pages/ella_workspace_page.dart';
@@ -26,6 +26,7 @@ import 'package:omi/ella/services/ella_workspace_status.dart';
 import 'package:omi/ella/services/guardian_alert_history_api.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/services/guardian_mode_service.dart';
+import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/main.dart';
 import 'package:omi/mobile/mobile_app.dart';
@@ -83,6 +84,32 @@ class _FixedActionItemsProvider extends ActionItemsProvider {
 class _NoRefreshConversationProvider extends ConversationProvider {
   @override
   Future<void> ensureFreshConversations() async {}
+}
+
+class _FixedTodayCardRepository implements TodayCardRepository {
+  _FixedTodayCardRepository(this.response, {this.onFetch});
+
+  final TodayCardResponse response;
+  final VoidCallback? onFetch;
+
+  @override
+  Future<TodayCardResponse> fetch({required String uid}) async {
+    onFetch?.call();
+    return response;
+  }
+}
+
+class _MemoryTodayCardCache implements TodayCardCache {
+  TodayCard? card;
+
+  @override
+  Future<void> clear({required String uid}) async => card = null;
+
+  @override
+  Future<TodayCard?> read({required String uid}) async => card;
+
+  @override
+  Future<void> write({required String uid, required TodayCard card}) async => this.card = card;
 }
 
 class _FailingEntitlementTransport implements EllaEntitlementTransport {
@@ -331,12 +358,23 @@ void main() {
 
   testWidgets('Home IndexedStack mounts actual Today and Chat with public-safe runtime behavior', (tester) async {
     var catalogCalls = 0;
-    var dailySummaryCalls = 0;
+    var todayCardCalls = 0;
     var guardianModeWrites = 0;
     var guardianNativeStarts = 0;
     guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
+    const previewEnabled = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
+    final todayCard = TodayCard(
+      id: previewEnabled ? 'preview-daily-memo' : 'runtime-daily-memo',
+      version: 1,
+      kind: TodayCardKind.recap,
+      eyebrow: 'FOR YOU TODAY',
+      headline: previewEnabled ? 'Preview daily memo' : 'Runtime daily memo',
+      body: previewEnabled ? 'The scissors turned up beside the garden.' : 'A verified Hermes thought for today.',
+      generatedAt: previewEnabled ? previewNow : runtimeNow,
+      sourceRefs: const [TodayCardSourceRef(kind: 'hermes_memory', id: 'memory-1', versionId: 'v1')],
+    );
     final actionItemsProvider = _FixedActionItemsProvider([
       ActionItemWithMetadata(
         id: 'runtime-reminder',
@@ -388,7 +426,19 @@ void main() {
             pagesOverride: [
               TodayPage(
                 nowProvider: () => runtimeNow,
-                guardianAvailability: () => isEllaInternalPilotEnabled && isEllaGuardianConfigured,
+                todayCardRepository: _FixedTodayCardRepository(
+                  TodayCardResponse(
+                    contractVersion: todayCardContractVersion,
+                    status: TodayCardStatus.ready,
+                    card: todayCard,
+                  ),
+                  onFetch: () => todayCardCalls++,
+                ),
+                todayCardCache: _MemoryTodayCardCache(),
+                todayCardUidOverride: 'test-user',
+                todayCardReadyOverride: true,
+                guardianAvailability: () =>
+                    (SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured,
                 guardianModeLoader: () async => const guardian_model.GuardianModeInfo(
                   currentMode: guardian_model.GuardianModeKey.off,
                   twoTierState: guardian_model.GuardianModeState(),
@@ -402,19 +452,6 @@ void main() {
                   guardianNativeStarts++;
                 },
                 guardianNativeStop: () async {},
-                dailySummaryLoader: () async {
-                  dailySummaryCalls++;
-                  return [
-                    DailySummary(
-                      id: 'runtime-summary',
-                      date: '2032-05-06',
-                      createdAt: runtimeNow,
-                      headline: 'Runtime summary',
-                      overview: '[Ella] Runtime daily summary.',
-                      stats: DayStats(),
-                    ),
-                  ];
-                },
               ),
               const ChatPage(isPivotBottom: true),
               const _Marker('voice'),
@@ -431,30 +468,22 @@ void main() {
     expect(find.byType(TodayPage, skipOffstage: false), findsOneWidget);
     expect(find.byType(ChatPage, skipOffstage: false), findsOneWidget);
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
-    const previewEnabled = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
     final expectedNow = previewEnabled ? previewNow : runtimeNow;
     expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
     expect(find.text(previewEnabled ? 'Preview reminder' : 'Runtime reminder'), findsOneWidget);
     expect(find.text(previewEnabled ? 'Runtime reminder' : 'Preview reminder'), findsNothing);
 
-    if (SharedPreferencesUtil.isPublicBuild) {
-      expect(dailySummaryCalls, 0);
-      expect(find.byKey(const Key('daily-note-card')), findsNothing);
-      expect(find.textContaining('scissors turned up'), findsNothing);
-    } else if (previewEnabled) {
-      expect(dailySummaryCalls, 0);
-      expect(find.textContaining('scissors turned up'), findsOneWidget);
-    } else {
-      expect(dailySummaryCalls, 1);
-      expect(find.textContaining('Runtime daily summary'), findsOneWidget);
-    }
-    if (isEllaInternalPilotEnabled && isEllaGuardianConfigured) {
+    expect(todayCardCalls, 1);
+    expect(find.byKey(const Key('today-card-semantics')), findsOneWidget);
+    expect(find.text(previewEnabled ? 'Preview daily memo' : 'Runtime daily memo'), findsOneWidget);
+    if ((SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured) {
       expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);
       expect(find.textContaining('Whispers are off'), findsOneWidget);
       expect(guardianNativeStarts, 0);
 
-      await tester
-          .tap(find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)));
+      await tester.tap(
+        find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+      );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
@@ -508,8 +537,8 @@ void main() {
     final expectedHiddenDispatches = SharedPreferencesUtil.isPublicBuild
         ? const <String>[]
         : allowsGuardianSurface()
-            ? hiddenRoutes
-            : hiddenRoutes.take(9).toList(growable: false);
+        ? hiddenRoutes
+        : hiddenRoutes.take(9).toList(growable: false);
     expect(dispatched, expectedHiddenDispatches);
 
     final allowed = ReceivedAction().fromMap({
@@ -544,9 +573,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Settings does not construct developer provider before Advanced Settings is opened', (
-    tester,
-  ) async {
+  testWidgets('Settings does not construct developer provider before Advanced Settings is opened', (tester) async {
     var providerConstructions = 0;
     var statusCalls = 0;
     var urlCalls = 0;
@@ -590,6 +617,7 @@ void main() {
     expect(statusCalls, 0);
     expect(urlCalls, 0);
     expect(find.byType(EllaSettingsPage), findsOneWidget);
+    expect(find.text('Ella workspace'), findsNothing);
     if (!allowsGuardianSurface()) {
       for (final key in const [
         'guardian-mode-settings-entry',
@@ -623,10 +651,7 @@ void main() {
         home: EllaWorkspacePage(statusOverride: status),
       ),
     );
-    expect(
-      find.byKey(const Key('workspace-whispers-route')),
-      allowsGuardianSurface() ? findsOneWidget : findsNothing,
-    );
+    expect(find.byKey(const Key('workspace-whispers-route')), allowsGuardianSurface() ? findsOneWidget : findsNothing);
   });
 
   test('developer provider initialization and request methods fail closed publicly', () async {

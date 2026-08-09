@@ -4,24 +4,27 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
-import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
-import 'package:omi/backend/schema/daily_summary.dart';
-import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/demo/today_card_fixtures.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/hardware/ella_hardware_artwork.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
-import 'package:omi/ella/pages/ella_daily_note_page.dart';
+import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
+import 'package:omi/ella/services/today_card_controller.dart';
+import 'package:omi/ella/services/today_card_repository.dart';
+import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
@@ -30,10 +33,11 @@ import 'package:omi/providers/audio_route_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
-typedef DailySummaryLoader = Future<List<DailySummary>> Function();
+typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, TodayCard card);
 typedef TodayNowProvider = DateTime Function();
 typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
 typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
@@ -64,7 +68,11 @@ List<ActionItemWithMetadata> todayUpcomingReminders(List<ActionItemWithMetadata>
 class TodayPage extends StatefulWidget {
   const TodayPage({
     super.key,
-    this.dailySummaryLoader,
+    this.todayCardRepository,
+    this.todayCardCache,
+    this.todayCardTalkRouteOpener,
+    this.todayCardUidOverride,
+    this.todayCardReadyOverride,
     this.nowProvider,
     this.guardianModeLoader,
     this.guardianModeSetter,
@@ -73,7 +81,11 @@ class TodayPage extends StatefulWidget {
     this.guardianAvailability,
   });
 
-  final DailySummaryLoader? dailySummaryLoader;
+  final TodayCardRepository? todayCardRepository;
+  final TodayCardCache? todayCardCache;
+  final TodayCardTalkRouteOpener? todayCardTalkRouteOpener;
+  final String? todayCardUidOverride;
+  final bool? todayCardReadyOverride;
   final TodayNowProvider? nowProvider;
   final GuardianModeLoader? guardianModeLoader;
   final GuardianModeSetter? guardianModeSetter;
@@ -81,14 +93,18 @@ class TodayPage extends StatefulWidget {
   final GuardianNativeLifecycle? guardianNativeStop;
   final GuardianAvailability? guardianAvailability;
 
+  @visibleForTesting
+  static V2VSessionScope sessionScopeFor(TodayCard card) =>
+      V2VSessionScope.dailyCard(cardId: card.id, expectedVersion: card.version);
+
   @override
   State<TodayPage> createState() => TodayPageState();
 }
 
-class TodayPageState extends State<TodayPage> {
+class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   final ScrollController _scrollController = ScrollController();
-  DailySummary? _dailySummary;
-  bool _isLoading = true;
+  late final TodayCardController _todayCardController;
+  EllaProvisioningProvider? _provisioningProvider;
   bool _isReading = false;
   bool _whispersOn = false;
   bool _whispersVerified = false;
@@ -99,9 +115,14 @@ class TodayPageState extends State<TodayPage> {
   @override
   void initState() {
     super.initState();
-    if (allowsUnverifiedEllaSurface()) {
-      _loadDailySummary();
-    }
+    WidgetsBinding.instance.addObserver(this);
+    _todayCardController = TodayCardController(
+      repository: widget.todayCardRepository ??
+          (SharedPreferencesUtil.isTodayDesignPreviewEnabled
+              ? const _DemoTodayCardRepository()
+              : HttpTodayCardRepository()),
+      cache: widget.todayCardCache ?? SharedPreferencesTodayCardCache(),
+    )..addListener(_onTodayCardChanged);
     if (_guardianAvailable) {
       _loadWhisperState();
     }
@@ -112,25 +133,43 @@ class TodayPageState extends State<TodayPage> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final nextProvider = Provider.of<EllaProvisioningProvider?>(context, listen: false);
+    if (!identical(nextProvider, _provisioningProvider)) {
+      _provisioningProvider?.removeListener(_syncTodayCardAuthority);
+      _provisioningProvider = nextProvider;
+      _provisioningProvider?.addListener(_syncTodayCardAuthority);
+    }
+    _syncTodayCardAuthority();
+  }
+
+  void _syncTodayCardAuthority() {
+    const isPreview = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
+    final uid = widget.todayCardUidOverride ?? (isPreview ? 'today-card-preview' : SharedPreferencesUtil().uid);
+    final isReady = widget.todayCardReadyOverride ?? (isPreview || _provisioningProvider?.isOperational == true);
+    unawaited(_todayCardController.updateAuthority(uid: uid, isProvisioningReady: isReady));
+  }
+
+  void _onTodayCardChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_todayCardController.onResumed());
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _provisioningProvider?.removeListener(_syncTodayCardAuthority);
+    _todayCardController
+      ..removeListener(_onTodayCardChanged)
+      ..dispose();
     _scrollController.dispose();
     ElevenLabsTts.stopOnDevice();
     super.dispose();
-  }
-
-  Future<void> _loadDailySummary() async {
-    try {
-      final summaries = SharedPreferencesUtil.isTodayDesignPreviewEnabled
-          ? DemoFixtures.dailySummaries(now: DateTime(2025, 7, 24, 9, 41))
-          : await (widget.dailySummaryLoader?.call() ?? getDailySummaries(limit: 7));
-      if (!mounted) return;
-      setState(() {
-        _dailySummary = summaries.isEmpty ? null : summaries.first;
-        _isLoading = false;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _isLoading = false);
-    }
   }
 
   Future<void> _loadWhisperState() async {
@@ -178,7 +217,7 @@ class TodayPageState extends State<TodayPage> {
       if (mounted) setState(() => _isReading = false);
       return;
     }
-    final text = _noteText;
+    final text = _todayCardController.state.card?.textForSpeech ?? '';
     if (text.isEmpty) return;
     setState(() => _isReading = true);
     try {
@@ -226,15 +265,33 @@ class TodayPageState extends State<TodayPage> {
     }
   }
 
-  String get _noteText {
-    final raw = _dailySummary?.overview.trim() ?? '';
-    return raw.replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
-  }
-
-  void _openDailyNote() {
-    final summary = _dailySummary;
-    if (summary == null) return;
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => EllaDailyNotePage(summary: summary)));
+  Future<void> _openTodayCardTalk() async {
+    final card = _todayCardController.state.card;
+    if (card == null) return;
+    final routeOpener = widget.todayCardTalkRouteOpener;
+    if (routeOpener != null) {
+      await routeOpener(context, card);
+      return;
+    }
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      useSafeArea: true,
+      backgroundColor: EllaColors.bgPrimary,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      clipBehavior: Clip.antiAlias,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.94,
+        child: EllaVoiceChatPage(
+          sessionScope: TodayPage.sessionScopeFor(card),
+          memoryTitle: card.headline,
+          modalPresentation: true,
+        ),
+      ),
+    );
   }
 
   void _openLiveView(CaptureProvider capture, ConversationProvider conversations) {
@@ -265,8 +322,6 @@ class TodayPageState extends State<TodayPage> {
       hasMemories: visibleConversations.isNotEmpty,
     );
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
-    final scale = MediaQuery.textScalerOf(context).scale(1);
-    final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
     final showGuardianSurfaces = _guardianAvailable;
 
     return SafeArea(
@@ -276,7 +331,7 @@ class TodayPageState extends State<TodayPage> {
         backgroundColor: EllaColors.card,
         onRefresh: () async {
           await Future.wait([
-            if (showUnverifiedSurfaces) _loadDailySummary(),
+            _todayCardController.retry(),
             if (showGuardianSurfaces) _loadWhisperState(),
             context.read<ActionItemsProvider>().fetchActionItems(),
             context.read<ConversationProvider>().getInitialConversations(),
@@ -315,19 +370,13 @@ class TodayPageState extends State<TodayPage> {
                     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage())),
               ),
             ],
-            if (showUnverifiedSurfaces) ...[
-              const SizedBox(height: EllaSizes.cardGap),
-              _DailyNoteCard(
-                loading: _isLoading,
-                text: _noteText,
-                isToday: _dailySummary?.date == DateFormat('yyyy-MM-dd').format(now),
-                isReading: _isReading,
-                enlarged: scale >= 1.45,
-                hasConversations: visibleConversations.isNotEmpty,
-                onTap: _openDailyNote,
-                onReadAloud: _toggleReadAloud,
-              ),
-            ],
+            const SizedBox(height: EllaSizes.cardGap),
+            TodayCardSurface(
+              state: _todayCardController.state,
+              isReading: _isReading,
+              onTalk: _todayCardController.state.card == null ? null : _openTodayCardTalk,
+              onReadAloud: _todayCardController.state.card == null ? null : _toggleReadAloud,
+            ),
             if (showGuardianSurfaces) ...[
               const SizedBox(height: EllaSizes.cardGap),
               KeyedSubtree(
@@ -368,6 +417,13 @@ class TodayPageState extends State<TodayPage> {
   }
 }
 
+class _DemoTodayCardRepository implements TodayCardRepository {
+  const _DemoTodayCardRepository();
+
+  @override
+  Future<TodayCardResponse> fetch({required String uid}) async => TodayCardFixtures.recap();
+}
+
 class _TodayHeader extends StatelessWidget {
   const _TodayHeader({required this.now});
 
@@ -390,131 +446,6 @@ class _TodayHeader extends StatelessWidget {
         const SizedBox(height: 8),
         Text('$greeting, $firstName.', style: EllaTextStyles.display),
       ],
-    );
-  }
-}
-
-class _DailyNoteCard extends StatelessWidget {
-  const _DailyNoteCard({
-    required this.loading,
-    required this.text,
-    required this.isToday,
-    required this.isReading,
-    required this.enlarged,
-    required this.hasConversations,
-    required this.onTap,
-    required this.onReadAloud,
-  });
-
-  final bool loading;
-  final String text;
-  final bool isToday;
-  final bool isReading;
-  final bool enlarged;
-  final bool hasConversations;
-  final VoidCallback onTap;
-  final VoidCallback onReadAloud;
-
-  String _preview(BuildContext context) {
-    if (text.isEmpty) {
-      return hasConversations
-          ? context.l10n.todayDailyNoteEmptyPreparing
-          : context.l10n.todayDailyNoteEmptyNoConversations;
-    }
-    final sentences = RegExp(r'.*?[.!?](?:\s|$)').allMatches(text).take(2).map((m) => m.group(0)!.trim()).toList();
-    return sentences.isEmpty ? text : sentences.join(' ');
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final preview = _preview(context);
-    final hasMore = text.isNotEmpty && preview.length < text.length;
-    return EllaCardSurface(
-      child: InkWell(
-        key: const Key('daily-note-card'),
-        onTap: text.isEmpty ? null : onTap,
-        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
-        child: Padding(
-          padding: const EdgeInsets.all(EllaSizes.notePadding),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(isToday ? "TODAY'S NOTE" : 'YESTERDAY EVENING', style: EllaTextStyles.eyebrow),
-              const SizedBox(height: 12),
-              if (loading)
-                const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                )
-              else
-                Text.rich(
-                  TextSpan(
-                    children: [
-                      TextSpan(text: hasMore ? '${preview.replaceFirst(RegExp(r'[.!?]$'), '')}… ' : preview),
-                      if (hasMore)
-                        TextSpan(
-                          text: context.l10n.todayReadMore,
-                          style: const TextStyle(color: EllaColors.tealDeep, fontWeight: FontWeight.w600),
-                        ),
-                    ],
-                  ),
-                  style: EllaTextStyles.noteBody,
-                  maxLines: enlarged ? null : 6,
-                  overflow: enlarged ? TextOverflow.visible : TextOverflow.ellipsis,
-                ),
-              const SizedBox(height: 18),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                alignment: WrapAlignment.spaceBetween,
-                children: [
-                  const Text('— Ella 🪽', style: EllaTextStyles.ellaSignOff),
-                  if (canReadDailyNote(loading: loading, text: text))
-                    Semantics(
-                      button: true,
-                      label: isReading ? 'Stop reading' : 'Read aloud',
-                      child: Material(
-                        color: EllaColors.cardDeep,
-                        borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                        child: InkWell(
-                          onTap: onReadAloud,
-                          borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 15),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    isReading ? Icons.stop_rounded : Icons.volume_up_rounded,
-                                    color: EllaColors.tealDeep,
-                                    size: 20,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    isReading ? 'Stop' : 'Read aloud',
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w700,
-                                      color: EllaColors.tealDeep,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

@@ -18,23 +18,38 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
-enum V2VSessionScopeKind { memory }
+enum V2VSessionScopeKind { memory, dailyCard }
 
 @immutable
 class V2VSessionScope {
   const V2VSessionScope.memory({required this.conversationId, this.expectedActiveSummaryVersionId})
-      : kind = V2VSessionScopeKind.memory;
+    : assert(conversationId != ''),
+      kind = V2VSessionScopeKind.memory,
+      cardId = '',
+      expectedVersion = 0;
+
+  const V2VSessionScope.dailyCard({required this.cardId, required this.expectedVersion})
+    : assert(cardId != ''),
+      assert(expectedVersion > 0),
+      kind = V2VSessionScopeKind.dailyCard,
+      conversationId = '',
+      expectedActiveSummaryVersionId = null;
 
   final V2VSessionScopeKind kind;
   final String conversationId;
   final String? expectedActiveSummaryVersionId;
+  final String cardId;
+  final int expectedVersion;
 
-  Map<String, dynamic> toJson() => {
-        'kind': kind.name,
-        'conversation_id': conversationId,
-        if (expectedActiveSummaryVersionId?.isNotEmpty == true)
-          'expected_active_summary_version_id': expectedActiveSummaryVersionId,
-      };
+  Map<String, dynamic> toJson() => switch (kind) {
+    V2VSessionScopeKind.memory => {
+      'kind': kind.name,
+      'conversation_id': conversationId,
+      if (expectedActiveSummaryVersionId?.isNotEmpty == true)
+        'expected_active_summary_version_id': expectedActiveSummaryVersionId,
+    },
+    V2VSessionScopeKind.dailyCard => {'kind': 'daily_card', 'card_id': cardId, 'expected_version': expectedVersion},
+  };
 
   V2VSessionScope withExpectedActiveSummaryVersionId(String? value) =>
       V2VSessionScope.memory(conversationId: conversationId, expectedActiveSummaryVersionId: value);
@@ -44,37 +59,57 @@ class V2VSessionScope {
 class V2VResolvedSessionScope {
   const V2VResolvedSessionScope({
     required this.kind,
-    required this.conversationId,
-    required this.activeSummaryVersionId,
-    required this.canReinterpret,
+    this.conversationId = '',
+    this.activeSummaryVersionId = '',
+    this.cardId = '',
+    this.cardVersion = 0,
+    this.canReinterpret = false,
   });
 
   final V2VSessionScopeKind kind;
   final String conversationId;
   final String activeSummaryVersionId;
+  final String cardId;
+  final int cardVersion;
   final bool canReinterpret;
 
   static V2VResolvedSessionScope? tryParse(Object? value) {
     if (value is! Map) return null;
     final kind = value['kind']?.toString();
-    final conversationId = value['conversation_id']?.toString().trim() ?? '';
-    final activeSummaryVersionId = value['active_summary_version_id']?.toString().trim() ?? '';
     final canReinterpret = value['can_reinterpret'];
-    if (kind != V2VSessionScopeKind.memory.name ||
-        conversationId.isEmpty ||
-        activeSummaryVersionId.isEmpty ||
-        canReinterpret is! bool) {
-      return null;
+    if (canReinterpret is! bool) return null;
+    if (kind == V2VSessionScopeKind.memory.name) {
+      final conversationId = value['conversation_id']?.toString().trim() ?? '';
+      final activeSummaryVersionId = value['active_summary_version_id']?.toString().trim() ?? '';
+      if (conversationId.isEmpty || activeSummaryVersionId.isEmpty) return null;
+      return V2VResolvedSessionScope(
+        kind: V2VSessionScopeKind.memory,
+        conversationId: conversationId,
+        activeSummaryVersionId: activeSummaryVersionId,
+        canReinterpret: canReinterpret,
+      );
     }
-    return V2VResolvedSessionScope(
-      kind: V2VSessionScopeKind.memory,
-      conversationId: conversationId,
-      activeSummaryVersionId: activeSummaryVersionId,
-      canReinterpret: canReinterpret,
-    );
+    if (kind == 'daily_card') {
+      final cardId = value['card_id']?.toString().trim() ?? '';
+      final cardVersion = value['card_version'];
+      if (cardId.isEmpty || cardVersion is! num || cardVersion.toInt() < 1) return null;
+      return V2VResolvedSessionScope(
+        kind: V2VSessionScopeKind.dailyCard,
+        conversationId: value['conversation_id']?.toString().trim() ?? '',
+        activeSummaryVersionId: value['active_summary_version_id']?.toString().trim() ?? '',
+        cardId: cardId,
+        cardVersion: cardVersion.toInt(),
+        canReinterpret: canReinterpret,
+      );
+    }
+    return null;
   }
 
-  bool matches(V2VSessionScope requested) => kind == requested.kind && conversationId == requested.conversationId;
+  bool matches(V2VSessionScope requested) => switch (kind) {
+    V2VSessionScopeKind.memory => requested.kind == kind && conversationId == requested.conversationId,
+    V2VSessionScopeKind.dailyCard =>
+      requested.kind == kind && cardId == requested.cardId && cardVersion == requested.expectedVersion,
+  };
 }
 
 @immutable
@@ -180,16 +215,16 @@ class V2VConnectionReceipt {
   }
 
   Map<String, Object?> toDebugFields() => {
-        'connected': connected,
-        'provider': provider,
-        'voice_mode': voiceMode,
-        'stage': stage.name,
-        if (sessionId.isNotEmpty) 'session_id': sessionId,
-        if (sessionScope != null) 'scope_kind': sessionScope!.kind.name,
-        if (sessionScope != null) 'scope_conversation_id': sessionScope!.conversationId,
-        if (httpStatus != null) 'http_status': httpStatus,
-        if (errorCode.isNotEmpty) 'error_code': errorCode,
-      };
+    'connected': connected,
+    'provider': provider,
+    'voice_mode': voiceMode,
+    'stage': stage.name,
+    if (sessionId.isNotEmpty) 'session_id': sessionId,
+    if (sessionScope != null) 'scope_kind': sessionScope!.kind.name,
+    if (sessionScope != null) 'scope_conversation_id': sessionScope!.conversationId,
+    if (httpStatus != null) 'http_status': httpStatus,
+    if (errorCode.isNotEmpty) 'error_code': errorCode,
+  };
 }
 
 class _V2VSessionResult {
@@ -265,9 +300,9 @@ class V2VClient {
     @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
     @visibleForTesting Future<bool> Function()? microphoneStarter,
-  })  : _beforeProtectedEgress = beforeProtectedEgress,
-        _onProtectedEgress = onProtectedEgress,
-        _microphoneStarter = microphoneStarter;
+  }) : _beforeProtectedEgress = beforeProtectedEgress,
+       _onProtectedEgress = onProtectedEgress,
+       _microphoneStarter = microphoneStarter;
 
   bool get isConnected => _isConnected;
 
@@ -304,11 +339,11 @@ class V2VClient {
   }
 
   static String normalizeProvider(String provider) => switch (provider) {
-        // Legacy values may remain in SharedPreferences after TestFlight upgrades.
-        'gemini-live' => 'gemini-native-live',
-        'openai-realtime' => 'openai-native-realtime',
-        _ => provider,
-      };
+    // Legacy values may remain in SharedPreferences after TestFlight upgrades.
+    'gemini-live' => 'gemini-native-live',
+    'openai-realtime' => 'openai-native-realtime',
+    _ => provider,
+  };
 
   static bool isSessionProvider(String provider) =>
       normalizeProvider(provider) == 'openclaw-direct' ||
@@ -331,12 +366,12 @@ class V2VClient {
   }
 
   static String providerDisplayName(String provider) => switch (normalizeProvider(provider)) {
-        'grok-voice' => 'Grok Native Realtime',
-        'gemini-native-live' => 'Gemini Native Live',
-        'openai-native-realtime' => 'OpenAI Native Realtime',
-        'openclaw-direct' => 'OpenClaw Direct',
-        _ => provider,
-      };
+    'grok-voice' => 'Grok Native Realtime',
+    'gemini-native-live' => 'Gemini Native Live',
+    'openai-native-realtime' => 'OpenAI Native Realtime',
+    'openclaw-direct' => 'OpenClaw Direct',
+    _ => provider,
+  };
 
   static String resolveEffectiveProvider({required String provisionedProvider, required String selectedProvider}) {
     final provisioned = normalizeProvider(provisionedProvider.trim());
@@ -380,13 +415,18 @@ class V2VClient {
     final providers = responseJson['providers'];
     if (providers is! List) return const {};
 
-    return providers.whereType<Map>().where((item) {
-      return item['type'] == 'v2v' && item['available'] == true;
-    }).map((item) {
-      return normalizeProvider(item['id']?.toString() ?? '');
-    }).where((provider) {
-      return provider.isNotEmpty;
-    }).toSet();
+    return providers
+        .whereType<Map>()
+        .where((item) {
+          return item['type'] == 'v2v' && item['available'] == true;
+        })
+        .map((item) {
+          return normalizeProvider(item['id']?.toString() ?? '');
+        })
+        .where((provider) {
+          return provider.isNotEmpty;
+        })
+        .toSet();
   }
 
   @visibleForTesting
@@ -410,8 +450,8 @@ class V2VClient {
       final humanDetail = detail is String
           ? detail.toLowerCase()
           : error is String
-              ? error.toLowerCase()
-              : '';
+          ? error.toLowerCase()
+          : '';
       if (candidate == null && humanDetail.contains('missing api key')) candidate = 'provider_not_configured';
       if (candidate == null && humanDetail.contains('unknown v2v provider')) candidate = 'unknown_provider';
       if (candidate == null && humanDetail.contains('uid required')) candidate = 'uid_required';
@@ -544,10 +584,7 @@ class V2VClient {
       );
     }
 
-    Future<V2VConnectionReceipt?> stopIfStartupInvalid(
-      V2VConnectionStage stage, {
-      String voiceMode = '',
-    }) async {
+    Future<V2VConnectionReceipt?> stopIfStartupInvalid(V2VConnectionStage stage, {String voiceMode = ''}) async {
       final cancellation = await cancelIfRequested(stage, voiceMode: voiceMode);
       if (cancellation != null) return cancellation;
       if (!authority.isCurrent()) return stopForAuthorityLoss(voiceMode: voiceMode);
@@ -640,10 +677,7 @@ class V2VClient {
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
       await _configureAudioSession();
-      final invalid = await stopIfStartupInvalid(
-        V2VConnectionStage.audioSession,
-        voiceMode: confirmedVoiceMode,
-      );
+      final invalid = await stopIfStartupInvalid(V2VConnectionStage.audioSession, voiceMode: confirmedVoiceMode);
       if (invalid != null) return invalid;
     } catch (error) {
       Logger.error('[V2V] Audio session setup failed for provider=$provider');
@@ -665,20 +699,14 @@ class V2VClient {
 
     try {
       if (!await _authorizeProtectedEgress(V2VProtectedEgressBoundary.websocket)) {
-        final invalid = await stopIfStartupInvalid(
-          V2VConnectionStage.websocket,
-          voiceMode: confirmedVoiceMode,
-        );
+        final invalid = await stopIfStartupInvalid(V2VConnectionStage.websocket, voiceMode: confirmedVoiceMode);
         if (invalid != null) return invalid;
         return stopForAuthorityLoss(voiceMode: confirmedVoiceMode);
       }
       _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl), pingInterval: const Duration(seconds: 30));
 
       await _channel!.ready.timeout(const Duration(seconds: 12));
-      final websocketInvalid = await stopIfStartupInvalid(
-        V2VConnectionStage.websocket,
-        voiceMode: confirmedVoiceMode,
-      );
+      final websocketInvalid = await stopIfStartupInvalid(V2VConnectionStage.websocket, voiceMode: confirmedVoiceMode);
       if (websocketInvalid != null) return websocketInvalid;
 
       // 3. Listen for messages from proxy
@@ -805,12 +833,14 @@ class V2VClient {
     Logger.debug('[V2V] Mic gate closed for playback: reason=$reason sent=$_micChunksSent chunks/$_micBytesSent bytes');
     onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic gate closed: $reason'));
 
-    _micGateFuture = _micGateFuture.then((_) async {
-      await _stopMicStream(reason: 'playback_gate:$reason');
-    }).catchError((error) {
-      Logger.error('[V2V] Mic gate close failed: $error');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic gate close failed: $error'));
-    });
+    _micGateFuture = _micGateFuture
+        .then((_) async {
+          await _stopMicStream(reason: 'playback_gate:$reason');
+        })
+        .catchError((error) {
+          Logger.error('[V2V] Mic gate close failed: $error');
+          onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic gate close failed: $error'));
+        });
   }
 
   void _resetTurnState() {
@@ -837,7 +867,8 @@ class V2VClient {
     await session.configure(
       AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
+        avAudioSessionCategoryOptions:
+            AVAudioSessionCategoryOptions.defaultToSpeaker |
             AVAudioSessionCategoryOptions.allowBluetooth |
             AVAudioSessionCategoryOptions.allowBluetoothA2dp |
             AVAudioSessionCategoryOptions.allowAirPlay,
@@ -1106,8 +1137,7 @@ class V2VClient {
   Future<bool> startAuthorizedMicrophoneForTesting({
     required AiConsentAuthoritySnapshot authority,
     required bool Function() shouldContinue,
-  }) =>
-      _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
+  }) => _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
 
   Future<bool> _startAuthorizedMicrophone({
     required AiConsentAuthoritySnapshot authority,
@@ -1280,13 +1310,15 @@ class V2VClient {
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
-    _streamFeedFuture = _streamFeedFuture.then((_) async {
-      await _ensureStreamingPlaybackStarted();
-      _streamPlayer.uint8ListSink?.add(pcmData);
-    }).catchError((error) {
-      Logger.error('[V2V] Stream playback feed error: $error');
-      onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
-    });
+    _streamFeedFuture = _streamFeedFuture
+        .then((_) async {
+          await _ensureStreamingPlaybackStarted();
+          _streamPlayer.uint8ListSink?.add(pcmData);
+        })
+        .catchError((error) {
+          Logger.error('[V2V] Stream playback feed error: $error');
+          onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
+        });
 
     if (_chunkCount == 1) {
       onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
