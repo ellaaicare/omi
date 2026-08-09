@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 sys.modules.setdefault("websockets", ModuleType("websockets"))
+sys.modules.setdefault("database.proposals", ModuleType("database.proposals"))
 conversations_module = ModuleType("database.conversations")
 conversations_module._decrypt_conversation_data = lambda value: value
 sys.modules.setdefault("database.conversations", conversations_module)
@@ -27,8 +28,12 @@ def voice_authority_defaults(monkeypatch):
     async def self_hosted_disabled(_uid):
         return False
 
+    async def no_direct_runtime(_uid):
+        return None
+
     monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", False)
     monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_disabled)
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", no_direct_runtime)
     monkeypatch.setattr(
         voice,
         "runtime_authority_identity",
@@ -671,6 +676,64 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
     assert claims["voice_mode"] == "v4"
     assert claims["provider"] == "grok-voice"
     assert claims["isolated_runtime"] is True
+
+
+def test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout_flags(monkeypatch):
+    runtime = _invitation_chat_runtime(uid="fresh-user")
+    direct_resolutions = []
+
+    async def direct_runtime(uid):
+        direct_resolutions.append(uid)
+        return runtime
+
+    async def forbidden_rollout_runtime(*_args, **_kwargs):
+        raise AssertionError("row-intrinsic binding must not enter rollout-classified resolution")
+
+    class Pool:
+        async def fetchrow(self, *_args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", direct_runtime)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", forbidden_rollout_runtime)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(uid="fresh-user", provider="grok-voice"),
+            authenticated_uid="fresh-user",
+        )
+    )
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert result.provider == "grok-voice"
+    assert result.voice_mode == "v4"
+    assert claims["isolated_runtime"] is True
+    assert claims["runtime_authority_digest"] == RUNTIME_AUTHORITY_DIGEST
+    principal = voice.VoiceProxyPrincipal(
+        uid="fresh-user",
+        session_id=claims["jti"],
+        provider=claims["provider"],
+        voice_mode=claims["voice_mode"],
+        isolated_runtime=claims["isolated_runtime"],
+        entitlement_revision=claims["entitlement_revision"],
+        correlation_id=claims["correlation_id"],
+        runtime_authority_digest=claims["runtime_authority_digest"],
+    )
+    assert asyncio.run(voice._resolve_voice_runtime(principal)) is runtime
+    assert direct_resolutions == ["fresh-user", "fresh-user", "fresh-user"]
 
 
 def test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry(monkeypatch):

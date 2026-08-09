@@ -3437,7 +3437,7 @@ class EllaProvisioningRepository:
         )
         return bool(row and row["eligible"])
 
-    async def _resolve_self_hosted_active_direct(
+    async def resolve_self_hosted_active_direct(
         self,
         uid: str,
         role: str = "user",
@@ -3474,6 +3474,19 @@ class EllaProvisioningRepository:
             template_version,
         )
         return _row_dict(row)
+
+    async def _resolve_self_hosted_active_direct(
+        self,
+        uid: str,
+        role: str = "user",
+        template_version: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Compatibility wrapper for existing internal callers."""
+        return await self.resolve_self_hosted_active_direct(
+            uid=uid,
+            role=role,
+            template_version=template_version,
+        )
 
     async def resolve_active_runtime(
         self,
@@ -3718,7 +3731,7 @@ class EllaProvisioningRepository:
                         # (possibly stale) job-target schema here, and requiring a
                         # match would reproduce the "incomplete on status" bug the
                         # fallback exists to fix. `POST /ensure` passes None (inert).
-                        fallback = await self._resolve_self_hosted_active_direct(uid=uid, role=role)
+                        fallback = await self.resolve_self_hosted_active_direct(uid=uid, role=role)
                         return fallback
                     decision = await voice_canary_db.revalidate_runtime_resolution_on_connection(
                         connection,
