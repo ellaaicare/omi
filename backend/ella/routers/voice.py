@@ -1161,10 +1161,14 @@ async def create_voice_session(
             current_identity = runtime_authority_identity(current_runtime)
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
-        if (
-            not hmac.compare_digest(current_identity.digest, runtime_authority_digest)
-            or int(current_runtime.target_entitlement_revision) != entitlement_revision
-        ):
+        runtime_authority_changed = not hmac.compare_digest(
+            current_identity.digest,
+            runtime_authority_digest,
+        )
+        invitation_entitlement_changed = self_hosted_required and (
+            int(current_runtime.target_entitlement_revision) != entitlement_revision
+        )
+        if runtime_authority_changed or invitation_entitlement_changed:
             raise HTTPException(status_code=409, detail={"code": "voice_runtime_authority_changed"})
         runtime = current_runtime
 

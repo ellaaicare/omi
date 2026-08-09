@@ -681,6 +681,7 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
 def test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout_flags(monkeypatch):
     runtime = _invitation_chat_runtime(uid="fresh-user")
     direct_resolutions = []
+    policy_calls = []
 
     async def direct_runtime(uid):
         direct_resolutions.append(uid)
@@ -688,6 +689,15 @@ def test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout
 
     async def forbidden_rollout_runtime(*_args, **_kwargs):
         raise AssertionError("row-intrinsic binding must not enter rollout-classified resolution")
+
+    async def evaluate_issuance(**kwargs):
+        policy_calls.append(kwargs)
+        return SimpleNamespace(
+            allowed=True,
+            code="ok",
+            entitlement={"revision": 3},
+            quota={},
+        )
 
     class Pool:
         async def fetchrow(self, *_args):
@@ -697,11 +707,13 @@ def test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout
         return Pool()
 
     monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", direct_runtime)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", forbidden_rollout_runtime)
+    monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", evaluate_issuance)
     monkeypatch.setattr(voice, "_get_pool", pool)
 
     result = asyncio.run(
@@ -722,6 +734,8 @@ def test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout
     assert result.voice_mode == "v4"
     assert claims["isolated_runtime"] is True
     assert claims["runtime_authority_digest"] == RUNTIME_AUTHORITY_DIGEST
+    assert claims["entitlement_revision"] == 3
+    assert len(policy_calls) == 1
     principal = voice.VoiceProxyPrincipal(
         uid="fresh-user",
         session_id=claims["jti"],
