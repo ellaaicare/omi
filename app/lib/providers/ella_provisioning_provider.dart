@@ -117,7 +117,6 @@ class EllaProvisioningProvider extends ChangeNotifier {
     final context = _requestContext;
     if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
     _requestContext = context.copyWithConsentReceiptId(receiptId);
-    if (isOperational) return;
     unawaited(retry());
   }
 
@@ -234,13 +233,16 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } else {
       state = nextReceipt.state;
     }
-    notifyListeners();
-
     if (isOperational) {
       await _preferences.markEllaProvisioningVerified(_activeUid);
       await const EllaAccountIsolationService().resumeAfterVerifiedProvisioning();
       if (generation != _generation) return;
     }
+
+    // Publish ready only after its exact account/provisioning authority has
+    // been reverified. Consumers must never recapture a ready receipt between
+    // the state transition and the authority commit.
+    notifyListeners();
 
     if (_shouldPoll) {
       _schedulePoll(generation, _pollDelay(nextReceipt));

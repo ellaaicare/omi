@@ -413,6 +413,104 @@ void main() {
     provider.dispose();
   });
 
+  test('same-account replacement consent receipt fails closed before provisioning recaptures authority', () async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    final ready = EllaProvisioningResponse(
+      statusCode: 200,
+      receipt: EllaProvisioningReceipt.fromJson({
+        'state': 'ready',
+        'binding_state': 'active',
+        'binding_revision': 1,
+        'effective_policy_revision': 'policy-1',
+      }),
+    );
+    final transport = _FakeTransport(ensureResponses: [ready, ready]);
+    final provider = EllaProvisioningProvider(transport: transport);
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.524+800',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        clientRequestId: 'request-receipt-a',
+        consentReceiptId: 'aicr_receipt-a',
+      ),
+    );
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    await preferences.markEllaProvisioningVerified('uid-a');
+    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1), isTrue);
+
+    final signalSnapshots = <({String receiptId, bool consentCurrent, bool provisioningCurrent})>[];
+    void onAuthorityChanged() {
+      signalSnapshots.add((
+        receiptId: preferences.aiConsentReceiptId,
+        consentCurrent: preferences.aiConsentAccepted,
+        provisioningCurrent: preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1),
+      ));
+    }
+
+    SharedPreferencesUtil.aiConsentAuthorityChanges.addListener(onAuthorityChanged);
+    addTearDown(() => SharedPreferencesUtil.aiConsentAuthorityChanges.removeListener(onAuthorityChanged));
+    final readyNotifications = <bool>[];
+    provider.addListener(() {
+      if (provider.isOperational) {
+        readyNotifications.add(
+          preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1),
+        );
+      }
+    });
+
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-b',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:01:00Z',
+    );
+
+    expect(signalSnapshots, [
+      (receiptId: 'aicr_receipt-a', consentCurrent: false, provisioningCurrent: false),
+    ]);
+    expect(preferences.aiConsentReceiptId, 'aicr_receipt-b');
+    expect(preferences.aiConsentAccepted, isFalse);
+
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-b',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    provider.setConsentReceiptId('aicr_receipt-b');
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.ensureCalls, 2);
+    expect(transport.ensureContexts.last.consentReceiptId, 'aicr_receipt-b');
+    expect(provider.isOperational, isTrue);
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1), isTrue);
+    expect(readyNotifications, [true]);
+    provider.dispose();
+  });
+
   test('AI consent becomes authority only after an exact server v8 managed-cloud grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(policy: AiConsentPolicy.bundled, submitResponse: _consentStatus());

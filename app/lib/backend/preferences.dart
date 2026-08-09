@@ -382,7 +382,12 @@ class SharedPreferencesUtil {
     String profileBindingId = '',
     String serverDecidedAt = '',
   }) {
-    if (uid != aiConsentReceiptUid || profileBindingId != aiConsentProfileBindingId) {
+    final hasAccountBoundReceipt = receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty;
+    final nextReceiptId = hasAccountBoundReceipt ? receiptId : '';
+    final nextReceiptUid = hasAccountBoundReceipt ? uid : '';
+    if (nextReceiptUid != aiConsentReceiptUid ||
+        profileBindingId != aiConsentProfileBindingId ||
+        nextReceiptId != aiConsentReceiptId) {
       _invalidateAiConsentAuthority();
     }
     aiConsentAccepted = true;
@@ -396,9 +401,9 @@ class SharedPreferencesUtil {
     saveString('aiConsentScopeHash', currentAiConsentScopeHash);
     saveString('aiConsentServerDecidedAt', serverDecidedAt);
     remove('aiConsentDeferredVersion');
-    if (receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty) {
-      saveString('aiConsentReceiptId', receiptId);
-      saveString('aiConsentReceiptUid', uid);
+    if (hasAccountBoundReceipt) {
+      saveString('aiConsentReceiptId', nextReceiptId);
+      saveString('aiConsentReceiptUid', nextReceiptUid);
     } else {
       remove('aiConsentReceiptId');
       remove('aiConsentReceiptUid');
