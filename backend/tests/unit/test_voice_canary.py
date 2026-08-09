@@ -23,7 +23,11 @@ def retained_runtime_not_invitation_owned(monkeypatch):
     async def authority_disabled(_uid):
         return False
 
+    async def no_direct_runtime(_uid):
+        return None
+
     monkeypatch.setattr(voice, "self_hosted_runtime_authority_required", authority_disabled)
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", no_direct_runtime)
 
 
 def _entitlement(**overrides):
