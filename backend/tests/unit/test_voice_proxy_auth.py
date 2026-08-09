@@ -1212,6 +1212,90 @@ def test_isolated_search_forces_receipt_agent_and_owner_header(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("scope_kind", ["memory", "daily_card"])
+def test_scoped_search_returns_only_the_server_resolved_subject(monkeypatch, scope_kind):
+    runtime = SimpleNamespace(agent_id="ella-uid-a", revision=8)
+    scope = {
+        "kind": scope_kind,
+        "title": "Selected garden memory",
+        "overview": "Alex and Priya planted tomato seedlings together.",
+        "occurred_at": "2026-07-24T10:00:00+00:00",
+        "conversation_id": "memory-a" if scope_kind == "memory" else "",
+        "active_summary_version_id": "version-4" if scope_kind == "memory" else "",
+        "card_id": "" if scope_kind == "memory" else "2265689d-e0d7-4a26-bdeb-2c8c97e90b89",
+        "card_version": None if scope_kind == "memory" else 4,
+        "card_evidence_hash": "" if scope_kind == "memory" else "sha256:" + "a" * 64,
+    }
+
+    async def resolve_runtime(_principal):
+        return runtime
+
+    async def resolve_scope(_principal):
+        return scope
+
+    async def forbidden_global_search(*_args, **_kwargs):
+        raise AssertionError("a scoped session must not fan out to global search")
+
+    monkeypatch.setattr(voice, "_resolve_voice_runtime", resolve_runtime)
+    monkeypatch.setattr(voice, "_resolve_principal_session_scope", resolve_scope)
+    monkeypatch.setattr(voice, "_search_workspace", forbidden_global_search)
+    monkeypatch.setattr(voice, "_search_omi_canonical_first", forbidden_global_search)
+    monkeypatch.setattr(voice, "_search_memories", forbidden_global_search)
+    monkeypatch.setattr(voice, "_search_canonical_timeline", forbidden_global_search)
+
+    token_scope = (
+        {
+            "scope_kind": "memory",
+            "conversation_id": "memory-a",
+            "active_summary_version_id": "version-4",
+            "can_reinterpret": True,
+        }
+        if scope_kind == "memory"
+        else {
+            "scope_kind": "daily_card",
+            "card_id": "2265689d-e0d7-4a26-bdeb-2c8c97e90b89",
+            "card_version": 4,
+            "card_evidence_hash": "sha256:" + "a" * 64,
+            "can_reinterpret": False,
+        }
+    )
+    result = asyncio.run(
+        voice.unified_search(
+            _request(
+                {
+                    "uid": "uid-a",
+                    "query": "what was this about",
+                    "sources": ["omi", "memories", "workspace"],
+                },
+                token=_token("uid-a", scope=token_scope),
+                service_token="test-proxy-secret",
+            )
+        )
+    )
+
+    assert result["scope_bound"] is True
+    assert result["sources_searched"] == ["session_scope"]
+    assert result["sources_denied"] == ["memories", "omi", "workspace"]
+    assert result["results"] == [
+        {
+            "source": "session_scope",
+            "title": "Selected garden memory",
+            "content": "Alex and Priya planted tomato seedlings together.",
+            "timestamp": "2026-07-24T10:00:00+00:00",
+            "score": 1000,
+            "metadata": {
+                "provenance": "voice_session_scope",
+                "scope_kind": scope_kind,
+                "conversation_id": "memory-a" if scope_kind == "memory" else "",
+                "active_summary_version_id": "version-4" if scope_kind == "memory" else "",
+                "card_id": "" if scope_kind == "memory" else "2265689d-e0d7-4a26-bdeb-2c8c97e90b89",
+                "card_version": None if scope_kind == "memory" else 4,
+                "card_evidence_hash": "" if scope_kind == "memory" else "sha256:" + "a" * 64,
+            },
+        }
+    ]
+
+
 def test_isolated_search_includes_receipt_bound_honcho_source(monkeypatch):
     runtime = SimpleNamespace(
         uid="uid-a",

@@ -25,7 +25,7 @@ NOW = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
 def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none"):
     return {
         "event_id": "omi:conversation-a:summary",
-        "text": "Grounded body.",
+        "text": "Grounded body with a useful remembered detail.",
         "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
         "privacy_scope": privacy_scope,
         "scan_policy": scan_policy,
@@ -35,7 +35,7 @@ def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_pol
         },
         "metadata": {
             "adapter": "omi-enriched-conversation",
-            "structured": {"title": "Grounded", "overview": "Grounded body."},
+            "structured": {"title": "Grounded", "overview": "Grounded body with a useful remembered detail."},
         },
     }
 
@@ -59,8 +59,8 @@ def _card(version="summary-v2"):
         content=TodayCardContent(
             eyebrow="A NOTE FROM YESTERDAY",
             headline="Grounded",
-            body="Grounded body.",
-            spoken_text="Grounded. Grounded body.",
+            body="Grounded body with a useful remembered detail.",
+            spoken_text="Grounded. Grounded body with a useful remembered detail.",
             sentence_source_ids=["conversation-a"],
         ),
         source_refs=[source],
@@ -579,3 +579,49 @@ def test_internal_assessment_risk_and_string_booleans_fail_closed():
 
     assert evidence[0].confirmed is False
     assert "safety" in evidence[0].tags
+
+
+def test_enriched_adapter_does_not_promote_missing_context_meta_summary():
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A very short moment",
+        "overview": (
+            "This tiny recording caught only the word So before it ended. "
+            "There is not enough context to know what was being discussed."
+        ),
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_enriched_adapter_honors_explicit_capture_quality_metrics():
+    row = _summary_row()
+    row["metadata"]["source_quality"] = {
+        "transcript_word_count": 4,
+        "capture_duration_seconds": 3.5,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count == 4
+    assert evidence.capture_duration_seconds == 3.5
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_capture_quality_metrics_ignore_nonfinite_values():
+    assert today_card_postgres._first_nonnegative_number(float("nan"), float("inf"), 9) == 9
+    assert today_card_postgres._first_nonnegative_number(float("-inf"), -1) is None

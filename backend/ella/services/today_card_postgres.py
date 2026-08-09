@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
@@ -27,6 +28,7 @@ from ella.services.today_card import (
     deterministic_card_id,
     evidence_is_safe,
     materialization_window,
+    source_text_is_meaningful,
     sha256_ref,
     today_card_source_pack,
 )
@@ -97,6 +99,19 @@ def _strict_bool(mapping: dict[str, Any], key: str, default: bool) -> bool:
     if key not in mapping:
         return default
     return mapping[key] is True
+
+
+def _first_nonnegative_number(*values: Any) -> float | None:
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(parsed) and parsed >= 0:
+            return parsed
+    return None
 
 
 def _card_from_row(row: Any) -> TodayCardRecord:
@@ -172,6 +187,7 @@ def _evidence_from_row(
     source_ref = _json_object(_record_value(row, "source_ref"))
     today = metadata.get("today_card") if isinstance(metadata.get("today_card"), dict) else {}
     structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
+    source_quality = metadata.get("source_quality") if isinstance(metadata.get("source_quality"), dict) else {}
     adapter = str(metadata.get("adapter") or "")
     occurred_at = _record_value(row, "started_at")
     if not isinstance(occurred_at, datetime):
@@ -201,11 +217,28 @@ def _evidence_from_row(
     conversation_id = str(source_ref.get("conversation_id") or "").strip() or None
     source_type = "conversation_summary" if conversation_id else str(today.get("source_type") or "canonical_event")
     confidence = today.get("confidence")
+    transcript_word_count_value = _first_nonnegative_number(
+        today.get("transcript_word_count"),
+        source_quality.get("transcript_word_count"),
+        structured.get("transcript_word_count"),
+        metadata.get("transcript_word_count"),
+    )
+    transcript_word_count = int(transcript_word_count_value) if transcript_word_count_value is not None else None
+    capture_duration_seconds = _first_nonnegative_number(
+        today.get("capture_duration_seconds"),
+        source_quality.get("capture_duration_seconds"),
+        source_quality.get("duration_seconds"),
+        structured.get("duration_seconds"),
+        metadata.get("duration_seconds"),
+    )
+    source_text_meaningful = source_text_is_meaningful(title, summary)
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
-        confidence = 0.9 if adapter == "omi-enriched-conversation" and source_version_id else 0.0
+        confidence = (
+            0.82 if adapter == "omi-enriched-conversation" and source_version_id and source_text_meaningful else 0.0
+        )
     privacy_scope = str(_record_value(row, "privacy_scope") or "user_private")
     scan_policy = str(_record_value(row, "scan_policy") or "none")
-    meaningful = _strict_bool(today, "meaningful", len(summary) >= 12 or len(title) >= 12)
+    meaningful = _strict_bool(today, "meaningful", source_text_meaningful)
     confirmed = _strict_bool(today, "confirmed", False)
     positive_or_neutral = _strict_bool(today, "positive_or_neutral", True)
     superseded = _strict_bool(today, "superseded", False)
@@ -239,6 +272,8 @@ def _evidence_from_row(
                 "tags": tags,
                 "person_keys": person_keys,
                 "topic_keys": topic_keys,
+                "transcript_word_count": transcript_word_count,
+                "capture_duration_seconds": capture_duration_seconds,
             }
         ),
         privacy_scope=privacy_scope,
@@ -258,6 +293,8 @@ def _evidence_from_row(
         tags=tags,
         person_keys=person_keys,
         topic_keys=topic_keys,
+        transcript_word_count=transcript_word_count,
+        capture_duration_seconds=capture_duration_seconds,
     )
 
 

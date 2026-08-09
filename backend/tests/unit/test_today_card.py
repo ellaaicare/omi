@@ -16,6 +16,7 @@ from ella.services.today_card import (
     TodayCardState,
     TodayCardUserContext,
     deterministic_card_id,
+    evidence_is_safe,
     select_today_card_evidence,
     sha256_ref,
 )
@@ -126,6 +127,38 @@ def _materialize(repository, renderer=None):
             LOCAL_DATE,
         )
     )
+
+
+def test_low_value_fragment_and_meta_summary_are_never_safe_sources():
+    fragment = _source(
+        TodayCardKind.recap,
+        "fragment",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "A very short moment",
+            "summary": (
+                "This tiny recording caught only the word So before it ended. "
+                "There is not enough context to know what was being discussed."
+            ),
+        }
+    )
+    one_word = fragment.model_copy(update={"title": "So", "summary": "So"})
+    short_transcript = _source(
+        TodayCardKind.recap,
+        "short-transcript",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(update={"transcript_word_count": 1})
+    short_capture = _source(
+        TodayCardKind.recap,
+        "short-capture",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(update={"capture_duration_seconds": 2.5})
+
+    assert evidence_is_safe(fragment) is False
+    assert evidence_is_safe(one_word) is False
+    assert evidence_is_safe(short_transcript) is False
+    assert evidence_is_safe(short_capture) is False
 
 
 def test_active_day_materializes_truthful_recap_before_older_memory():

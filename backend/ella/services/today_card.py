@@ -20,6 +20,9 @@ TODAY_CARD_MATERIALIZATION_HOUR = 3
 TODAY_CARD_SOURCE_COOLDOWN_DAYS = 30
 TODAY_CARD_TOPIC_COOLDOWN_DAYS = 14
 TODAY_CARD_MIN_CONFIDENCE = 0.75
+TODAY_CARD_MIN_SOURCE_WORDS = 4
+TODAY_CARD_MIN_TRANSCRIPT_WORDS = 12
+TODAY_CARD_MIN_CAPTURE_SECONDS = 8.0
 
 _DENIED_PRIVACY_SCOPES = {
     "caregiver_private",
@@ -42,6 +45,15 @@ _DENIED_TAGS = {
     "self_harm",
 }
 _WHITESPACE = re.compile(r"\s+")
+_WORD = re.compile(r"[a-z0-9]+(?:['’][a-z0-9]+)?", re.IGNORECASE)
+_LOW_VALUE_META_COMMENTARY = (
+    re.compile(r"\b(?:tiny|very short|too short|brief) (?:audio|capture|clip|recording|transcript)\b", re.IGNORECASE),
+    re.compile(r"\b(?:audio|capture|clip|recording|transcript) (?:caught|contains?|captured) only\b", re.IGNORECASE),
+    re.compile(r"\bonly (?:the )?(?:word|words|fragment)\b", re.IGNORECASE),
+    re.compile(r"\b(?:not|isn't|wasn't|is not|was not) enough (?:context|detail|information)\b", re.IGNORECASE),
+    re.compile(r"\b(?:cannot|can't|could not|couldn't) (?:know|tell|determine|infer|summarize)\b", re.IGNORECASE),
+    re.compile(r"\b(?:insufficient|missing) context\b", re.IGNORECASE),
+)
 
 
 class TodayCardState(str, Enum):
@@ -89,6 +101,8 @@ class TodayCardEvidence(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=50)
     person_keys: list[str] = Field(default_factory=list, max_length=50)
     topic_keys: list[str] = Field(default_factory=list, max_length=50)
+    transcript_word_count: int | None = Field(default=None, ge=0)
+    capture_duration_seconds: float | None = Field(default=None, ge=0.0)
 
     @field_validator("title", "summary")
     @classmethod
@@ -227,6 +241,15 @@ def materialization_window(local_date: date, timezone_name: str) -> tuple[dateti
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
+def source_text_is_meaningful(title: str, summary: str) -> bool:
+    """Reject fragments and model commentary about an unusable source."""
+    text = _WHITESPACE.sub(" ", f"{title} {summary}").strip()
+    if any(pattern.search(text) for pattern in _LOW_VALUE_META_COMMENTARY):
+        return False
+    words = _WORD.findall(summary or title)
+    return len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.lower() for word in words}) >= 3
+
+
 def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
     tags = {str(tag).strip().lower() for tag in evidence.tags}
     if evidence.source.privacy_scope.lower() in _DENIED_PRIVACY_SCOPES:
@@ -240,6 +263,15 @@ def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
     if not evidence.positive_or_neutral:
         return False
     if not evidence.title and not evidence.summary:
+        return False
+    if not source_text_is_meaningful(evidence.title, evidence.summary):
+        return False
+    if evidence.transcript_word_count is not None and evidence.transcript_word_count < TODAY_CARD_MIN_TRANSCRIPT_WORDS:
+        return False
+    if (
+        evidence.capture_duration_seconds is not None
+        and evidence.capture_duration_seconds < TODAY_CARD_MIN_CAPTURE_SECONDS
+    ):
         return False
     return True
 
