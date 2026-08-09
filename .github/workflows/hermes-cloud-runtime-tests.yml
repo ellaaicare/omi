@@ -634,6 +634,7 @@ jobs:
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
             "tests/unit/test_ella_runtime_route_isolation.py::test_legacy_history_unexpected_failure_logs_fixed_content_free_classification"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry"
+            "tests/unit/test_ella_runtime_route_isolation.py::test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout_flags"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_provider"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_authority_denials_precede_provider_setup[invitation_runtime_fallback_enabled]"
             "tests/unit/test_ella_provisioning_service.py::test_runtime_receipt_requires_owned_workspace_port_and_honcho"
@@ -683,7 +684,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 544
+          test "$collected" -eq 545
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

@@ -2681,7 +2681,7 @@ def test_resolve_self_hosted_active_direct_positive_healthy_active():
     repository = EllaProvisioningRepository(pool)
 
     row = asyncio.run(
-        repository._resolve_self_hosted_active_direct(
+        repository.resolve_self_hosted_active_direct(
             uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
             role="user",
             template_version="hermes-user-v1",
