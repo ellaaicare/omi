@@ -714,6 +714,8 @@ void main() {
         child: MaterialApp(
           navigatorKey: MyApp.navigatorKey,
           navigatorObservers: [observer],
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
           home: const HomePage(
             navigateToRoute: '/facts',
             runtimeSideEffectsEnabled: false,

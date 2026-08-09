@@ -72,8 +72,10 @@ void main() {
     final harness = await _pumpHome(tester, conversations: conversations, includeBottomNav: true);
     addTearDown(harness.dispose);
 
-    expect(find.text('SUNDAY · AUGUST 9'), findsOneWidget);
-    expect(find.text('Good morning, Margaret.'), findsOneWidget);
+    final renderedText =
+        tester.widgetList<Text>(find.byType(Text)).map((widget) => widget.data).whereType<String>().toList();
+    expect(find.text('SUNDAY · AUGUST 9'), findsOneWidget, reason: renderedText.join(' | '));
+    expect(find.text('Good morning, Margaret'), findsOneWidget);
     expect(find.text('Record a moment'), findsOneWidget);
     expect(find.text('Records on this iPhone'), findsOneWidget);
     expect(find.text('Recent memories'), findsOneWidget);
@@ -109,7 +111,7 @@ void main() {
     expect(find.text('Record a moment'), findsOneWidget);
   });
 
-  testWidgets('paired necklace changes capture source without adding Home debug controls', (tester) async {
+  testWidgets('Home-owned necklace capture stops its stream before finishing', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
       ..pairedDevice = necklace
@@ -127,6 +129,40 @@ void main() {
     await tester.pump();
     expect(harness.capture.deviceStarts, 1);
     expect(find.text('Listening… tap to finish'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finishes, 1);
+    expect(harness.capture.recordingState, RecordingState.stop);
+    expect(find.text('Record a moment'), findsOneWidget);
+  });
+
+  testWidgets('continuous necklace stream gets exact moment boundaries without being stopped', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.deviceStarts, 0);
+    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.finishes, 1, reason: 'the start tap must exclude pre-tap necklace audio');
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.deviceStops, 0, reason: 'Home must preserve a stream it did not start');
+    expect(harness.capture.finishes, 2, reason: 'the finish tap closes only the intentional moment');
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
   testWidgets('day-one state is useful and reduced motion removes capture transitions', (tester) async {
@@ -157,20 +193,36 @@ void main() {
       conversations: _ConversationFixtures.withMemories(photoBase64: ''),
       viewport: const Size(320, 844),
       textScaler: const TextScaler.linear(2),
+      includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
-    final recordTarget = find.byKey(const Key('today-record-moment'));
-    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -500));
+    final homeScrollable = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    homeScrollable.position.jumpTo(0);
     await tester.pump();
+    await expectLater(
+      find.byType(MaterialApp),
+      matchesGoldenFile('goldens/ella_home_memory_mosaic_320_200_full_shell.png'),
+    );
+
+    final recordTarget = find.byKey(const Key('today-record-moment'));
+    await tester.dragFrom(const Offset(160, 400), const Offset(0, -600));
+    await tester.pump();
+    expect(recordTarget, findsOneWidget);
     expect(tester.getSize(recordTarget).height, greaterThanOrEqualTo(48));
     expect(find.bySemanticsLabel(RegExp(r'Record a moment.*Records on this iPhone')), findsOneWidget);
     expect(tester.takeException(), isNull);
 
-    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -1200));
+    await tester.dragFrom(const Offset(160, 400), const Offset(0, -1200));
     await tester.pump();
     expect(find.byKey(const Key('memory-journal-card-memory-1')), findsOneWidget);
     expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Chat'), findsOneWidget);
+    expect(find.text('Talk'), findsOneWidget);
+    expect(find.text('Settings'), findsOneWidget);
     expect(tester.takeException(), isNull);
     semantics.dispose();
   });
@@ -212,13 +264,14 @@ Future<_HomeHarness> _pumpHome(
   bool disableAnimations = false,
   Size viewport = const Size(390, 844),
   TextScaler textScaler = TextScaler.noScaling,
+  RecordingState initialRecordingState = RecordingState.stop,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 
-  final capture = _FakeCaptureProvider();
+  final capture = _FakeCaptureProvider(initialRecordingState);
   final actionItems = _NoActionsProvider();
   final conversationProvider = _FixtureConversationProvider(conversations);
   final deviceProvider = device ?? DeviceProvider();
@@ -321,9 +374,14 @@ class _FixtureConversationProvider extends ConversationProvider {
 }
 
 class _FakeCaptureProvider extends CaptureProvider {
+  _FakeCaptureProvider(RecordingState initialState) {
+    recordingState = initialState;
+  }
+
   int phoneStarts = 0;
   int phoneStops = 0;
   int deviceStarts = 0;
+  int deviceStops = 0;
   int finishes = 0;
 
   @override
@@ -343,6 +401,12 @@ class _FakeCaptureProvider extends CaptureProvider {
     deviceStarts++;
     updateRecordingDevice(device);
     updateRecordingState(RecordingState.deviceRecord);
+  }
+
+  @override
+  Future<void> stopStreamDeviceRecording({bool cleanDevice = false}) async {
+    deviceStops++;
+    updateRecordingState(RecordingState.stop);
   }
 
   @override

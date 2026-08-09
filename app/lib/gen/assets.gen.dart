@@ -181,9 +181,17 @@ class $AssetsImagesGen {
   /// File path: assets/images/clone.png
   AssetGenImage get clone => const AssetGenImage('assets/images/clone.png');
 
+  /// File path: assets/images/ella-daily-note-botanical.png
+  AssetGenImage get ellaDailyNoteBotanical =>
+      const AssetGenImage('assets/images/ella-daily-note-botanical.png');
+
   /// Directory path: assets/images/ella-hardware
   $AssetsImagesEllaHardwareGen get ellaHardware =>
       const $AssetsImagesEllaHardwareGen();
+
+  /// File path: assets/images/ella-memory-watercolor-fallback.png
+  AssetGenImage get ellaMemoryWatercolorFallback =>
+      const AssetGenImage('assets/images/ella-memory-watercolor-fallback.png');
 
   /// File path: assets/images/ella_onboarding_1.png
   AssetGenImage get ellaOnboarding1 =>
@@ -429,6 +437,8 @@ class $AssetsImagesGen {
     calendarLogo,
     checkbox,
     clone,
+    ellaDailyNoteBotanical,
+    ellaMemoryWatercolorFallback,
     ellaOnboarding1,
     ellaOnboarding2,
     ellaOnboarding3,

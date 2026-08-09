@@ -17325,6 +17325,18 @@ abstract class AppLocalizations {
   /// **'Pull down to try again. If this keeps happening, contact support.'**
   String get todayCardDegradedBody;
 
+  /// No description provided for @todayCardAuthorityUnavailableHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is still getting your note ready'**
+  String get todayCardAuthorityUnavailableHeadline;
+
+  /// No description provided for @todayCardAuthorityUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your Daily Note will appear after Ella finishes setting up your account.'**
+  String get todayCardAuthorityUnavailableBody;
+
   /// No description provided for @todayCardSavedStatus.
   ///
   /// In en, this message translates to:
@@ -17421,6 +17433,60 @@ abstract class AppLocalizations {
   /// **'Record something you want to remember. Ella will bring meaningful moments back here.'**
   String get todayFirstMemoryBody;
 
+  /// No description provided for @todayGreetingFallbackName.
+  ///
+  /// In en, this message translates to:
+  /// **'there'**
+  String get todayGreetingFallbackName;
+
+  /// Morning greeting on Ella Home
+  ///
+  /// In en, this message translates to:
+  /// **'Good morning, {name}'**
+  String todayGreetingMorning(String name);
+
+  /// Afternoon greeting on Ella Home
+  ///
+  /// In en, this message translates to:
+  /// **'Good afternoon, {name}'**
+  String todayGreetingAfternoon(String name);
+
+  /// Evening greeting on Ella Home
+  ///
+  /// In en, this message translates to:
+  /// **'Good evening, {name}'**
+  String todayGreetingEvening(String name);
+
+  /// Localized date anchor on Ella Home
+  ///
+  /// In en, this message translates to:
+  /// **'{weekday} · {monthDay}'**
+  String todayDateEyebrow(String weekday, String monthDay);
+
+  /// No description provided for @bottomNavHome.
+  ///
+  /// In en, this message translates to:
+  /// **'Home'**
+  String get bottomNavHome;
+
+  /// No description provided for @bottomNavChat.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat'**
+  String get bottomNavChat;
+
+  /// No description provided for @bottomNavTalk.
+  ///
+  /// In en, this message translates to:
+  /// **'Talk'**
+  String get bottomNavTalk;
+
+  /// No description provided for @bottomNavSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Settings'**
+  String get bottomNavSettings;
+
   /// No description provided for @scopedTalkUnavailableTitle.
   ///
   /// In en, this message translates to:
@@ -17432,6 +17498,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella can\'t open this item in Talk right now. Close this window and keep browsing.'**
   String get scopedTalkUnavailableBody;
+
+  /// No description provided for @scopedTalkRetryableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t open this item in Talk just now. Try again, or close this window and keep browsing.'**
+  String get scopedTalkRetryableBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

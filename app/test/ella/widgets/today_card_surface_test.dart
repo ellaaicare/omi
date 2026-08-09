@@ -224,4 +224,23 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('authority timeout gives terminal setup copy instead of an inoperative pull-to-refresh', (tester) async {
+    configureView(tester);
+    await tester.pumpWidget(
+      buildApp(
+        const TodayCardViewState(
+          status: TodayCardStatus.degraded,
+          errorCode: 'today_card_authority_unavailable',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Ella is still getting your note ready'), findsOneWidget);
+    expect(find.textContaining('finishes setting up your account'), findsOneWidget);
+    expect(find.textContaining('Pull down'), findsNothing);
+    expect(find.byKey(const Key('today-card-talk')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }

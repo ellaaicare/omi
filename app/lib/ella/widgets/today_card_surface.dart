@@ -118,11 +118,17 @@ class TodayCardSurface extends StatelessWidget {
                 headline: context.l10n.todayCardNoSafeSourceHeadline,
                 body: context.l10n.todayCardNoSafeSourceBody,
               )
-            : _TodayCardContent(
-                eyebrow: context.l10n.todayCardPreparingEyebrow,
-                headline: context.l10n.todayCardDegradedHeadline,
-                body: context.l10n.todayCardDegradedBody,
-              ),
+            : state.errorCode == 'today_card_authority_unavailable'
+                ? _TodayCardContent(
+                    eyebrow: context.l10n.todayCardPreparingEyebrow,
+                    headline: context.l10n.todayCardAuthorityUnavailableHeadline,
+                    body: context.l10n.todayCardAuthorityUnavailableBody,
+                  )
+                : _TodayCardContent(
+                    eyebrow: context.l10n.todayCardPreparingEyebrow,
+                    headline: context.l10n.todayCardDegradedHeadline,
+                    body: context.l10n.todayCardDegradedBody,
+                  ),
         TodayCardStatus.ready || TodayCardStatus.preparing => _TodayCardContent(
             eyebrow: context.l10n.todayCardPreparingEyebrow,
             headline: context.l10n.todayCardPreparingHeadline,

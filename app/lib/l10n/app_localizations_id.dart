@@ -9315,6 +9315,13 @@ class AppLocalizationsId extends AppLocalizations {
   String get todayCardDegradedBody => 'Pull down to try again. If this keeps happening, contact support.';
 
   @override
+  String get todayCardAuthorityUnavailableHeadline => 'Ella is still getting your note ready';
+
+  @override
+  String get todayCardAuthorityUnavailableBody =>
+      'Your Daily Note will appear after Ella finishes setting up your account.';
+
+  @override
   String get todayCardSavedStatus => 'Showing the last note while Ella checks for an update.';
 
   @override
@@ -9364,9 +9371,48 @@ class AppLocalizationsId extends AppLocalizations {
       'Record something you want to remember. Ella will bring meaningful moments back here.';
 
   @override
+  String get todayGreetingFallbackName => 'there';
+
+  @override
+  String todayGreetingMorning(String name) {
+    return 'Good morning, $name';
+  }
+
+  @override
+  String todayGreetingAfternoon(String name) {
+    return 'Good afternoon, $name';
+  }
+
+  @override
+  String todayGreetingEvening(String name) {
+    return 'Good evening, $name';
+  }
+
+  @override
+  String todayDateEyebrow(String weekday, String monthDay) {
+    return '$weekday · $monthDay';
+  }
+
+  @override
+  String get bottomNavHome => 'Home';
+
+  @override
+  String get bottomNavChat => 'Chat';
+
+  @override
+  String get bottomNavTalk => 'Talk';
+
+  @override
+  String get bottomNavSettings => 'Settings';
+
+  @override
   String get scopedTalkUnavailableTitle => 'Talk isn\'t available for this item';
 
   @override
   String get scopedTalkUnavailableBody =>
       'Ella can\'t open this item in Talk right now. Close this window and keep browsing.';
+
+  @override
+  String get scopedTalkRetryableBody =>
+      'Ella couldn\'t open this item in Talk just now. Try again, or close this window and keep browsing.';
 }

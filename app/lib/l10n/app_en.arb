@@ -10649,6 +10649,8 @@
   "todayCardNoSafeSourceBody": "Ella will add one when there is enough recent memory to be useful.",
   "todayCardDegradedHeadline": "Today's note isn't available right now",
   "todayCardDegradedBody": "Pull down to try again. If this keeps happening, contact support.",
+  "todayCardAuthorityUnavailableHeadline": "Ella is still getting your note ready",
+  "todayCardAuthorityUnavailableBody": "Your Daily Note will appear after Ella finishes setting up your account.",
   "todayCardSavedStatus": "Showing the last note while Ella checks for an update.",
   "todayCardProvenanceRecentMemory": "From a recent memory",
   "todayRecordMoment": "Record a moment",
@@ -10665,6 +10667,35 @@
   "todayMemoryPhotoLabel": "Photo from this memory",
   "todayFirstMemoryHeadline": "Your journal begins with one moment",
   "todayFirstMemoryBody": "Record something you want to remember. Ella will bring meaningful moments back here.",
+  "todayGreetingFallbackName": "there",
+  "todayGreetingMorning": "Good morning, {name}",
+  "@todayGreetingMorning": {
+    "description": "Morning greeting on Ella Home",
+    "placeholders": {"name": {"type": "String"}}
+  },
+  "todayGreetingAfternoon": "Good afternoon, {name}",
+  "@todayGreetingAfternoon": {
+    "description": "Afternoon greeting on Ella Home",
+    "placeholders": {"name": {"type": "String"}}
+  },
+  "todayGreetingEvening": "Good evening, {name}",
+  "@todayGreetingEvening": {
+    "description": "Evening greeting on Ella Home",
+    "placeholders": {"name": {"type": "String"}}
+  },
+  "todayDateEyebrow": "{weekday} · {monthDay}",
+  "@todayDateEyebrow": {
+    "description": "Localized date anchor on Ella Home",
+    "placeholders": {
+      "weekday": {"type": "String"},
+      "monthDay": {"type": "String"}
+    }
+  },
+  "bottomNavHome": "Home",
+  "bottomNavChat": "Chat",
+  "bottomNavTalk": "Talk",
+  "bottomNavSettings": "Settings",
   "scopedTalkUnavailableTitle": "Talk isn't available for this item",
-  "scopedTalkUnavailableBody": "Ella can't open this item in Talk right now. Close this window and keep browsing."
+  "scopedTalkUnavailableBody": "Ella can't open this item in Talk right now. Close this window and keep browsing.",
+  "scopedTalkRetryableBody": "Ella couldn't open this item in Talk just now. Try again, or close this window and keep browsing."
 }

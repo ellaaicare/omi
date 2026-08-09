@@ -47,6 +47,8 @@ typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
 typedef GuardianNativeLifecycle = Future<void> Function();
 typedef GuardianAvailability = bool Function();
 
+enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
+
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
 bool shouldShowMemoriesLoading({required bool hasLoaded, required bool isLoading, required bool hasMemories}) =>
@@ -130,6 +132,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   EllaProvisioningProvider? _provisioningProvider;
   bool _homeCaptureActive = false;
   bool _homeCaptureStarting = false;
+  _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
   bool _whispersVerified = false;
   bool _updatingWhispers = false;
@@ -408,24 +411,64 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     setState(() => _homeCaptureStarting = true);
     try {
       if (isActive) {
-        if (!necklaceConnected) {
-          await capture.stopStreamRecording();
-          if (mounted) setState(() => _homeCaptureActive = false);
-          await capture.forceProcessingCurrentConversation();
-        } else {
-          await capture.forceProcessingCurrentConversation();
-          if (mounted) setState(() => _homeCaptureActive = false);
+        switch (_homeCaptureSource) {
+          case _HomeCaptureSource.phone:
+            await capture.stopStreamRecording();
+            if (mounted) {
+              setState(() {
+                _homeCaptureActive = false;
+                _homeCaptureSource = null;
+              });
+            }
+            await capture.forceProcessingCurrentConversation();
+            break;
+          case _HomeCaptureSource.necklaceOwned:
+            await capture.stopStreamDeviceRecording();
+            if (capture.recordingState == RecordingState.deviceRecord) {
+              throw StateError('Home-owned necklace stream did not stop');
+            }
+            if (mounted) {
+              setState(() {
+                _homeCaptureActive = false;
+                _homeCaptureSource = null;
+              });
+            }
+            await capture.forceProcessingCurrentConversation();
+            break;
+          case _HomeCaptureSource.necklaceContinuous:
+            await capture.forceProcessingCurrentConversation();
+            if (mounted) {
+              setState(() {
+                _homeCaptureActive = false;
+                _homeCaptureSource = null;
+              });
+            }
+            break;
+          case null:
+            if (mounted) setState(() => _homeCaptureActive = false);
+            break;
         }
         return;
       }
 
       if (necklaceConnected && connectedDevice != null) {
+        var startedHere = false;
         if (capture.recordingState == RecordingState.stop) {
           await capture.streamDeviceRecording(device: connectedDevice);
+          startedHere = capture.recordingState == RecordingState.deviceRecord;
+        } else if (capture.recordingState == RecordingState.deviceRecord) {
+          // The necklace may already be streaming continuously. Finalize that
+          // pre-tap audio so this intentional moment starts at an exact boundary
+          // without stopping the user's ambient capture.
+          await capture.forceProcessingCurrentConversation();
         }
         if (!mounted) return;
         final started = capture.recordingState == RecordingState.deviceRecord;
-        setState(() => _homeCaptureActive = started);
+        setState(() {
+          _homeCaptureActive = started;
+          _homeCaptureSource =
+              started ? (startedHere ? _HomeCaptureSource.necklaceOwned : _HomeCaptureSource.necklaceContinuous) : null;
+        });
         if (!started) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
         }
@@ -436,7 +479,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (!mounted) return;
       final started =
           capture.recordingState == RecordingState.record || capture.recordingState == RecordingState.initialising;
-      setState(() => _homeCaptureActive = started);
+      setState(() {
+        _homeCaptureActive = started;
+        _homeCaptureSource = started ? _HomeCaptureSource.phone : null;
+      });
       if (!started) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
       }
@@ -597,13 +643,18 @@ class _TodayHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final rawName = SharedPreferencesUtil().givenName.trim();
-    final firstName = rawName.isNotEmpty ? rawName : (SharedPreferencesUtil().demoMode ? 'Margaret' : 'there');
+    final firstName = rawName.isNotEmpty
+        ? rawName
+        : (SharedPreferencesUtil().demoMode ? 'Margaret' : context.l10n.todayGreetingFallbackName);
     final greeting = now.hour < 12
-        ? 'Good morning'
+        ? context.l10n.todayGreetingMorning(firstName)
         : now.hour < 17
-            ? 'Good afternoon'
-            : 'Good evening';
-    final date = DateFormat('EEEE · MMMM d').format(now).toUpperCase();
+            ? context.l10n.todayGreetingAfternoon(firstName)
+            : context.l10n.todayGreetingEvening(firstName);
+    final locale = Localizations.localeOf(context).toLanguageTag();
+    final date = context.l10n
+        .todayDateEyebrow(DateFormat('EEEE', locale).format(now), DateFormat('MMMM d', locale).format(now))
+        .toUpperCase();
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -614,7 +665,7 @@ class _TodayHeader extends StatelessWidget {
               Text(date, style: EllaTextStyles.eyebrow),
               const SizedBox(height: 8),
               Text(
-                '$greeting, $firstName.',
+                greeting,
                 style: EllaTextStyles.noteBody.copyWith(fontSize: 24, height: 1.14),
               ),
             ],

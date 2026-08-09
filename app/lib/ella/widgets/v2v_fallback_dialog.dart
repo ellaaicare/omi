@@ -25,6 +25,7 @@ class V2VFallbackDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final providerName = localizedV2VProviderName(context, receipt.provider);
+    final canRetry = allowStandardFallback || !receipt.isPermanentScopedFailure;
     return AlertDialog(
       backgroundColor: EllaColors.card,
       title: Text(
@@ -36,7 +37,9 @@ class V2VFallbackDialog extends StatelessWidget {
       content: Text(
         allowStandardFallback
             ? context.l10n.voiceV2vUnavailableBody(receipt.stage.name, receipt.safeDetail)
-            : context.l10n.scopedTalkUnavailableBody,
+            : canRetry
+                ? context.l10n.scopedTalkRetryableBody
+                : context.l10n.scopedTalkUnavailableBody,
         style: EllaTextStyles.body,
       ),
       actions: [
@@ -52,7 +55,7 @@ class V2VFallbackDialog extends StatelessWidget {
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
             child: Text(context.l10n.voiceUseElevenLabs),
           ),
-        if (allowStandardFallback)
+        if (canRetry)
           FilledButton(
             key: const ValueKey('v2v-failure-retry'),
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
