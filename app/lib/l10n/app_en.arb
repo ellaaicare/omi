@@ -10638,12 +10638,15 @@
   "aiConsentGrantUnavailableBody": "Ella couldn't confirm your choice with the server, so nothing has been shared yet. Please try again in a few minutes.",
   "aiConsentGrantPolicyMismatchBody": "This version of Ella no longer matches the current privacy policy. Please update the app, then try again.",
   "aiConsentGrantNetworkBody": "Ella couldn't reach the server. Check your connection and try again.",
-  "todayCardPreparingEyebrow": "FOR YOU TODAY",
-  "todayCardPreparingHeadline": "Ella is putting something together for you.",
-  "todayCardPreparingBody": "Pull down in a little while to check again.",
+  "todayCardPreparingEyebrow": "ELLA'S DAILY NOTE",
+  "todayCardPreparingHeadline": "Preparing today's note",
+  "todayCardPreparingBody": "Ella is finding one useful moment from your recent memories.",
   "todayCardNewUserHeadline": "What matters to you?",
   "todayCardNewUserBody": "Tell Ella about a person, place, or interest you would like to talk about.",
-  "todayCardDegradedHeadline": "Ella could not refresh this just now.",
-  "todayCardDegradedBody": "Pull down to try again.",
-  "todayCardSavedStatus": "Showing the last item Ella saved for you."
+  "todayCardNoSafeSourceHeadline": "No new note yet",
+  "todayCardNoSafeSourceBody": "Ella will add one when there is enough recent memory to be useful.",
+  "todayCardDegradedHeadline": "Today's note isn't available right now",
+  "todayCardDegradedBody": "Pull down to try again. If this keeps happening, contact support.",
+  "todayCardSavedStatus": "Showing the last note while Ella checks for an update.",
+  "todayCardProvenanceRecentMemory": "From a recent memory"
 }

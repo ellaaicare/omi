@@ -17262,19 +17262,19 @@ abstract class AppLocalizations {
   /// No description provided for @todayCardPreparingEyebrow.
   ///
   /// In en, this message translates to:
-  /// **'FOR YOU TODAY'**
+  /// **'ELLA\'S DAILY NOTE'**
   String get todayCardPreparingEyebrow;
 
   /// No description provided for @todayCardPreparingHeadline.
   ///
   /// In en, this message translates to:
-  /// **'Ella is putting something together for you.'**
+  /// **'Preparing today\'s note'**
   String get todayCardPreparingHeadline;
 
   /// No description provided for @todayCardPreparingBody.
   ///
   /// In en, this message translates to:
-  /// **'Pull down in a little while to check again.'**
+  /// **'Ella is finding one useful moment from your recent memories.'**
   String get todayCardPreparingBody;
 
   /// No description provided for @todayCardNewUserHeadline.
@@ -17289,23 +17289,41 @@ abstract class AppLocalizations {
   /// **'Tell Ella about a person, place, or interest you would like to talk about.'**
   String get todayCardNewUserBody;
 
+  /// No description provided for @todayCardNoSafeSourceHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'No new note yet'**
+  String get todayCardNoSafeSourceHeadline;
+
+  /// No description provided for @todayCardNoSafeSourceBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will add one when there is enough recent memory to be useful.'**
+  String get todayCardNoSafeSourceBody;
+
   /// No description provided for @todayCardDegradedHeadline.
   ///
   /// In en, this message translates to:
-  /// **'Ella could not refresh this just now.'**
+  /// **'Today\'s note isn\'t available right now'**
   String get todayCardDegradedHeadline;
 
   /// No description provided for @todayCardDegradedBody.
   ///
   /// In en, this message translates to:
-  /// **'Pull down to try again.'**
+  /// **'Pull down to try again. If this keeps happening, contact support.'**
   String get todayCardDegradedBody;
 
   /// No description provided for @todayCardSavedStatus.
   ///
   /// In en, this message translates to:
-  /// **'Showing the last item Ella saved for you.'**
+  /// **'Showing the last note while Ella checks for an update.'**
   String get todayCardSavedStatus;
+
+  /// No description provided for @todayCardProvenanceRecentMemory.
+  ///
+  /// In en, this message translates to:
+  /// **'From a recent memory'**
+  String get todayCardProvenanceRecentMemory;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
