@@ -209,6 +209,67 @@ def test_chat_history_rejects_query_uid_that_differs_from_firebase_subject():
     assert error.value.status_code == 403
 
 
+def test_isolated_hermes_chat_has_a_bounded_provider_timeout(monkeypatch):
+    captured = {}
+
+    async def no_events(*_args, **_kwargs):
+        return []
+
+    async def no_temporal(*_args, **_kwargs):
+        return "recent context", []
+
+    async def canonical_write(*_args, **_kwargs):
+        return None
+
+    async def stable_runtime(_identity):
+        return _invitation_chat_runtime()
+
+    class TimedOutStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aiter_lines(self):
+            raise chat.httpx.ReadTimeout("content-free provider timeout")
+            yield
+
+    class TimedClient:
+        def __init__(self, *_args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return TimedOutStreamResponse()
+
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal)
+    monkeypatch.setattr(chat, "_write_ios_chat_canonical_event", canonical_write)
+    monkeypatch.setattr(chat, "revalidate_runtime_authority", stable_runtime)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", TimedClient)
+
+    chunks = asyncio.run(
+        _collect_stream(
+            chat._stream_hermes_chat(
+                "content-free timeout test",
+                "invited-user",
+                runtime=_invitation_chat_runtime(),
+            )
+        )
+    )
+
+    assert captured["timeout"] == chat.HERMES_CHAT_REQUEST_TIMEOUT_SECONDS == 60.0
+    assert chunks == ["data: Error: Hermes request timed out\n\n"]
+
+
 def test_mounted_chat_history_authenticates_before_runtime_or_history_work(monkeypatch):
     downstream_calls = []
 
