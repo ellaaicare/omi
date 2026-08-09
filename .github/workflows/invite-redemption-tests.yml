@@ -170,7 +170,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 189
+          test "$collected" -eq 190
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -212,6 +212,7 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation"
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_positive_healthy_active"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_negative_disabled_unhealthy"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_no_row_returns_none"
