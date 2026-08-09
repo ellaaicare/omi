@@ -1815,7 +1815,7 @@ def test_self_hosted_consent_authority_change_invalidates_runtime(
                     profile_uid=changed.profile_uid,
                     consent_receipt_id=f"{changed.consent_receipt_id}-changed",
                     profile_binding_id=changed.profile_binding_id,
-                    policy_version=changed.policy_version,
+                    policy_version=f"{changed.policy_version}-changed",
                     processor_set_hash=changed.processor_set_hash,
                     scope_version=changed.scope_version,
                     scope_hash=changed.scope_hash,

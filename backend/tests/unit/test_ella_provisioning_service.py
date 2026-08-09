@@ -49,6 +49,7 @@ from ella.services.provisioning import (
     ProvisioningError,
     VerifiedIdentity,
     extract_runtime_binding,
+    current_self_hosted_runtime_lineage,
     provision_idempotency_key,
     provision_timeout_seconds,
     public_receipt,
@@ -238,6 +239,7 @@ class FakeRepository:
         self.job_calls = []
         self.voice_seed_calls = []
         self.voice_seed_result = False
+        self.last_activation_arguments = None
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -322,7 +324,11 @@ class FakeRepository:
         authority_lineage=None,
         model=SELF_HOSTED_RUNTIME_MODEL,
     ):
-        del require_invitation_target, authority_lineage, model
+        self.last_activation_arguments = {
+            "require_invitation_target": require_invitation_target,
+            "authority_lineage": authority_lineage,
+            "model": model,
+        }
         self.activation_calls += 1
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
@@ -3172,7 +3178,7 @@ def test_missing_attestation_key_fails_before_provisioner_or_binding_write(monke
 
 def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
-    identity = VerifiedIdentity("fresh-relax-user", "user@example.test", "User", "UTC")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
     repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
 
     # Without the relax flag a fresh self-hosted UID is denied (strict gate).
@@ -3207,6 +3213,51 @@ def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch)
 
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
+
+
+def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv(
+        "ELLA_HERMES_PROVISION_ATTESTATION_KEY",
+        "unit-test-attestation-key-32-bytes-minimum",
+    )
+    identity = VerifiedIdentity("fresh-relax-user", "user@example.test", "User", "UTC")
+
+    relaxed_repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+    asyncio.run(
+        ProvisioningCoordinator(
+            relaxed_repository,
+            FakeProvisionClient(_runtime_receipt()),
+        ).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=identity,
+        )
+    )
+    assert relaxed_repository.job["state"] == "ready"
+    assert relaxed_repository.last_activation_arguments == {
+        "require_invitation_target": False,
+        "authority_lineage": None,
+        "model": SELF_HOSTED_RUNTIME_MODEL,
+    }
+
+    admission = _self_hosted_admission(identity.uid)
+    invitation_repository = FakeRepository(
+        self_hosted_admission=admission,
+        self_hosted_owned=True,
+    )
+    asyncio.run(
+        ProvisioningCoordinator(
+            invitation_repository,
+            FakeProvisionClient(_runtime_receipt()),
+        ).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=identity,
+        )
+    )
+    assert invitation_repository.job["state"] == "ready"
+    assert invitation_repository.last_activation_arguments["require_invitation_target"] is True
+    assert invitation_repository.last_activation_arguments["authority_lineage"] == current_self_hosted_runtime_lineage()
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):

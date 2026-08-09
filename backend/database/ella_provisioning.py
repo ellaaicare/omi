@@ -2979,7 +2979,7 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def seed_voice_entitlement_if_absent(self, *, uid: str) -> bool:
-        """Create-if-absent self-hosted grok voice entitlement.
+        """Create or safely recover a self-hosted grok voice entitlement.
 
         Fresh self-hosted hermes user provisioning should carry a working
         grok-voice entitlement so the first voice/chat session does not open
@@ -2988,9 +2988,11 @@ class EllaProvisioningRepository:
         plan=canary, provider_allowlist={grok-voice}, mode_allowlist={v4},
         explicit quota (daily 2700s / monthly 43200s / session 1200s).
 
-        No-clobber / row precedence: ``ON CONFLICT (uid) DO NOTHING`` — an
-        existing entitlement (e.g. a user with a prior voice row) is left
-        untouched. Returns True when a row was newly inserted.
+        No-clobber / row precedence: every existing entitlement is left
+        untouched except the exact invitationless auto-provision shape tied to
+        the content-free recovery receipt for a previous
+        ``managed_cloud_consent_grant_changed`` quarantine. Returns True when a
+        row was newly inserted or safely recovered.
         """
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
@@ -3008,7 +3010,7 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
-                result = await connection.execute(
+                row = await connection.fetchrow(
                     """
                     INSERT INTO voice_entitlements (
                         uid, status, plan, daily_limit_s, monthly_limit_s,
@@ -3020,6 +3022,7 @@ class EllaProvisioningRepository:
                         $6::text[], $7::text[], $8::text[], $9::jsonb, $10
                     )
                     ON CONFLICT (uid) DO NOTHING
+                    RETURNING revision
                     """,
                     uid,
                     2700,
@@ -3032,7 +3035,70 @@ class EllaProvisioningRepository:
                     json.dumps({"enabled": False, "order": []}),
                     "auto-provision self-hosted grok voice",
                 )
-                return result == "INSERT 0 1"
+                if row is not None:
+                    return True
+
+                recovery_candidates = await connection.fetch(
+                    """
+                    SELECT job.id AS job_id, binding.id AS binding_id
+                    FROM users account
+                    JOIN ella_provisioning_jobs job
+                      ON job.user_id = account.id
+                    JOIN ella_runtime_bindings binding
+                      ON binding.user_id = account.id
+                     AND binding.provider = 'hermes'
+                     AND binding.role = 'user'
+                     AND binding.template_version = job.target_schema_version
+                    WHERE account.omi_uid = $1
+                      AND account.status = 'PENDING'
+                      AND job.state = 'provisioning'
+                      AND job.stage = 'smoke_passed'
+                      AND job.retryable = TRUE
+                      AND job.error_code IS NULL
+                      AND job.receipts @> '[{"type":"fresh_consent_regrant_rearmed","content_free":true}]'::jsonb
+                      AND binding.status = 'shadow'
+                      AND binding.active = FALSE
+                      AND binding.health_state = 'healthy'
+                      AND binding.runtime_target_mode = 'hermes-chat'
+                      AND binding.quarantine_reason IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_invitation_redemptions redemption
+                          WHERE redemption.user_id = account.id
+                      )
+                    FOR UPDATE OF job, binding
+                    """,
+                    uid,
+                )
+                if len(recovery_candidates) != 1:
+                    return False
+
+                row = await connection.fetchrow(
+                    """
+                    UPDATE voice_entitlements
+                    SET status = 'active',
+                        revision = revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE uid = $1
+                      AND status = 'revoked'
+                      AND invitation_id IS NULL
+                      AND plan = 'canary'
+                      AND daily_limit_s = 2700
+                      AND monthly_limit_s = 43200
+                      AND max_session_s = 1200
+                      AND max_concurrent = 1
+                      AND provider_allowlist = ARRAY['grok-voice']::text[]
+                      AND model_allowlist = ARRAY[]::text[]
+                      AND mode_allowlist = ARRAY['v4']::text[]
+                      AND fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                      AND operator_note = 'auto-provision self-hosted grok voice'
+                      AND consent_authority_epoch IS NULL
+                      AND invitation_consent_pending = FALSE
+                    RETURNING revision
+                    """,
+                    uid,
+                )
+                return row is not None
 
     async def activate_runtime_binding(
         self,

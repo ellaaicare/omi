@@ -85,13 +85,9 @@ def invitation_consent_receipt_ref(uid: str, receipt_id: str) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _grant_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
+def _grant_contract_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
     return bool(
         row["decision"] == "granted"
-        and hmac.compare_digest(
-            str(row["consent_receipt_ref"] or ""),
-            consent_receipt_ref(grant.account_uid, grant.consent_receipt_id),
-        )
         and hmac.compare_digest(
             str(row["profile_binding_id"] or ""),
             grant.profile_binding_id,
@@ -113,6 +109,142 @@ def _grant_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
             grant.scope_hash,
         )
     )
+
+
+def _grant_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
+    return bool(
+        _grant_contract_matches(row, grant)
+        and hmac.compare_digest(
+            str(row["consent_receipt_ref"] or ""),
+            consent_receipt_ref(grant.account_uid, grant.consent_receipt_id),
+        )
+    )
+
+
+async def _rearm_fresh_self_hosted_regrant_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    user_id: uuid.UUID,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
+) -> bool:
+    """Rearm only the exact fresh-relax quarantine left by a prior regrant.
+
+    This does not reactivate a runtime. It moves one content-free, invitationless
+    provisioning attempt back to ``pending`` and its disabled binding back to a
+    non-authorizing ``shadow`` state. The normal provisioner must then obtain a
+    fresh Honcho attestation, restage a healthy binding, recover the exact
+    auto-provisioned voice row, and activate it.
+    """
+
+    await authority_advisory_lock.require_self_owner_lock(
+        conn,
+        owner_lock,
+        user_id=user_id,
+    )
+    candidates = await conn.fetch(
+        """
+        SELECT job.id AS job_id, binding.id AS binding_id
+        FROM users account
+        JOIN ella_provisioning_jobs job
+          ON job.user_id = account.id
+        JOIN ella_runtime_bindings binding
+          ON binding.user_id = account.id
+         AND binding.provider = 'hermes'
+         AND binding.role = 'user'
+         AND binding.template_version = job.target_schema_version
+        WHERE account.id = $1
+          AND account.omi_uid = $2
+          AND account.status = 'PENDING'
+          AND job.state = 'blocked'
+          AND job.stage = 'runtime_ready'
+          AND job.retryable = FALSE
+          AND job.error_code = 'invitation_authority_revoked'
+          AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
+          AND binding.status = 'disabled'
+          AND binding.active = FALSE
+          AND binding.health_state = 'unhealthy'
+          AND binding.quarantine_reason = 'managed_cloud_consent_grant_changed'
+          AND binding.runtime_target_mode = 'hermes-chat'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ella_invitation_redemptions redemption
+              WHERE redemption.user_id = account.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM voice_entitlements entitlement
+              WHERE entitlement.uid = $2
+                AND NOT (
+                    entitlement.status = 'revoked'
+                    AND entitlement.invitation_id IS NULL
+                    AND entitlement.plan = 'canary'
+                    AND entitlement.daily_limit_s = 2700
+                    AND entitlement.monthly_limit_s = 43200
+                    AND entitlement.max_session_s = 1200
+                    AND entitlement.max_concurrent = 1
+                    AND entitlement.provider_allowlist = ARRAY['grok-voice']::text[]
+                    AND entitlement.model_allowlist = ARRAY[]::text[]
+                    AND entitlement.mode_allowlist = ARRAY['v4']::text[]
+                    AND entitlement.fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                    AND entitlement.operator_note = 'auto-provision self-hosted grok voice'
+                    AND entitlement.consent_authority_epoch IS NULL
+                    AND entitlement.invitation_consent_pending = FALSE
+                )
+          )
+        FOR UPDATE OF job, binding
+        """,
+        user_id,
+        uid,
+    )
+    if len(candidates) != 1:
+        return False
+
+    candidate = candidates[0]
+    job_result = await conn.execute(
+        """
+        UPDATE ella_provisioning_jobs
+        SET state = 'pending',
+            stage = 'identity_ready',
+            retryable = TRUE,
+            error_code = NULL,
+            error_detail = '{}'::jsonb,
+            receipts = receipts || jsonb_build_array(
+                jsonb_build_object(
+                    'type', 'fresh_consent_regrant_rearmed',
+                    'content_free', TRUE
+                )
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND state = 'blocked'
+          AND error_code = 'invitation_authority_revoked'
+        """,
+        candidate["job_id"],
+    )
+    binding_result = await conn.execute(
+        """
+        UPDATE ella_runtime_bindings
+        SET status = 'shadow',
+            active = FALSE,
+            health_state = 'pending',
+            health_receipt = '{"content_free":true,"reason":"managed_cloud_consent_regrant_recovery_pending"}'::jsonb,
+            disabled_at = NULL,
+            quarantined_at = NULL,
+            quarantine_reason = NULL,
+            revision = revision + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'disabled'
+          AND active = FALSE
+          AND health_state = 'unhealthy'
+          AND quarantine_reason = 'managed_cloud_consent_grant_changed'
+        """,
+        candidate["binding_id"],
+    )
+    if job_result != "UPDATE 1" or binding_result != "UPDATE 1":
+        raise ManagedCloudAuthorityUnavailable("fresh_consent_regrant_recovery_stale")
+    return True
 
 
 async def _quarantine_on_connection(
@@ -311,7 +443,25 @@ async def synchronize_grant(
                         grant.scope_version,
                         grant.scope_hash,
                     )
-                elif not _grant_matches(row, grant):
+                elif _grant_matches(row, grant):
+                    pass
+                elif _grant_contract_matches(row, grant):
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE ella_managed_cloud_consent_authority
+                        SET consent_receipt_ref = $2,
+                            revision = revision + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = $1
+                        RETURNING *
+                        """,
+                        user_id,
+                        consent_receipt_ref(
+                            grant.account_uid,
+                            grant.consent_receipt_id,
+                        ),
+                    )
+                else:
                     row = await conn.fetchrow(
                         """
                         UPDATE ella_managed_cloud_consent_authority
@@ -348,6 +498,13 @@ async def synchronize_grant(
                     )
                 if row is None or not _grant_matches(row, grant):
                     raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_grant_failed")
+                if allow_fresh_uid_bootstrap:
+                    await _rearm_fresh_self_hosted_regrant_on_connection(
+                        conn,
+                        uid=grant.account_uid,
+                        user_id=user_id,
+                        owner_lock=owner_lock,
+                    )
                 pending_count = int(
                     await conn.fetchval(
                         """
