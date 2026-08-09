@@ -47,6 +47,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
   EllaProvisioningPollHandle? _pollHandle;
   int _pollAttempts = 0;
   int _generation = 0;
+
+  // Changes independently of [_generation] so an obsolete request is denied
+  // while its finally block can still release the shared in-flight slot.
+  int _requestContextEpoch = 0;
   bool _requestInFlight = false;
   bool _retryEnsureAfterCurrentRequest = false;
 
@@ -79,6 +83,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _cancelPoll();
     _activeUid = uid;
     _requestContext = requestContext;
+    _requestContextEpoch++;
     _pollAttempts = 0;
     _requestInFlight = false;
     _retryEnsureAfterCurrentRequest = false;
@@ -117,7 +122,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     final context = _requestContext;
     if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
     _requestContext = context.copyWithConsentReceiptId(receiptId);
-    if (isOperational) return;
+    _requestContextEpoch++;
     unawaited(retry());
   }
 
@@ -136,6 +141,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   void reset() {
     _generation++;
+    _requestContextEpoch++;
     _cancelPoll();
     _activeUid = '';
     _requestContext = null;
@@ -151,13 +157,14 @@ class EllaProvisioningProvider extends ChangeNotifier {
   Future<void> _ensure(int generation) async {
     final context = _requestContext;
     if (context == null || generation != _generation || _requestInFlight) return;
+    final requestContextEpoch = _requestContextEpoch;
     _requestInFlight = true;
     try {
       final response = await _transport.ensure(context);
-      if (generation != _generation) return;
-      await _applyResponse(response, generation);
+      if (!_isCurrentRequest(generation, requestContextEpoch)) return;
+      await _applyResponse(response, generation, requestContextEpoch);
     } catch (error) {
-      if (generation != _generation) return;
+      if (!_isCurrentRequest(generation, requestContextEpoch)) return;
       Logger.debug('[ProvisioningGate] Ensure failed: $error');
       _setFailure('network_unavailable');
       _schedulePoll(generation, _backoffDelay);
@@ -174,13 +181,14 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
 
     _pollAttempts++;
+    final requestContextEpoch = _requestContextEpoch;
     _requestInFlight = true;
     try {
       final response = await _transport.status();
-      if (generation != _generation) return;
-      await _applyResponse(response, generation);
+      if (!_isCurrentRequest(generation, requestContextEpoch)) return;
+      await _applyResponse(response, generation, requestContextEpoch);
     } catch (error) {
-      if (generation != _generation) return;
+      if (!_isCurrentRequest(generation, requestContextEpoch)) return;
       Logger.debug('[ProvisioningGate] Status failed: $error');
       _setFailure('network_unavailable');
       _schedulePoll(generation, _backoffDelay);
@@ -189,13 +197,14 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> _applyResponse(EllaProvisioningResponse response, int generation) async {
+  Future<void> _applyResponse(EllaProvisioningResponse response, int generation, int requestContextEpoch) async {
+    if (!_isCurrentRequest(generation, requestContextEpoch)) return;
     final nextReceipt = response.receipt;
     if (!response.isAccepted || nextReceipt == null) {
       if (nextReceipt != null) {
-        receipt = nextReceipt;
         await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
-        if (generation != _generation) return;
+        if (!_isCurrentRequest(generation, requestContextEpoch)) return;
+        receipt = nextReceipt;
       }
       final code = nextReceipt?.errorCode.isNotEmpty == true
           ? nextReceipt!.errorCode
@@ -217,10 +226,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
       return;
     }
 
+    await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
+    if (!_isCurrentRequest(generation, requestContextEpoch)) return;
     receipt = nextReceipt;
     errorCode = nextReceipt.errorCode;
-    await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
-    if (generation != _generation) return;
 
     if (nextReceipt.state == EllaProvisioningState.ready && !nextReceipt.isOperational) {
       state = EllaProvisioningState.blocked;
@@ -234,13 +243,18 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } else {
       state = nextReceipt.state;
     }
-    notifyListeners();
-
     if (isOperational) {
       await _preferences.markEllaProvisioningVerified(_activeUid);
+      if (!_isCurrentRequest(generation, requestContextEpoch)) return;
       await const EllaAccountIsolationService().resumeAfterVerifiedProvisioning();
-      if (generation != _generation) return;
+      if (!_isCurrentRequest(generation, requestContextEpoch)) return;
     }
+
+    // Publish ready only after its exact account/provisioning authority has
+    // been reverified. Consumers must never recapture a ready receipt between
+    // the state transition and the authority commit.
+    notifyListeners();
+    if (!_isCurrentRequest(generation, requestContextEpoch)) return;
 
     if (_shouldPoll) {
       _schedulePoll(generation, _pollDelay(nextReceipt));
@@ -293,6 +307,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _pollHandle = null;
   }
 
+  bool _isCurrentRequest(int generation, int requestContextEpoch) =>
+      generation == _generation && requestContextEpoch == _requestContextEpoch;
+
   void _finishRequest(int generation) {
     if (generation != _generation) return;
     _requestInFlight = false;
@@ -305,6 +322,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   @override
   void dispose() {
     _generation++;
+    _requestContextEpoch++;
     _cancelPoll();
     super.dispose();
   }

@@ -22,7 +22,7 @@ bool get hasAuthenticatedGuardianIdentity {
 /// fail-closed when the build capability or exact Firebase identity is absent.
 bool allowsGuardianSurface({
   bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
-  bool isInvitationBuild = isEllaInternalPilotEnabled,
+  bool isInvitationBuild = SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled,
   bool guardianConfigured = isEllaGuardianConfigured,
   bool? guardianAuthenticated,
 }) {
@@ -35,7 +35,7 @@ bool allowsGuardianSurface({
 /// Whispers until those separate delivery contracts are proven.
 bool allowsGuardianCareSurface({
   bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
-  bool isInvitationBuild = isEllaInternalPilotEnabled,
+  bool isInvitationBuild = SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled,
   bool guardianConfigured = isEllaGuardianConfigured,
   bool? guardianAuthenticated,
 }) =>
@@ -54,7 +54,7 @@ bool allowsGuardianCareSurface({
 String? allowedEllaNavigationRoute(
   String? route, {
   bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
-  bool isInvitationBuild = isEllaInternalPilotEnabled,
+  bool isInvitationBuild = SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled,
   bool guardianConfigured = isEllaGuardianConfigured,
   bool? guardianAuthenticated,
 }) {

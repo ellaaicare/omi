@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/services/services.dart';
@@ -16,6 +17,7 @@ class EllaAccountIsolationService {
     this.stopServices,
     this.quarantineLegacy,
     this.stopNotificationAudio,
+    this.stopOnDeviceTts,
     this.clearGuardianNotifications,
   });
 
@@ -25,6 +27,7 @@ class EllaAccountIsolationService {
   final FutureOr<void> Function()? stopServices;
   final FutureOr<void> Function()? quarantineLegacy;
   final FutureOr<void> Function()? stopNotificationAudio;
+  final FutureOr<void> Function()? stopOnDeviceTts;
   final FutureOr<void> Function()? clearGuardianNotifications;
 
   static final Map<Object, FutureOr<void> Function()> _captureProducers = {};
@@ -58,6 +61,11 @@ class EllaAccountIsolationService {
       await stopNotificationAudio!.call();
     } else {
       await EllaNotificationHandler.stopAudio();
+    }
+    if (stopOnDeviceTts != null) {
+      await stopOnDeviceTts!.call();
+    } else {
+      await ElevenLabsTts.stopOnDevice();
     }
     if (clearGuardianNotifications != null) {
       await clearGuardianNotifications!.call();

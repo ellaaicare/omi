@@ -365,6 +365,7 @@ void main() {
     final calls = <String>[];
     final service = EllaAccountIsolationService(
       stopNotificationAudio: () => calls.add('notification-audio'),
+      stopOnDeviceTts: () => calls.add('on-device-tts'),
       clearGuardianNotifications: () => calls.add('notification-residue'),
       stopCapture: () => calls.add('capture'),
       stopV2v: () => calls.add('v2v'),
@@ -378,6 +379,7 @@ void main() {
     expect(calls, [
       'guardian',
       'notification-audio',
+      'on-device-tts',
       'notification-residue',
       'capture',
       'v2v',

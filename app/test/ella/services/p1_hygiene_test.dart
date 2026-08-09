@@ -100,12 +100,13 @@ void main() {
     );
   });
 
-  test('release helper keeps Whispers default-off and passes only an explicit Guardian opt-in', () {
+  test('release helper enables authenticated Whispers for prod and preserves an explicit build override', () {
     final script = File('${_appRoot().path}/ios/build-and-upload.sh').readAsStringSync();
 
-    expect(script, contains(r'ELLA_GUARDIAN_ENABLED:-false'));
+    expect(script, contains('ELLA_GUARDIAN_ENABLED="true"'));
+    expect(script, contains('ELLA_GUARDIAN_ENABLED="false"'));
     expect(script, contains(r'DART_DEFINES+=(--dart-define=ELLA_GUARDIAN_ENABLED=true)'));
-    expect(script, contains(r'ELLA_GUARDIAN_ENABLED=${ELLA_GUARDIAN_ENABLED:-false}'));
+    expect(script, contains(r'ELLA_GUARDIAN_ENABLED=$ELLA_GUARDIAN_ENABLED'));
   });
 
   test('native Guardian polling, playback reporting, and injection require explicit availability', () {

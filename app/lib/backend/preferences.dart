@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/schema/app.dart';
@@ -27,6 +28,7 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
   static int _aiConsentAuthorityGeneration = 0;
+  static final ValueNotifier<int> _aiConsentAuthorityChanges = ValueNotifier<int>(0);
   static String _verifiedEllaProvisioningUid = '';
   static int _verifiedEllaProvisioningBindingRevision = 0;
   static String _verifiedEllaProvisioningPolicyRevision = '';
@@ -66,6 +68,8 @@ class SharedPreferencesUtil {
   String get uid => getString('uid');
 
   int get aiConsentAuthorityGeneration => _aiConsentAuthorityGeneration;
+
+  static ValueListenable<int> get aiConsentAuthorityChanges => _aiConsentAuthorityChanges;
 
   //-------------------------------- Device ----------------------------------//
 
@@ -362,6 +366,7 @@ class SharedPreferencesUtil {
     _aiConsentAuthorityGeneration++;
     clearAiConsentServerVerification();
     _clearEllaProvisioningServerVerification();
+    _aiConsentAuthorityChanges.value = _aiConsentAuthorityGeneration;
   }
 
   /// Invalidates every delayed account operation before Firebase identity is
@@ -377,7 +382,12 @@ class SharedPreferencesUtil {
     String profileBindingId = '',
     String serverDecidedAt = '',
   }) {
-    if (uid != aiConsentReceiptUid || profileBindingId != aiConsentProfileBindingId) {
+    final hasAccountBoundReceipt = receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty;
+    final nextReceiptId = hasAccountBoundReceipt ? receiptId : '';
+    final nextReceiptUid = hasAccountBoundReceipt ? uid : '';
+    if (nextReceiptUid != aiConsentReceiptUid ||
+        profileBindingId != aiConsentProfileBindingId ||
+        nextReceiptId != aiConsentReceiptId) {
       _invalidateAiConsentAuthority();
     }
     aiConsentAccepted = true;
@@ -391,9 +401,9 @@ class SharedPreferencesUtil {
     saveString('aiConsentScopeHash', currentAiConsentScopeHash);
     saveString('aiConsentServerDecidedAt', serverDecidedAt);
     remove('aiConsentDeferredVersion');
-    if (receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty) {
-      saveString('aiConsentReceiptId', receiptId);
-      saveString('aiConsentReceiptUid', uid);
+    if (hasAccountBoundReceipt) {
+      saveString('aiConsentReceiptId', nextReceiptId);
+      saveString('aiConsentReceiptUid', nextReceiptUid);
     } else {
       remove('aiConsentReceiptId');
       remove('aiConsentReceiptUid');

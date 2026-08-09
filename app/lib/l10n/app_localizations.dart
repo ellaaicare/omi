@@ -16053,6 +16053,18 @@ abstract class AppLocalizations {
   /// **'Recent Guardian alerts and playback status'**
   String get guardianAlertsHistorySubtitle;
 
+  /// No description provided for @ellaWhisperHistoryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'What Ella has said'**
+  String get ellaWhisperHistoryTitle;
+
+  /// No description provided for @ellaWhisperHistorySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Helpful things Ella has said and why'**
+  String get ellaWhisperHistorySubtitle;
+
   /// No description provided for @guardianAlertsLoadFailed.
   ///
   /// In en, this message translates to:
@@ -16860,19 +16872,19 @@ abstract class AppLocalizations {
   /// No description provided for @ellaClientUpdateRequiredBody.
   ///
   /// In en, this message translates to:
-  /// **'Update Ella to continue securely. This version cannot connect to your private workspace.'**
+  /// **'Update Ella to continue securely. This version can no longer connect to Ella.'**
   String get ellaClientUpdateRequiredBody;
 
   /// No description provided for @ellaWorkspaceUnavailableTitle.
   ///
   /// In en, this message translates to:
-  /// **'Your Ella workspace is not ready'**
+  /// **'Ella is still getting ready'**
   String get ellaWorkspaceUnavailableTitle;
 
   /// No description provided for @ellaWorkspaceUnavailableBody.
   ///
   /// In en, this message translates to:
-  /// **'Ella could not verify your private workspace. Try again shortly.'**
+  /// **'Ella could not finish getting ready. Try again shortly.'**
   String get ellaWorkspaceUnavailableBody;
 
   /// No description provided for @ellaChatUnavailableTitle.
@@ -17246,6 +17258,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella couldn\'t reach the server. Check your connection and try again.'**
   String get aiConsentGrantNetworkBody;
+
+  /// No description provided for @todayCardPreparingEyebrow.
+  ///
+  /// In en, this message translates to:
+  /// **'FOR YOU TODAY'**
+  String get todayCardPreparingEyebrow;
+
+  /// No description provided for @todayCardPreparingHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is putting something together for you.'**
+  String get todayCardPreparingHeadline;
+
+  /// No description provided for @todayCardPreparingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Pull down in a little while to check again.'**
+  String get todayCardPreparingBody;
+
+  /// No description provided for @todayCardNewUserHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'What matters to you?'**
+  String get todayCardNewUserHeadline;
+
+  /// No description provided for @todayCardNewUserBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Tell Ella about a person, place, or interest you would like to talk about.'**
+  String get todayCardNewUserBody;
+
+  /// No description provided for @todayCardDegradedHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not refresh this just now.'**
+  String get todayCardDegradedHeadline;
+
+  /// No description provided for @todayCardDegradedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Pull down to try again.'**
+  String get todayCardDegradedBody;
+
+  /// No description provided for @todayCardSavedStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Showing the last item Ella saved for you.'**
+  String get todayCardSavedStatus;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

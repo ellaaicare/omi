@@ -8603,6 +8603,12 @@ class AppLocalizationsNo extends AppLocalizations {
   String get guardianAlertsHistorySubtitle => 'Recent Guardian alerts and playback status';
 
   @override
+  String get ellaWhisperHistoryTitle => 'What Ella has said';
+
+  @override
+  String get ellaWhisperHistorySubtitle => 'Helpful things Ella has said and why';
+
+  @override
   String get guardianAlertsLoadFailed => 'Could not load Guardian alerts';
 
   @override
@@ -9051,13 +9057,13 @@ class AppLocalizationsNo extends AppLocalizations {
 
   @override
   String get ellaClientUpdateRequiredBody =>
-      'Update Ella to continue securely. This version cannot connect to your private workspace.';
+      'Update Ella to continue securely. This version can no longer connect to Ella.';
 
   @override
-  String get ellaWorkspaceUnavailableTitle => 'Your Ella workspace is not ready';
+  String get ellaWorkspaceUnavailableTitle => 'Ella is still getting ready';
 
   @override
-  String get ellaWorkspaceUnavailableBody => 'Ella could not verify your private workspace. Try again shortly.';
+  String get ellaWorkspaceUnavailableBody => 'Ella could not finish getting ready. Try again shortly.';
 
   @override
   String get ellaChatUnavailableTitle => 'Ella could not connect';
@@ -9256,4 +9262,28 @@ class AppLocalizationsNo extends AppLocalizations {
 
   @override
   String get aiConsentGrantNetworkBody => 'Ella couldn\'t reach the server. Check your connection and try again.';
+
+  @override
+  String get todayCardPreparingEyebrow => 'FOR YOU TODAY';
+
+  @override
+  String get todayCardPreparingHeadline => 'Ella is putting something together for you.';
+
+  @override
+  String get todayCardPreparingBody => 'Pull down in a little while to check again.';
+
+  @override
+  String get todayCardNewUserHeadline => 'What matters to you?';
+
+  @override
+  String get todayCardNewUserBody => 'Tell Ella about a person, place, or interest you would like to talk about.';
+
+  @override
+  String get todayCardDegradedHeadline => 'Ella could not refresh this just now.';
+
+  @override
+  String get todayCardDegradedBody => 'Pull down to try again.';
+
+  @override
+  String get todayCardSavedStatus => 'Showing the last item Ella saved for you.';
 }

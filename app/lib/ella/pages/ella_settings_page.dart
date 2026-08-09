@@ -15,7 +15,6 @@ import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/alert_channels_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
-import 'package:omi/ella/pages/ella_workspace_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
@@ -262,15 +261,6 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
             const SizedBox(height: 8),
-            EllaSettingsRow(
-              icon: Icons.lock_person_outlined,
-              title: context.l10n.ellaWorkspaceTitle,
-              subtitle: context.l10n.ellaWorkspaceSettingsSubtitle,
-              onTap: () {
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaWorkspacePage()));
-              },
-            ),
-            const SizedBox(height: 8),
 
             // Internal policy picker, only available after the developer unlock.
             if (_developerUnlocked && showGuardianCareSurfaces)
@@ -365,8 +355,8 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               EllaSettingsRow(
                 key: const Key('guardian-history-settings-entry'),
                 icon: Icons.record_voice_over_rounded,
-                title: 'What Ella has said',
-                subtitle: 'Helpful things Ella has said and why',
+                title: context.l10n.ellaWhisperHistoryTitle,
+                subtitle: context.l10n.ellaWhisperHistorySubtitle,
                 onTap: () {
                   Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
                 },
