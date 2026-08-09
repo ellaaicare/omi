@@ -509,6 +509,12 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
 
+    Future<void> openHomeControls() async {
+      await tester.tap(find.byKey(const Key('today-controls-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+
     expect(find.byType(HomePage), findsOneWidget);
     expect(find.byType(TodayPage, skipOffstage: false), findsOneWidget);
     expect(find.byType(ChatPage, skipOffstage: false), findsOneWidget);
@@ -518,6 +524,12 @@ void main() {
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
     final expectedNow = previewEnabled ? previewNow : runtimeNow;
     expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
+    expect(find.text('Record a moment'), findsOneWidget);
+    final expectedRecordingSource =
+        deviceProvider.presentationIsConnected ? 'Records with your necklace' : 'Records on this iPhone';
+    expect(find.text(expectedRecordingSource, skipOffstage: false), findsOneWidget);
+    expect(find.text('Voice'), findsNothing);
+    expect(find.text('Talk'), findsOneWidget);
     expect(find.text(previewEnabled ? 'Preview reminder' : 'Runtime reminder'), findsOneWidget);
     expect(find.text(previewEnabled ? 'Runtime reminder' : 'Preview reminder'), findsNothing);
 
@@ -525,6 +537,8 @@ void main() {
     expect(find.byKey(const Key('today-card-semantics')), findsOneWidget);
     expect(find.text(previewEnabled ? 'Preview daily memo' : 'Runtime daily memo'), findsOneWidget);
     if ((SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured) {
+      expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
+      await openHomeControls();
       expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);
       expect(find.textContaining('Whispers are off'), findsOneWidget);
       expect(guardianNativeStarts, 0);
@@ -538,6 +552,7 @@ void main() {
       expect(guardianModeWrites, 1);
       expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
       expect(guardianNativeStarts, 1);
+      await openHomeControls();
       expect(find.textContaining('Whispers are on'), findsOneWidget);
 
       // A failed disable must read back server authority. The server remains
@@ -555,6 +570,7 @@ void main() {
       expect(guardianServerEnabled, isTrue);
       expect(guardianNativeStops, greaterThanOrEqualTo(1));
       expect(guardianNativeStarts, 2);
+      await openHomeControls();
       expect(find.textContaining('Whispers are on'), findsOneWidget);
       expect(
         tester
@@ -573,7 +589,8 @@ void main() {
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
       );
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump(const Duration(milliseconds: 400));
+      await openHomeControls();
 
       final unavailableSwitch = tester.widget<Switch>(
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
@@ -596,6 +613,7 @@ void main() {
       await tester.pumpWidget(buildHome(todayKey: UniqueKey()));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
+      await openHomeControls();
 
       final initialFailureSwitch = tester.widget<Switch>(
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
@@ -696,6 +714,8 @@ void main() {
         child: MaterialApp(
           navigatorKey: MyApp.navigatorKey,
           navigatorObservers: [observer],
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
           home: const HomePage(
             navigateToRoute: '/facts',
             runtimeSideEffectsEnabled: false,

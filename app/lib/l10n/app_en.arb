@@ -10643,10 +10643,59 @@
   "todayCardPreparingBody": "Ella is finding one useful moment from your recent memories.",
   "todayCardNewUserHeadline": "What matters to you?",
   "todayCardNewUserBody": "Tell Ella about a person, place, or interest you would like to talk about.",
+  "todayCardFirstNoteHeadline": "Your first note begins with a moment",
+  "todayCardFirstNoteBody": "Record a moment today. Ella will turn the moments you choose into a note worth returning to.",
   "todayCardNoSafeSourceHeadline": "No new note yet",
   "todayCardNoSafeSourceBody": "Ella will add one when there is enough recent memory to be useful.",
   "todayCardDegradedHeadline": "Today's note isn't available right now",
   "todayCardDegradedBody": "Pull down to try again. If this keeps happening, contact support.",
+  "todayCardAuthorityUnavailableHeadline": "Ella is still getting your note ready",
+  "todayCardAuthorityUnavailableBody": "Your Daily Note will appear after Ella finishes setting up your account.",
   "todayCardSavedStatus": "Showing the last note while Ella checks for an update.",
-  "todayCardProvenanceRecentMemory": "From a recent memory"
+  "todayCardProvenanceRecentMemory": "From a recent memory",
+  "todayRecordMoment": "Record a moment",
+  "todayRecordStarting": "Starting…",
+  "todayRecordListening": "Listening… tap to finish",
+  "todayRecordOnPhone": "Records on this iPhone",
+  "todayRecordWithNecklace": "Records with your necklace",
+  "todayRecordingUnavailable": "Recording isn't available right now.",
+  "todayControlsTitle": "Ella controls",
+  "todayControlsButton": "Open recording and Whisper controls",
+  "todayRecordingSource": "Recording source",
+  "todayManageNecklace": "Manage necklace",
+  "todayRecentMemories": "Recent memories",
+  "todayMemoryPhotoLabel": "Photo from this memory",
+  "todayFirstMemoryHeadline": "Your journal begins with one moment",
+  "todayFirstMemoryBody": "Record something you want to remember. Ella will bring meaningful moments back here.",
+  "todayGreetingFallbackName": "there",
+  "todayGreetingMorning": "Good morning, {name}",
+  "@todayGreetingMorning": {
+    "description": "Morning greeting on Ella Home",
+    "placeholders": {"name": {"type": "String"}}
+  },
+  "todayGreetingAfternoon": "Good afternoon, {name}",
+  "@todayGreetingAfternoon": {
+    "description": "Afternoon greeting on Ella Home",
+    "placeholders": {"name": {"type": "String"}}
+  },
+  "todayGreetingEvening": "Good evening, {name}",
+  "@todayGreetingEvening": {
+    "description": "Evening greeting on Ella Home",
+    "placeholders": {"name": {"type": "String"}}
+  },
+  "todayDateEyebrow": "{weekday} · {monthDay}",
+  "@todayDateEyebrow": {
+    "description": "Localized date anchor on Ella Home",
+    "placeholders": {
+      "weekday": {"type": "String"},
+      "monthDay": {"type": "String"}
+    }
+  },
+  "bottomNavHome": "Home",
+  "bottomNavChat": "Chat",
+  "bottomNavTalk": "Talk",
+  "bottomNavSettings": "Settings",
+  "scopedTalkUnavailableTitle": "Talk isn't available for this item",
+  "scopedTalkUnavailableBody": "Ella can't open this item in Talk right now. Close this window and keep browsing.",
+  "scopedTalkRetryableBody": "Ella couldn't open this item in Talk just now. Try again, or close this window and keep browsing."
 }

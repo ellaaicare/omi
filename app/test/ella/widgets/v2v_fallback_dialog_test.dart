@@ -36,7 +36,7 @@ void main() {
     expect(find.byKey(const ValueKey('v2v-failure-cancel')), findsOneWidget);
   });
 
-  testWidgets('memory-scoped failures offer retry or stop without an unscoped fallback', (tester) async {
+  testWidgets('transient scoped failures preserve Retry without offering unscoped fallback', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -46,9 +46,34 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text("Talk isn't available for this item"), findsOneWidget);
+    expect(find.textContaining('Try again'), findsOneWidget);
     expect(find.text('Use ElevenLabs'), findsNothing);
     expect(find.text('Retry'), findsOneWidget);
-    expect(find.text('Cancel'), findsOneWidget);
+    expect(find.text('Close'), findsOneWidget);
+  });
+
+  testWidgets('permanent scoped contract failures are close-only', (tester) async {
+    const permanentReceipt = V2VConnectionReceipt(
+      connected: false,
+      provider: 'grok-voice',
+      voiceMode: 'grok-voice-memory-v4',
+      stage: V2VConnectionStage.session,
+      httpStatus: 200,
+      errorCode: 'invalid_session_scope',
+    );
+    await tester.pumpWidget(
+      const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(body: V2VFallbackDialog(receipt: permanentReceipt, allowStandardFallback: false)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Use ElevenLabs'), findsNothing);
+    expect(find.text('Retry'), findsNothing);
+    expect(find.text('Close'), findsOneWidget);
   });
 
   testWidgets('explicit cancel returns stop instead of forcing another retry', (tester) async {

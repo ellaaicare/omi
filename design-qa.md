@@ -111,3 +111,52 @@ The final pass checked the hardware strip, daily-note typography and inline link
 ## Result
 
 passed
+
+---
+
+# Ella Home — Memory Mosaic design QA
+
+- Selected reference: `/Users/ellaai/.buzz/RESEARCH/ELLA_HOME_REFINED_MEMORY_MOSAIC_2026_08_09.png`
+- Implementation capture: `app/test/pages/home/goldens/ella_home_memory_mosaic.png`
+- Combined comparison: `/private/tmp/home-design-comparison-successor.png`
+- Matched viewport: 390 × 844 points
+
+## Visual inspection
+
+- P0: none.
+- P1: none.
+- P2: the first review head's 320-point/200% test omitted the persistent shell navigation. The real shell exposed a 26-point label overflow; the successor uses responsive navigation label sizing and a checked-in full-shell golden.
+- Hierarchy matches the selected synthesis: date and greeting, editorial Daily Note, one intentional Record action, then the two-up memory journal.
+- The implementation intentionally adds the final requested date anchor, signed-in name, state-aware phone/necklace caption, distinct Talk label/icon, and compact controls button.
+- Fraunces remains the editorial family for the Note and journal hierarchy. Generated botanical art is decorative only; source media is shown only when attached to the actual memory.
+- The longer real greeting wraps safely instead of truncating, while the Daily Note, recording action, and first memory row remain visible at 390 × 844.
+
+## States and accessibility
+
+- Ready, preparing, degraded/no-note, day-one empty, phone capture, necklace capture, starting, and live recording states have widget coverage.
+- 320-point width at 200% text scale has no clipping or ellipsis; the memory layout stacks at large text.
+- Capture and controls targets meet the 48 × 48 point minimum. Semantic order follows the visual hierarchy and the capture control announces its active source.
+- Reduce Motion removes the capture transition duration and disables the breathing animation.
+- Checked contrast ratios: ink/paper 15.06:1; teal/pale capture 4.73:1; teal/paper 5.82:1; ink/card 14.47:1; soft/card 5.62:1; warning/card 4.54:1.
+
+## Successor verification
+
+- Real-shell large-text capture: `app/test/pages/home/goldens/ella_home_memory_mosaic_320_200_full_shell.png` at 320 × 844 points and 200% text.
+- The final full-shell capture keeps every bottom-navigation label readable, retains the 48-point controls, and has no overflow, clipping, ellipsis, or orphaned greeting punctuation.
+- The 390 × 844 reference/implementation comparison was rebuilt after the greeting and navigation corrections. The differences are deliberate product requirements: date anchor, Talk instead of Voice, source-aware recording copy, and real source media when available.
+- Interaction QA now also covers Home-owned necklace stop, continuous-necklace pre-tap/final boundaries, reason-specific terminal Note copy, and distinct transient/permanent scoped Talk recovery.
+
+## Final art and empty-state polish
+
+- Selected reference remains `/Users/ellaai/.buzz/RESEARCH/ELLA_HOME_REFINED_MEMORY_MOSAIC_2026_08_09.png`.
+- Current implementation capture: `app/test/pages/home/goldens/ella_home_memory_mosaic.png`.
+- Final matched-viewport comparison: `/private/tmp/ella-home-polish-comparison.png` at 390 × 844 points per side.
+- Long-note stress capture: `app/test/ella/widgets/goldens/ella_daily_note_long_320_200.png` at 320 points wide and 200% text.
+- P0: none.
+- P1: none.
+- P2: none.
+- The botanical is no longer a full-card wash. It is constrained to the lower-right 188 × 176 point corner and capped at 0.18 opacity, keeping the reading column clean even when the Note becomes much longer.
+- The day-one copy is warmer but avoids promising that one recording will always produce a same-day Note: `Your first note begins with a moment` and `Record a moment today. Ella will turn the moments you choose into a note worth returning to.`
+- The accepted fold trade-off remains deliberate: at 390 × 844 the memory images begin above the navigation while their captions continue below the first fold. App Store creative may use a controlled scroll position, but the production Home layout is not compressed merely to imitate a marketing frame.
+
+final result: passed

@@ -7,8 +7,9 @@ import 'package:provider/provider.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
-/// Ella 4-tab bottom navigation: Home, Chat, Voice, Settings.
+/// Ella 4-tab bottom navigation: Home, Chat, Talk, Settings.
 ///
 /// - Text labels always visible (elder-friendly)
 /// - Teal active color, no center record button
@@ -25,6 +26,9 @@ class BottomNavBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<HomeProvider>(
       builder: (context, home, child) {
+        final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+        const navigationHeight = EllaSizes.navBarHeight;
+        final labelFontSize = textScale >= 1.8 ? 10.0 : 14.0;
         return Align(
           alignment: Alignment.bottomCenter,
           child: Container(
@@ -38,12 +42,14 @@ class BottomNavBar extends StatelessWidget {
             child: SafeArea(
               top: false,
               child: SizedBox(
-                height: EllaSizes.navBarHeight,
+                height: navigationHeight,
                 child: Row(
                   children: [
                     _NavTab(
                       icon: FontAwesomeIcons.house,
-                      label: 'Home',
+                      label: context.l10n.bottomNavHome,
+                      height: navigationHeight,
+                      labelFontSize: labelFontSize,
                       isSelected: home.selectedIndex == 0,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -54,7 +60,9 @@ class BottomNavBar extends StatelessWidget {
                     ),
                     _NavTab(
                       icon: FontAwesomeIcons.solidComment,
-                      label: 'Chat',
+                      label: context.l10n.bottomNavChat,
+                      height: navigationHeight,
+                      labelFontSize: labelFontSize,
                       isSelected: home.selectedIndex == 1,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -64,19 +72,23 @@ class BottomNavBar extends StatelessWidget {
                       },
                     ),
                     _NavTab(
-                      icon: FontAwesomeIcons.microphone,
-                      label: 'Voice',
+                      icon: FontAwesomeIcons.waveSquare,
+                      label: context.l10n.bottomNavTalk,
+                      height: navigationHeight,
+                      labelFontSize: labelFontSize,
                       isSelected: home.selectedIndex == 2,
                       onTap: () {
                         HapticFeedback.mediumImpact();
-                        MixpanelManager().bottomNavigationTabClicked('Voice');
+                        MixpanelManager().bottomNavigationTabClicked('Talk');
                         primaryFocus?.unfocus();
                         onTabTap(2, home.selectedIndex == 2);
                       },
                     ),
                     _NavTab(
                       icon: FontAwesomeIcons.gear,
-                      label: 'Settings',
+                      label: context.l10n.bottomNavSettings,
+                      height: navigationHeight,
+                      labelFontSize: labelFontSize,
                       isSelected: home.selectedIndex == 3,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -100,12 +112,16 @@ class _NavTab extends StatelessWidget {
   const _NavTab({
     required this.icon,
     required this.label,
+    required this.height,
+    required this.labelFontSize,
     required this.isSelected,
     required this.onTap,
   });
 
   final IconData icon;
   final String label;
+  final double height;
+  final double labelFontSize;
   final bool isSelected;
   final VoidCallback onTap;
 
@@ -116,7 +132,7 @@ class _NavTab extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: SizedBox(
-          height: EllaSizes.navBarHeight,
+          height: height,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -124,9 +140,11 @@ class _NavTab extends StatelessWidget {
               const SizedBox(height: 4),
               Text(
                 label,
+                maxLines: 2,
+                textAlign: TextAlign.center,
                 style: TextStyle(
                   color: color,
-                  fontSize: 14,
+                  fontSize: labelFontSize,
                   fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
                 ),
               ),

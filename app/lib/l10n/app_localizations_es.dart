@@ -9298,6 +9298,13 @@ class AppLocalizationsEs extends AppLocalizations {
   String get todayCardNewUserBody => 'Tell Ella about a person, place, or interest you would like to talk about.';
 
   @override
+  String get todayCardFirstNoteHeadline => 'Your first note begins with a moment';
+
+  @override
+  String get todayCardFirstNoteBody =>
+      'Record a moment today. Ella will turn the moments you choose into a note worth returning to.';
+
+  @override
   String get todayCardNoSafeSourceHeadline => 'No new note yet';
 
   @override
@@ -9310,8 +9317,104 @@ class AppLocalizationsEs extends AppLocalizations {
   String get todayCardDegradedBody => 'Pull down to try again. If this keeps happening, contact support.';
 
   @override
+  String get todayCardAuthorityUnavailableHeadline => 'Ella is still getting your note ready';
+
+  @override
+  String get todayCardAuthorityUnavailableBody =>
+      'Your Daily Note will appear after Ella finishes setting up your account.';
+
+  @override
   String get todayCardSavedStatus => 'Showing the last note while Ella checks for an update.';
 
   @override
   String get todayCardProvenanceRecentMemory => 'From a recent memory';
+
+  @override
+  String get todayRecordMoment => 'Record a moment';
+
+  @override
+  String get todayRecordStarting => 'Starting…';
+
+  @override
+  String get todayRecordListening => 'Listening… tap to finish';
+
+  @override
+  String get todayRecordOnPhone => 'Records on this iPhone';
+
+  @override
+  String get todayRecordWithNecklace => 'Records with your necklace';
+
+  @override
+  String get todayRecordingUnavailable => 'Recording isn\'t available right now.';
+
+  @override
+  String get todayControlsTitle => 'Ella controls';
+
+  @override
+  String get todayControlsButton => 'Open recording and Whisper controls';
+
+  @override
+  String get todayRecordingSource => 'Recording source';
+
+  @override
+  String get todayManageNecklace => 'Manage necklace';
+
+  @override
+  String get todayRecentMemories => 'Recent memories';
+
+  @override
+  String get todayMemoryPhotoLabel => 'Photo from this memory';
+
+  @override
+  String get todayFirstMemoryHeadline => 'Your journal begins with one moment';
+
+  @override
+  String get todayFirstMemoryBody =>
+      'Record something you want to remember. Ella will bring meaningful moments back here.';
+
+  @override
+  String get todayGreetingFallbackName => 'there';
+
+  @override
+  String todayGreetingMorning(String name) {
+    return 'Good morning, $name';
+  }
+
+  @override
+  String todayGreetingAfternoon(String name) {
+    return 'Good afternoon, $name';
+  }
+
+  @override
+  String todayGreetingEvening(String name) {
+    return 'Good evening, $name';
+  }
+
+  @override
+  String todayDateEyebrow(String weekday, String monthDay) {
+    return '$weekday · $monthDay';
+  }
+
+  @override
+  String get bottomNavHome => 'Home';
+
+  @override
+  String get bottomNavChat => 'Chat';
+
+  @override
+  String get bottomNavTalk => 'Talk';
+
+  @override
+  String get bottomNavSettings => 'Settings';
+
+  @override
+  String get scopedTalkUnavailableTitle => 'Talk isn\'t available for this item';
+
+  @override
+  String get scopedTalkUnavailableBody =>
+      'Ella can\'t open this item in Talk right now. Close this window and keep browsing.';
+
+  @override
+  String get scopedTalkRetryableBody =>
+      'Ella couldn\'t open this item in Talk just now. Try again, or close this window and keep browsing.';
 }

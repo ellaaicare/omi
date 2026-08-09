@@ -211,6 +211,18 @@ class V2VConnectionReceipt {
   bool get shouldRefreshMemoryScope => shouldRefreshSessionScope;
   EllaVoicePolicyReason? get policyReason => parseEllaVoicePolicyReason(errorCode);
   bool get isPolicyDenial => policyReason != null;
+  bool get isPermanentScopedFailure => const {
+        'ai_consent_required',
+        'consent_authority_lost',
+        'invalid_session_contract',
+        'invalid_session_scope',
+        'memory_scope_provider_unsupported',
+        'missing_authenticated_identity',
+        'provider_mismatch',
+        'unsupported_provider',
+        'voice_session_scope_stale',
+        'voice_session_scope_unavailable',
+      }.contains(errorCode);
 
   String get safeDetail {
     final parts = <String>[if (httpStatus != null) 'HTTP $httpStatus', if (errorCode.isNotEmpty) errorCode];
