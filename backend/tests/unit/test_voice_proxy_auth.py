@@ -19,6 +19,14 @@ sys.modules.setdefault("database.conversations", conversations_module)
 
 from ella.routers import voice
 from ella.services import correction_honcho_contract as honcho_contract
+from ella.services.today_card import (
+    TodayCardContent,
+    TodayCardKind,
+    TodayCardRecord,
+    TodayCardSourceRef,
+    TodayCardState,
+    sha256_ref,
+)
 
 RUNTIME_AUTHORITY_DIGEST = "a" * 64
 
@@ -199,6 +207,160 @@ def test_voice_session_token_rejects_empty_memory_version():
                 "can_reinterpret": False,
             },
         )
+
+
+def test_daily_card_scope_accepts_identifiers_only_and_token_binds_authority():
+    card_id = "2265689d-e0d7-4a26-bdeb-2c8c97e90b89"
+    with pytest.raises(ValueError, match="extra_forbidden"):
+        voice.VoiceSessionScope(
+            kind="daily_card",
+            card_id=card_id,
+            expected_version=4,
+            title="client-authored content must be rejected",
+        )
+
+    encoded = voice.create_session_token(
+        uid="uid-a",
+        firebase_uid="uid-a",
+        voice_mode="v4",
+        provider="grok-voice",
+        isolated_runtime=True,
+        session_scope={
+            "kind": "daily_card",
+            "card_id": card_id,
+            "card_version": 4,
+            "card_evidence_hash": "sha256:" + "a" * 64,
+            "can_reinterpret": False,
+            "title": "server content also stays out of the token",
+        },
+    )
+    claims = jwt.decode(
+        encoded,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert claims["scope_kind"] == "daily_card"
+    assert claims["card_id"] == card_id
+    assert claims["card_version"] == 4
+    assert claims["card_evidence_hash"] == "sha256:" + "a" * 64
+    assert claims["can_reinterpret"] is False
+    assert "title" not in claims
+    assert "conversation_id" not in claims
+
+    principal = voice.authenticate_voice_proxy_request(
+        _request(
+            {"uid": "uid-a"},
+            token=encoded,
+            service_token="test-proxy-secret",
+        ),
+        "uid-a",
+    )
+    assert principal.card_id == card_id
+    assert principal.active_summary_version_id is None
+    assert principal.conversation_id is None
+
+
+def test_daily_card_scope_resolves_exact_owner_version_and_unambiguous_correction(monkeypatch):
+    source = TodayCardSourceRef(
+        source_type="conversation_summary",
+        source_id="conversation-a",
+        source_version_id="summary-v3",
+        occurred_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        evidence_hash=sha256_ref("source"),
+        conversation_id="conversation-a",
+    )
+    card = TodayCardRecord(
+        card_id="79a591b8-4d92-4bfd-92a2-74b2050109b0",
+        uid="uid-a",
+        local_date=datetime(2026, 7, 31, tzinfo=timezone.utc).date(),
+        timezone="UTC",
+        version=3,
+        state=TodayCardState.ready,
+        kind=TodayCardKind.memory,
+        content=TodayCardContent(
+            eyebrow="A MEMORY FROM JULY 30",
+            headline="The garden",
+            body="A source-grounded garden memory.",
+            spoken_text="The garden. A source-grounded garden memory.",
+            sentence_source_ids=["conversation-a"],
+        ),
+        source_refs=[source],
+        evidence_hash=sha256_ref([source.model_dump(mode="json")]),
+        generated_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+    )
+
+    class Repository:
+        def __init__(self, _pool_getter):
+            pass
+
+        async def get_by_id(self, uid, card_id):
+            if uid == card.uid and card_id == card.card_id:
+                return card
+            return None
+
+        async def sources_are_current(self, resolved):
+            return resolved.card_id == card.card_id
+
+    monkeypatch.setattr(voice, "PostgresTodayCardRepository", Repository)
+
+    resolved = asyncio.run(
+        voice._resolve_voice_daily_card_scope(
+            "uid-a",
+            voice.VoiceSessionScope(kind="daily_card", card_id=card.card_id, expected_version=3),
+        )
+    )
+
+    assert resolved["card_id"] == card.card_id
+    assert resolved["card_version"] == 3
+    assert resolved["can_reinterpret"] is True
+    assert resolved["conversation_id"] == "conversation-a"
+    assert resolved["active_summary_version_id"] == "summary-v3"
+    assert "never quiz" in resolved["instruction"]
+
+    with pytest.raises(HTTPException) as wrong_owner:
+        asyncio.run(
+            voice._resolve_voice_daily_card_scope(
+                "uid-b",
+                voice.VoiceSessionScope(kind="daily_card", card_id=card.card_id, expected_version=3),
+            )
+        )
+    assert wrong_owner.value.status_code == 404
+
+    with pytest.raises(HTTPException) as stale:
+        asyncio.run(
+            voice._resolve_voice_daily_card_scope(
+                "uid-a",
+                voice.VoiceSessionScope(kind="daily_card", card_id=card.card_id, expected_version=2),
+            )
+        )
+    assert stale.value.status_code == 409
+    assert stale.value.detail == {"code": "voice_session_scope_stale"}
+
+    with pytest.raises(HTTPException) as changed_after_issue:
+        asyncio.run(
+            voice._resolve_principal_session_scope(
+                voice.VoiceProxyPrincipal(
+                    uid="uid-a",
+                    session_id="session-a",
+                    provider="grok-voice",
+                    voice_mode="v4",
+                    isolated_runtime=False,
+                    scope_kind="daily_card",
+                    card_id=card.card_id,
+                    card_version=3,
+                    card_evidence_hash="sha256:" + "0" * 64,
+                    conversation_id="conversation-a",
+                    active_summary_version_id="summary-v3",
+                    can_reinterpret=True,
+                )
+            )
+        )
+    assert changed_after_issue.value.status_code == 409
+    assert changed_after_issue.value.detail == {"code": "voice_session_scope_stale"}
 
 
 @pytest.mark.parametrize("legacy_mode", ["v1", "v2", "v3-fast"])
@@ -1213,6 +1375,17 @@ def test_canonical_startup_and_search_require_exact_uid_and_matching_signed_memo
             "metadata": {"scope_kind": "memory", "conversation_id": "memory-b"},
         },
         {
+            "uid": "UserA",
+            "channel": "ios_voice",
+            "provider": "grok-realtime",
+            "role": "user",
+            "text": "Daily card A private garden detail.",
+            "started_at": datetime(2026, 7, 24, 10, 2, 30),
+            "session_id": "daily-card-session",
+            "source_ref": {"scope_kind": "daily_card", "card_id": "card-a"},
+            "metadata": {"scope_kind": "daily_card", "card_id": "card-a"},
+        },
+        {
             "uid": "usera",
             "channel": "ios_voice",
             "provider": "grok-realtime",
@@ -1238,15 +1411,20 @@ def test_canonical_startup_and_search_require_exact_uid_and_matching_signed_memo
     queries = []
 
     class Pool:
-        async def fetch(self, query, uid, scope_kind, conversation_id, *rest):
-            queries.append((query, uid, scope_kind, conversation_id, rest))
+        async def fetch(self, query, uid, scope_kind, conversation_id, card_id, *rest):
+            queries.append((query, uid, scope_kind, conversation_id, card_id, rest))
             visible = []
             for row in rows:
                 if row["uid"] != uid:
                     continue
                 row_scope = row["source_ref"].get("scope_kind")
                 row_conversation = row["source_ref"].get("conversation_id")
-                if row_scope != "memory" or (scope_kind == "memory" and row_conversation == conversation_id):
+                row_card = row["source_ref"].get("card_id")
+                if row_scope not in {"memory", "daily_card"}:
+                    visible.append(row)
+                elif scope_kind == "memory" and row_conversation == conversation_id:
+                    visible.append(row)
+                elif scope_kind == "daily_card" and row_card == card_id:
                     visible.append(row)
             return visible
 
@@ -1270,15 +1448,24 @@ def test_canonical_startup_and_search_require_exact_uid_and_matching_signed_memo
             conversation_id="memory-a",
         )
     )
+    card_startup = asyncio.run(
+        voice._fetch_recent_canonical_timeline(
+            "UserA",
+            scope_kind="daily_card",
+            card_id="card-a",
+        )
+    )
 
     assert "General garden plans." in general_startup
     assert "Memory A garden detail." not in general_startup
     assert "Memory B private garden detail." not in general_startup
+    assert "Daily card A private garden detail." not in general_startup
     assert "Case-colliding general garden detail." not in general_startup
     assert "Case-colliding private garden detail." not in general_startup
     assert "General garden plans." in scoped_startup
     assert "Memory A garden detail." in scoped_startup
     assert "Memory B private garden detail." not in scoped_startup
+    assert "Daily card A private garden detail." not in scoped_startup
     assert "Case-colliding general garden detail." not in scoped_startup
     assert "Case-colliding private garden detail." not in scoped_startup
     assert [result["content"] for result in general_search] == ["General garden plans."]
@@ -1286,6 +1473,8 @@ def test_canonical_startup_and_search_require_exact_uid_and_matching_signed_memo
         "General garden plans.",
         "Memory A garden detail.",
     }
+    assert "Daily card A private garden detail." in card_startup
+    assert "Memory A garden detail." not in card_startup
     assert all("source_ref ->> 'scope_kind'" in query for query, *_ in queries)
     assert all("WHERE uid = $1" in query for query, *_ in queries)
     assert all("lower(uid)" not in query for query, *_ in queries)

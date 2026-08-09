@@ -1737,6 +1737,7 @@ if module_name == "ella.routers.callbacks":
     fake_exact_auth.ELLA_SUBJECT_UID_HEADER = "X-Ella-Subject-Uid"
     fake_exact_auth.EllaRequestAuthority = object
     fake_exact_auth.get_exact_firebase_uid = lambda *args, **kwargs: None
+    fake_exact_auth.get_firebase_or_service_authority = lambda *args, **kwargs: None
     fake_exact_auth.get_exact_service_authority = lambda *args, **kwargs: None
     fake_exact_auth.require_matching_firebase_uid = lambda *args, **kwargs: None
     sys.modules["utils.ella.exact_firebase_auth"] = fake_exact_auth
