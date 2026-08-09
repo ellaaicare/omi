@@ -272,10 +272,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _loadWhisperState() async {
     if (!_guardianAvailable) return;
-    final injectedInfo = widget.guardianModeLoader == null ? null : await widget.guardianModeLoader!.call();
-    final result = widget.guardianModeLoader == null ? await guardian_api.getGuardianMode() : null;
-    final info = result?.value ?? injectedInfo;
-    if (info == null || result?.isFailure == true) {
+    final info = await _readWhisperState();
+    if (info == null) {
       await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
       if (!mounted) return;
       setState(() {
@@ -285,7 +283,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     if (!mounted) return;
-    var enabled = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+    var enabled = _whispersEnabled(info);
     try {
       if (enabled) {
         await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
@@ -303,6 +301,24 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _whispersVerified = true;
     });
   }
+
+  Future<GuardianModeInfo?> _readWhisperState() async {
+    try {
+      final loader = widget.guardianModeLoader;
+      if (loader != null) return loader();
+      final result = await guardian_api.getGuardianMode();
+      return result.isSuccess ? result.value : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _whispersEnabled(GuardianModeInfo info) =>
+      !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+
+  Future<void> _reconcileWhisperNative(bool enabled) => enabled
+      ? (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start())
+      : (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
 
   void scrollToTop() {
     if (!_scrollController.hasClients) return;
@@ -337,6 +353,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _setWhispers(bool enabled) async {
     if (_updatingWhispers || !_guardianAvailable) return;
+    final previousEnabled = _whispersOn;
     setState(() {
       _whispersOn = enabled;
       _updatingWhispers = true;
@@ -359,14 +376,40 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       success = false;
     }
     if (!success && enabled) {
-      await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-      await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
-          guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+      try {
+        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+        await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
+            guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+      } catch (_) {}
+    }
+    var resolvedEnabled = enabled;
+    var resolvedVerified = success;
+    if (!success) {
+      final authoritative = await _readWhisperState();
+      if (authoritative != null) {
+        resolvedEnabled = _whispersEnabled(authoritative);
+        try {
+          await _reconcileWhisperNative(resolvedEnabled);
+          resolvedVerified = true;
+        } catch (_) {
+          resolvedVerified = false;
+        }
+      } else {
+        // The write may have reached the server even though the response did
+        // not. Keep the last verified display value but mark it unavailable;
+        // never claim OFF (or ON) without an authoritative readback.
+        resolvedEnabled = previousEnabled;
+        resolvedVerified = false;
+        try {
+          await _reconcileWhisperNative(previousEnabled);
+        } catch (_) {}
+      }
     }
     if (!mounted) return;
     setState(() {
       _updatingWhispers = false;
-      if (!success) _whispersOn = false;
+      _whispersOn = resolvedEnabled;
+      _whispersVerified = resolvedVerified;
     });
     if (!success) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));

@@ -21,7 +21,7 @@ class TodayCardSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final card = state.card;
-    final content = card == null ? _fallbackContent(context, state.status) : _TodayCardContent.fromCard(context, card);
+    final content = card == null ? _fallbackContent(context, state) : _TodayCardContent.fromCard(context, card);
 
     return EllaCardSurface(
       child: Semantics(
@@ -132,19 +132,25 @@ class TodayCardSurface extends StatelessWidget {
 
   _TodayCardContent _fallbackContent(
     BuildContext context,
-    TodayCardStatus status,
+    TodayCardViewState state,
   ) =>
-      switch (status) {
+      switch (state.status) {
         TodayCardStatus.newUser => _TodayCardContent(
             eyebrow: context.l10n.todayCardPreparingEyebrow,
             headline: context.l10n.todayCardNewUserHeadline,
             body: context.l10n.todayCardNewUserBody,
           ),
-        TodayCardStatus.degraded => _TodayCardContent(
-            eyebrow: context.l10n.todayCardPreparingEyebrow,
-            headline: context.l10n.todayCardDegradedHeadline,
-            body: context.l10n.todayCardDegradedBody,
-          ),
+        TodayCardStatus.degraded => state.errorCode == 'no_safe_source'
+            ? _TodayCardContent(
+                eyebrow: context.l10n.todayCardPreparingEyebrow,
+                headline: context.l10n.todayCardNoSafeSourceHeadline,
+                body: context.l10n.todayCardNoSafeSourceBody,
+              )
+            : _TodayCardContent(
+                eyebrow: context.l10n.todayCardPreparingEyebrow,
+                headline: context.l10n.todayCardDegradedHeadline,
+                body: context.l10n.todayCardDegradedBody,
+              ),
         TodayCardStatus.ready || TodayCardStatus.preparing => _TodayCardContent(
             eyebrow: context.l10n.todayCardPreparingEyebrow,
             headline: context.l10n.todayCardPreparingHeadline,
@@ -234,12 +240,19 @@ class _TodayCardContent {
     this.provenance,
   });
 
-  factory _TodayCardContent.fromCard(BuildContext context, TodayCard card) => _TodayCardContent(
-        eyebrow: context.l10n.todayCardPreparingEyebrow,
-        headline: card.headline,
-        body: card.body,
-        provenance: card.kind == TodayCardKind.welcome ? null : card.eyebrow,
-      );
+  factory _TodayCardContent.fromCard(BuildContext context, TodayCard card) {
+    final provenanceParts = <String>[
+      if (card.kind != TodayCardKind.welcome && card.sourceRefs.isNotEmpty)
+        context.l10n.todayCardProvenanceRecentMemory,
+      if (card.kind != TodayCardKind.welcome && card.localDate.isNotEmpty) context.l10n.todayCardProvenanceUpdatedToday,
+    ];
+    return _TodayCardContent(
+      eyebrow: context.l10n.todayCardPreparingEyebrow,
+      headline: card.headline,
+      body: card.body,
+      provenance: provenanceParts.isEmpty ? null : provenanceParts.join(' • '),
+    );
+  }
 
   final String eyebrow;
   final String headline;

@@ -378,6 +378,10 @@ void main() {
     var todayCardCalls = 0;
     var guardianModeWrites = 0;
     var guardianNativeStarts = 0;
+    var guardianNativeStops = 0;
+    var guardianServerEnabled = false;
+    var guardianModeWriteSucceeds = true;
+    var guardianReadbackSucceeds = true;
     guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
@@ -464,19 +468,30 @@ void main() {
                 todayCardAuthorityChanges: authorityChanges,
                 guardianAvailability: () =>
                     (SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured,
-                guardianModeLoader: () async => const guardian_model.GuardianModeInfo(
-                  currentMode: guardian_model.GuardianModeKey.off,
-                  twoTierState: guardian_model.GuardianModeState(),
-                ),
+                guardianModeLoader: () async => guardianReadbackSucceeds
+                    ? guardian_model.GuardianModeInfo(
+                        currentMode: guardianServerEnabled
+                            ? guardian_model.GuardianModeKey.activeSupport
+                            : guardian_model.GuardianModeKey.off,
+                        twoTierState: guardianServerEnabled
+                            ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
+                            : const guardian_model.GuardianModeState(),
+                      )
+                    : null,
                 guardianModeSetter: (state) async {
                   guardianModeWrites++;
                   writtenGuardianState = state;
-                  return true;
+                  if (guardianModeWriteSucceeds) {
+                    guardianServerEnabled = !state.isOff;
+                  }
+                  return guardianModeWriteSucceeds;
                 },
                 guardianNativeStart: () async {
                   guardianNativeStarts++;
                 },
-                guardianNativeStop: () async {},
+                guardianNativeStop: () async {
+                  guardianNativeStops++;
+                },
               ),
               const ChatPage(isPivotBottom: true),
               const _Marker('voice'),
@@ -519,6 +534,49 @@ void main() {
       expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
       expect(guardianNativeStarts, 1);
       expect(find.textContaining('Whispers are on'), findsOneWidget);
+
+      // A failed disable must read back server authority. The server remains
+      // ON here, so the control must return to ON and native capture must be
+      // reconciled instead of falsely claiming OFF.
+      guardianModeWriteSucceeds = false;
+      await tester.tap(
+        find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(guardianModeWrites, 2);
+      expect(writtenGuardianState?.isOff, isTrue);
+      expect(guardianServerEnabled, isTrue);
+      expect(guardianNativeStops, greaterThanOrEqualTo(1));
+      expect(guardianNativeStarts, 2);
+      expect(find.textContaining('Whispers are on'), findsOneWidget);
+      expect(
+        tester
+            .widget<Switch>(
+              find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+            )
+            .value,
+        isTrue,
+      );
+      expect(find.byType(SnackBar), findsOneWidget);
+
+      // If readback is also unavailable, keep the last verified switch value
+      // but disable the control and show no OFF claim until authority returns.
+      guardianReadbackSucceeds = false;
+      await tester.tap(
+        find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      final unavailableSwitch = tester.widget<Switch>(
+        find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+      );
+      expect(unavailableSwitch.value, isTrue);
+      expect(unavailableSwitch.onChanged, isNull);
+      expect(find.textContaining('Whispers are off'), findsNothing);
+      expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
     } else if (!allowsGuardianSurface()) {
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsNothing);

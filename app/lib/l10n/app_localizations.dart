@@ -17289,16 +17289,28 @@ abstract class AppLocalizations {
   /// **'Tell Ella about a person, place, or interest you would like to talk about.'**
   String get todayCardNewUserBody;
 
-  /// No description provided for @todayCardDegradedHeadline.
+  /// No description provided for @todayCardNoSafeSourceHeadline.
   ///
   /// In en, this message translates to:
   /// **'No new note yet'**
+  String get todayCardNoSafeSourceHeadline;
+
+  /// No description provided for @todayCardNoSafeSourceBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will add one when there is enough recent memory to be useful.'**
+  String get todayCardNoSafeSourceBody;
+
+  /// No description provided for @todayCardDegradedHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Today\'s note isn\'t available right now'**
   String get todayCardDegradedHeadline;
 
   /// No description provided for @todayCardDegradedBody.
   ///
   /// In en, this message translates to:
-  /// **'Ella will add one when there is enough recent memory to be useful.'**
+  /// **'Pull down to try again. If this keeps happening, contact support.'**
   String get todayCardDegradedBody;
 
   /// No description provided for @todayCardSavedStatus.
@@ -17306,6 +17318,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Showing the last note while Ella checks for an update.'**
   String get todayCardSavedStatus;
+
+  /// No description provided for @todayCardProvenanceRecentMemory.
+  ///
+  /// In en, this message translates to:
+  /// **'From a recent memory'**
+  String get todayCardProvenanceRecentMemory;
+
+  /// No description provided for @todayCardProvenanceUpdatedToday.
+  ///
+  /// In en, this message translates to:
+  /// **'Updated today'**
+  String get todayCardProvenanceUpdatedToday;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

@@ -10643,7 +10643,11 @@
   "todayCardPreparingBody": "Ella is finding one useful moment from your recent memories.",
   "todayCardNewUserHeadline": "What matters to you?",
   "todayCardNewUserBody": "Tell Ella about a person, place, or interest you would like to talk about.",
-  "todayCardDegradedHeadline": "No new note yet",
-  "todayCardDegradedBody": "Ella will add one when there is enough recent memory to be useful.",
-  "todayCardSavedStatus": "Showing the last note while Ella checks for an update."
+  "todayCardNoSafeSourceHeadline": "No new note yet",
+  "todayCardNoSafeSourceBody": "Ella will add one when there is enough recent memory to be useful.",
+  "todayCardDegradedHeadline": "Today's note isn't available right now",
+  "todayCardDegradedBody": "Pull down to try again. If this keeps happening, contact support.",
+  "todayCardSavedStatus": "Showing the last note while Ella checks for an update.",
+  "todayCardProvenanceRecentMemory": "From a recent memory",
+  "todayCardProvenanceUpdatedToday": "Updated today"
 }

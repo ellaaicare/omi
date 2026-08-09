@@ -9279,11 +9279,23 @@ class AppLocalizationsCs extends AppLocalizations {
   String get todayCardNewUserBody => 'Tell Ella about a person, place, or interest you would like to talk about.';
 
   @override
-  String get todayCardDegradedHeadline => 'No new note yet';
+  String get todayCardNoSafeSourceHeadline => 'No new note yet';
 
   @override
-  String get todayCardDegradedBody => 'Ella will add one when there is enough recent memory to be useful.';
+  String get todayCardNoSafeSourceBody => 'Ella will add one when there is enough recent memory to be useful.';
+
+  @override
+  String get todayCardDegradedHeadline => 'Today\'s note isn\'t available right now';
+
+  @override
+  String get todayCardDegradedBody => 'Pull down to try again. If this keeps happening, contact support.';
 
   @override
   String get todayCardSavedStatus => 'Showing the last note while Ella checks for an update.';
+
+  @override
+  String get todayCardProvenanceRecentMemory => 'From a recent memory';
+
+  @override
+  String get todayCardProvenanceUpdatedToday => 'Updated today';
 }
