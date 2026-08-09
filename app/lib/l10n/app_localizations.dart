@@ -17292,13 +17292,13 @@ abstract class AppLocalizations {
   /// No description provided for @todayCardFirstNoteHeadline.
   ///
   /// In en, this message translates to:
-  /// **'Your first note arrives this evening'**
+  /// **'Your first note begins with a moment'**
   String get todayCardFirstNoteHeadline;
 
   /// No description provided for @todayCardFirstNoteBody.
   ///
   /// In en, this message translates to:
-  /// **'Record a moment today. Ella will bring back something meaningful when there is enough to be useful.'**
+  /// **'Record a moment today. Ella will turn the moments you choose into a note worth returning to.'**
   String get todayCardFirstNoteBody;
 
   /// No description provided for @todayCardNoSafeSourceHeadline.

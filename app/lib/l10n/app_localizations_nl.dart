@@ -9309,11 +9309,11 @@ class AppLocalizationsNl extends AppLocalizations {
   String get todayCardNewUserBody => 'Tell Ella about a person, place, or interest you would like to talk about.';
 
   @override
-  String get todayCardFirstNoteHeadline => 'Your first note arrives this evening';
+  String get todayCardFirstNoteHeadline => 'Your first note begins with a moment';
 
   @override
   String get todayCardFirstNoteBody =>
-      'Record a moment today. Ella will bring back something meaningful when there is enough to be useful.';
+      'Record a moment today. Ella will turn the moments you choose into a note worth returning to.';
 
   @override
   String get todayCardNoSafeSourceHeadline => 'No new note yet';

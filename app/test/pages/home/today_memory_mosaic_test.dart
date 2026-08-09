@@ -39,18 +39,18 @@ void main() {
           ..addFont(rootBundle.load('assets/fonts/Fraunces-Latin-Regular.ttf'))
           ..addFont(rootBundle.load('assets/fonts/Fraunces-Latin-Medium.ttf')))
         .load();
-    await (FontLoader('packages/font_awesome_flutter/FontAwesomeSolid')
-          ..addFont(rootBundle.load(
-            'packages/font_awesome_flutter/lib/fonts/Font-Awesome-7-Free-Solid-900.otf',
-          )))
+    await (FontLoader(
+      'packages/font_awesome_flutter/FontAwesomeSolid',
+    )..addFont(rootBundle.load('packages/font_awesome_flutter/lib/fonts/Font-Awesome-7-Free-Solid-900.otf')))
         .load();
     var flutterCache = File(Platform.resolvedExecutable).parent;
     while (!File('${flutterCache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf').existsSync()) {
       flutterCache = flutterCache.parent;
     }
     final materialIcons = File('${flutterCache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf');
-    await (FontLoader('MaterialIcons')
-          ..addFont(materialIcons.readAsBytes().then((bytes) => ByteData.sublistView(Uint8List.fromList(bytes)))))
+    await (FontLoader(
+      'MaterialIcons',
+    )..addFont(materialIcons.readAsBytes().then((bytes) => ByteData.sublistView(Uint8List.fromList(bytes)))))
         .load();
     try {
       await ServiceManager.init();
@@ -66,9 +66,7 @@ void main() {
 
   testWidgets('ready Home matches the selected Memory Mosaic hierarchy', (tester) async {
     final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
-    final conversations = _ConversationFixtures.withMemories(
-      photoBase64: base64Encode(photoData.buffer.asUint8List()),
-    );
+    final conversations = _ConversationFixtures.withMemories(photoBase64: base64Encode(photoData.buffer.asUint8List()));
     final harness = await _pumpHome(tester, conversations: conversations, includeBottomNav: true);
     addTearDown(harness.dispose);
 
@@ -177,7 +175,8 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.text('Your first note arrives this evening'), findsOneWidget);
+    expect(find.text('Your first note begins with a moment'), findsOneWidget);
+    expect(find.textContaining('note worth returning to'), findsOneWidget);
     expect(find.byKey(const Key('memory-journal-empty')), findsOneWidget);
     expect(find.text('Your journal begins with one moment'), findsOneWidget);
     final container = tester.widget<AnimatedContainer>(
@@ -321,11 +320,8 @@ Future<_HomeHarness> _pumpHome(
                   nowProvider: () => DateTime(2026, 8, 9, 9, 12),
                   todayCardRepository: _FixedTodayCardRepository(response),
                   todayCardCache: _MemoryTodayCardCache(),
-                  todayCardAuthoritySnapshotProvider: () => (
-                    uid: 'test-user',
-                    authorityKey: 'test-authority',
-                    isProvisioningReady: true,
-                  ),
+                  todayCardAuthoritySnapshotProvider: () =>
+                      (uid: 'test-user', authorityKey: 'test-authority', isProvisioningReady: true),
                   todayCardAuthorityChanges: authorityChanges,
                   guardianAvailability: () => false,
                 ),
@@ -457,13 +453,7 @@ class _ConversationFixtures {
             'Coffee by the window',
             'A slow morning, warm light, and a few minutes that felt entirely your own.',
           ),
-          photos: [
-            ConversationPhoto(
-              id: 'photo-1',
-              base64: photoBase64,
-              createdAt: DateTime(2026, 8, 8, 9),
-            ),
-          ],
+          photos: [ConversationPhoto(id: 'photo-1', base64: photoBase64, createdAt: DateTime(2026, 8, 8, 9))],
         ),
         ServerConversation(
           id: 'memory-2',

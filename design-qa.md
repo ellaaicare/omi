@@ -146,4 +146,17 @@ passed
 - The 390 × 844 reference/implementation comparison was rebuilt after the greeting and navigation corrections. The differences are deliberate product requirements: date anchor, Talk instead of Voice, source-aware recording copy, and real source media when available.
 - Interaction QA now also covers Home-owned necklace stop, continuous-necklace pre-tap/final boundaries, reason-specific terminal Note copy, and distinct transient/permanent scoped Talk recovery.
 
+## Final art and empty-state polish
+
+- Selected reference remains `/Users/ellaai/.buzz/RESEARCH/ELLA_HOME_REFINED_MEMORY_MOSAIC_2026_08_09.png`.
+- Current implementation capture: `app/test/pages/home/goldens/ella_home_memory_mosaic.png`.
+- Final matched-viewport comparison: `/private/tmp/ella-home-polish-comparison.png` at 390 × 844 points per side.
+- Long-note stress capture: `app/test/ella/widgets/goldens/ella_daily_note_long_320_200.png` at 320 points wide and 200% text.
+- P0: none.
+- P1: none.
+- P2: none.
+- The botanical is no longer a full-card wash. It is constrained to the lower-right 188 × 176 point corner and capped at 0.18 opacity, keeping the reading column clean even when the Note becomes much longer.
+- The day-one copy is warmer but avoids promising that one recording will always produce a same-day Note: `Your first note begins with a moment` and `Record a moment today. Ella will turn the moments you choose into a note worth returning to.`
+- The accepted fold trade-off remains deliberate: at 390 × 844 the memory images begin above the navigation while their captions continue below the first fold. App Store creative may use a controlled scroll position, but the production Home layout is not compressed merely to imitate a marketing frame.
+
 final result: passed

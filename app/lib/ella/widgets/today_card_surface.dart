@@ -5,14 +5,12 @@ import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class TodayCardSurface extends StatelessWidget {
-  const TodayCardSurface({
-    super.key,
-    required this.state,
-    required this.onTalk,
-  });
+  const TodayCardSurface({super.key, required this.state, required this.onTalk});
 
   final TodayCardViewState state;
   final VoidCallback? onTalk;
+
+  static const double _botanicalOpacity = 0.18;
 
   @override
   Widget build(BuildContext context) {
@@ -26,14 +24,19 @@ class TodayCardSurface extends StatelessWidget {
       child: Stack(
         children: [
           if (showBotanical)
-            Positioned.fill(
+            Positioned(
+              right: -18,
+              bottom: -22,
+              width: 188,
+              height: 176,
               child: ExcludeSemantics(
                 child: Opacity(
-                  opacity: 0.38,
+                  key: const Key('today-card-botanical'),
+                  opacity: _botanicalOpacity,
                   child: Image.asset(
                     'assets/images/ella-daily-note-botanical.png',
                     fit: BoxFit.cover,
-                    alignment: Alignment.centerRight,
+                    alignment: Alignment.bottomRight,
                   ),
                 ),
               ),
@@ -102,11 +105,7 @@ class TodayCardSurface extends StatelessWidget {
     return stableValue % 3 != 0;
   }
 
-  _TodayCardContent _fallbackContent(
-    BuildContext context,
-    TodayCardViewState state,
-  ) =>
-      switch (state.status) {
+  _TodayCardContent _fallbackContent(BuildContext context, TodayCardViewState state) => switch (state.status) {
         TodayCardStatus.newUser => _TodayCardContent(
             eyebrow: context.l10n.todayCardPreparingEyebrow,
             headline: context.l10n.todayCardFirstNoteHeadline,
@@ -151,11 +150,7 @@ class _TodayCardFooter extends StatelessWidget {
         final shouldStack = textScale > 1.3 || constraints.maxWidth < 300;
         final source = provenance == null
             ? const SizedBox.shrink()
-            : _StatusLine(
-                key: const Key('today-card-provenance'),
-                icon: Icons.eco_outlined,
-                label: provenance!,
-              );
+            : _StatusLine(key: const Key('today-card-provenance'), icon: Icons.eco_outlined, label: provenance!);
         final talk = TextButton.icon(
           key: const Key('today-card-talk'),
           onPressed: onTalk,
@@ -174,7 +169,10 @@ class _TodayCardFooter extends StatelessWidget {
           return Column(
             key: const Key('today-card-actions-stacked'),
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [source, Align(alignment: Alignment.centerRight, child: talk)],
+            children: [
+              source,
+              Align(alignment: Alignment.centerRight, child: talk),
+            ],
           );
         }
 
@@ -211,12 +209,7 @@ class _StatusLine extends StatelessWidget {
 }
 
 class _TodayCardContent {
-  const _TodayCardContent({
-    required this.eyebrow,
-    required this.headline,
-    required this.body,
-    this.provenance,
-  });
+  const _TodayCardContent({required this.eyebrow, required this.headline, required this.body, this.provenance});
 
   factory _TodayCardContent.fromCard(BuildContext context, TodayCard card) {
     return _TodayCardContent(
