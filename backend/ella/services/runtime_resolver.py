@@ -14,6 +14,7 @@ from uuid import UUID
 
 from database.ella_provisioning import (
     EllaProvisioningRepository,
+    ProvisioningSchemaNotReadyError,
     RuntimePoolClaimError,
 )
 from database.honcho_attestation import (
@@ -482,6 +483,30 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         account_user_id=account_user_id,
         profile_user_id=profile_user_id,
     )
+
+
+async def resolve_direct_self_hosted_runtime(
+    uid: str,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> Optional[IsolatedRuntime]:
+    """Resolve a row-intrinsically active Hermes binding for voice isolation.
+
+    Fresh-relax and migrated accounts can hold a healthy binding without an
+    invitation admission or exact-UID rollout flag. The binding must still pass
+    the same runtime receipt validation before it can leave legacy voice routing.
+    """
+    if not uid:
+        return None
+    try:
+        repository = repository or await EllaProvisioningRepository.create()
+        binding = await repository.resolve_self_hosted_active_direct(uid=uid)
+    except ProvisioningSchemaNotReadyError as exc:
+        raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise ProvisioningError("self_hosted_runtime_authority_unavailable", retryable=True) from exc
+    return runtime_from_binding(binding, uid) if binding else None
 
 
 async def resolve_isolated_runtime(

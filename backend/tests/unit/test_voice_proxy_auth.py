@@ -113,11 +113,15 @@ def voice_auth(monkeypatch):
     async def retained_runtime_not_invitation_owned(_uid):
         return False
 
+    async def no_direct_runtime(_uid):
+        return None
+
     monkeypatch.setattr(
         voice,
         "self_hosted_runtime_authority_required",
         retained_runtime_not_invitation_owned,
     )
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", no_direct_runtime)
 
 
 def test_voice_session_token_has_firebase_subject_and_proxy_audience():
