@@ -32,6 +32,20 @@ typedef EllaChatHistoryTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+const ellaChatInactivityTimeout = Duration(seconds: 75);
+
+Stream<T> withEllaChatInactivityTimeout<T>(
+  Stream<T> stream, {
+  Duration timeout = ellaChatInactivityTimeout,
+}) =>
+    stream.timeout(
+      timeout,
+      onTimeout: (sink) {
+        sink.addError(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
+        sink.close();
+      },
+    );
+
 Future<http.Response?> _defaultHistoryTransport({
   required String url,
   required String expectedAuthenticatedUid,
@@ -83,11 +97,14 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     final rawMessages = data['messages'] as List<dynamic>? ?? [];
 
     final result = <ServerMessage>[];
+    var recognizedHistoryShape = rawMessages.isEmpty;
     for (final m in rawMessages) {
+      if (m is! Map<String, dynamic>) continue;
       final role = m['role'] as String? ?? '';
-      final content = m['content'] as String? ?? '';
-      final ts = m['timestamp'] as String?;
+      final content = (m['content'] ?? m['text']) as String? ?? '';
+      final ts = (m['timestamp'] ?? m['created_at']) as String?;
       final id = m['id'] as String? ?? const Uuid().v4();
+      recognizedHistoryShape = recognizedHistoryShape || m.containsKey('content') || m.containsKey('text');
       if (content.isEmpty) continue;
       if (content.startsWith('[SYSTEM:')) {
         continue; // Filter scanner notifications from chat UI
@@ -108,6 +125,11 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           askForNps: false,
         ),
       );
+    }
+
+    if (!recognizedHistoryShape) {
+      Logger.debug('[EllaChat] History response contained no supported message fields');
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
     }
 
     // API returns newest first; reverse for chronological UI order
@@ -147,12 +169,14 @@ Stream<ServerMessageChunk> sendEllaChatStream(
     return;
   }
 
-  yield* sendEllaMessageStream(
-    text,
-    headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
-    clientMessageId: const Uuid().v4(),
-    clientSentAt: DateTime.now().toUtc(),
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
+  yield* withEllaChatInactivityTimeout(
+    sendEllaMessageStream(
+      text,
+      headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
+      clientMessageId: const Uuid().v4(),
+      clientSentAt: DateTime.now().toUtc(),
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    ),
   );
 }
