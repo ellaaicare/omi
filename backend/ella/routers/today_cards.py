@@ -205,10 +205,14 @@ def create_today_cards_router(
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "today_card_unavailable"}) from exc
         envelope = _envelope(result.card)
+        cache_control = "private, max-age=60, must-revalidate"
         response.headers["ETag"] = envelope.etag
-        response.headers["Cache-Control"] = "private, max-age=60, must-revalidate"
+        response.headers["Cache-Control"] = cache_control
         if str(request.headers.get("If-None-Match") or "") == envelope.etag:
-            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": envelope.etag})
+            return Response(
+                status_code=status.HTTP_304_NOT_MODIFIED,
+                headers={"ETag": envelope.etag, "Cache-Control": cache_control},
+            )
         return envelope
 
     @router.get("/v1/ella/today-card/health")
@@ -320,11 +324,18 @@ def create_today_cards_router(
         authority = _require_subject_bound_service_auth(request)
         body.uid = authority.require_uid(body.uid, feature="Today-card invalidation")
         try:
-            invalidated = await repository.invalidate_source(
-                uid=body.uid,
-                source_id=body.source_id,
-                reason=body.reason,
-            )
+            if body.reason in {"source_deleted", "source_retracted"}:
+                invalidated = await repository.tombstone_source(
+                    uid=body.uid,
+                    source_id=body.source_id,
+                    reason=body.reason,
+                )
+            else:
+                invalidated = await repository.invalidate_source(
+                    uid=body.uid,
+                    source_id=body.source_id,
+                    reason=body.reason,
+                )
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "today_card_invalidation_failed"}) from exc
         return {"ok": True, "invalidated": invalidated}

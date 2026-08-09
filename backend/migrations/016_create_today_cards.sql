@@ -69,10 +69,17 @@ CREATE INDEX IF NOT EXISTS ella_today_cards_invalidated_idx
 CREATE TABLE IF NOT EXISTS ella_today_card_source_tombstones (
     uid TEXT COLLATE "C" NOT NULL,
     source_id TEXT COLLATE "C" NOT NULL,
-    reason TEXT COLLATE "C" NOT NULL CHECK (reason IN ('source_deleted')),
+    reason TEXT COLLATE "C" NOT NULL,
     deleted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (uid, source_id)
 );
+
+ALTER TABLE ella_today_card_source_tombstones
+    DROP CONSTRAINT IF EXISTS ella_today_card_source_tombstones_reason_check;
+
+ALTER TABLE ella_today_card_source_tombstones
+    ADD CONSTRAINT ella_today_card_source_tombstones_reason_check
+    CHECK (reason IN ('source_deleted', 'source_retracted'));
 
 CREATE TABLE IF NOT EXISTS ella_today_card_feedback (
     feedback_id UUID PRIMARY KEY,

@@ -85,6 +85,10 @@ class Repository:
         self.invalidations.append(kwargs)
         return 1
 
+    async def tombstone_source(self, **kwargs):
+        self.invalidations.append(kwargs)
+        return 1
+
     async def record_feedback(self, *, uid, card_id, expected_version, feedback_id, action):
         if uid != UID or card_id != self.card.card_id:
             raise LookupError("today_card_not_found")
@@ -128,6 +132,11 @@ def test_today_card_ready_envelope_etag_and_stale_version_contract():
     assert body["state"] == "ready"
     assert body["card"]["kind"] == "recap"
     assert body["card"]["source_date"] == "2026-07-31"
+    assert response.headers["cache-control"] == "private, max-age=60, must-revalidate"
+
+    not_modified = client.get("/v1/ella/today-card", headers={"If-None-Match": response.headers["etag"]})
+    assert not_modified.status_code == 304
+    assert not_modified.headers["cache-control"] == "private, max-age=60, must-revalidate"
     assert body["card"]["source_refs"][0]["source_version_id"] == "summary-v2"
     assert body["etag"] == response.headers["etag"]
     assert response.headers["cache-control"] == "private, max-age=60, must-revalidate"

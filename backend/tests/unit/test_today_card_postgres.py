@@ -22,15 +22,32 @@ from ella.services.today_card_postgres import PostgresTodayCardRepository
 NOW = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
 
 
+def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none"):
+    return {
+        "event_id": "omi:conversation-a:summary",
+        "text": "Grounded body.",
+        "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+        "privacy_scope": privacy_scope,
+        "scan_policy": scan_policy,
+        "source_ref": {
+            "conversation_id": "conversation-a",
+            "active_summary_version_id": version,
+        },
+        "metadata": {
+            "adapter": "omi-enriched-conversation",
+            "structured": {"title": "Grounded", "overview": "Grounded body."},
+        },
+    }
+
+
 def _card(version="summary-v2"):
-    source = TodayCardSourceRef(
-        source_type="conversation_summary",
-        source_id="conversation-a",
-        source_version_id=version,
-        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
-        evidence_hash=sha256_ref(version),
-        conversation_id="conversation-a",
+    evidence = today_card_postgres._evidence_from_row(
+        _summary_row(version),
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
     )
+    assert evidence is not None
+    source = evidence.source
     return TodayCardRecord(
         card_id="3aa05168-9d13-49ba-8137-cbcbac86855b",
         uid="uid-a",
@@ -59,8 +76,8 @@ class Pool:
         self.executions = []
 
     async def fetchrow(self, query, *args):
-        if "active_summary_version_id" in query:
-            return {"active_summary_version_id": self.current_version}
+        if "FROM canonical_events" in query:
+            return _summary_row(self.current_version)
         return None
 
     async def execute(self, query, *args):
@@ -101,6 +118,30 @@ def test_sources_are_current_requires_exact_owner_conversation_and_active_versio
         )
         is True
     )
+
+
+def test_sources_are_current_rejects_same_version_safety_metadata_change():
+    class SafetyTightenedPool(Pool):
+        async def fetchrow(self, query, *args):
+            assert args == ("uid-a", "conversation-a")
+            return _summary_row("summary-v2", privacy_scope="system_private")
+
+    current = asyncio.run(
+        PostgresTodayCardRepository(lambda: asyncio.sleep(0, result=SafetyTightenedPool())).sources_are_current(_card())
+    )
+
+    assert current is False
+
+
+def test_canonical_source_snapshot_normalizes_driver_json_strings():
+    row = _summary_row()
+    driver_row = {
+        **row,
+        "source_ref": canonical_events._stable_json(row["source_ref"]),
+        "metadata": canonical_events._stable_json(row["metadata"]),
+    }
+
+    assert canonical_events._today_card_source_snapshot(driver_row) == canonical_events._today_card_source_snapshot(row)
 
 
 def test_source_less_card_becomes_stale_when_delayed_canonical_evidence_arrives():
@@ -207,6 +248,7 @@ def test_fresh_preparing_row_is_not_reported_as_acquired():
 
 def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
     executions = []
+    invalidation_calls = 0
 
     class Transaction:
         async def __aenter__(self):
@@ -220,8 +262,12 @@ def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
             return Transaction()
 
         async def execute(self, query, *args):
+            nonlocal invalidation_calls
             executions.append((query, args))
-            return "UPDATE 1" if "UPDATE ella_today_cards" in query else "DELETE 1"
+            if "UPDATE ella_today_cards" in query:
+                invalidation_calls += 1
+                return "UPDATE 1" if invalidation_calls == 1 else "UPDATE 0"
+            return "DELETE 1"
 
     class Acquire:
         async def __aenter__(self):
@@ -234,10 +280,6 @@ def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
         def acquire(self):
             return Acquire()
 
-        async def execute(self, query, *args):
-            executions.append((query, args))
-            return "UPDATE 0"
-
     pool = DeletionPool()
     monkeypatch.setattr(today_card_postgres, "get_ella_postgres_pool", lambda: asyncio.sleep(0, result=pool))
 
@@ -249,7 +291,9 @@ def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
     assert "DELETE FROM canonical_events" in rendered
     assert "DELETE FROM canonical_event_sessions" in rendered
     assert rendered.count("UPDATE ella_today_cards") == 2
-    assert all(args[:2] == ("uid-a", "conversation-a") for query, args in executions[:3])
+    assert rendered.count("pg_advisory_xact_lock") == 2
+    destructive_args = [args for query, args in executions if "INSERT INTO ella_today_card_source_tombstones" in query]
+    assert destructive_args == [("uid-a", "conversation-a", "source_deleted")]
     invalidation_args = [args for query, args in executions if "UPDATE ella_today_cards" in query]
     assert all(args[0] == "uid-a" for args in invalidation_args)
     assert all('"source_id": "conversation-a"' in args[1] for args in invalidation_args)
@@ -257,11 +301,34 @@ def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
 
 
 def test_materialized_save_fails_closed_when_selected_source_is_tombstoned():
-    class TombstonePool:
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, query, *_args):
+            assert "pg_advisory_xact_lock" in query
+
         async def fetchrow(self, query, *_args):
             assert "ella_today_card_source_tombstones" in query
-            assert "jsonb_build_object('source_id', tombstone.source_id)" in query
             return None
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class TombstonePool:
+        def acquire(self):
+            return Acquire()
 
     repository = PostgresTodayCardRepository(lambda: asyncio.sleep(0, result=TombstonePool()))
 
@@ -283,9 +350,12 @@ def test_canonical_summary_correction_invalidates_card_in_same_transaction(monke
         def transaction(self):
             return Transaction()
 
+        async def execute(self, query, *_args):
+            assert "pg_advisory_xact_lock" in query
+
         async def fetchrow(self, query, *args):
-            if "SELECT source_ref" in query:
-                return {"active_summary_version_id": "summary-v1"}
+            if "SELECT text" in query:
+                return _summary_row("summary-v1")
             if "INSERT INTO canonical_events" in query:
                 return {"inserted": False}
             raise AssertionError(query)
@@ -350,9 +420,12 @@ def test_missing_today_card_table_rolls_back_savepoint_without_aborting_canonica
         def transaction(self):
             return Transaction()
 
+        async def execute(self, query, *_args):
+            assert "pg_advisory_xact_lock" in query
+
         async def fetchrow(self, query, *_args):
-            if "SELECT source_ref" in query:
-                return {"active_summary_version_id": "summary-v1"}
+            if "SELECT text" in query:
+                return _summary_row("summary-v1")
             if "INSERT INTO canonical_events" in query:
                 return {"inserted": False}
             raise AssertionError(query)
@@ -416,6 +489,7 @@ def test_migration_defines_versioned_authority_and_source_indexes():
     assert "ella_today_card_feedback" in migration
     assert "ella_today_card_source_tombstones" in migration
     assert "PRIMARY KEY (uid, source_id)" in migration
+    assert "'source_retracted'" in migration
     assert "ON DELETE CASCADE" in migration
 
 

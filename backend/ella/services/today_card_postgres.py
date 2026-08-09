@@ -25,12 +25,15 @@ from ella.services.today_card import (
     TodayCardState,
     TodayCardUserContext,
     deterministic_card_id,
+    evidence_is_safe,
     materialization_window,
     sha256_ref,
     today_card_source_pack,
 )
 
 logger = logging.getLogger("ella.today_card")
+
+_SOURCE_VALIDITY_LOCK_PREFIX = "ella.today-card-source-validity"
 
 _SENSITIVE_MARKERS = (
     "abuse",
@@ -151,6 +154,14 @@ def _source_tags(metadata: dict[str, Any], scan_policy: str) -> list[str]:
     return sorted({str(tag).strip().lower() for tag in raw_tags if str(tag).strip()})
 
 
+async def lock_today_card_source_validity(conn: Any, uid: str) -> None:
+    """Serialize canonical evidence writes, invalidation, and card publication per owner."""
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"{_SOURCE_VALIDITY_LOCK_PREFIX}:{uid}",
+    )
+
+
 def _evidence_from_row(
     row: Any,
     *,
@@ -193,6 +204,15 @@ def _evidence_from_row(
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = 0.9 if adapter == "omi-enriched-conversation" and source_version_id else 0.0
     privacy_scope = str(_record_value(row, "privacy_scope") or "user_private")
+    scan_policy = str(_record_value(row, "scan_policy") or "none")
+    meaningful = _strict_bool(today, "meaningful", len(summary) >= 12 or len(title) >= 12)
+    confirmed = _strict_bool(today, "confirmed", False)
+    positive_or_neutral = _strict_bool(today, "positive_or_neutral", True)
+    superseded = _strict_bool(today, "superseded", False)
+    deleted = _strict_bool(today, "deleted", False)
+    tags = _source_tags(metadata, scan_policy)
+    person_keys = [value[:128] for value in _string_list(today.get("person_keys"))]
+    topic_keys = [value[:128] for value in _string_list(today.get("topic_keys"))]
     source = TodayCardSourceRef(
         source_type=source_type,
         source_id=source_id,
@@ -203,8 +223,22 @@ def _evidence_from_row(
                 "event_id": _record_value(row, "event_id"),
                 "source_id": source_id,
                 "source_version_id": source_version_id,
+                "source_type": source_type,
+                "conversation_id": conversation_id,
+                "occurred_at": occurred_at,
                 "title": title,
                 "summary": summary,
+                "privacy_scope": privacy_scope,
+                "scan_policy": scan_policy,
+                "confidence": float(confidence),
+                "meaningful": meaningful,
+                "confirmed": confirmed,
+                "positive_or_neutral": positive_or_neutral,
+                "superseded": superseded,
+                "deleted": deleted,
+                "tags": tags,
+                "person_keys": person_keys,
+                "topic_keys": topic_keys,
             }
         ),
         privacy_scope=privacy_scope,
@@ -216,14 +250,14 @@ def _evidence_from_row(
         summary=summary,
         source=source,
         confidence=float(confidence),
-        meaningful=_strict_bool(today, "meaningful", len(summary) >= 12 or len(title) >= 12),
-        confirmed=_strict_bool(today, "confirmed", False),
-        positive_or_neutral=_strict_bool(today, "positive_or_neutral", True),
-        superseded=_strict_bool(today, "superseded", False),
-        deleted=_strict_bool(today, "deleted", False),
-        tags=_source_tags(metadata, str(_record_value(row, "scan_policy") or "none")),
-        person_keys=[value[:128] for value in _string_list(today.get("person_keys"))],
-        topic_keys=[value[:128] for value in _string_list(today.get("topic_keys"))],
+        meaningful=meaningful,
+        confirmed=confirmed,
+        positive_or_neutral=positive_or_neutral,
+        superseded=superseded,
+        deleted=deleted,
+        tags=tags,
+        person_keys=person_keys,
+        topic_keys=topic_keys,
     )
 
 
@@ -243,30 +277,50 @@ async def _sources_are_current(queryable: Any, card: TodayCardRecord) -> bool:
         )
         _, current_watermark = today_card_source_pack(evidence)
         return card.source_watermark == current_watermark
+    previous_day_start, previous_day_end = materialization_window(card.local_date, card.timezone)
     for source in card.source_refs:
-        if source.source_type != "conversation_summary" or not source.conversation_id:
-            continue
         row = await queryable.fetchrow(
             """
-            SELECT source_ref ->> 'active_summary_version_id' AS active_summary_version_id
+            SELECT event_id, text, started_at, privacy_scope, scan_policy, source_ref, metadata
             FROM canonical_events
             WHERE uid = $1
-              AND source_ref ->> 'conversation_id' = $2
-              AND COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
+              AND COALESCE(
+                    NULLIF(source_ref ->> 'conversation_id', ''),
+                    NULLIF(metadata #>> '{today_card,source_id}', ''),
+                    event_id
+                  ) = $2
+              AND (
+                    COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
+                    OR metadata ? 'today_card'
+              )
               AND NOT EXISTS (
                     SELECT 1
                     FROM ella_today_card_source_tombstones tombstone
                     WHERE tombstone.uid = canonical_events.uid
-                      AND tombstone.source_id = source_ref ->> 'conversation_id'
+                      AND tombstone.source_id = $2
               )
-            ORDER BY inserted_at DESC
+            ORDER BY inserted_at DESC, started_at DESC, event_id DESC
             LIMIT 1
             """,
             card.uid,
-            source.conversation_id,
+            source.source_id,
         )
-        if row is None or str(_record_value(row, "active_summary_version_id") or "") != str(
-            source.source_version_id or ""
+        if row is None:
+            return False
+        try:
+            current = _evidence_from_row(
+                row,
+                previous_day_start=previous_day_start,
+                previous_day_end=previous_day_end,
+            )
+        except (TypeError, ValueError):
+            return False
+        if (
+            current is None
+            or not evidence_is_safe(current)
+            or current.source.source_id != source.source_id
+            or current.source.source_version_id != source.source_version_id
+            or current.source.evidence_hash != source.evidence_hash
         ):
             return False
     return True
@@ -283,20 +337,33 @@ async def _load_evidence(
     rows = await queryable.fetch(
         """
         SELECT event_id, text, started_at, privacy_scope, scan_policy, source_ref, metadata
-        FROM canonical_events
-        WHERE uid = $1
-          AND started_at >= $2
-          AND (
-                COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
-                OR metadata ? 'today_card'
-          )
+        FROM (
+            SELECT uid, event_id, text, started_at, inserted_at, privacy_scope, scan_policy, source_ref, metadata,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY COALESCE(
+                           NULLIF(source_ref ->> 'conversation_id', ''),
+                           NULLIF(metadata #>> '{today_card,source_id}', ''),
+                           event_id
+                       )
+                       ORDER BY inserted_at DESC, started_at DESC, event_id DESC
+                   ) AS source_rank
+            FROM canonical_events
+            WHERE uid = $1
+              AND started_at >= $2
+              AND (
+                    COALESCE(metadata ->> 'adapter', '') = 'omi-enriched-conversation'
+                    OR metadata ? 'today_card'
+              )
+        ) evidence_row
+        WHERE source_rank = 1
           AND NOT EXISTS (
                 SELECT 1
                 FROM ella_today_card_source_tombstones tombstone
-                WHERE tombstone.uid = canonical_events.uid
+                WHERE tombstone.uid = evidence_row.uid
                   AND tombstone.source_id = COALESCE(
-                        canonical_events.source_ref ->> 'conversation_id',
-                        canonical_events.metadata #>> '{today_card,source_id}'
+                        NULLIF(evidence_row.source_ref ->> 'conversation_id', ''),
+                        NULLIF(evidence_row.metadata #>> '{today_card,source_id}', ''),
+                        evidence_row.event_id
                   )
           )
         ORDER BY started_at DESC, event_id ASC
@@ -500,9 +567,14 @@ class PostgresTodayCardRepository:
 
     async def save_materialized(self, card: TodayCardRecord) -> TodayCardRecord:
         pool = await self._pool()
-        row = await pool.fetchrow(
-            """
-            UPDATE ella_today_cards
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await lock_today_card_source_validity(conn, card.uid)
+                if not await _sources_are_current(conn, card):
+                    raise RuntimeError("today_card_materialization_conflict")
+                row = await conn.fetchrow(
+                    """
+                    UPDATE ella_today_cards
             SET state = $3,
                 kind = $4,
                 content = $5::jsonb,
@@ -530,25 +602,25 @@ class PostgresTodayCardRepository:
                       )
               )
             RETURNING *
-            """,
-            card.card_id,
-            card.version,
-            card.state.value,
-            card.kind.value if card.kind else None,
-            json.dumps(card.content.model_dump(mode="json")) if card.content else None,
-            json.dumps([source.model_dump(mode="json") for source in card.source_refs]),
-            card.evidence_hash,
-            card.source_watermark,
-            card.render_contract_version,
-            json.dumps(card.private_consolidation, default=str),
-            json.dumps(card.presentation.model_dump(mode="json")),
-            json.dumps(card.interaction_state, default=str),
-            card.reason_code,
-            card.generated_at,
-            card.invalidated_at,
-            card.invalidation_reason,
-            card.updated_at,
-        )
+                    """,
+                    card.card_id,
+                    card.version,
+                    card.state.value,
+                    card.kind.value if card.kind else None,
+                    json.dumps(card.content.model_dump(mode="json")) if card.content else None,
+                    json.dumps([source.model_dump(mode="json") for source in card.source_refs]),
+                    card.evidence_hash,
+                    card.source_watermark,
+                    card.render_contract_version,
+                    json.dumps(card.private_consolidation, default=str),
+                    json.dumps(card.presentation.model_dump(mode="json")),
+                    json.dumps(card.interaction_state, default=str),
+                    card.reason_code,
+                    card.generated_at,
+                    card.invalidated_at,
+                    card.invalidation_reason,
+                    card.updated_at,
+                )
         if row is None:
             raise RuntimeError("today_card_materialization_conflict")
         return _card_from_row(row)
@@ -562,8 +634,11 @@ class PostgresTodayCardRepository:
         now: datetime | None = None,
     ) -> int:
         pool = await self._pool()
-        result = await pool.execute(
-            """
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await lock_today_card_source_validity(conn, uid)
+                result = await conn.execute(
+                    """
             UPDATE ella_today_cards
             SET invalidated_at = $4,
                 invalidation_reason = $3,
@@ -571,13 +646,74 @@ class PostgresTodayCardRepository:
             WHERE uid = $1
               AND invalidated_at IS NULL
               AND source_refs @> $2::jsonb
-            """,
-            uid,
-            json.dumps([{"source_id": source_id}]),
-            reason[:120],
-            now or datetime.now(timezone.utc),
-        )
+                    """,
+                    uid,
+                    json.dumps([{"source_id": source_id}]),
+                    reason[:120],
+                    now or datetime.now(timezone.utc),
+                )
         return int(str(result).split()[-1])
+
+    async def tombstone_source(
+        self,
+        *,
+        uid: str,
+        source_id: str,
+        reason: str,
+    ) -> int:
+        if reason not in {"source_deleted", "source_retracted"}:
+            raise ValueError("today_card_tombstone_reason_invalid")
+        pool = await self._pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await lock_today_card_source_validity(conn, uid)
+                await conn.execute(
+                    """
+                    INSERT INTO ella_today_card_source_tombstones (uid, source_id, reason)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (uid, source_id) DO UPDATE
+                    SET reason = EXCLUDED.reason,
+                        deleted_at = LEAST(
+                            ella_today_card_source_tombstones.deleted_at,
+                            EXCLUDED.deleted_at
+                        )
+                    """,
+                    uid,
+                    source_id,
+                    reason,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM canonical_event_sessions
+                    WHERE uid = $1
+                      AND source_ref ->> 'conversation_id' = $2
+                    """,
+                    uid,
+                    source_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM canonical_events
+                    WHERE uid = $1
+                      AND (
+                            source_ref ->> 'conversation_id' = $2
+                            OR metadata #>> '{today_card,source_id}' = $2
+                            OR event_id = $2
+                      )
+                    """,
+                    uid,
+                    source_id,
+                )
+                invalidated = await self.invalidate_source_in_connection(
+                    conn,
+                    uid=uid,
+                    source_id=source_id,
+                    reason=reason,
+                )
+        # Retain an explicit post-commit pass for callers that predate the
+        # shared source-validity lock; new publication paths are fenced above.
+        invalidated += await self.invalidate_source(uid=uid, source_id=source_id, reason=reason)
+        return invalidated
 
     @staticmethod
     async def invalidate_source_in_connection(
@@ -714,50 +850,11 @@ async def invalidate_deleted_conversation_source(uid: str, conversation_id: str)
     """Tombstone and remove exact canonical evidence before source deletion."""
     repository = PostgresTodayCardRepository(get_ella_postgres_pool)
     try:
-        pool = await repository._pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO ella_today_card_source_tombstones (uid, source_id, reason)
-                    VALUES ($1, $2, 'source_deleted')
-                    ON CONFLICT (uid, source_id) DO NOTHING
-                    """,
-                    uid,
-                    conversation_id,
-                )
-                await conn.execute(
-                    """
-                    DELETE FROM canonical_event_sessions
-                    WHERE uid = $1
-                      AND source_ref ->> 'conversation_id' = $2
-                    """,
-                    uid,
-                    conversation_id,
-                )
-                await conn.execute(
-                    """
-                    DELETE FROM canonical_events
-                    WHERE uid = $1
-                      AND source_ref ->> 'conversation_id' = $2
-                    """,
-                    uid,
-                    conversation_id,
-                )
-                invalidated = await repository.invalidate_source_in_connection(
-                    conn,
-                    uid=uid,
-                    source_id=conversation_id,
-                    reason="source_deleted",
-                )
-        # Close the claim/save race: a save after the transaction sees the
-        # committed tombstone; a save before it is caught by this final pass.
-        invalidated += await repository.invalidate_source(
+        return await repository.tombstone_source(
             uid=uid,
             source_id=conversation_id,
             reason="source_deleted",
         )
-        return invalidated
     except asyncpg.UndefinedTableError:
         # Preserve the additive migration compatibility window. Once migration
         # 016 exists, every other failure blocks deletion before content can be

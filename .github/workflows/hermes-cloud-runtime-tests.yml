@@ -764,6 +764,10 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_deleted_source_is_tombstoned_removed_and_excluded_after_stale_reinsert"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_source_less_card_watermark_detects_delayed_canonical_evidence"
+            "tests/postgres/test_today_card_lifecycle_postgres.py::test_same_version_safety_tightening_invalidates_ready_source_fingerprint"
+            "tests/postgres/test_today_card_lifecycle_postgres.py::test_source_advance_during_materialization_cannot_publish_stale_card"
+            "tests/postgres/test_today_card_lifecycle_postgres.py::test_explicit_source_retraction_is_durable_across_stale_reinsert"
+            "tests/postgres/test_today_card_lifecycle_postgres.py::test_explicit_source_currentness_uses_only_latest_canonical_version"
           )
           for required_id in "${required_today_card_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$today_card_ids"

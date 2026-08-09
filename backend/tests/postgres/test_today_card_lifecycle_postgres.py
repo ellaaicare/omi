@@ -9,7 +9,9 @@ import asyncpg
 import pytest
 
 from ella.services import today_card_postgres
-from ella.services.today_card import today_card_source_pack
+from ella.routers import canonical_events
+from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
+from ella.services.today_card import DeterministicTodayCardRenderer, TodayCardMaterializer, today_card_source_pack
 from ella.services.today_card_postgres import PostgresTodayCardRepository
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
@@ -113,6 +115,45 @@ async def _insert_summary(pool: asyncpg.Pool, *, uid: str, conversation_id: str)
     )
 
 
+async def _insert_explicit_source(
+    pool: asyncpg.Pool,
+    *,
+    uid: str,
+    source_id: str,
+    source_version_id: str = "source-v1",
+) -> None:
+    await pool.execute(
+        """
+        INSERT INTO canonical_events (
+            uid, canonical_identity, event_id, source_identity, channel,
+            provider, role, text, started_at, source_ref, metadata
+        )
+        VALUES ($1, $1, $2, $3, 'hermes', 'hermes', 'assistant',
+                'A useful observation from recent memory.', $4, '{}'::jsonb, $5::jsonb)
+        ON CONFLICT (event_id, source_identity) DO UPDATE
+        SET text = EXCLUDED.text, source_ref = EXCLUDED.source_ref, metadata = EXCLUDED.metadata
+        """,
+        uid,
+        f"today:{source_id}:{source_version_id}",
+        f"hermes:{source_id}:{source_version_id}",
+        datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+        json.dumps(
+            {
+                "today_card": {
+                    "kind": "recap",
+                    "source_id": source_id,
+                    "source_version_id": source_version_id,
+                    "title": "A useful observation",
+                    "summary": "A useful observation from recent memory.",
+                    "confidence": 0.95,
+                    "meaningful": True,
+                    "positive_or_neutral": True,
+                }
+            }
+        ),
+    )
+
+
 def test_deleted_source_is_tombstoned_removed_and_excluded_after_stale_reinsert(monkeypatch):
     async def scenario() -> None:
         admin, pool, schema = await _create_schema()
@@ -205,6 +246,194 @@ def test_source_less_card_watermark_detects_delayed_canonical_evidence():
 
             await _insert_summary(pool, uid=uid, conversation_id="conversation-late")
             assert await repository.sources_are_current(card) is False
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
+
+
+def test_same_version_safety_tightening_invalidates_ready_source_fingerprint():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema()
+        try:
+            uid = "today-safety-user"
+            await pool.execute("INSERT INTO users (omi_uid) VALUES ($1)", uid)
+            await _insert_summary(pool, uid=uid, conversation_id="conversation-safety")
+
+            async def get_pool():
+                return pool
+
+            repository = PostgresTodayCardRepository(get_pool)
+            materializer = TodayCardMaterializer(
+                repository,
+                clock=lambda: datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+            )
+            result = await materializer.materialize(uid, date(2026, 8, 1))
+            assert result.card.state.value == "ready"
+            assert result.card.source_refs[0].source_version_id == "summary-v1"
+            assert await repository.sources_are_current(result.card) is True
+
+            await pool.execute(
+                """
+                UPDATE canonical_events
+                SET privacy_scope = 'system_private'
+                WHERE uid = $1 AND source_ref ->> 'conversation_id' = 'conversation-safety'
+                """,
+                uid,
+            )
+
+            assert await repository.sources_are_current(result.card) is False
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
+
+
+def test_source_advance_during_materialization_cannot_publish_stale_card(monkeypatch):
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema()
+        try:
+            uid = "today-race-user"
+            conversation_id = "conversation-race"
+            await pool.execute("INSERT INTO users (omi_uid) VALUES ($1)", uid)
+            await _insert_summary(pool, uid=uid, conversation_id=conversation_id)
+
+            async def get_pool():
+                return pool
+
+            monkeypatch.setattr(canonical_events, "_get_pool", get_pool)
+            store = PostgresCanonicalEventStore(
+                reinterpretation_repository=False,
+                today_card_repository=PostgresTodayCardRepository(get_pool),
+            )
+
+            class AdvancingRenderer(DeterministicTodayCardRenderer):
+                async def render(self, **kwargs):
+                    await store.write_batch(
+                        [
+                            CanonicalEventIn(
+                                uid=uid,
+                                canonical_identity=uid,
+                                event_id=f"omi:{conversation_id}:summary",
+                                source_ref={
+                                    "source_identity": f"omi:{conversation_id}",
+                                    "conversation_id": conversation_id,
+                                    "active_summary_version_id": "summary-v2",
+                                },
+                                channel="omi",
+                                provider="omi-backend",
+                                role="assistant",
+                                text="New canonical summary.",
+                                started_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+                                metadata={
+                                    "adapter": "omi-enriched-conversation",
+                                    "structured": {
+                                        "title": "New canonical source",
+                                        "overview": "New canonical summary.",
+                                    },
+                                },
+                            )
+                        ]
+                    )
+                    return await super().render(**kwargs)
+
+            materializer = TodayCardMaterializer(
+                PostgresTodayCardRepository(get_pool),
+                renderer=AdvancingRenderer(),
+                clock=lambda: datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+            )
+
+            with pytest.raises(RuntimeError, match="today_card_materialization_conflict"):
+                await materializer.materialize(uid, date(2026, 8, 1))
+
+            row = await pool.fetchrow("SELECT state, source_refs FROM ella_today_cards WHERE uid = $1", uid)
+            assert row is not None
+            assert row["state"] == "preparing"
+            assert json.loads(row["source_refs"]) == []
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
+
+
+def test_explicit_source_retraction_is_durable_across_stale_reinsert():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema()
+        try:
+            uid = "today-explicit-retract-user"
+            source_id = "hermes-note-a"
+            await pool.execute("INSERT INTO users (omi_uid) VALUES ($1)", uid)
+            await _insert_explicit_source(pool, uid=uid, source_id=source_id)
+
+            async def get_pool():
+                return pool
+
+            repository = PostgresTodayCardRepository(get_pool)
+            materializer = TodayCardMaterializer(
+                repository,
+                clock=lambda: datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+            )
+            result = await materializer.materialize(uid, date(2026, 8, 1))
+            assert result.card.state.value == "ready"
+            assert result.card.source_refs[0].source_id == source_id
+
+            assert (
+                await repository.tombstone_source(
+                    uid=uid,
+                    source_id=source_id,
+                    reason="source_retracted",
+                )
+                == 1
+            )
+            assert await pool.fetchval("SELECT COUNT(*) FROM canonical_events WHERE uid = $1", uid) == 0
+
+            await _insert_explicit_source(pool, uid=uid, source_id=source_id)
+            evidence = await repository.load_evidence(
+                uid=uid,
+                previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+                previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                history_start=datetime(2025, 8, 1, tzinfo=timezone.utc),
+            )
+            assert evidence == []
+            assert await repository.sources_are_current(result.card) is False
+            assert await pool.fetchval(
+                """
+                SELECT reason = 'source_retracted'
+                FROM ella_today_card_source_tombstones
+                WHERE uid = $1 AND source_id = $2
+                """,
+                uid,
+                source_id,
+            )
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
+
+
+def test_explicit_source_currentness_uses_only_latest_canonical_version():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema()
+        try:
+            uid = "today-explicit-version-user"
+            source_id = "hermes-note-versioned"
+            await _insert_explicit_source(pool, uid=uid, source_id=source_id, source_version_id="source-v1")
+            await _insert_explicit_source(pool, uid=uid, source_id=source_id, source_version_id="source-v2")
+
+            async def get_pool():
+                return pool
+
+            repository = PostgresTodayCardRepository(get_pool)
+            evidence = await repository.load_evidence(
+                uid=uid,
+                previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+                previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                history_start=datetime(2025, 8, 1, tzinfo=timezone.utc),
+            )
+
+            assert len(evidence) == 1
+            assert evidence[0].source.source_id == source_id
+            assert evidence[0].source.source_version_id == "source-v2"
         finally:
             await _drop_schema(admin, pool, schema)
 

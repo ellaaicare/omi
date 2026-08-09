@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from database.ella_postgres import get_ella_postgres_pool
-from ella.services.today_card_postgres import PostgresTodayCardRepository
+from ella.services.today_card_postgres import PostgresTodayCardRepository, lock_today_card_source_validity
 from utils.ella.canonical_auth import CANONICAL_EVENT_SERVICE_HEADER
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
@@ -81,6 +81,36 @@ def _should_replace_existing_event(item: dict[str, Any]) -> bool:
     """
     metadata = item.get("metadata") or {}
     return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
+
+
+def _today_card_source_id(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    today = metadata.get("today_card") if isinstance(metadata.get("today_card"), dict) else {}
+    if metadata.get("adapter") != "omi-enriched-conversation" and not today:
+        return ""
+    return str(source_ref.get("conversation_id") or today.get("source_id") or item.get("event_id") or "").strip()
+
+
+def _today_card_source_snapshot(value: dict[str, Any]) -> str:
+    def json_value(candidate: Any) -> Any:
+        if isinstance(candidate, str):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return candidate
+        return candidate
+
+    return _stable_json(
+        {
+            "text": value.get("text"),
+            "started_at": value.get("started_at"),
+            "privacy_scope": value.get("privacy_scope"),
+            "scan_policy": value.get("scan_policy"),
+            "source_ref": json_value(value.get("source_ref")),
+            "metadata": json_value(value.get("metadata")),
+        }
+    )
 
 
 def _is_private_scoped_event(item: dict[str, Any]) -> bool:
@@ -361,15 +391,14 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             async with conn.transaction():
                 for event in events:
                     item = event.normalized()
-                    previous_summary_version = ""
-                    conversation_id = ""
-                    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-                    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
-                    if item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation":
-                        conversation_id = str(source_ref.get("conversation_id") or "")
+                    today_card_source_id = _today_card_source_id(item)
+                    previous_source_snapshot = ""
+                    if today_card_source_id:
+                        await lock_today_card_source_validity(conn, item["uid"])
+                    if _should_replace_existing_event(item) and today_card_source_id:
                         previous = await conn.fetchrow(
                             """
-                            SELECT source_ref ->> 'active_summary_version_id' AS active_summary_version_id
+                            SELECT text, started_at, privacy_scope, scan_policy, source_ref, metadata
                             FROM canonical_events
                             WHERE event_id = $1 AND source_identity = $2
                             FOR UPDATE
@@ -378,7 +407,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             item["source_identity"],
                         )
                         if previous:
-                            previous_summary_version = str(previous["active_summary_version_id"] or "")
+                            previous_source_snapshot = _today_card_source_snapshot(dict(previous))
                     conflict_clause = (
                         """
                         DO UPDATE SET
@@ -440,18 +469,19 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             "updated": bool(row and not row["inserted"]),
                         }
                     )
-                    current_summary_version = str(source_ref.get("active_summary_version_id") or "")
                     if (
-                        conversation_id
-                        and previous_summary_version
-                        and current_summary_version != previous_summary_version
+                        row
+                        and not row["inserted"]
+                        and today_card_source_id
+                        and previous_source_snapshot
+                        and _today_card_source_snapshot(item) != previous_source_snapshot
                     ):
                         try:
                             async with conn.transaction():
                                 await self._today_card_repository.invalidate_source_in_connection(
                                     conn,
                                     uid=item["uid"],
-                                    source_id=conversation_id,
+                                    source_id=today_card_source_id,
                                     reason="source_version_changed",
                                 )
                         except asyncpg.UndefinedTableError:
