@@ -105,6 +105,10 @@ class FakeRuntimeService:
                     "contains_user_speech": True,
                     "guardian_relevant": False,
                 },
+                "grounding": {
+                    "outcome": "supported",
+                    "supporting_quotes": ["Synthetic cafe order."],
+                },
             }
         )
         if response_validator:
@@ -156,6 +160,12 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
     assert "conversation-a" not in request.user_input
     assert summary_applier.await_args.kwargs["require_canonical"] is True
     assert summary_applier.await_args.kwargs["summary_source"] == "hermes_cloud"
+    grounding = summary_applier.await_args.kwargs["today_card_grounding"]
+    assert grounding["semantic_outcome"] == "supported"
+    assert grounding["owner_hash"].startswith("sha256:")
+    assert grounding["conversation_id_hash"].startswith("sha256:")
+    assert grounding["runtime_interaction_id"] == "interaction-a"
+    assert grounding["canonical_assistant_event_id"] == "event-assistant"
     assert result.active_summary_version_id == "version-enriched"
     assert result.provider_response_present is True
     assert result.client_interaction_id == request.client_interaction_id
@@ -184,6 +194,91 @@ def test_enrichment_rejects_transcript_change_before_writeback():
                 conversation_id="conversation-a",
             )
         )
+
+    service.summary_applier.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "overview",
+    [
+        "[Ella] La grabación era demasiado corta para resumir lo ocurrido.",
+        "[Ella] 录音太短，无法总结发生了什么。",
+    ],
+)
+def test_enrichment_semantic_insufficiency_cannot_issue_today_card_attestation(overview):
+    conversation = _conversation(
+        "We met after lunch and planned the garden beds for next spring with three neighbors joining us."
+    )
+
+    class InsufficientRuntime(FakeRuntimeService):
+        async def run_turn(self, runtime, request, *, response_validator=None):
+            self.calls.append((runtime, request))
+            text = json.dumps(
+                {
+                    "title": "A captured moment",
+                    "overview": overview,
+                    "category": "other",
+                    "grounding": {"outcome": "insufficient", "supporting_quotes": []},
+                }
+            )
+            if response_validator:
+                response_validator(text)
+            return SimpleNamespace(
+                text=text,
+                response_id="response-insufficient",
+                canonical_user_event_id="event-user-insufficient",
+                canonical_assistant_event_id="event-assistant-insufficient",
+                duplicate=False,
+                usage={},
+                runtime_interaction_id="interaction-insufficient",
+            )
+
+    summary_applier = AsyncMock(
+        return_value={"active_summary_version_id": "version-enriched", "canonical_confirmed": True}
+    )
+    service = HermesCloudEnrichmentService(
+        repository=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        runtime_service_factory=lambda allow_shadow: InsufficientRuntime(),
+        conversation_reader=lambda uid, conversation_id: deepcopy(conversation),
+        summary_applier=summary_applier,
+    )
+    service._runtime = AsyncMock(return_value=_runtime())
+
+    asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
+
+    assert summary_applier.await_args.kwargs["today_card_grounding"] is None
+
+
+def test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript():
+    conversation = _conversation("We planted tomatoes together in the garden after lunch.")
+
+    class MismatchedQuoteRuntime(FakeRuntimeService):
+        async def run_turn(self, runtime, request, *, response_validator=None):
+            text = json.dumps(
+                {
+                    "title": "A lottery win",
+                    "overview": "[Ella] You won the lottery and bought a red sailboat.",
+                    "category": "other",
+                    "grounding": {
+                        "outcome": "supported",
+                        "supporting_quotes": ["I won the lottery and bought a red sailboat."],
+                    },
+                }
+            )
+            response_validator(text)
+
+    service = HermesCloudEnrichmentService(
+        repository=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        runtime_service_factory=lambda allow_shadow: MismatchedQuoteRuntime(),
+        conversation_reader=lambda uid, conversation_id: deepcopy(conversation),
+        summary_applier=AsyncMock(),
+    )
+    service._runtime = AsyncMock(return_value=_runtime())
+
+    with pytest.raises(ValueError, match="not present in the authoritative transcript"):
+        asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
 
     service.summary_applier.assert_not_awaited()
 

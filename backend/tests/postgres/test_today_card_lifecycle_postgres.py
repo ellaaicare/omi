@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import uuid
@@ -13,6 +14,12 @@ from ella.routers import canonical_events
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services.today_card import DeterministicTodayCardRenderer, TodayCardMaterializer, today_card_source_pack
 from ella.services.today_card_postgres import PostgresTodayCardRepository
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / "016_create_today_cards.sql"
@@ -89,6 +96,33 @@ async def _drop_schema(admin: asyncpg.Connection, pool: asyncpg.Pool, schema: st
     await admin.close()
 
 
+def _semantic_summary_metadata(*, conversation_id: str, version: str, title: str, overview: str) -> dict:
+    transcript_segments = [{"text": "We planted tomatoes together and planned another garden visit after lunch."}]
+    structured = {"title": title, "overview": overview}
+    return {
+        "adapter": "omi-enriched-conversation",
+        "structured": structured,
+        "summary_versions": [{"id": version, "title": title, "overview": overview}],
+        "transcript_segments": transcript_segments,
+        "today_card": {
+            "grounding": {
+                "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+                "attester": TODAY_CARD_GROUNDING_ATTESTER,
+                "semantic_outcome": "supported",
+                "source_version_id": version,
+                "transcript_hash": transcript_grounding_hash(transcript_segments),
+                "summary_hash": summary_grounding_hash(structured),
+                "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
+                "policy_version": "hermes-cloud-enrichment-v1",
+                "owner_hash": "sha256:" + ("b" * 64),
+                "conversation_id_hash": "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
+                "runtime_interaction_id": "runtime-interaction-a",
+                "canonical_assistant_event_id": "canonical-assistant-a",
+            }
+        },
+    }
+
+
 async def _insert_summary(pool: asyncpg.Pool, *, uid: str, conversation_id: str) -> None:
     await pool.execute(
         """
@@ -107,21 +141,12 @@ async def _insert_summary(pool: asyncpg.Pool, *, uid: str, conversation_id: str)
         datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
         json.dumps({"conversation_id": conversation_id, "active_summary_version_id": "summary-v1"}),
         json.dumps(
-            {
-                "adapter": "omi-enriched-conversation",
-                "structured": {"title": "Eligible source", "overview": "Eligible summary with grounded details."},
-                "today_card": {
-                    "grounding": {
-                        "contract_version": "ella.today_card.grounding.v1",
-                        "grounded_content": True,
-                        "source_version_id": "summary-v1",
-                        "transcript_hash": "sha256:" + ("a" * 64),
-                        "transcript_word_count": 14,
-                        "transcript_non_ascii_alphanumeric_count": 0,
-                        "capture_duration_seconds": 18.0,
-                    }
-                },
-            }
+            _semantic_summary_metadata(
+                conversation_id=conversation_id,
+                version="summary-v1",
+                title="Eligible source",
+                overview="Eligible summary with grounded details.",
+            )
         ),
     )
 
@@ -336,24 +361,12 @@ def test_source_advance_during_materialization_cannot_publish_stale_card(monkeyp
                                 role="assistant",
                                 text="New canonical summary with grounded details.",
                                 started_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
-                                metadata={
-                                    "adapter": "omi-enriched-conversation",
-                                    "structured": {
-                                        "title": "New canonical source",
-                                        "overview": "New canonical summary with grounded details.",
-                                    },
-                                    "today_card": {
-                                        "grounding": {
-                                            "contract_version": "ella.today_card.grounding.v1",
-                                            "grounded_content": True,
-                                            "source_version_id": "summary-v2",
-                                            "transcript_hash": "sha256:" + ("b" * 64),
-                                            "transcript_word_count": 14,
-                                            "transcript_non_ascii_alphanumeric_count": 0,
-                                            "capture_duration_seconds": 18.0,
-                                        }
-                                    },
-                                },
+                                metadata=_semantic_summary_metadata(
+                                    conversation_id=conversation_id,
+                                    version="summary-v2",
+                                    title="New canonical source",
+                                    overview="New canonical summary with grounded details.",
+                                ),
                             )
                         ]
                     )

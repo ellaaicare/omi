@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import logging
@@ -14,9 +15,6 @@ from database.ella_postgres import get_ella_postgres_pool
 
 from ella.services.today_card import (
     TODAY_CARD_CONTRACT_VERSION,
-    TODAY_CARD_MIN_CAPTURE_SECONDS,
-    TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC,
-    TODAY_CARD_MIN_TRANSCRIPT_WORDS,
     TODAY_CARD_RENDER_CONTRACT_VERSION,
     TODAY_CARD_SOURCE_COOLDOWN_DAYS,
     TodayCardAvoidance,
@@ -35,9 +33,14 @@ from ella.services.today_card import (
     sha256_ref,
     today_card_source_pack,
 )
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 
 logger = logging.getLogger("ella.today_card")
-TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.grounding.v1"
 
 _SOURCE_VALIDITY_LOCK_PREFIX = "ella.today-card-source-validity"
 
@@ -173,32 +176,65 @@ def _source_tags(metadata: dict[str, Any], scan_policy: str) -> list[str]:
     return sorted({str(tag).strip().lower() for tag in raw_tags if str(tag).strip()})
 
 
-def _has_grounded_content_provenance(today: dict[str, Any], source_version_id: str | None) -> bool:
+def _has_grounded_content_provenance(
+    today: dict[str, Any],
+    source_version_id: str | None,
+    *,
+    structured: dict[str, Any],
+    transcript_segments: list[Any],
+    summary_versions: list[Any],
+    conversation_id: str | None,
+) -> bool:
     grounding = today.get("grounding")
     if not isinstance(grounding, dict) or not source_version_id:
         return False
-    transcript_word_count = _first_nonnegative_number(grounding.get("transcript_word_count"))
-    transcript_non_ascii_count = _first_nonnegative_number(grounding.get("transcript_non_ascii_alphanumeric_count"))
-    capture_duration_seconds = _first_nonnegative_number(grounding.get("capture_duration_seconds"))
-    transcript_hash = str(grounding.get("transcript_hash") or "")
-    transcript_hash_digest = transcript_hash.removeprefix("sha256:")
-    has_grounded_transcript = bool(
-        (transcript_word_count is not None and transcript_word_count >= TODAY_CARD_MIN_TRANSCRIPT_WORDS)
-        or (
-            transcript_non_ascii_count is not None
-            and transcript_non_ascii_count >= TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC
+    normalized_segments = [dict(segment) for segment in transcript_segments if isinstance(segment, dict)]
+    matching_versions = [
+        version
+        for version in summary_versions
+        if isinstance(version, dict) and str(version.get("id") or "") == source_version_id
+    ]
+    if len(matching_versions) != 1:
+        return False
+    active_version = matching_versions[0]
+    if (
+        str(active_version.get("title") or "").strip() != str(structured.get("title") or "").strip()
+        or str(active_version.get("overview") or "").strip() != str(structured.get("overview") or "").strip()
+        or active_version.get("source") != "hermes_cloud"
+        or active_version.get("kind") != "hermes_enriched"
+    ):
+        return False
+    quote_hashes = grounding.get("supporting_quote_hashes")
+    owner_hash = str(grounding.get("owner_hash") or "")
+    owner_digest = owner_hash.removeprefix("sha256:")
+    valid_quote_hashes = (
+        isinstance(quote_hashes, list)
+        and bool(quote_hashes)
+        and all(
+            isinstance(value, str)
+            and value.startswith("sha256:")
+            and len(value.removeprefix("sha256:")) == 64
+            and all(character in "0123456789abcdef" for character in value.removeprefix("sha256:"))
+            for value in quote_hashes
         )
     )
     return (
         grounding.get("contract_version") == TODAY_CARD_GROUNDING_CONTRACT_VERSION
-        and grounding.get("grounded_content") is True
+        and grounding.get("attester") == TODAY_CARD_GROUNDING_ATTESTER
+        and grounding.get("semantic_outcome") == "supported"
         and grounding.get("source_version_id") == source_version_id
-        and capture_duration_seconds is not None
-        and capture_duration_seconds >= TODAY_CARD_MIN_CAPTURE_SECONDS
-        and has_grounded_transcript
-        and transcript_hash.startswith("sha256:")
-        and len(transcript_hash_digest) == 64
-        and all(character in "0123456789abcdef" for character in transcript_hash_digest)
+        and grounding.get("transcript_hash") == transcript_grounding_hash(normalized_segments)
+        and grounding.get("summary_hash") == summary_grounding_hash(structured)
+        and conversation_id is not None
+        and grounding.get("conversation_id_hash")
+        == "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()
+        and owner_hash.startswith("sha256:")
+        and len(owner_digest) == 64
+        and all(character in "0123456789abcdef" for character in owner_digest)
+        and bool(str(grounding.get("runtime_interaction_id") or "").strip())
+        and bool(str(grounding.get("canonical_assistant_event_id") or "").strip())
+        and grounding.get("policy_version") == "hermes-cloud-enrichment-v1"
+        and valid_quote_hashes
     )
 
 
@@ -275,9 +311,15 @@ def _evidence_from_row(
     )
     source_text_meaningful = source_text_is_meaningful(title, summary)
     if adapter == "omi-enriched-conversation":
+        transcript_segments = metadata.get("transcript_segments")
+        summary_versions = metadata.get("summary_versions")
         source_text_meaningful = source_text_meaningful and _has_grounded_content_provenance(
             today,
             source_version_id,
+            structured=structured,
+            transcript_segments=(transcript_segments if isinstance(transcript_segments, list) else []),
+            summary_versions=(summary_versions if isinstance(summary_versions, list) else []),
+            conversation_id=conversation_id,
         )
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = (

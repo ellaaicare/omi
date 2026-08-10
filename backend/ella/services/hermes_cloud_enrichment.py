@@ -19,6 +19,12 @@ from ella.services.hermes_cloud_runtime import (
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime
 from models.conversation import CategoryEnum
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 
 HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
 HERMES_CLOUD_ENRICHMENT_POLICY_VERSION = "hermes-cloud-enrichment-v1"
@@ -35,6 +41,9 @@ Rules:
 - Keep the title short and free of markdown.
 - category must be one of: personal, education, health, finance, legal, philosophy, spiritual, science, entrepreneurship, parenting, romantic, travel, inspiration, technology, business, social, work, sports, politics, literature, history, architecture, music, weather, news, entertainment, psychology, real, design, family, economics, environment, other.
 - Include concise ella_tags and an ella_signal object.
+- Judge whether the summary contains a useful, specific fact grounded in the transcript. This is a semantic decision, not a length check.
+- Set grounding.outcome to "supported" only when the overview is useful and supported by the transcript; otherwise set it to "insufficient".
+- For "supported", include 1-3 exact verbatim transcript excerpts that support the overview. For "insufficient", use an empty supporting_quotes list.
 - Do not contact anyone, deliver Guardian or caregiver messages, or mutate memory.
 
 Return exactly:
@@ -51,6 +60,10 @@ Return exactly:
     "contains_media": false,
     "contains_user_speech": true,
     "guardian_relevant": false
+  },
+  "grounding": {
+    "outcome": "supported|insufficient",
+    "supporting_quotes": ["exact verbatim transcript excerpt"]
   }
 }"""
 
@@ -183,6 +196,51 @@ def _summary_sha256(summary: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _normalized_grounding_text(value: str) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _grounding_attestation(
+    result: dict[str, Any],
+    *,
+    transcript_segments: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    grounding = result.get("grounding")
+    if not isinstance(grounding, dict):
+        raise ValueError("Summary model response missing grounding assessment")
+    outcome = str(grounding.get("outcome") or "").strip().lower()
+    if outcome not in {"supported", "insufficient"}:
+        raise ValueError("Summary model response has invalid grounding outcome")
+    raw_quotes = grounding.get("supporting_quotes")
+    if not isinstance(raw_quotes, list):
+        raise ValueError("Summary model response has invalid grounding quotes")
+    if outcome == "insufficient":
+        if raw_quotes:
+            raise ValueError("Insufficient summary cannot include grounding quotes")
+        return None
+
+    transcript = _normalized_grounding_text(
+        " ".join(str(segment.get("text") or "") for segment in transcript_segments if isinstance(segment, dict))
+    ).casefold()
+    quotes = [_normalized_grounding_text(str(value or "")) for value in raw_quotes]
+    if not 1 <= len(quotes) <= 3 or any(not quote for quote in quotes):
+        raise ValueError("Supported summary requires one to three grounding quotes")
+    if any(quote.casefold() not in transcript for quote in quotes):
+        raise ValueError("Grounding quote is not present in the authoritative transcript")
+    if any(sum(character.isalnum() for character in quote) < 8 for quote in quotes):
+        raise ValueError("Grounding quote is too short to support a summary")
+    return {
+        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        "attester": TODAY_CARD_GROUNDING_ATTESTER,
+        "semantic_outcome": "supported",
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
+        "summary_hash": summary_grounding_hash(summary),
+        "supporting_quote_hashes": ["sha256:" + hashlib.sha256(quote.encode("utf-8")).hexdigest() for quote in quotes],
+        "policy_version": HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+    }
+
+
 def _interaction_identity(
     uid: str,
     conversation_id: str,
@@ -217,10 +275,13 @@ def build_enrichment_identity(
     )
 
 
-def _validate_enrichment_output(content: str) -> None:
-    _normalize_summary(
-        _extract_json_object(content),
-        {},
+def _validate_enrichment_output(content: str, transcript_segments: list[dict[str, Any]]) -> None:
+    parsed = _extract_json_object(content)
+    summary = _normalize_summary(parsed, {})
+    _grounding_attestation(
+        parsed,
+        transcript_segments=transcript_segments,
+        summary=summary,
     )
 
 
@@ -353,15 +414,32 @@ class HermesCloudEnrichmentService:
             },
             user_scan_policy="none",
         )
+        transcript_segments = [
+            dict(segment) for segment in (conversation.get("transcript_segments") or []) if isinstance(segment, dict)
+        ]
         turn = await self._runtime_service(allow_shadow).run_turn(
             runtime,
             request,
-            response_validator=_validate_enrichment_output,
+            response_validator=lambda content: _validate_enrichment_output(content, transcript_segments),
         )
+        provider_result = _extract_json_object(turn.text)
         summary = _normalize_summary(
-            _extract_json_object(turn.text),
+            provider_result,
             _structured_summary(conversation),
         )
+        today_card_grounding = _grounding_attestation(
+            provider_result,
+            transcript_segments=transcript_segments,
+            summary=summary,
+        )
+        if today_card_grounding is not None:
+            today_card_grounding = {
+                **today_card_grounding,
+                "owner_hash": "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest(),
+                "conversation_id_hash": "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
+                "runtime_interaction_id": str(turn.runtime_interaction_id or ""),
+                "canonical_assistant_event_id": str(turn.canonical_assistant_event_id or ""),
+            }
 
         current = await asyncio.to_thread(
             self.conversation_reader,
@@ -401,6 +479,7 @@ class HermesCloudEnrichmentService:
             require_canonical=True,
             require_based_on_match=not same_applied_trace,
             preserve_generated_results=True,
+            today_card_grounding=today_card_grounding,
         )
         version_id = str(apply_result.get("active_summary_version_id") or "")
         if not version_id or apply_result.get("canonical_confirmed") is not True:

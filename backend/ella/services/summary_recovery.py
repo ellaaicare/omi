@@ -365,6 +365,7 @@ async def apply_summary_update(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
+    today_card_grounding: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -384,6 +385,7 @@ async def apply_summary_update(
         require_canonical=require_canonical,
         require_based_on_match=require_based_on_match,
         preserve_generated_results=preserve_generated_results,
+        today_card_grounding=today_card_grounding,
     )
 
 

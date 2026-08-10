@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -35,6 +36,13 @@ _corrections_spec.loader.exec_module(corrections)
 corrections.ELLA_CONFIG = SimpleNamespace(n8n_base_url="https://n8n.test")
 from ella.services import summary_recovery, summary_writeback
 from ella.services.runtime_errors import ProvisioningError
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    build_omi_canonical_event,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -3136,3 +3144,135 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
             }
         }
     ]
+
+
+def _semantic_grounding_conversation():
+    conversation = _retry_conversation(status="completed", request_id=None)
+    conversation["id"] = "conversation-1"
+    conversation["active_summary_version_id"] = "summary-v1"
+    conversation["summary_versions"] = []
+    return conversation
+
+
+def _semantic_grounding_attestation(conversation):
+    title = "Garden plans"
+    overview = "[Ella] You planted tomatoes and planned another garden visit after lunch."
+    return {
+        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        "attester": TODAY_CARD_GROUNDING_ATTESTER,
+        "semantic_outcome": "supported",
+        "transcript_hash": transcript_grounding_hash(conversation["transcript_segments"]),
+        "summary_hash": summary_grounding_hash({"title": title, "overview": overview}),
+        "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
+        "policy_version": "hermes-cloud-enrichment-v1",
+        "owner_hash": "sha256:" + hashlib.sha256(b"user-1").hexdigest(),
+        "conversation_id_hash": "sha256:" + hashlib.sha256(b"conversation-1").hexdigest(),
+        "runtime_interaction_id": "runtime-interaction-a",
+        "canonical_assistant_event_id": "canonical-assistant-a",
+    }
+
+
+def _semantic_grounding_version_update(_conversation, *, next_structured, **_kwargs):
+    return {
+        "summary_versions": [
+            {
+                "id": "summary-v2",
+                "title": next_structured["title"],
+                "overview": next_structured["overview"],
+                "emoji": next_structured.get("emoji") or "📝",
+                "category": next_structured.get("category") or "other",
+                "kind": "hermes_enriched",
+                "source": "hermes_cloud",
+                "is_active": True,
+            }
+        ],
+        "active_summary_version_id": "summary-v2",
+        "new_summary_version_id": "summary-v2",
+    }
+
+
+def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event(monkeypatch):
+    conversation = _semantic_grounding_conversation()
+    updates = []
+    canonical_events = []
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "build_summary_version_update",
+        _semantic_grounding_version_update,
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation",
+        lambda uid, cid, update: updates.append(update),
+    )
+
+    def canonical_writer(uid, record, **_kwargs):
+        canonical_events.append(build_omi_canonical_event(uid, record))
+        return {"ok": True, "inserted": 1}
+
+    result = asyncio.run(
+        summary_writeback.write_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            title="Garden plans",
+            overview="[Ella] You planted tomatoes and planned another garden visit after lunch.",
+            category="other",
+            summary_source="hermes_cloud",
+            summary_kind="hermes_enriched",
+            trace_id="trace-a",
+            require_canonical=True,
+            canonical_writer=canonical_writer,
+            today_card_grounding=_semantic_grounding_attestation(conversation),
+        )
+    )
+
+    receipt = updates[0]["enrichment_state"]["today_card_grounding"]
+    assert receipt["source_version_id"] == result["active_summary_version_id"] == "summary-v2"
+    assert canonical_events[0]["metadata"]["today_card"]["grounding"] == receipt
+    assert updates[-1]["enrichment_state"]["canonical_status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("summary_hash", "sha256:" + ("0" * 64)),
+        ("transcript_hash", "sha256:" + ("0" * 64)),
+        ("owner_hash", "sha256:" + ("0" * 64)),
+        ("conversation_id_hash", "sha256:" + ("0" * 64)),
+        ("runtime_interaction_id", ""),
+        ("canonical_assistant_event_id", ""),
+    ],
+)
+def test_semantic_attestation_cannot_be_copied_or_mutated_before_writeback(monkeypatch, field, value):
+    conversation = _semantic_grounding_conversation()
+    updates = []
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "build_summary_version_update",
+        _semantic_grounding_version_update,
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation",
+        lambda uid, cid, update: updates.append(update),
+    )
+    attestation = _semantic_grounding_attestation(conversation)
+    attestation[field] = value
+
+    with pytest.raises(ValueError, match="today_card_grounding_attestation_invalid"):
+        asyncio.run(
+            summary_writeback.write_conversation_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                title="Garden plans",
+                overview="[Ella] You planted tomatoes and planned another garden visit after lunch.",
+                category="other",
+                summary_source="hermes_cloud",
+                summary_kind="hermes_enriched",
+                today_card_grounding=attestation,
+            )
+        )
+
+    assert updates == []

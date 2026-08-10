@@ -1,5 +1,6 @@
 import asyncio
 import ast
+import hashlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -24,23 +25,52 @@ from ella.services.today_card import (
     today_card_source_pack,
 )
 from ella.services.today_card_postgres import PostgresTodayCardRepository
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 
 NOW = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
 
 
-def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none", grounded=True):
-    today_card = {}
-    if grounded:
-        today_card["grounding"] = {
-            "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
-            "grounded_content": True,
-            "source_version_id": version,
-            "transcript_hash": "sha256:" + ("a" * 64),
-            "transcript_word_count": 14,
-            "transcript_non_ascii_alphanumeric_count": 0,
-            "capture_duration_seconds": 18.0,
+def _attest_row(row):
+    metadata = row["metadata"]
+    source_version_id = row["source_ref"]["active_summary_version_id"]
+    metadata["summary_versions"] = [
+        {
+            "id": source_version_id,
+            "title": metadata["structured"].get("title") or "",
+            "overview": metadata["structured"].get("overview") or "",
+            "source": "hermes_cloud",
+            "kind": "hermes_enriched",
         }
-    return {
+    ]
+    transcript_segments = metadata.setdefault(
+        "transcript_segments",
+        [{"text": "We planted tomatoes together and planned another garden visit after lunch."}],
+    )
+    metadata.setdefault("today_card", {})["grounding"] = {
+        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        "attester": TODAY_CARD_GROUNDING_ATTESTER,
+        "semantic_outcome": "supported",
+        "source_version_id": source_version_id,
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
+        "summary_hash": summary_grounding_hash(metadata["structured"]),
+        "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
+        "policy_version": "hermes-cloud-enrichment-v1",
+        "owner_hash": "sha256:" + ("b" * 64),
+        "conversation_id_hash": "sha256:"
+        + hashlib.sha256(row["source_ref"]["conversation_id"].encode("utf-8")).hexdigest(),
+        "runtime_interaction_id": "runtime-interaction-a",
+        "canonical_assistant_event_id": "canonical-assistant-a",
+    }
+    return row
+
+
+def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none", grounded=True):
+    row = {
         "event_id": "omi:conversation-a:summary",
         "text": "Grounded body with a useful remembered detail.",
         "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
@@ -53,9 +83,13 @@ def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_pol
         "metadata": {
             "adapter": "omi-enriched-conversation",
             "structured": {"title": "Grounded", "overview": "Grounded body with a useful remembered detail."},
-            "today_card": today_card,
+            "transcript_segments": [
+                {"text": "We planted tomatoes together and planned another garden visit after lunch."}
+            ],
+            "today_card": {},
         },
     }
+    return _attest_row(row) if grounded else row
 
 
 def _card(version="summary-v2"):
@@ -214,32 +248,27 @@ def test_source_less_card_becomes_stale_when_delayed_canonical_evidence_arrives(
         async def fetch(self, query, *_args):
             assert "ella_today_card_source_tombstones" in query
             return [
-                {
-                    "event_id": "omi:conversation-late:summary",
-                    "text": "A delayed but eligible source.",
-                    "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
-                    "privacy_scope": "user_private",
-                    "scan_policy": "none",
-                    "source_ref": {
-                        "conversation_id": "conversation-late",
-                        "active_summary_version_id": "summary-v1",
-                    },
-                    "metadata": {
-                        "adapter": "omi-enriched-conversation",
-                        "structured": {"title": "Late source", "overview": "A delayed but eligible source."},
-                        "today_card": {
-                            "grounding": {
-                                "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
-                                "grounded_content": True,
-                                "source_version_id": "summary-v1",
-                                "transcript_hash": "sha256:" + ("a" * 64),
-                                "transcript_word_count": 14,
-                                "transcript_non_ascii_alphanumeric_count": 0,
-                                "capture_duration_seconds": 18.0,
-                            }
+                _attest_row(
+                    {
+                        "event_id": "omi:conversation-late:summary",
+                        "text": "A delayed but eligible source.",
+                        "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+                        "privacy_scope": "user_private",
+                        "scan_policy": "none",
+                        "source_ref": {
+                            "conversation_id": "conversation-late",
+                            "active_summary_version_id": "summary-v1",
                         },
-                    },
-                }
+                        "metadata": {
+                            "adapter": "omi-enriched-conversation",
+                            "structured": {"title": "Late source", "overview": "A delayed but eligible source."},
+                            "transcript_segments": [
+                                {"text": "A delayed but eligible source arrived after processing completed."}
+                            ],
+                            "today_card": {},
+                        },
+                    }
+                )
             ]
 
     card = _card().model_copy(
@@ -748,6 +777,7 @@ def test_enriched_adapter_rejects_terse_summary_despite_substantive_title_and_pr
         "title": "Alex and Priya planted tomatoes together",
         "overview": "Garden",
     }
+    _attest_row(row)
 
     evidence = today_card_postgres._evidence_from_row(
         row,
@@ -775,6 +805,7 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
         "title": "A thoughtful conversation",
         "overview": summary,
     }
+    _attest_row(row)
 
     evidence = today_card_postgres._evidence_from_row(
         row,
@@ -942,6 +973,7 @@ def test_complete_quality_metrics_cannot_override_pure_source_commentary():
         "transcript_word_count": 24,
         "duration_seconds": 18.0,
     }
+    _attest_row(row)
 
     evidence = today_card_postgres._evidence_from_row(
         row,
@@ -994,6 +1026,92 @@ def test_unproven_multilingual_commentary_fails_closed_through_materialization(s
 
 
 @pytest.mark.parametrize(
+    "summary",
+    [
+        "La grabación era demasiado corta para resumir lo ocurrido.",
+        "录音太短，无法总结发生了什么。",
+    ],
+)
+def test_nominal_length_receipt_cannot_substitute_for_semantic_attestation(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 14,
+        "duration_seconds": 18.0,
+    }
+    row["metadata"]["transcript_segments"] = [
+        {"text": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"}
+    ]
+    row["metadata"]["today_card"]["grounding"] = {
+        "contract_version": "ella.today_card.grounding.v1",
+        "grounded_content": True,
+        "source_version_id": "summary-v2",
+        "transcript_hash": transcript_grounding_hash(row["metadata"]["transcript_segments"]),
+        "transcript_word_count": 14,
+        "capture_duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    card = _materialize_evidence(evidence)
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert card.state == TodayCardState.degraded
+    assert card.content is None
+    assert summary not in card.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "summary",
+        "transcript",
+        "version",
+        "conversation",
+        "ghost_version",
+        "empty_support",
+        "fractional_support",
+    ],
+)
+def test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced(mutation):
+    row = _summary_row()
+    grounding = row["metadata"]["today_card"]["grounding"]
+    if mutation == "summary":
+        row["metadata"]["structured"][
+            "overview"
+        ] = "A copied receipt now covers an unrelated lottery and sailboat story."
+    elif mutation == "transcript":
+        row["metadata"]["transcript_segments"][0]["text"] = "A different transcript replaced the attested source."
+    elif mutation == "version":
+        row["source_ref"]["active_summary_version_id"] = "summary-v3"
+    elif mutation == "conversation":
+        row["source_ref"]["conversation_id"] = "conversation-b"
+    elif mutation == "ghost_version":
+        row["metadata"]["summary_versions"] = []
+    elif mutation == "empty_support":
+        grounding["supporting_quote_hashes"] = []
+    elif mutation == "fractional_support":
+        grounding["supporting_quote_hashes"] = [12.1]
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    card = _materialize_evidence(evidence)
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert card.state == TodayCardState.degraded
+    assert card.content is None
+
+
+@pytest.mark.parametrize(
     ("title", "summary"),
     [
         ("庭の思い出", "今日は母と庭でトマトを植えました。"),
@@ -1009,6 +1127,7 @@ def test_structurally_grounded_unicode_content_remains_eligible(title, summary):
         "transcript_word_count": 24,
         "duration_seconds": 18.0,
     }
+    _attest_row(row)
 
     evidence = today_card_postgres._evidence_from_row(
         row,
@@ -1104,6 +1223,7 @@ def test_enriched_adapter_preserves_multiline_punctuation_in_rendered_output(sum
         "transcript_word_count": 24,
         "duration_seconds": 18.0,
     }
+    _attest_row(row)
 
     evidence = today_card_postgres._evidence_from_row(
         row,

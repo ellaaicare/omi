@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -15,12 +15,8 @@ from utils.ella.canonical_auth import canonical_event_service_headers
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
-TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.grounding.v1"
-TODAY_CARD_MIN_TRANSCRIPT_WORDS = 12
-TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC = 12
-TODAY_CARD_MIN_CAPTURE_SECONDS = 8.0
-_GROUNDING_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
-_GROUNDING_WHITESPACE = re.compile(r"\s+")
+TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
+TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_enrichment"
 
 
 def _enum_value(value: Any) -> Any:
@@ -106,59 +102,88 @@ def _transcript_segments(conversation: Any) -> list[dict[str, Any]]:
     return [_segment_dict(segment) for segment in segments]
 
 
-def _datetime_value(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str) and value.strip():
-        try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    else:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+def transcript_grounding_hash(transcript_segments: list[dict[str, Any]]) -> str:
+    normalized_segments = [_json_safe(_segment_dict(segment)) for segment in transcript_segments]
+    source = json.dumps(
+        normalized_segments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def summary_grounding_hash(structured: dict[str, Any]) -> str:
+    source = json.dumps(
+        {
+            "overview": str(structured.get("overview") or "").strip(),
+            "title": str(structured.get("title") or "").strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def _today_card_grounding(
+    uid: str,
+    conversation: Any,
     transcript_segments: list[dict[str, Any]],
     *,
+    structured: dict[str, Any],
     source_version_id: Optional[str],
-    started_at: Any,
-    finished_at: Any,
 ) -> dict[str, Any]:
-    transcript = _GROUNDING_WHITESPACE.sub(
-        " ",
-        " ".join(str(segment.get("text") or "") for segment in transcript_segments),
-    ).strip()
-    transcript_word_count = len(_GROUNDING_WORD.findall(transcript))
-    transcript_non_ascii_alphanumeric_count = sum(
-        1 for character in transcript if character.isalnum() and not character.isascii()
+    enrichment_state = _model_to_dict(_object_get(conversation, "enrichment_state"))
+    receipt = enrichment_state.get("today_card_grounding")
+    if not isinstance(receipt, dict):
+        return {}
+    matching_versions = [
+        version
+        for version in _summary_versions(conversation)
+        if str(version.get("id") or "") == str(source_version_id or "")
+    ]
+    if len(matching_versions) != 1:
+        return {}
+    active_version = matching_versions[0]
+    if (
+        str(active_version.get("title") or "").strip() != str(structured.get("title") or "").strip()
+        or str(active_version.get("overview") or "").strip() != str(structured.get("overview") or "").strip()
+        or active_version.get("source") != "hermes_cloud"
+        or active_version.get("kind") != "hermes_enriched"
+    ):
+        return {}
+    expected_transcript_hash = transcript_grounding_hash(transcript_segments)
+    expected_summary_hash = summary_grounding_hash(structured)
+    quote_hashes = receipt.get("supporting_quote_hashes")
+    if not isinstance(quote_hashes, list) or not quote_hashes:
+        return {}
+    valid_quote_hashes = all(
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value.removeprefix("sha256:")) == 64
+        and all(character in "0123456789abcdef" for character in value.removeprefix("sha256:"))
+        for value in quote_hashes
     )
-    started = _datetime_value(started_at)
-    finished = _datetime_value(finished_at)
-    capture_duration_seconds = (
-        max(0.0, (finished - started).total_seconds()) if started is not None and finished is not None else 0.0
-    )
-    transcript_hash = "sha256:" + hashlib.sha256(transcript.encode("utf-8")).hexdigest()
-    grounded_content = bool(
-        source_version_id
-        and capture_duration_seconds >= TODAY_CARD_MIN_CAPTURE_SECONDS
-        and (
-            transcript_word_count >= TODAY_CARD_MIN_TRANSCRIPT_WORDS
-            or transcript_non_ascii_alphanumeric_count >= TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC
-        )
-    )
-    return {
-        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
-        "grounded_content": grounded_content,
-        "source_version_id": source_version_id,
-        "transcript_hash": transcript_hash,
-        "transcript_word_count": transcript_word_count,
-        "transcript_non_ascii_alphanumeric_count": transcript_non_ascii_alphanumeric_count,
-        "capture_duration_seconds": capture_duration_seconds,
-    }
+    if not valid_quote_hashes:
+        return {}
+    if not (
+        receipt.get("contract_version") == TODAY_CARD_GROUNDING_CONTRACT_VERSION
+        and receipt.get("attester") == TODAY_CARD_GROUNDING_ATTESTER
+        and receipt.get("semantic_outcome") == "supported"
+        and receipt.get("source_version_id") == source_version_id
+        and receipt.get("transcript_hash") == expected_transcript_hash
+        and receipt.get("summary_hash") == expected_summary_hash
+        and receipt.get("owner_hash") == "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest()
+        and receipt.get("conversation_id_hash")
+        == "sha256:" + hashlib.sha256(str(_object_get(conversation, "id") or "").encode("utf-8")).hexdigest()
+        and bool(str(receipt.get("runtime_interaction_id") or "").strip())
+        and bool(str(receipt.get("canonical_assistant_event_id") or "").strip())
+        and receipt.get("policy_version") == "hermes-cloud-enrichment-v1"
+    ):
+        return {}
+    return dict(receipt)
 
 
 def _summary_versions(conversation: Any) -> list[dict[str, Any]]:
@@ -200,10 +225,11 @@ def build_omi_canonical_event(
     active_summary_version_id = _active_summary_version_id(conversation)
     transcript_segments = _transcript_segments(conversation)
     today_card_grounding = _today_card_grounding(
+        uid,
+        conversation,
         transcript_segments,
+        structured=structured,
         source_version_id=active_summary_version_id,
-        started_at=started_at,
-        finished_at=finished_at,
     )
 
     event = {
