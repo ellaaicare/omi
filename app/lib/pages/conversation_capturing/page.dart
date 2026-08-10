@@ -43,6 +43,16 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   bool _isMuted = false;
   final ScrollController _timelineScrollController = ScrollController();
 
+  String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
+        PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
+        PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.consentUnavailable ||
+        PhoneCaptureStartResult.recorderUnavailable ||
+        PhoneCaptureStartResult.cancelled =>
+          context.l10n.todayRecordingUnavailable,
+        PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
+      };
+
   @override
   void initState() {
     _controller = TabController(length: 2, vsync: this, initialIndex: 0);
@@ -59,20 +69,31 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     if (_isMuted) {
       // Unmute - resume recording
       HapticFeedback.mediumImpact();
-      setState(() {
-        _isMuted = false;
-      });
 
       if (PlatformService.isDesktop) {
         // Desktop - system audio
+        setState(() {
+          _isMuted = false;
+        });
         await provider.resumeSystemAudioRecording();
       } else if (provider.havingRecordingDevice) {
         // Device recording (Omi device)
+        setState(() {
+          _isMuted = false;
+        });
         await provider.resumeDeviceRecording();
       } else {
         // Phone mic
-        await provider.streamRecording();
-        MixpanelManager().phoneMicRecordingStarted();
+        final result = await provider.streamRecording();
+        if (!mounted) return;
+        if (result == PhoneCaptureStartResult.started && provider.recordingState == RecordingState.record) {
+          setState(() {
+            _isMuted = false;
+          });
+          MixpanelManager().phoneMicRecordingStarted();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
+        }
       }
     } else {
       // Mute - pause recording with interesting haptic

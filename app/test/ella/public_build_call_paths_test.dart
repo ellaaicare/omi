@@ -537,6 +537,9 @@ void main() {
     expect(find.byKey(const Key('today-card-semantics')), findsOneWidget);
     expect(find.text(previewEnabled ? 'Preview daily memo' : 'Runtime daily memo'), findsOneWidget);
     if ((SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured) {
+      expect(find.byKey(const Key('today-whispers-card')), findsOneWidget);
+      expect(find.text('Whispers'), findsOneWidget);
+      expect(find.text('See whispers'), findsOneWidget);
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       await openHomeControls();
       expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);
@@ -598,7 +601,7 @@ void main() {
       expect(unavailableSwitch.value, isTrue);
       expect(unavailableSwitch.onChanged, isNull);
       expect(find.textContaining('Whispers are off'), findsNothing);
-      expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
+      expect(find.byKey(const Key('whispers-history-entry')), findsOneWidget);
 
       // Initial reconciliation must also fail closed. If the server says ON,
       // native start fails, and the compensating server disable is rejected,
@@ -624,7 +627,7 @@ void main() {
       expect(initialFailureSwitch.onChanged, isNull);
       expect(find.textContaining('Whispers are on'), findsNothing);
       expect(find.textContaining('Whispers are off'), findsNothing);
-      expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
+      expect(find.byKey(const Key('whispers-history-entry')), findsOneWidget);
     } else if (!allowsGuardianSurface()) {
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsNothing);

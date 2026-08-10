@@ -59,6 +59,15 @@ import 'package:omi/backend/schema/message_event.dart'
         FreemiumThresholdReachedEvent,
         SegmentsDeletedEvent;
 
+enum PhoneCaptureStartResult {
+  started,
+  consentUnavailable,
+  microphonePermissionDenied,
+  transcriptionUnavailable,
+  recorderUnavailable,
+  cancelled,
+}
+
 class CaptureProvider extends ChangeNotifier
     with MessageNotifierMixin, WidgetsBindingObserver
     implements ITransctiptSegmentSocketServiceListener {
@@ -124,7 +133,7 @@ class CaptureProvider extends ChangeNotifier
 
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
-  Future<void>? _micStartFuture;
+  Future<PhoneCaptureStartResult>? _micStartFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
@@ -355,6 +364,8 @@ class CaptureProvider extends ChangeNotifier
       recordingState == RecordingState.systemAudioRecord;
 
   bool get havingRecordingDevice => _recordingDevice != null;
+
+  bool get hasCapturableContent => segments.isNotEmpty || photos.isNotEmpty;
 
   BtDevice? get recordingDevice => _recordingDevice;
 
@@ -1031,11 +1042,11 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  Future<void> streamRecording() {
+  Future<PhoneCaptureStartResult> streamRecording() {
     final activeStart = _micStartFuture;
     if (activeStart != null) return activeStart;
 
-    late final Future<void> trackedStart;
+    late final Future<PhoneCaptureStartResult> trackedStart;
     trackedStart = _streamRecording().whenComplete(() {
       if (identical(_micStartFuture, trackedStart)) _micStartFuture = null;
     });
@@ -1043,34 +1054,94 @@ class CaptureProvider extends ChangeNotifier
     return trackedStart;
   }
 
-  Future<void> _streamRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  Future<PhoneCaptureStartResult> _streamRecording() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return PhoneCaptureStartResult.consentUnavailable;
     final generation = _captureGeneration;
     final captureAuthority = WalOwnerAuthority.active();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
+      return PhoneCaptureStartResult.cancelled;
+    }
     updateRecordingState(RecordingState.initialising);
-    await Permission.microphone.request();
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
-
-    // Send current location when conversation starts
-    _sendCurrentGeolocation();
+    PermissionStatus microphonePermission;
+    try {
+      microphonePermission = await Permission.microphone.request();
+    } catch (error) {
+      Logger.error('Phone microphone permission could not be checked: $error');
+      updateRecordingState(RecordingState.stop);
+      return PhoneCaptureStartResult.recorderUnavailable;
+    }
+    if (!_isCaptureCurrent(generation, captureAuthority)) {
+      updateRecordingState(RecordingState.stop);
+      return PhoneCaptureStartResult.cancelled;
+    }
+    if (!microphonePermission.isGranted) {
+      updateRecordingState(RecordingState.stop);
+      return PhoneCaptureStartResult.microphonePermissionDenied;
+    }
 
     // prepare
-    await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
+    try {
+      await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
+    } catch (error) {
+      Logger.error('Phone transcription could not start: $error');
+      _transcriptServiceReady = false;
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone capture transcript unavailable');
+      return PhoneCaptureStartResult.transcriptionUnavailable;
+    }
+    if (!_isCaptureCurrent(generation, captureAuthority)) {
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone capture authority changed');
+      return PhoneCaptureStartResult.cancelled;
+    }
+    if (_socket == null || _socket?.state != SocketServiceState.connected) {
+      _transcriptServiceReady = false;
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone capture transcript unavailable');
+      return PhoneCaptureStartResult.transcriptionUnavailable;
+    }
 
     // record
-    await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
-      if (_isCaptureCurrent(generation, captureAuthority) && _socket?.state == SocketServiceState.connected) {
-        _socket?.send(bytes);
-      }
-    }, onRecording: () {
-      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.record);
-    }, onStop: () {
-      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
-    }, onInitializing: () {
-      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
-    });
+    try {
+      await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
+        if (_isCaptureCurrent(generation, captureAuthority) && _socket?.state == SocketServiceState.connected) {
+          _socket?.send(bytes);
+        }
+      }, onRecording: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.record);
+      }, onStop: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
+      }, onInitializing: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
+      });
+    } catch (error) {
+      Logger.error('Phone microphone could not start: $error');
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone recorder unavailable');
+      return PhoneCaptureStartResult.recorderUnavailable;
+    }
+    if (!_isCaptureCurrent(generation, captureAuthority)) {
+      await ServiceManager.instance().mic.stop();
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone capture authority changed');
+      return PhoneCaptureStartResult.cancelled;
+    }
+    if (_socket == null || _socket?.state != SocketServiceState.connected) {
+      await ServiceManager.instance().mic.stop();
+      _transcriptServiceReady = false;
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone capture transcript disconnected');
+      return PhoneCaptureStartResult.transcriptionUnavailable;
+    }
+    if (recordingState != RecordingState.record) {
+      await ServiceManager.instance().mic.stop();
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'phone recorder did not start');
+      return PhoneCaptureStartResult.recorderUnavailable;
+    }
+    // Capture has actually started; do not send location for failed attempts.
+    _sendCurrentGeolocation();
+    return PhoneCaptureStartResult.started;
   }
 
   stopStreamRecording() async {

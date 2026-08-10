@@ -109,6 +109,37 @@ void main() {
     expect(find.text('Record a moment'), findsOneWidget);
   });
 
+  testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      phoneStartResult: PhoneCaptureStartResult.transcriptionUnavailable,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.stop);
+    expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
+    expect(find.text('Listening… tap to finish'), findsNothing);
+  });
+
+  testWidgets('empty phone capture creates no processing memory', (tester) async {
+    final harness = await _pumpHome(tester, conversations: const [], captureHasContent: false);
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finishes, 0);
+    expect(find.text('No words were captured, so no memory was created.'), findsOneWidget);
+  });
+
   testWidgets('Home-owned necklace capture stops its stream before finishing', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -150,6 +181,9 @@ void main() {
     );
     addTearDown(harness.dispose);
 
+    expect(find.byKey(const Key('today-necklace-continuous-recording')), findsOneWidget);
+    expect(find.text('Your necklace is recording continuously'), findsOneWidget);
+
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
     expect(harness.capture.deviceStarts, 0);
@@ -161,6 +195,32 @@ void main() {
     expect(harness.capture.deviceStops, 0, reason: 'Home must preserve a stream it did not start');
     expect(harness.capture.finishes, 2, reason: 'the finish tap closes only the intentional moment');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  testWidgets('empty continuous necklace start opens a moment without false finish feedback', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+      captureHasContent: false,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.finishes, 0);
+    expect(harness.capture.deviceStarts, 0);
+    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
+    expect(find.text('Listening… tap to finish'), findsOneWidget);
   });
 
   testWidgets('day-one state is useful and reduced motion removes capture transitions', (tester) async {
@@ -183,6 +243,22 @@ void main() {
       find.ancestor(of: find.byKey(const Key('today-record-moment')), matching: find.byType(AnimatedContainer)),
     );
     expect(container.duration, Duration.zero);
+  });
+
+  testWidgets('Home keeps more than two recent memories in the vertical journal', (tester) async {
+    final harness = await _pumpHome(tester, conversations: _ConversationFixtures.manyMemories());
+    addTearDown(harness.dispose);
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('memory-journal-card-memory-4')),
+      350,
+      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+
+    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-card-memory-3')), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-card-memory-4')), findsOneWidget);
   });
 
   testWidgets('200 percent text stays readable and preserves capture semantics at 320 width', (tester) async {
@@ -264,13 +340,19 @@ Future<_HomeHarness> _pumpHome(
   Size viewport = const Size(390, 844),
   TextScaler textScaler = TextScaler.noScaling,
   RecordingState initialRecordingState = RecordingState.stop,
+  PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
+  bool captureHasContent = true,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 
-  final capture = _FakeCaptureProvider(initialRecordingState);
+  final capture = _FakeCaptureProvider(
+    initialRecordingState,
+    phoneStartResult: phoneStartResult,
+    hasContent: captureHasContent,
+  );
   final actionItems = _NoActionsProvider();
   final conversationProvider = _FixtureConversationProvider(conversations);
   final deviceProvider = device ?? DeviceProvider();
@@ -370,9 +452,16 @@ class _FixtureConversationProvider extends ConversationProvider {
 }
 
 class _FakeCaptureProvider extends CaptureProvider {
-  _FakeCaptureProvider(RecordingState initialState) {
+  _FakeCaptureProvider(
+    RecordingState initialState, {
+    required this.phoneStartResult,
+    required this.hasContent,
+  }) {
     recordingState = initialState;
   }
+
+  final PhoneCaptureStartResult phoneStartResult;
+  final bool hasContent;
 
   int phoneStarts = 0;
   int phoneStops = 0;
@@ -381,9 +470,15 @@ class _FakeCaptureProvider extends CaptureProvider {
   int finishes = 0;
 
   @override
-  Future<void> streamRecording() async {
+  bool get hasCapturableContent => hasContent;
+
+  @override
+  Future<PhoneCaptureStartResult> streamRecording() async {
     phoneStarts++;
-    updateRecordingState(RecordingState.record);
+    updateRecordingState(
+      phoneStartResult == PhoneCaptureStartResult.started ? RecordingState.record : RecordingState.stop,
+    );
+    return phoneStartResult;
   }
 
   @override
@@ -444,6 +539,16 @@ class _MemoryTodayCardCache implements TodayCardCache {
 }
 
 class _ConversationFixtures {
+  static List<ServerConversation> manyMemories() => List.generate(
+        4,
+        (index) => ServerConversation(
+          id: 'memory-${index + 1}',
+          createdAt: DateTime(2026, 8, 8 - index, 9),
+          startedAt: DateTime(2026, 8, 8 - index, 9),
+          structured: Structured('Memory ${index + 1}', 'A readable memory overview ${index + 1}.'),
+        ),
+      );
+
   static List<ServerConversation> withMemories({required String photoBase64}) => [
         ServerConversation(
           id: 'memory-1',

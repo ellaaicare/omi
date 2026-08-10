@@ -401,6 +401,25 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     );
   }
 
+  String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
+        PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
+        PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.consentUnavailable ||
+        PhoneCaptureStartResult.recorderUnavailable ||
+        PhoneCaptureStartResult.cancelled =>
+          context.l10n.todayRecordingUnavailable,
+        PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
+      };
+
+  Future<void> _finalizeHomeMoment(CaptureProvider capture) async {
+    if (capture.hasCapturableContent) {
+      await capture.forceProcessingCurrentConversation();
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+  }
+
   Future<void> _toggleHomeCapture({
     required CaptureProvider capture,
     required bool isActive,
@@ -420,7 +439,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 _homeCaptureSource = null;
               });
             }
-            await capture.forceProcessingCurrentConversation();
+            await _finalizeHomeMoment(capture);
             break;
           case _HomeCaptureSource.necklaceOwned:
             await capture.stopStreamDeviceRecording();
@@ -433,10 +452,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 _homeCaptureSource = null;
               });
             }
-            await capture.forceProcessingCurrentConversation();
+            await _finalizeHomeMoment(capture);
             break;
           case _HomeCaptureSource.necklaceContinuous:
-            await capture.forceProcessingCurrentConversation();
+            await _finalizeHomeMoment(capture);
             if (mounted) {
               setState(() {
                 _homeCaptureActive = false;
@@ -460,7 +479,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           // The necklace may already be streaming continuously. Finalize that
           // pre-tap audio so this intentional moment starts at an exact boundary
           // without stopping the user's ambient capture.
-          await capture.forceProcessingCurrentConversation();
+          if (capture.hasCapturableContent) {
+            await capture.forceProcessingCurrentConversation();
+          }
         }
         if (!mounted) return;
         final started = capture.recordingState == RecordingState.deviceRecord;
@@ -475,16 +496,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return;
       }
 
-      await capture.streamRecording();
+      final result = await capture.streamRecording();
       if (!mounted) return;
-      final started =
-          capture.recordingState == RecordingState.record || capture.recordingState == RecordingState.initialising;
+      final started = result == PhoneCaptureStartResult.started && capture.recordingState == RecordingState.record;
       setState(() {
         _homeCaptureActive = started;
         _homeCaptureSource = started ? _HomeCaptureSource.phone : null;
       });
       if (!started) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
       }
     } catch (_) {
       if (!mounted) return;
@@ -599,6 +619,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               active: homeCaptureActive,
               starting: _homeCaptureStarting,
               necklaceConnected: deviceConnected,
+              necklaceContinuouslyRecording:
+                  deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureActive,
               onTap: () => _toggleHomeCapture(
                 capture: capture,
                 isActive: homeCaptureActive,
@@ -606,12 +628,21 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 connectedDevice: device.presentationConnectedDevice,
               ),
             ),
+            if (showGuardianSurfaces) ...[
+              const SizedBox(height: EllaSizes.sectionGap),
+              _WhispersHomeCard(
+                enabled: _whispersOn,
+                verified: _whispersVerified,
+                onOpen: () =>
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+              ),
+            ],
             const SizedBox(height: EllaSizes.sectionGap),
             if (memoriesLoading)
               const _RecentMemoriesLoading()
             else
               _RecentMemories(
-                conversations: visibleConversations.take(2).toList(),
+                conversations: visibleConversations.take(6).toList(),
                 refreshing: conversations.isLoadingConversations,
                 onOpenAll: () =>
                     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EllaMemoriesPage())),
@@ -701,12 +732,14 @@ class _RecordMomentControl extends StatelessWidget {
     required this.active,
     required this.starting,
     required this.necklaceConnected,
+    required this.necklaceContinuouslyRecording,
     required this.onTap,
   });
 
   final bool active;
   final bool starting;
   final bool necklaceConnected;
+  final bool necklaceContinuouslyRecording;
   final VoidCallback onTap;
 
   @override
@@ -779,8 +812,95 @@ class _RecordMomentControl extends StatelessWidget {
             textAlign: TextAlign.center,
             style: EllaTextStyles.caption.copyWith(fontSize: 14),
           ),
+          if (necklaceContinuouslyRecording) ...[
+            const SizedBox(height: 8),
+            Semantics(
+              liveRegion: true,
+              label: context.l10n.todayNecklaceRecordingContinuously,
+              child: Row(
+                key: const Key('today-necklace-continuous-recording'),
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const EllaBreathingDot(active: true, live: true, size: 10),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      context.l10n.todayNecklaceRecordingContinuously,
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: EllaColors.tealDeep,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+class _WhispersHomeCard extends StatelessWidget {
+  const _WhispersHomeCard({required this.enabled, required this.verified, required this.onOpen});
+
+  final bool enabled;
+  final bool verified;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = !verified
+        ? context.l10n.todayWhispersUnavailable
+        : enabled
+            ? context.l10n.todayWhispersOnDescription
+            : context.l10n.todayWhispersOffDescription;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          context.l10n.todayWhispersTitle,
+          style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.1),
+        ),
+        const SizedBox(height: 14),
+        EllaCardSurface(
+          child: InkWell(
+            key: const Key('today-whispers-card'),
+            onTap: onOpen,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 84),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                child: Row(
+                  children: [
+                    EllaBreathingDot(active: verified && enabled, live: verified && enabled),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(status, style: EllaTextStyles.secondary),
+                          const SizedBox(height: 4),
+                          Text(
+                            context.l10n.todayWhispersHistory,
+                            style: EllaTextStyles.secondary.copyWith(
+                              color: EllaColors.tealDeep,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -924,34 +1044,32 @@ class _HomeControlsSheet extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (whispersVerified) ...[
-                    const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
-                    InkWell(
-                      key: const Key('whispers-history-entry'),
-                      onTap: onWhispersHistory,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: EllaSizes.listItemMinHeight),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(
-                            children: [
-                              const SizedBox(width: 40),
-                              Expanded(
-                                child: Text(
-                                  context.l10n.todayWhispersHistory,
-                                  style: EllaTextStyles.secondary.copyWith(
-                                    color: EllaColors.tealDeep,
-                                    fontWeight: FontWeight.w700,
-                                  ),
+                  const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
+                  InkWell(
+                    key: const Key('whispers-history-entry'),
+                    onTap: onWhispersHistory,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: EllaSizes.listItemMinHeight),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(
+                          children: [
+                            const SizedBox(width: 40),
+                            Expanded(
+                              child: Text(
+                                context.l10n.todayWhispersHistory,
+                                style: EllaTextStyles.secondary.copyWith(
+                                  color: EllaColors.tealDeep,
+                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
-                              const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
-                            ],
-                          ),
+                            ),
+                            const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                          ],
                         ),
                       ),
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),
@@ -1439,15 +1557,24 @@ class _RecentMemories extends StatelessWidget {
                   ],
                 );
               }
-              return IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(child: cards.first),
-                    const SizedBox(width: EllaSizes.cardGap),
-                    Expanded(child: cards[1]),
+              return Column(
+                children: [
+                  for (var index = 0; index < cards.length; index += 2) ...[
+                    IntrinsicHeight(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(child: cards[index]),
+                          const SizedBox(width: EllaSizes.cardGap),
+                          Expanded(
+                            child: index + 1 < cards.length ? cards[index + 1] : const SizedBox.shrink(),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (index + 2 < cards.length) const SizedBox(height: EllaSizes.cardGap),
                   ],
-                ),
+                ],
               );
             },
           ),
