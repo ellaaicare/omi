@@ -66,11 +66,14 @@ _LOW_VALUE_SOURCE_LIMITATION = (
     ),
 )
 _LOW_VALUE_CLAUSE_BREAK = re.compile(
-    r"[.!?;:]+|\s*[—–]\s*|(?:,\s*|\s+)(?:but|so|then|yet)\s+",
+    r"[\n.!?;:(),]+|\s*[—–]\s*|\s+(?:and|but|or|so|then|while|yet)\s+",
     re.IGNORECASE,
 )
 _LOW_VALUE_COMPANION_COMMENTARY = re.compile(
-    r"\b(?:insufficient|missing|no|not\s+enough)\s+(?:useful\s+)?(?:context|detail|information)\b",
+    r"\b(?:(?:insufficient|missing|no|not\s+enough)\s+(?:coherent\s+|meaningful\s+|usable\s+|useful\s+)?"
+    r"(?:account|context|detail|information|meaning|summary)\b|"
+    r"nothing(?:\s+(?:coherent|meaningful|usable|useful))?.{0,24}"
+    r"(?:available|could\s+be\s+(?:determined|inferred|produced|recovered|summarized)|remained))",
     re.IGNORECASE,
 )
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
@@ -278,26 +281,30 @@ def _text_has_substance(text: str) -> bool:
 
 def _summary_is_low_value_commentary(summary: str) -> bool:
     normalized = _WHITESPACE.sub(" ", summary).strip()
-    clauses = [clause.strip(" ,:-") for clause in _LOW_VALUE_CLAUSE_BREAK.split(normalized) if clause.strip(" ,:-")]
-    low_value_clauses = [
-        clause
-        for clause in clauses
-        if (
-            any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
-            and _LOW_VALUE_SUMMARY_OUTCOME.search(clause)
-        )
-        or _LOW_VALUE_COMPANION_COMMENTARY.search(clause)
-    ]
-    if not low_value_clauses:
+    has_source_limitation = any(pattern.search(normalized) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
+    has_summary_outcome = bool(_LOW_VALUE_SUMMARY_OUTCOME.search(normalized))
+    if not has_source_limitation or not has_summary_outcome:
         return False
-    return not any(_text_has_substance(clause) for clause in clauses if clause not in low_value_clauses)
+
+    clauses = [
+        _WHITESPACE.sub(" ", clause).strip(" ,:-")
+        for clause in _LOW_VALUE_CLAUSE_BREAK.split(summary)
+        if _WHITESPACE.sub(" ", clause).strip(" ,:-")
+    ]
+    return not any(
+        _text_has_substance(clause)
+        for clause in clauses
+        if not any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
+        and not _LOW_VALUE_SUMMARY_OUTCOME.search(clause)
+        and not _LOW_VALUE_COMPANION_COMMENTARY.search(clause)
+    )
 
 
 def source_text_is_meaningful(title: str, summary: str) -> bool:
     """Reject unusable-source commentary before it can become rendered body text."""
     normalized_title = _WHITESPACE.sub(" ", title).strip()
     normalized_summary = _WHITESPACE.sub(" ", summary).strip()
-    if _summary_is_low_value_commentary(normalized_summary):
+    if _summary_is_low_value_commentary(summary):
         return False
     return _text_has_substance(f"{normalized_title} {normalized_summary}".strip())
 

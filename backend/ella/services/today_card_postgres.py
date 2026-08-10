@@ -206,6 +206,11 @@ def _evidence_from_row(
 
     title = str(today.get("title") or structured.get("title") or metadata.get("title") or "").strip()
     summary = str(today.get("summary") or structured.get("overview") or _record_value(row, "text") or "").strip()
+    summary_lines = [line.strip() for line in summary.splitlines() if line.strip()]
+    summary = " ".join(
+        line if index == len(summary_lines) - 1 or line.endswith((".", "!", "?", ";", ":")) else f"{line}."
+        for index, line in enumerate(summary_lines)
+    )
     source_id = str(
         source_ref.get("conversation_id") or today.get("source_id") or _record_value(row, "event_id") or ""
     ).strip()

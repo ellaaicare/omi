@@ -194,6 +194,9 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
     [
         "The recording was too short to provide a useful summary.",
         ("The recording lacked enough detail to summarize what happened. " "No useful context was available."),
+        ("The clip was inaudible and could not support a useful summary. " "Nothing meaningful could be recovered."),
+        "Almost no speech was captured to summarize what happened; no usable detail remained.",
+        ("The recording lacked enough detail to summarize what happened. " "No coherent account could be produced."),
     ],
 )
 def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title(junk_summary):

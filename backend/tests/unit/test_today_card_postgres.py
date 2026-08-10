@@ -724,6 +724,14 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
         "The recording was too short to summarize the documentary but everyone chose the missing scenes to film next.",
         "The recording was too short to summarize the documentary: everyone chose the missing scenes to film next.",
         "The clip was brief and hard to summarize — we planned next week's episode anyway.",
+        "The recording was too short to summarize the documentary, and everyone chose the missing scenes to film next.",
+        "The recording was too short to summarize the documentary, or everyone could plan a second filming day.",
+        (
+            "Although the recording was too short to summarize the documentary, "
+            "everyone planned a second filming day."
+        ),
+        "The recording was too short to summarize the documentary while everyone kept editing the final scene.",
+        "The recording was too short to summarize the documentary\nEveryone planned a second filming day.",
     ],
 )
 def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary):
@@ -745,13 +753,20 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary)
     assert today_card_postgres.evidence_is_safe(evidence) is True
 
 
-def test_enriched_adapter_rejects_multisentence_insufficiency_commentary():
+@pytest.mark.parametrize(
+    "summary",
+    [
+        ("The recording lacked enough detail to summarize what happened. " "No useful context was available."),
+        ("The clip was inaudible and could not support a useful summary. " "Nothing meaningful could be recovered."),
+        "Almost no speech was captured to summarize what happened; no usable detail remained.",
+        ("The recording lacked enough detail to summarize what happened. " "No coherent account could be produced."),
+    ],
+)
+def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": "A captured moment",
-        "overview": (
-            "The recording lacked enough detail to summarize what happened. " "No useful context was available."
-        ),
+        "overview": summary,
     }
 
     evidence = today_card_postgres._evidence_from_row(
