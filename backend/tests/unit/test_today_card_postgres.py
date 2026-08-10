@@ -36,6 +36,7 @@ NOW = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
 
 
 def _attest_row(row):
+    row.setdefault("uid", "uid-a")
     metadata = row["metadata"]
     source_version_id = row["source_ref"]["active_summary_version_id"]
     metadata["summary_versions"] = [
@@ -59,18 +60,21 @@ def _attest_row(row):
         "transcript_hash": transcript_grounding_hash(transcript_segments),
         "summary_hash": summary_grounding_hash(metadata["structured"]),
         "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
-        "policy_version": "hermes-cloud-enrichment-v1",
-        "owner_hash": "sha256:" + ("b" * 64),
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
+        "owner_hash": "sha256:" + hashlib.sha256(row["uid"].encode("utf-8")).hexdigest(),
         "conversation_id_hash": "sha256:"
         + hashlib.sha256(row["source_ref"]["conversation_id"].encode("utf-8")).hexdigest(),
         "runtime_interaction_id": "runtime-interaction-a",
         "canonical_assistant_event_id": "canonical-assistant-a",
+        "verifier_runtime_interaction_id": "verifier-runtime-a",
+        "verifier_canonical_assistant_event_id": "verifier-assistant-a",
     }
     return row
 
 
 def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none", grounded=True):
     row = {
+        "uid": "uid-a",
         "event_id": "omi:conversation-a:summary",
         "text": "Grounded body with a useful remembered detail.",
         "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
@@ -988,6 +992,33 @@ def test_complete_quality_metrics_cannot_override_pure_source_commentary():
     assert summary in evidence.summary
 
 
+def test_fabricated_summary_without_independent_receipt_fails_closed_through_materialization():
+    summary = "[Ella] You won the lottery and bought a red sailboat."
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A lottery win",
+        "overview": summary,
+        "transcript_word_count": 12,
+        "duration_seconds": 18.0,
+    }
+    row["metadata"]["transcript_segments"] = [{"text": "We planted tomatoes together in the garden after lunch."}]
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    card = _materialize_evidence(evidence)
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+    assert card.state == TodayCardState.degraded
+    assert card.reason_code == "no_safe_source"
+    assert card.content is None
+    assert summary not in card.model_dump_json()
+
+
 @pytest.mark.parametrize(
     "summary",
     [
@@ -1076,6 +1107,7 @@ def test_nominal_length_receipt_cannot_substitute_for_semantic_attestation(summa
         "ghost_version",
         "empty_support",
         "fractional_support",
+        "owner",
     ],
 )
 def test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced(mutation):
@@ -1097,6 +1129,8 @@ def test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced(mutation):
         grounding["supporting_quote_hashes"] = []
     elif mutation == "fractional_support":
         grounding["supporting_quote_hashes"] = [12.1]
+    elif mutation == "owner":
+        grounding["owner_hash"] = "sha256:" + hashlib.sha256(b"uid-b").hexdigest()
 
     evidence = today_card_postgres._evidence_from_row(
         row,

@@ -20,11 +20,13 @@ def _semantic_receipt(conversation, source_version_id, uid="uid-123"):
         "transcript_hash": transcript_grounding_hash(conversation["transcript_segments"]),
         "summary_hash": summary_grounding_hash(conversation["structured"]),
         "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
-        "policy_version": "hermes-cloud-enrichment-v1",
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
         "owner_hash": "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest(),
         "conversation_id_hash": "sha256:" + hashlib.sha256(conversation["id"].encode("utf-8")).hexdigest(),
         "runtime_interaction_id": "runtime-interaction-a",
         "canonical_assistant_event_id": "canonical-assistant-a",
+        "verifier_runtime_interaction_id": "verifier-runtime-a",
+        "verifier_canonical_assistant_event_id": "verifier-assistant-a",
     }
 
 

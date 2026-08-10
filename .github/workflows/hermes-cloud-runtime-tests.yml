@@ -713,6 +713,7 @@ jobs:
             "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[memory]"
             "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[daily_card]"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_ignores_self_attestation_and_requires_independent_verifier"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_activation_rejects_tampered_attestation_before_publication"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
@@ -738,7 +739,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 553
+          test "$collected" -eq 554
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -790,6 +791,7 @@ jobs:
             "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_emits_bound_semantic_grounding_provenance"
             "tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event"
             "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[summary]"
+            "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[owner]"
             "tests/unit/test_today_card_api.py::test_internal_uid_mutations_require_exact_service_subject"
             "tests/unit/test_today_card_api.py::test_cross_account_materialize_due_route_is_not_exposed"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
@@ -901,7 +903,7 @@ jobs:
             -v
           test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 15
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 71
+          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
           pytest tests/unit/test_ella_guardian_delivery.py -v

@@ -184,6 +184,7 @@ def _has_grounded_content_provenance(
     transcript_segments: list[Any],
     summary_versions: list[Any],
     conversation_id: str | None,
+    expected_uid: str | None,
 ) -> bool:
     grounding = today.get("grounding")
     if not isinstance(grounding, dict) or not source_version_id:
@@ -205,8 +206,7 @@ def _has_grounded_content_provenance(
     ):
         return False
     quote_hashes = grounding.get("supporting_quote_hashes")
-    owner_hash = str(grounding.get("owner_hash") or "")
-    owner_digest = owner_hash.removeprefix("sha256:")
+    expected_owner_hash = "sha256:" + hashlib.sha256(expected_uid.encode("utf-8")).hexdigest() if expected_uid else None
     valid_quote_hashes = (
         isinstance(quote_hashes, list)
         and bool(quote_hashes)
@@ -228,12 +228,13 @@ def _has_grounded_content_provenance(
         and conversation_id is not None
         and grounding.get("conversation_id_hash")
         == "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()
-        and owner_hash.startswith("sha256:")
-        and len(owner_digest) == 64
-        and all(character in "0123456789abcdef" for character in owner_digest)
+        and expected_owner_hash is not None
+        and grounding.get("owner_hash") == expected_owner_hash
         and bool(str(grounding.get("runtime_interaction_id") or "").strip())
         and bool(str(grounding.get("canonical_assistant_event_id") or "").strip())
-        and grounding.get("policy_version") == "hermes-cloud-enrichment-v1"
+        and bool(str(grounding.get("verifier_runtime_interaction_id") or "").strip())
+        and bool(str(grounding.get("verifier_canonical_assistant_event_id") or "").strip())
+        and grounding.get("policy_version") == "hermes-cloud-grounding-verifier-v1"
         and valid_quote_hashes
     )
 
@@ -251,9 +252,11 @@ def _evidence_from_row(
     *,
     previous_day_start: datetime,
     previous_day_end: datetime,
+    expected_uid: str | None = None,
 ) -> TodayCardEvidence | None:
     metadata = _json_object(_record_value(row, "metadata"))
     source_ref = _json_object(_record_value(row, "source_ref"))
+    expected_owner_uid = expected_uid or _record_value(row, "uid")
     today = metadata.get("today_card") if isinstance(metadata.get("today_card"), dict) else {}
     structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
     source_quality = metadata.get("source_quality") if isinstance(metadata.get("source_quality"), dict) else {}
@@ -320,6 +323,7 @@ def _evidence_from_row(
             transcript_segments=(transcript_segments if isinstance(transcript_segments, list) else []),
             summary_versions=(summary_versions if isinstance(summary_versions, list) else []),
             conversation_id=conversation_id,
+            expected_uid=(str(expected_owner_uid) if expected_owner_uid else None),
         )
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = (
@@ -438,6 +442,7 @@ async def _sources_are_current(queryable: Any, card: TodayCardRecord) -> bool:
                 row,
                 previous_day_start=previous_day_start,
                 previous_day_end=previous_day_end,
+                expected_uid=card.uid,
             )
         except (TypeError, ValueError):
             return False
@@ -505,6 +510,7 @@ async def _load_evidence(
                 row,
                 previous_day_start=previous_day_start,
                 previous_day_end=previous_day_end,
+                expected_uid=uid,
             )
         except (TypeError, ValueError):
             logger.warning("[FLOW:TODAY-CARD] malformed canonical evidence skipped")

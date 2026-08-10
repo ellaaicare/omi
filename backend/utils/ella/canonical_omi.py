@@ -16,7 +16,7 @@ CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
 TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
-TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_enrichment"
+TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_grounding_verifier"
 
 
 def _enum_value(value: Any) -> Any:
@@ -180,7 +180,9 @@ def _today_card_grounding(
         == "sha256:" + hashlib.sha256(str(_object_get(conversation, "id") or "").encode("utf-8")).hexdigest()
         and bool(str(receipt.get("runtime_interaction_id") or "").strip())
         and bool(str(receipt.get("canonical_assistant_event_id") or "").strip())
-        and receipt.get("policy_version") == "hermes-cloud-enrichment-v1"
+        and bool(str(receipt.get("verifier_runtime_interaction_id") or "").strip())
+        and bool(str(receipt.get("verifier_canonical_assistant_event_id") or "").strip())
+        and receipt.get("policy_version") == "hermes-cloud-grounding-verifier-v1"
     ):
         return {}
     return dict(receipt)

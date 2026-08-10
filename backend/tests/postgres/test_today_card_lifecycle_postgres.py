@@ -96,13 +96,21 @@ async def _drop_schema(admin: asyncpg.Connection, pool: asyncpg.Pool, schema: st
     await admin.close()
 
 
-def _semantic_summary_metadata(*, conversation_id: str, version: str, title: str, overview: str) -> dict:
+def _semantic_summary_metadata(*, uid: str, conversation_id: str, version: str, title: str, overview: str) -> dict:
     transcript_segments = [{"text": "We planted tomatoes together and planned another garden visit after lunch."}]
     structured = {"title": title, "overview": overview}
     return {
         "adapter": "omi-enriched-conversation",
         "structured": structured,
-        "summary_versions": [{"id": version, "title": title, "overview": overview}],
+        "summary_versions": [
+            {
+                "id": version,
+                "title": title,
+                "overview": overview,
+                "source": "hermes_cloud",
+                "kind": "hermes_enriched",
+            }
+        ],
         "transcript_segments": transcript_segments,
         "today_card": {
             "grounding": {
@@ -113,11 +121,13 @@ def _semantic_summary_metadata(*, conversation_id: str, version: str, title: str
                 "transcript_hash": transcript_grounding_hash(transcript_segments),
                 "summary_hash": summary_grounding_hash(structured),
                 "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
-                "policy_version": "hermes-cloud-enrichment-v1",
-                "owner_hash": "sha256:" + ("b" * 64),
+                "policy_version": "hermes-cloud-grounding-verifier-v1",
+                "owner_hash": "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest(),
                 "conversation_id_hash": "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
                 "runtime_interaction_id": "runtime-interaction-a",
                 "canonical_assistant_event_id": "canonical-assistant-a",
+                "verifier_runtime_interaction_id": "verifier-runtime-a",
+                "verifier_canonical_assistant_event_id": "verifier-assistant-a",
             }
         },
     }
@@ -142,6 +152,7 @@ async def _insert_summary(pool: asyncpg.Pool, *, uid: str, conversation_id: str)
         json.dumps({"conversation_id": conversation_id, "active_summary_version_id": "summary-v1"}),
         json.dumps(
             _semantic_summary_metadata(
+                uid=uid,
                 conversation_id=conversation_id,
                 version="summary-v1",
                 title="Eligible source",
@@ -362,6 +373,7 @@ def test_source_advance_during_materialization_cannot_publish_stale_card(monkeyp
                                 text="New canonical summary with grounded details.",
                                 started_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
                                 metadata=_semantic_summary_metadata(
+                                    uid=uid,
                                     conversation_id=conversation_id,
                                     version="summary-v2",
                                     title="New canonical source",

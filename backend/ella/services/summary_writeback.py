@@ -200,7 +200,9 @@ async def write_conversation_summary(
             == 'sha256:' + hashlib.sha256(conversation_id.encode('utf-8')).hexdigest()
             and bool(str(today_card_grounding.get('runtime_interaction_id') or '').strip())
             and bool(str(today_card_grounding.get('canonical_assistant_event_id') or '').strip())
-            and today_card_grounding.get('policy_version') == 'hermes-cloud-enrichment-v1'
+            and bool(str(today_card_grounding.get('verifier_runtime_interaction_id') or '').strip())
+            and bool(str(today_card_grounding.get('verifier_canonical_assistant_event_id') or '').strip())
+            and today_card_grounding.get('policy_version') == 'hermes-cloud-grounding-verifier-v1'
             and quote_hashes_are_valid
         ):
             raise ValueError('today_card_grounding_attestation_invalid')

@@ -3164,11 +3164,13 @@ def _semantic_grounding_attestation(conversation):
         "transcript_hash": transcript_grounding_hash(conversation["transcript_segments"]),
         "summary_hash": summary_grounding_hash({"title": title, "overview": overview}),
         "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
-        "policy_version": "hermes-cloud-enrichment-v1",
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
         "owner_hash": "sha256:" + hashlib.sha256(b"user-1").hexdigest(),
         "conversation_id_hash": "sha256:" + hashlib.sha256(b"conversation-1").hexdigest(),
         "runtime_interaction_id": "runtime-interaction-a",
         "canonical_assistant_event_id": "canonical-assistant-a",
+        "verifier_runtime_interaction_id": "verifier-runtime-a",
+        "verifier_canonical_assistant_event_id": "verifier-assistant-a",
     }
 
 
@@ -3242,6 +3244,8 @@ def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_e
         ("conversation_id_hash", "sha256:" + ("0" * 64)),
         ("runtime_interaction_id", ""),
         ("canonical_assistant_event_id", ""),
+        ("verifier_runtime_interaction_id", ""),
+        ("verifier_canonical_assistant_event_id", ""),
     ],
 )
 def test_semantic_attestation_cannot_be_copied_or_mutated_before_writeback(monkeypatch, field, value):
