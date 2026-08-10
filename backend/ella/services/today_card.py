@@ -71,177 +71,12 @@ _LOW_VALUE_SOURCE_LIMITATION = (
         re.IGNORECASE,
     ),
 )
-_LOW_VALUE_CLAUSE_BREAK = re.compile(
-    r"[\n.!?;:(),]+|\s*[—–]\s*|\s+(?:and|but|or|so|then|while|yet)\s+",
-    re.IGNORECASE,
-)
-_LOW_VALUE_COMPANION_COMMENTARY = re.compile(
-    r"\b(?:(?:insufficient|missing|no|not\s+enough)\s+(?:coherent\s+|meaningful\s+|usable\s+|useful\s+)?"
-    r"(?:account|context|detail|information|meaning|summary)\b|"
-    r"nothing(?:\s+(?:coherent|meaningful|usable|useful))?.{0,24}"
-    r"(?:available|could\s+be\s+(?:determined|inferred|produced|recovered|summarized)|remained))",
-    re.IGNORECASE,
-)
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
     r"\b(?:recap|summar(?:y|iz(?:e|ed|ing)|is(?:e|ed|ing))|to\s+(?:determine|infer|know|tell|understand)|"
     r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
     r"only\s+(?:the\s+)?(?:fragment|word|words))\b",
     re.IGNORECASE,
 )
-_CONCRETE_ACTOR = re.compile(
-    r"\b(?:children|everyone|famil(?:y|ies)|friends?|guests?|he|hosts?|i|neighbors?|people|she|they|visitors?|we|you)\b",
-    re.IGNORECASE,
-)
-_LOW_VALUE_META_WORDS = {
-    "a",
-    "account",
-    "an",
-    "and",
-    "as",
-    "at",
-    "audio",
-    "available",
-    "barely",
-    "be",
-    "been",
-    "being",
-    "before",
-    "but",
-    "by",
-    "capture",
-    "captured",
-    "captures",
-    "clear",
-    "clip",
-    "clips",
-    "coherent",
-    "content",
-    "context",
-    "could",
-    "detail",
-    "details",
-    "determine",
-    "did",
-    "do",
-    "does",
-    "discussed",
-    "discussing",
-    "discussion",
-    "ended",
-    "entirely",
-    "failed",
-    "few",
-    "for",
-    "form",
-    "fragment",
-    "fragments",
-    "from",
-    "had",
-    "hardly",
-    "has",
-    "have",
-    "he",
-    "her",
-    "hers",
-    "him",
-    "his",
-    "how",
-    "i",
-    "impossible",
-    "in",
-    "inaudible",
-    "incoherent",
-    "inconclusive",
-    "indeterminate",
-    "infer",
-    "information",
-    "insufficient",
-    "intelligible",
-    "is",
-    "it",
-    "its",
-    "little",
-    "may",
-    "meaning",
-    "meaningful",
-    "meaningless",
-    "meant",
-    "message",
-    "might",
-    "mostly",
-    "no",
-    "noise",
-    "none",
-    "not",
-    "nothing",
-    "of",
-    "offered",
-    "on",
-    "one",
-    "only",
-    "or",
-    "our",
-    "produced",
-    "recap",
-    "recording",
-    "recordings",
-    "recovered",
-    "remaining",
-    "remained",
-    "rest",
-    "result",
-    "she",
-    "short",
-    "should",
-    "silence",
-    "silent",
-    "speech",
-    "summarize",
-    "summarized",
-    "summary",
-    "tell",
-    "that",
-    "the",
-    "their",
-    "them",
-    "there",
-    "they",
-    "this",
-    "thought",
-    "to",
-    "topic",
-    "transcript",
-    "transcripts",
-    "unable",
-    "unavailable",
-    "unclear",
-    "undecipherable",
-    "understand",
-    "unintelligible",
-    "unknown",
-    "unusable",
-    "usable",
-    "useful",
-    "useless",
-    "was",
-    "we",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "with",
-    "without",
-    "word",
-    "words",
-    "work",
-    "would",
-    "you",
-    "your",
-    "zero",
-}
 
 
 class TodayCardState(str, Enum):
@@ -439,44 +274,23 @@ def _text_has_substance(text: str) -> bool:
     return len(alphanumeric) >= 8 and len(non_ascii_alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
 
 
-def _clause_has_concrete_content(clause: str) -> bool:
-    all_words = _WORD.findall(clause)
-    words = [word for word in all_words if word.casefold() not in _LOW_VALUE_META_WORDS]
-    distinct_words = {word.casefold() for word in words}
-    if len(distinct_words) >= 3:
-        return True
-    if len(distinct_words) >= 2 and _CONCRETE_ACTOR.search(clause):
-        return True
-
-    non_ascii = [character.casefold() for character in clause if character.isalnum() and not character.isascii()]
-    return len(non_ascii) >= 4 and len(set(non_ascii)) >= 3
-
-
 def _summary_is_low_value_commentary(summary: str) -> bool:
     normalized = _WHITESPACE.sub(" ", summary).strip()
     has_source_limitation = any(pattern.search(normalized) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
     has_summary_outcome = bool(_LOW_VALUE_SUMMARY_OUTCOME.search(normalized))
-    if not has_source_limitation or not has_summary_outcome:
-        return False
-
-    clauses = [
-        _WHITESPACE.sub(" ", clause).strip(" ,:-")
-        for clause in _LOW_VALUE_CLAUSE_BREAK.split(summary)
-        if _WHITESPACE.sub(" ", clause).strip(" ,:-")
-    ]
-    return not any(
-        _clause_has_concrete_content(clause)
-        for clause in clauses
-        if not any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
-        and not _LOW_VALUE_COMPANION_COMMENTARY.search(clause)
-    )
+    return has_source_limitation and has_summary_outcome
 
 
-def source_text_is_meaningful(title: str, summary: str) -> bool:
-    """Reject unusable-source commentary before it can become rendered body text."""
+def source_text_is_meaningful(
+    title: str,
+    summary: str,
+    *,
+    has_explicit_quality_metrics: bool = False,
+) -> bool:
+    """Fail closed on legacy source-quality commentary before it can render."""
     normalized_title = _WHITESPACE.sub(" ", title).strip()
     normalized_summary = _WHITESPACE.sub(" ", summary).strip()
-    if _summary_is_low_value_commentary(summary):
+    if not has_explicit_quality_metrics and _summary_is_low_value_commentary(summary):
         return False
     return _text_has_substance(f"{normalized_title} {normalized_summary}".strip())
 
@@ -495,7 +309,13 @@ def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
         return False
     if not evidence.title and not evidence.summary:
         return False
-    if not source_text_is_meaningful(evidence.title, evidence.summary):
+    if not source_text_is_meaningful(
+        evidence.title,
+        evidence.summary,
+        has_explicit_quality_metrics=(
+            evidence.transcript_word_count is not None and evidence.capture_duration_seconds is not None
+        ),
+    ):
         return False
     if evidence.transcript_word_count is not None and evidence.transcript_word_count < TODAY_CARD_MIN_TRANSCRIPT_WORDS:
         return False

@@ -221,6 +221,10 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
         "The clip contained no speech and could not be summarized.",
         ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
         ("The recording was too short to summarize what happened. " "Everything was lost."),
+        ("The recording was too short to summarize what happened. " "It did not provide any new information."),
+        ("The recording was too short to summarize what happened. " "We got zilch."),
+        ("The recording was too short to summarize what happened. " "Everyone heard only static."),
+        ("The recording was too short to summarize what happened. " "内容は不明でした。"),
     ],
 )
 def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title(junk_summary):

@@ -748,11 +748,13 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
         ),
     ],
 )
-def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary):
+def test_enriched_adapter_keeps_quality_backed_substantive_documentary_editing_summary(summary):
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
     }
 
     evidence = today_card_postgres._evidence_from_row(
@@ -798,6 +800,12 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary)
         "The clip contained no speech and could not be summarized.",
         ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
         ("The recording was too short to summarize what happened. " "Everything was lost."),
+        ("The recording was too short to summarize what happened. " "It did not provide any new information."),
+        ("The recording was too short to summarize what happened. " "We got zilch."),
+        ("The recording was too short to summarize what happened. " "Everyone heard only static."),
+        ("The recording was too short to summarize what happened. " "内容は不明でした。"),
+        ("The recording was too short to summarize the documentary because everyone planned a second filming day."),
+        ("Even though the recording was too short to summarize the documentary, Maria smiled during the visit."),
     ],
 )
 def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
@@ -805,6 +813,33 @@ def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    ("quality_key", "quality_value"),
+    [
+        ("transcript_word_count", 24),
+        ("duration_seconds", 18.0),
+    ],
+)
+def test_legacy_adapter_requires_complete_explicit_quality_to_override_source_commentary(quality_key, quality_value):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": "The recording was too short to summarize what happened.",
+        quality_key: quality_value,
     }
 
     evidence = today_card_postgres._evidence_from_row(
@@ -837,6 +872,8 @@ def test_enriched_adapter_preserves_multiline_punctuation_in_rendered_output(sum
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
     }
 
     evidence = today_card_postgres._evidence_from_row(
