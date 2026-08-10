@@ -21,6 +21,7 @@ typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResu
 });
 
 typedef ConversationsFetchCall = Future<ConversationsFetchResult> Function();
+typedef ConversationDeleteCall = Future<bool> Function(String conversationId);
 
 class _ProcessingRetryPoll {
   final String requestId;
@@ -83,6 +84,7 @@ class ConversationProvider extends ChangeNotifier {
   final RetryConversationProcessingCall _retryConversationProcessing;
   final ConversationsFetchCall? _conversationsFetch;
   final ConversationsFetchCall? _failedConversationsFetch;
+  final ConversationDeleteCall _conversationDelete;
   final Duration _conversationsFetchTimeout;
   final Duration _failedConversationsFetchTimeout;
 
@@ -92,11 +94,13 @@ class ConversationProvider extends ChangeNotifier {
     RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing,
     ConversationsFetchCall? conversationsFetchCall,
     ConversationsFetchCall? failedConversationsFetchCall,
+    ConversationDeleteCall conversationDeleteCall = deleteConversationServer,
     Duration conversationsFetchTimeout = const Duration(seconds: 15),
     Duration failedConversationsFetchTimeout = const Duration(seconds: 8),
   })  : _retryConversationProcessing = retryConversationProcessingCall,
         _conversationsFetch = conversationsFetchCall,
         _failedConversationsFetch = failedConversationsFetchCall,
+        _conversationDelete = conversationDeleteCall,
         _conversationsFetchTimeout = conversationsFetchTimeout,
         _failedConversationsFetchTimeout = failedConversationsFetchTimeout {
     _setupMergeListener();
@@ -1089,6 +1093,31 @@ class ConversationProvider extends ChangeNotifier {
     deleteConversationServer(conversation.id);
     _groupConversationsByDateWithoutNotify();
     notifyListeners();
+  }
+
+  /// Permanently deletes an Ella journal memory only after the authenticated
+  /// server confirms deletion. A failed request leaves every local projection
+  /// intact so a transient network failure cannot masquerade as data removal.
+  Future<bool> deleteConversationPermanently(ServerConversation conversation) async {
+    bool deleted;
+    try {
+      deleted = await _conversationDelete(conversation.id);
+    } catch (_) {
+      Logger.error('Permanent memory deletion request failed');
+      return false;
+    }
+    if (!deleted) return false;
+
+    conversations.removeWhere((item) => item.id == conversation.id);
+    searchedConversations.removeWhere((item) => item.id == conversation.id);
+    processingConversations.removeWhere((item) => item.id == conversation.id);
+    failedConversations.removeWhere((item) => item.id == conversation.id);
+    _groupConversationsByDateWithoutNotify();
+    if (selectedFolderId == null) {
+      SharedPreferencesUtil().cachedConversations = conversations;
+    }
+    notifyListeners();
+    return true;
   }
 
   @override

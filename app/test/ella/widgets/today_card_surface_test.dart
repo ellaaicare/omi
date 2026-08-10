@@ -37,7 +37,8 @@ void main() {
     });
   }
 
-  Widget buildApp(TodayCardViewState state, {double textScale = 1}) => MaterialApp(
+  Widget buildApp(TodayCardViewState state, {double textScale = 1, VoidCallback? onReadMore, VoidCallback? onTalk}) =>
+      MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -50,7 +51,7 @@ void main() {
           body: SingleChildScrollView(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: EllaSizes.screenPadding),
-              child: TodayCardSurface(state: state, onTalk: () {}),
+              child: TodayCardSurface(state: state, onReadMore: onReadMore ?? () {}, onTalk: onTalk ?? () {}),
             ),
           ),
         ),
@@ -87,6 +88,7 @@ void main() {
     expect(find.textContaining('Updated today'), findsNothing);
     expect(find.text('SERVER DISPLAY COPY'), findsNothing);
     expect(find.byKey(const Key('today-card-actions-row')), findsOneWidget);
+    expect(find.byKey(const Key('today-card-read-more')), findsOneWidget);
     expect(find.byKey(const Key('today-card-talk')), findsOneWidget);
     expect(find.byKey(const Key('today-card-read-aloud')), findsNothing);
     expect(tester.getSize(find.byKey(const Key('today-card-talk'))).height, greaterThanOrEqualTo(48));
@@ -98,7 +100,7 @@ void main() {
         MediaQuery.textScalerOf(tester.element(find.byKey(const Key('today-card-body')))).scale(16) / 16;
     expect(
       surfaceSize.height,
-      lessThanOrEqualTo(360),
+      lessThanOrEqualTo(400),
       reason: 'surface=$surfaceSize headline=$headlineSize body=$bodySize actions=$actionSize scale=$effectiveScale',
     );
     expect(tester.takeException(), isNull);
@@ -125,6 +127,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('today-card-actions-stacked')), findsOneWidget);
+    expect(find.byKey(const Key('today-card-read-more')), findsOneWidget);
     expect(find.text('A calm moment worth repeating'), findsOneWidget);
     expect(find.textContaining('A little time outside'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -151,7 +154,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('corner botanical stays subtle behind a long note at 320 points and 200 percent text', (tester) async {
+  testWidgets('long note stays bounded at 320 points and 200 percent text', (tester) async {
     configureView(tester, width: 320, height: 2200);
     await tester.pumpWidget(
       buildApp(
@@ -174,8 +177,30 @@ void main() {
     expect(find.byKey(const Key('today-card-actions-stacked')), findsOneWidget);
     expect(find.textContaining('A familiar story opened'), findsOneWidget);
     expect(find.textContaining('the light across the room'), findsOneWidget);
+    expect(tester.widget<Text>(find.byKey(const Key('today-card-headline'))).maxLines, 2);
+    expect(tester.widget<Text>(find.byKey(const Key('today-card-body'))).maxLines, 2);
+    expect(tester.getSize(find.byKey(const Key('today-card-semantics'))).height, lessThanOrEqualTo(600));
     expect(tester.takeException(), isNull);
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_daily_note_long_320_200.png'));
+  });
+
+  testWidgets('compact card exposes working read-more and talk actions', (tester) async {
+    configureView(tester);
+    var readMoreTaps = 0;
+    var talkTaps = 0;
+    await tester.pumpWidget(
+      buildApp(
+        TodayCardViewState(status: TodayCardStatus.ready, card: readyCard()),
+        onReadMore: () => readMoreTaps += 1,
+        onTalk: () => talkTaps += 1,
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('today-card-read-more')));
+    await tester.tap(find.byKey(const Key('today-card-talk')));
+
+    expect(readMoreTaps, 1);
+    expect(talkTaps, 1);
   });
 
   testWidgets('preparing state exposes no actions or invented personal content', (tester) async {
@@ -186,6 +211,7 @@ void main() {
     expect(find.text("Preparing today's note"), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.byKey(const Key('today-card-talk')), findsNothing);
+    expect(find.byKey(const Key('today-card-read-more')), findsNothing);
     expect(find.byKey(const Key('today-card-read-aloud')), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -201,6 +227,7 @@ void main() {
     expect(find.textContaining('enough recent memory'), findsOneWidget);
     expect(find.byKey(const Key('today-card-provenance')), findsNothing);
     expect(find.byKey(const Key('today-card-talk')), findsNothing);
+    expect(find.byKey(const Key('today-card-read-more')), findsNothing);
     expect(find.byKey(const Key('today-card-read-aloud')), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -215,6 +242,7 @@ void main() {
       expect(find.textContaining('Pull down to try again'), findsOneWidget);
       expect(find.textContaining('enough recent memory'), findsNothing);
       expect(find.byKey(const Key('today-card-talk')), findsNothing);
+      expect(find.byKey(const Key('today-card-read-more')), findsNothing);
       expect(find.byKey(const Key('today-card-read-aloud')), findsNothing);
       expect(tester.takeException(), isNull);
     });
@@ -233,6 +261,7 @@ void main() {
     expect(find.textContaining('finishes setting up your account'), findsOneWidget);
     expect(find.textContaining('Pull down'), findsNothing);
     expect(find.byKey(const Key('today-card-talk')), findsNothing);
+    expect(find.byKey(const Key('today-card-read-more')), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

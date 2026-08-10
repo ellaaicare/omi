@@ -401,6 +401,31 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _openTodayCardDetail() async {
+    await _syncTodayCardAuthority();
+    if (!mounted) return;
+    final card = _todayCardController.state.card;
+    if (card == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: EllaColors.bgPrimary,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      clipBehavior: Clip.antiAlias,
+      builder: (sheetContext) => FractionallySizedBox(
+        heightFactor: 0.82,
+        child: _TodayCardDetailSheet(
+          card: card,
+          onTalk: () {
+            Navigator.of(sheetContext).pop();
+            unawaited(_openTodayCardTalk());
+          },
+        ),
+      ),
+    );
+  }
+
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
         PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
@@ -612,6 +637,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             const SizedBox(height: 22),
             TodayCardSurface(
               state: _todayCardController.state,
+              onReadMore: _todayCardController.state.card == null ? null : _openTodayCardDetail,
               onTalk: _todayCardController.state.card == null ? null : _openTodayCardTalk,
             ),
             const SizedBox(height: 20),
@@ -665,6 +691,78 @@ class _DemoTodayCardRepository implements TodayCardRepository {
   Future<TodayCardResponse> fetch({required String uid}) async => TodayCardFixtures.recap();
 }
 
+class _TodayCardDetailSheet extends StatelessWidget {
+  const _TodayCardDetailSheet({required this.card, required this.onTalk});
+
+  final TodayCard card;
+  final VoidCallback onTalk;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 10),
+          Center(
+            child: Container(
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+            child: Row(
+              children: [
+                Expanded(child: Text(context.l10n.todayCardPreparingEyebrow, style: EllaTextStyles.eyebrow)),
+                IconButton(
+                  key: const Key('today-card-detail-close'),
+                  tooltip: context.l10n.close,
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.close_rounded, color: EllaColors.tealDeep),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              key: const Key('today-card-detail-scroll'),
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Semantics(
+                    header: true,
+                    child: Text(card.headline, style: EllaTextStyles.noteBody.copyWith(fontSize: 30, height: 1.15)),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(card.body, style: EllaTextStyles.noteBody.copyWith(fontSize: 20, height: 1.45)),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+            child: FilledButton.icon(
+              key: const Key('today-card-detail-talk'),
+              onPressed: onTalk,
+              icon: const Icon(Icons.graphic_eq_rounded),
+              label: Text(context.l10n.memoryTalkAction),
+              style: FilledButton.styleFrom(
+                backgroundColor: EllaColors.tealDeep,
+                foregroundColor: Colors.white,
+                minimumSize: const Size.fromHeight(EllaSizes.minTouchTarget),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _TodayHeader extends StatelessWidget {
   const _TodayHeader({required this.now, required this.onOpenControls});
 
@@ -695,10 +793,7 @@ class _TodayHeader extends StatelessWidget {
             children: [
               Text(date, style: EllaTextStyles.eyebrow),
               const SizedBox(height: 8),
-              Text(
-                greeting,
-                style: EllaTextStyles.noteBody.copyWith(fontSize: 24, height: 1.14),
-              ),
+              Text(greeting, style: EllaTextStyles.noteBody.copyWith(fontSize: 24, height: 1.14)),
             ],
           ),
         ),
@@ -827,10 +922,7 @@ class _RecordMomentControl extends StatelessWidget {
                     child: Text(
                       context.l10n.todayNecklaceRecordingContinuously,
                       textAlign: TextAlign.center,
-                      style: EllaTextStyles.caption.copyWith(
-                        color: EllaColors.tealDeep,
-                        fontWeight: FontWeight.w700,
-                      ),
+                      style: EllaTextStyles.caption.copyWith(color: EllaColors.tealDeep, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ],
@@ -860,10 +952,7 @@ class _WhispersHomeCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          context.l10n.todayWhispersTitle,
-          style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.1),
-        ),
+        Text(context.l10n.todayWhispersTitle, style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.1)),
         const SizedBox(height: 14),
         EllaCardSurface(
           child: InkWell(
@@ -1521,10 +1610,7 @@ class _RecentMemories extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
                   child: Text(
                     context.l10n.todaySeeAllMemories,
-                    style: EllaTextStyles.secondary.copyWith(
-                      color: EllaColors.tealDeep,
-                      fontWeight: FontWeight.w700,
-                    ),
+                    style: EllaTextStyles.secondary.copyWith(color: EllaColors.tealDeep, fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
@@ -1566,9 +1652,7 @@ class _RecentMemories extends StatelessWidget {
                         children: [
                           Expanded(child: cards[index]),
                           const SizedBox(width: EllaSizes.cardGap),
-                          Expanded(
-                            child: index + 1 < cards.length ? cards[index + 1] : const SizedBox.shrink(),
-                          ),
+                          Expanded(child: index + 1 < cards.length ? cards[index + 1] : const SizedBox.shrink()),
                         ],
                       ),
                     ),

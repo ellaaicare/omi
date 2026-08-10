@@ -33,10 +33,7 @@ void main() {
   test('Ella-visible conversations never leak discarded cache records', () {
     final provider = ConversationProvider();
     addTearDown(provider.dispose);
-    provider.conversations = [
-      conversation('kept'),
-      conversation('discarded', discarded: true),
-    ];
+    provider.conversations = [conversation('kept'), conversation('discarded', discarded: true)];
 
     expect(provider.visibleConversations.map((item) => item.id), ['kept']);
 
@@ -65,6 +62,64 @@ void main() {
     await SharedPreferencesUtil.init();
 
     expect(SharedPreferencesUtil().cachedConversations.single.id, 'current');
+  });
+
+  test('confirmed permanent deletion removes every local projection and cache entry', () async {
+    SharedPreferences.setMockInitialValues({'uid': 'current-user'});
+    await SharedPreferencesUtil.init();
+    final deleted = conversation('delete-me');
+    final kept = conversation('keep-me');
+    final requestedIds = <String>[];
+    final provider = ConversationProvider(
+      conversationDeleteCall: (id) async {
+        requestedIds.add(id);
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+    provider.conversations = [deleted, kept];
+    provider.searchedConversations = [deleted, kept];
+    provider.failedConversations = [deleted];
+    SharedPreferencesUtil().cachedConversations = [deleted, kept];
+
+    final result = await provider.deleteConversationPermanently(deleted);
+
+    expect(result, isTrue);
+    expect(requestedIds, ['delete-me']);
+    expect(provider.conversations.map((item) => item.id), ['keep-me']);
+    expect(provider.searchedConversations.map((item) => item.id), ['keep-me']);
+    expect(provider.failedConversations, isEmpty);
+    expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), ['keep-me']);
+  });
+
+  test('failed permanent deletion preserves every local projection', () async {
+    final memory = conversation('still-here');
+    final provider = ConversationProvider(conversationDeleteCall: (_) async => false);
+    addTearDown(provider.dispose);
+    provider.conversations = [memory];
+    provider.searchedConversations = [memory];
+
+    final result = await provider.deleteConversationPermanently(memory);
+
+    expect(result, isFalse);
+    expect(provider.conversations, [memory]);
+    expect(provider.searchedConversations, [memory]);
+  });
+
+  test('thrown permanent deletion request preserves every local projection', () async {
+    final memory = conversation('still-here-after-error');
+    final provider = ConversationProvider(
+      conversationDeleteCall: (_) async => throw StateError('network unavailable'),
+    );
+    addTearDown(provider.dispose);
+    provider.conversations = [memory];
+    provider.searchedConversations = [memory];
+
+    final result = await provider.deleteConversationPermanently(memory);
+
+    expect(result, isFalse);
+    expect(provider.conversations, [memory]);
+    expect(provider.searchedConversations, [memory]);
   });
 
   test('primary memories finish loading while failed-summary request is still pending', () async {

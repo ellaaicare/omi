@@ -10,6 +10,7 @@ import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/enums.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class EllaMemoriesPage extends StatefulWidget {
   const EllaMemoriesPage({super.key});
@@ -19,6 +20,8 @@ class EllaMemoriesPage extends StatefulWidget {
 }
 
 class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
+  final Set<String> _deletingConversationIds = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -92,11 +95,11 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                 for (final conversation in entry.value) ...[
                   _MemoryRow(
                     conversation: conversation,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => ConversationDetailPage(conversation: conversation),
-                      ),
-                    ),
+                    deleting: _deletingConversationIds.contains(conversation.id),
+                    onTap: () => Navigator.of(
+                      context,
+                    ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation))),
+                    onDelete: () => _confirmDelete(conversationProvider, conversation),
                   ),
                   const SizedBox(height: EllaSizes.cardGap),
                 ],
@@ -105,12 +108,44 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
             if (!loading && groups.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 80),
-                child:
-                    Text('Your memories will appear here. 🪽', textAlign: TextAlign.center, style: EllaTextStyles.body),
+                child: Text(
+                  'Your memories will appear here. 🪽',
+                  textAlign: TextAlign.center,
+                  style: EllaTextStyles.body,
+                ),
               ),
           ],
         ),
       ),
+    );
+  }
+
+  Future<void> _confirmDelete(ConversationProvider provider, ServerConversation conversation) async {
+    if (_deletingConversationIds.contains(conversation.id)) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(context.l10n.deleteMemory),
+        content: Text(context.l10n.deleteMemoryConfirmation),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(context.l10n.cancel)),
+          FilledButton(
+            key: const Key('confirm-delete-memory'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: EllaColors.warning, foregroundColor: Colors.white),
+            child: Text(context.l10n.delete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _deletingConversationIds.add(conversation.id));
+    final deleted = await provider.deleteConversationPermanently(conversation);
+    if (!mounted) return;
+    setState(() => _deletingConversationIds.remove(conversation.id));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(deleted ? context.l10n.memoryDeleted : context.l10n.anErrorOccurredTryAgain)),
     );
   }
 }
@@ -148,10 +183,12 @@ class _LiveMemoryCard extends StatelessWidget {
 }
 
 class _MemoryRow extends StatelessWidget {
-  const _MemoryRow({required this.conversation, required this.onTap});
+  const _MemoryRow({required this.conversation, required this.deleting, required this.onTap, required this.onDelete});
 
   final ServerConversation conversation;
+  final bool deleting;
   final VoidCallback onTap;
+  final VoidCallback onDelete;
 
   String get _title =>
       conversation.structured.title.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
@@ -196,8 +233,31 @@ class _MemoryRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
+              deleting
+                  ? const SizedBox(
+                      key: Key('deleting-memory-progress'),
+                      width: EllaSizes.minTouchTarget,
+                      height: EllaSizes.minTouchTarget,
+                      child: Center(
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                        ),
+                      ),
+                    )
+                  : IconButton(
+                      key: Key('delete-memory-${conversation.id}'),
+                      tooltip: context.l10n.deleteMemory,
+                      onPressed: onDelete,
+                      constraints: const BoxConstraints(
+                        minWidth: EllaSizes.minTouchTarget,
+                        minHeight: EllaSizes.minTouchTarget,
+                      ),
+                      icon: const Icon(Icons.delete_outline_rounded, color: EllaColors.warning),
+                    ),
               const Padding(
-                padding: EdgeInsets.only(top: 8),
+                padding: EdgeInsets.only(top: 12),
                 child: Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
               ),
             ],

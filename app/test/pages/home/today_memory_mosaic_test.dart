@@ -88,6 +88,45 @@ void main() {
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_mosaic.png'));
   });
 
+  testWidgets('Daily Note preview opens the full note and hands off to scoped talk', (tester) async {
+    const fullBody =
+        'A longer Daily Note keeps its complete grounded text available here while Home remains a compact overview.';
+    var talkOpens = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      todayResponse: TodayCardResponse(
+        contractVersion: todayCardContractVersion,
+        status: TodayCardStatus.ready,
+        card: TodayCard(
+          id: 'detail-note',
+          version: 2,
+          kind: TodayCardKind.memory,
+          eyebrow: 'ELLA’S DAILY NOTE',
+          headline: 'A note worth opening',
+          body: fullBody,
+          generatedAt: DateTime(2026, 8, 10, 8),
+          sourceRefs: const [TodayCardSourceRef(kind: 'memory', id: 'memory-1')],
+        ),
+      ),
+      todayCardTalkRouteOpener: (_, __) async => talkOpens += 1,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-card-read-more')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('today-card-detail-scroll')), findsOneWidget);
+    expect(find.text(fullBody), findsNWidgets(2));
+    expect(find.byKey(const Key('today-card-detail-talk')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-card-detail-talk')));
+    await tester.pumpAndSettle();
+
+    expect(talkOpens, 1);
+    expect(find.byKey(const Key('today-card-detail-scroll')), findsNothing);
+  });
+
   testWidgets('phone capture transforms in place and finishes the moment', (tester) async {
     final harness = await _pumpHome(tester, conversations: const []);
     addTearDown(harness.dispose);
@@ -342,6 +381,7 @@ Future<_HomeHarness> _pumpHome(
   RecordingState initialRecordingState = RecordingState.stop,
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
+  TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -405,6 +445,7 @@ Future<_HomeHarness> _pumpHome(
                   todayCardAuthoritySnapshotProvider: () =>
                       (uid: 'test-user', authorityKey: 'test-authority', isProvisioningReady: true),
                   todayCardAuthorityChanges: authorityChanges,
+                  todayCardTalkRouteOpener: todayCardTalkRouteOpener,
                   guardianAvailability: () => false,
                 ),
                 if (includeBottomNav) BottomNavBar(onTabTap: (_, __) {}),
@@ -452,11 +493,7 @@ class _FixtureConversationProvider extends ConversationProvider {
 }
 
 class _FakeCaptureProvider extends CaptureProvider {
-  _FakeCaptureProvider(
-    RecordingState initialState, {
-    required this.phoneStartResult,
-    required this.hasContent,
-  }) {
+  _FakeCaptureProvider(RecordingState initialState, {required this.phoneStartResult, required this.hasContent}) {
     recordingState = initialState;
   }
 
