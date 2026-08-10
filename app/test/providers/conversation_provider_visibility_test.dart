@@ -92,6 +92,23 @@ void main() {
     expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), ['keep-me']);
   });
 
+  test('confirmed permanent deletion purges global cache while a folder is selected', () async {
+    SharedPreferences.setMockInitialValues({'uid': 'current-user'});
+    await SharedPreferencesUtil.init();
+    final deleted = conversation('delete-from-folder');
+    final globallyCached = conversation('global-cache-entry');
+    final provider = ConversationProvider(conversationDeleteCall: (_) async => true)
+      ..selectedFolderId = 'folder-1'
+      ..conversations = [deleted];
+    addTearDown(provider.dispose);
+    SharedPreferencesUtil().cachedConversations = [deleted, globallyCached];
+
+    expect(await provider.deleteConversationPermanently(deleted), isTrue);
+
+    expect(provider.conversations, isEmpty);
+    expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), ['global-cache-entry']);
+  });
+
   test('failed permanent deletion preserves every local projection', () async {
     final memory = conversation('still-here');
     final provider = ConversationProvider(conversationDeleteCall: (_) async => false);

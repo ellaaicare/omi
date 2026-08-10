@@ -1113,9 +1113,9 @@ class ConversationProvider extends ChangeNotifier {
     processingConversations.removeWhere((item) => item.id == conversation.id);
     failedConversations.removeWhere((item) => item.id == conversation.id);
     _groupConversationsByDateWithoutNotify();
-    if (selectedFolderId == null) {
-      SharedPreferencesUtil().cachedConversations = conversations;
-    }
+    final cachedConversations =
+        SharedPreferencesUtil().cachedConversations.where((item) => item.id != conversation.id).toList(growable: false);
+    SharedPreferencesUtil().cachedConversations = cachedConversations;
     notifyListeners();
     return true;
   }
