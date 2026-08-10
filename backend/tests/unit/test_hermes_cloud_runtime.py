@@ -493,11 +493,13 @@ def test_broker_grounding_verifier_fails_closed_before_admission(monkeypatch):
     )
 
     repository = FakeRepository(previous_response_id="poisoned-response")
+    event_store = InMemoryCanonicalEventStore()
+    policy = FakePolicy()
     service = HermesCloudRuntimeService(
         repository=repository,
-        event_store=InMemoryCanonicalEventStore(),
+        event_store=event_store,
         cloud_client=object(),  # type: ignore[arg-type]
-        voice_policy=FakePolicy(),
+        voice_policy=policy,
         cost_estimator=lambda usage: 0,
         max_cost_estimator=lambda **kwargs: 1,
     )
@@ -522,7 +524,15 @@ def test_broker_grounding_verifier_fails_closed_before_admission(monkeypatch):
         )
 
     assert error.value.code == "hermes_broker_grounding_verifier_unsupported"
-    assert repository.failures == ["hermes_broker_grounding_verifier_unsupported"]
+    assert repository.interaction is None
+    assert repository.interaction_requests == []
+    assert repository.claim_continuation_flags == []
+    assert repository.receipts == {}
+    assert repository.failures == []
+    assert event_store._events == {}
+    assert policy.accepted == []
+    assert policy.reserved == []
+    assert policy.released == []
 
 
 def test_enrichment_rejects_chat_target_before_admission_or_provider():

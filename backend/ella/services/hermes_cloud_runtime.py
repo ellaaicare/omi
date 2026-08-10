@@ -452,6 +452,16 @@ class HermesCloudRuntimeService:
                 "hermes_cloud_enrichment_transcript_target_required",
                 retryable=False,
             )
+        if request.channel == HERMES_CLOUD_GROUNDING_CHANNEL:
+            prototype_config = load_prototype_config()
+            if runtime_uses_broker_prototype(runtime, config=prototype_config):
+                # The synthetic broker does not implement the grounding pass.
+                # Reject the transport selection before creating any runtime,
+                # canonical-event, admission, or cost state.
+                raise ProvisioningError(
+                    "hermes_broker_grounding_verifier_unsupported",
+                    retryable=False,
+                )
         profile_class = await self.repository.get_cloud_profile_class(request.uid)
         if profile_class != runtime.profile_class:
             raise ProvisioningError("hermes_cloud_profile_class_changed", retryable=False)
