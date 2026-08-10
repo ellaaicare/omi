@@ -65,7 +65,14 @@ _LOW_VALUE_SOURCE_LIMITATION = (
         re.IGNORECASE,
     ),
 )
-_LOW_VALUE_CLAUSE_BREAK = re.compile(r"[.!?;]+|,\s*(?:and|but|so|then|yet)\s+", re.IGNORECASE)
+_LOW_VALUE_CLAUSE_BREAK = re.compile(
+    r"[.!?;:]+|\s*[—–]\s*|(?:,\s*|\s+)(?:but|so|then|yet)\s+",
+    re.IGNORECASE,
+)
+_LOW_VALUE_COMPANION_COMMENTARY = re.compile(
+    r"\b(?:insufficient|missing|no|not\s+enough)\s+(?:useful\s+)?(?:context|detail|information)\b",
+    re.IGNORECASE,
+)
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
     r"\b(?:recap|summar(?:y|ize|ise)|to\s+(?:determine|infer|know|tell|understand)|"
     r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
@@ -275,8 +282,11 @@ def _summary_is_low_value_commentary(summary: str) -> bool:
     low_value_clauses = [
         clause
         for clause in clauses
-        if any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
-        and _LOW_VALUE_SUMMARY_OUTCOME.search(clause)
+        if (
+            any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
+            and _LOW_VALUE_SUMMARY_OUTCOME.search(clause)
+        )
+        or _LOW_VALUE_COMPANION_COMMENTARY.search(clause)
     ]
     if not low_value_clauses:
         return False

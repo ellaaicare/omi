@@ -714,14 +714,23 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
     assert today_card_postgres.evidence_is_safe(evidence) is True
 
 
-def test_enriched_adapter_keeps_substantive_documentary_editing_summary():
-    row = _summary_row()
-    row["metadata"]["structured"] = {
-        "title": "A captured moment",
-        "overview": (
+@pytest.mark.parametrize(
+    "summary",
+    [
+        (
             "The recording was too short to summarize the whole documentary, "
             "so everyone chose the missing scenes to film next."
         ),
+        "The recording was too short to summarize the documentary but everyone chose the missing scenes to film next.",
+        "The recording was too short to summarize the documentary: everyone chose the missing scenes to film next.",
+        "The clip was brief and hard to summarize — we planned next week's episode anyway.",
+    ],
+)
+def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
     }
 
     evidence = today_card_postgres._evidence_from_row(
@@ -734,6 +743,27 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary():
     assert evidence.meaningful is True
     assert evidence.confidence == 0.82
     assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
+def test_enriched_adapter_rejects_multisentence_insufficiency_commentary():
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": (
+            "The recording lacked enough detail to summarize what happened. " "No useful context was available."
+        ),
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,8 @@ import asyncio
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from ella.services.today_card import (
     DeterministicTodayCardRenderer,
     TODAY_CARD_CONTRACT_VERSION,
@@ -187,8 +189,14 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
     assert evidence_is_safe(title_rich) is True
 
 
-def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title():
-    junk_summary = "The recording was too short to provide a useful summary."
+@pytest.mark.parametrize(
+    "junk_summary",
+    [
+        "The recording was too short to provide a useful summary.",
+        ("The recording lacked enough detail to summarize what happened. " "No useful context was available."),
+    ],
+)
+def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title(junk_summary):
     evidence = _source(
         TodayCardKind.recap,
         "title-cannot-rescue-junk",
