@@ -1885,19 +1885,22 @@ class EllaProvisioningRepository:
         correlation_id: str,
         canonical_user_event_id: str,
         canonical_assistant_event_id: str,
+        allow_previous_response: bool = True,
     ) -> dict[str, Any]:
-        previous_response_id = await self.pool.fetchval(
-            """
-            SELECT provider_response_id
-            FROM ella_runtime_interactions
-            WHERE scope_id = $1
-              AND status = 'completed'
-              AND provider_response_id IS NOT NULL
-            ORDER BY completed_at DESC, created_at DESC
-            LIMIT 1
-            """,
-            uuid.UUID(str(scope_id)),
-        )
+        previous_response_id = None
+        if allow_previous_response:
+            previous_response_id = await self.pool.fetchval(
+                """
+                SELECT provider_response_id
+                FROM ella_runtime_interactions
+                WHERE scope_id = $1
+                  AND status = 'completed'
+                  AND provider_response_id IS NOT NULL
+                ORDER BY completed_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                uuid.UUID(str(scope_id)),
+            )
         row = await self.pool.fetchrow(
             """
             INSERT INTO ella_runtime_interactions (
@@ -1970,7 +1973,12 @@ class EllaProvisioningRepository:
             error_code[:120],
         )
 
-    async def claim_runtime_interaction(self, interaction_id: str) -> Optional[dict[str, Any]]:
+    async def claim_runtime_interaction(
+        self,
+        interaction_id: str,
+        *,
+        allow_previous_response: bool = True,
+    ) -> Optional[dict[str, Any]]:
         interaction_uuid = uuid.UUID(str(interaction_id))
         async with self.pool.acquire() as connection:
             async with connection.transaction():
@@ -2001,20 +2009,22 @@ class EllaProvisioningRepository:
                 )
                 if running_other:
                     return None
-                previous_response = await connection.fetchrow(
-                    """
-                    SELECT provider_response_id, usage
-                    FROM ella_runtime_interactions
-                    WHERE scope_id = $1
-                      AND id <> $2
-                      AND status = 'completed'
-                      AND provider_response_id IS NOT NULL
-                    ORDER BY completed_at DESC, created_at DESC, id DESC
-                    LIMIT 1
-                    """,
-                    selected["scope_id"],
-                    interaction_uuid,
-                )
+                previous_response = None
+                if allow_previous_response:
+                    previous_response = await connection.fetchrow(
+                        """
+                        SELECT provider_response_id, usage
+                        FROM ella_runtime_interactions
+                        WHERE scope_id = $1
+                          AND id <> $2
+                          AND status = 'completed'
+                          AND provider_response_id IS NOT NULL
+                        ORDER BY completed_at DESC, created_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        selected["scope_id"],
+                        interaction_uuid,
+                    )
                 previous_response_id = previous_response["provider_response_id"] if previous_response else None
                 previous_response_usage = _json_object(previous_response["usage"] or {}) if previous_response else {}
                 row = await connection.fetchrow(

@@ -218,7 +218,7 @@ def test_enrichment_rejects_transcript_change_before_writeback():
         "[Ella] 录音太短，无法总结发生了什么。",
     ],
 )
-def test_enrichment_semantic_insufficiency_cannot_issue_today_card_attestation(overview):
+def test_enrichment_semantic_insufficiency_cannot_write_summary_or_attestation(overview):
     conversation = _conversation(
         "We met after lunch and planned the garden beds for next spring with three neighbors joining us."
     )
@@ -260,9 +260,13 @@ def test_enrichment_semantic_insufficiency_cannot_issue_today_card_attestation(o
     )
     service._runtime = AsyncMock(return_value=_runtime())
 
-    asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
+    with pytest.raises(
+        ProvisioningError,
+        match="hermes_cloud_enrichment_insufficient_grounding",
+    ):
+        asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
 
-    assert summary_applier.await_args.kwargs["today_card_grounding"] is None
+    summary_applier.assert_not_awaited()
 
 
 def test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript():
@@ -354,9 +358,13 @@ def test_enrichment_ignores_self_attestation_and_requires_independent_verifier()
     )
     service._runtime = AsyncMock(return_value=_runtime())
 
-    asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
+    with pytest.raises(
+        ProvisioningError,
+        match="hermes_cloud_enrichment_insufficient_grounding",
+    ):
+        asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
 
-    assert summary_applier.await_args.kwargs["today_card_grounding"] is None
+    summary_applier.assert_not_awaited()
 
 
 def test_enrichment_requires_confirmed_canonical_writeback():

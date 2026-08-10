@@ -494,6 +494,7 @@ class HermesCloudEnrichmentService:
                 "summary_sha256": _summary_sha256(summary),
             },
             user_scan_policy="none",
+            allow_previous_response=False,
         )
         verifier_turn = await runtime_service.run_turn(
             runtime,
@@ -505,16 +506,20 @@ class HermesCloudEnrichmentService:
             transcript_segments=transcript_segments,
             summary=summary,
         )
-        if today_card_grounding is not None:
-            today_card_grounding = {
-                **today_card_grounding,
-                "owner_hash": "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest(),
-                "conversation_id_hash": "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
-                "runtime_interaction_id": str(turn.runtime_interaction_id or ""),
-                "canonical_assistant_event_id": str(turn.canonical_assistant_event_id or ""),
-                "verifier_runtime_interaction_id": str(verifier_turn.runtime_interaction_id or ""),
-                "verifier_canonical_assistant_event_id": str(verifier_turn.canonical_assistant_event_id or ""),
-            }
+        if today_card_grounding is None:
+            raise ProvisioningError(
+                "hermes_cloud_enrichment_insufficient_grounding",
+                retryable=False,
+            )
+        today_card_grounding = {
+            **today_card_grounding,
+            "owner_hash": "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest(),
+            "conversation_id_hash": "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
+            "runtime_interaction_id": str(turn.runtime_interaction_id or ""),
+            "canonical_assistant_event_id": str(turn.canonical_assistant_event_id or ""),
+            "verifier_runtime_interaction_id": str(verifier_turn.runtime_interaction_id or ""),
+            "verifier_canonical_assistant_event_id": str(verifier_turn.canonical_assistant_event_id or ""),
+        }
 
         current = await asyncio.to_thread(
             self.conversation_reader,

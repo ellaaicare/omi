@@ -43,6 +43,8 @@ HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
 HERMES_CLOUD_ENRICHMENT_MODE = "hermes-cloud-transcript"
 HERMES_CLOUD_PHOTON_MODE = "hermes-cloud-photon"
 HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
+HERMES_CLOUD_GROUNDING_CHANNEL = "omi_enrichment_grounding_verifier"
+HERMES_CLOUD_ENRICHMENT_CHANNELS = frozenset({HERMES_CLOUD_ENRICHMENT_CHANNEL, HERMES_CLOUD_GROUNDING_CHANNEL})
 DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
@@ -202,6 +204,7 @@ class HermesCloudTurnRequest:
     client_metadata: dict[str, Any]
     consent_grant_epoch: Optional[str] = None
     user_scan_policy: str = "immediate"
+    allow_previous_response: bool = True
 
 
 @dataclass(frozen=True)
@@ -216,17 +219,20 @@ class HermesCloudTurnResult:
 
 
 def _request_hash(request: HermesCloudTurnRequest) -> str:
-    material = "\x1f".join(
-        (
-            request.uid,
-            request.channel,
-            request.client_interaction_id,
-            request.user_input,
-            request.instructions,
-            request.consent_grant_epoch or "",
-            request.user_scan_policy,
-        )
-    )
+    fields = [
+        request.uid,
+        request.channel,
+        request.client_interaction_id,
+        request.user_input,
+        request.instructions,
+        request.consent_grant_epoch or "",
+        request.user_scan_policy,
+    ]
+    # Preserve the deployed hash for every continuation-enabled caller. Only
+    # the new fail-closed verifier contract needs a distinct idempotency shape.
+    if not request.allow_previous_response:
+        fields.append("stateless")
+    material = "\x1f".join(fields)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -379,7 +385,7 @@ class HermesCloudRuntimeService:
         await mark_provider_send_boundary()
         client = self.broker_client_factory(prototype_config)
         source_event_id = str(request.client_interaction_id or request.correlation_id)
-        if request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL:
+        if request.channel in HERMES_CLOUD_ENRICHMENT_CHANNELS:
             # Enrichment instructions already embed transcript JSON; surface a
             # bounded segment list for the broker transcript lane.
             terminal = await client.run_transcript_user_summary(
@@ -434,7 +440,7 @@ class HermesCloudRuntimeService:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
         runtime_identity = cloud_runtime_authority_identity(runtime)
         if (
-            request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL
+            request.channel in HERMES_CLOUD_ENRICHMENT_CHANNELS
             and runtime_identity.target_mode != HERMES_CLOUD_ENRICHMENT_MODE
         ):
             raise ProvisioningError(
@@ -503,6 +509,7 @@ class HermesCloudRuntimeService:
                 correlation_id=request.correlation_id,
                 canonical_user_event_id=user_event_id,
                 canonical_assistant_event_id=assistant_event_id,
+                allow_previous_response=request.allow_previous_response,
             )
         except RuntimePoolClaimError as exc:
             raise ProvisioningError(str(exc), retryable=False) from exc
@@ -536,7 +543,10 @@ class HermesCloudRuntimeService:
                 runtime_interaction_id=str(interaction["id"]),
             )
 
-        claimed = await self.repository.claim_runtime_interaction(str(interaction["id"]))
+        claimed = await self.repository.claim_runtime_interaction(
+            str(interaction["id"]),
+            allow_previous_response=request.allow_previous_response,
+        )
         if not claimed:
             raise ProvisioningError("hermes_cloud_turn_in_progress", retryable=True)
         recovered = await self.event_store.get_event(
@@ -623,7 +633,7 @@ class HermesCloudRuntimeService:
                 raise ProvisioningError("no_entitlement", retryable=False)
             if request.channel == "photon":
                 entitlement_mode = HERMES_CLOUD_PHOTON_MODE
-            elif request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL:
+            elif request.channel in HERMES_CLOUD_ENRICHMENT_CHANNELS:
                 entitlement_mode = HERMES_CLOUD_ENRICHMENT_MODE
             else:
                 entitlement_mode = HERMES_CLOUD_CHAT_MODE

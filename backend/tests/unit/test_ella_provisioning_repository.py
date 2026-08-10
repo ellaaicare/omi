@@ -582,6 +582,54 @@ def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_c
     assert not any("UPDATE ella_runtime_interactions" in query for query, _args in blocked_connection.queries)
 
 
+def test_stateless_runtime_interaction_skips_predecessor_at_create_and_claim():
+    class CreatePool:
+        def __init__(self):
+            self.calls = []
+
+        async def fetchval(self, query, *args):
+            raise AssertionError("stateless creation must not query a predecessor")
+
+        async def fetchrow(self, query, *args):
+            self.calls.append((query, args))
+            return {
+                "id": args[0],
+                "request_hash": args[3],
+                "previous_response_id": args[7],
+            }
+
+    create_pool = CreatePool()
+    repository = EllaProvisioningRepository(create_pool)
+    created = asyncio.run(
+        repository.get_or_create_runtime_interaction(
+            scope_id=str(uuid.uuid4()),
+            client_interaction_id="stateless-verifier",
+            request_hash="request-hash",
+            correlation_id="correlation-a",
+            canonical_user_event_id="user-event-a",
+            canonical_assistant_event_id="assistant-event-a",
+            allow_previous_response=False,
+        )
+    )
+
+    assert created["previous_response_id"] is None
+    assert create_pool.calls[0][1][7] is None
+
+    interaction_id = str(uuid.uuid4())
+    claim_connection = _InteractionClaimConnection()
+    claimed = asyncio.run(
+        EllaProvisioningRepository(_Pool(claim_connection)).claim_runtime_interaction(
+            interaction_id,
+            allow_previous_response=False,
+        )
+    )
+
+    assert claimed["previous_response_id"] is None
+    assert claimed["previous_response_usage"] == {}
+    joined = "\n".join(query for query, _args in claim_connection.queries)
+    assert "ORDER BY completed_at DESC, created_at DESC, id DESC" not in joined
+
+
 def test_shadow_promotion_is_explicit_owner_scoped_revision_cas(monkeypatch):
     owner_id = uuid.uuid4()
     pool = _LookupPool(

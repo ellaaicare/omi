@@ -17,6 +17,7 @@ from ella.services.hermes_cloud_runtime import (
     HERMES_CLOUD_CHAT_MODE,
     HERMES_CLOUD_ENRICHMENT_CHANNEL,
     HERMES_CLOUD_ENRICHMENT_MODE,
+    HERMES_CLOUD_GROUNDING_CHANNEL,
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
     broker_session_id_for_scope,
@@ -1039,7 +1040,11 @@ def test_provider_turn_rejects_missing_persisted_consent_authority_epoch(monkeyp
     assert error.value.code == "hermes_broker_prototype_consent_authority_epoch_missing"
 
 
-def test_enrichment_channel_uses_transcript_lane(monkeypatch):
+@pytest.mark.parametrize(
+    "channel",
+    [HERMES_CLOUD_ENRICHMENT_CHANNEL, HERMES_CLOUD_GROUNDING_CHANNEL],
+)
+def test_enrichment_channels_use_transcript_lane(monkeypatch, channel):
     _enable(monkeypatch)
     seen = {}
 
@@ -1079,7 +1084,7 @@ def test_enrichment_channel_uses_transcript_lane(monkeypatch):
                 uid=AUTH_UID,
                 client_interaction_id="evt-enrich",
                 correlation_id="c-enrich",
-                channel=HERMES_CLOUD_ENRICHMENT_CHANNEL,
+                channel=channel,
                 user_input="transcript text",
                 instructions="enrich",
                 started_at=datetime.now(timezone.utc),
