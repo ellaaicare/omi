@@ -46,6 +46,11 @@ class V2VFallbackDialog extends StatelessWidget {
         OutlinedButton.icon(
           key: const ValueKey('v2v-failure-cancel'),
           onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: EllaColors.tealDeep,
+            side: const BorderSide(color: EllaColors.tealDeep),
+            minimumSize: const Size(0, EllaSizes.minTouchTarget),
+          ),
           icon: const Icon(Icons.close),
           label: Text(allowStandardFallback ? context.l10n.cancel : context.l10n.close),
         ),
@@ -53,12 +58,21 @@ class V2VFallbackDialog extends StatelessWidget {
           TextButton(
             key: const ValueKey('v2v-failure-elevenlabs'),
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
+            style: TextButton.styleFrom(
+              foregroundColor: EllaColors.tealDeep,
+              minimumSize: const Size(0, EllaSizes.minTouchTarget),
+            ),
             child: Text(context.l10n.voiceUseElevenLabs),
           ),
         if (canRetry)
           FilledButton(
             key: const ValueKey('v2v-failure-retry'),
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
+            style: FilledButton.styleFrom(
+              backgroundColor: EllaColors.tealDeep,
+              foregroundColor: EllaColors.paper,
+              minimumSize: const Size(0, EllaSizes.minTouchTarget),
+            ),
             child: Text(context.l10n.retry),
           ),
       ],

@@ -1164,45 +1164,28 @@ class GetAppsWidgets extends StatelessWidget {
         physics: const NeverScrollableScrollPhysics(),
         children: [
           const SizedBox(height: 32),
-          Text(
-            context.l10n.noSummaryForConversation,
-            style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 20),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  border: const GradientBoxBorder(
-                    gradient: LinearGradient(colors: [
-                      Color.fromARGB(127, 208, 208, 208),
-                      Color.fromARGB(127, 188, 99, 121),
-                      Color.fromARGB(127, 86, 101, 182),
-                      Color.fromARGB(127, 126, 190, 236)
-                    ]),
-                    width: 2,
+          EllaCardSurface(
+            key: const Key('conversation-summary-empty'),
+            child: Padding(
+              padding: const EdgeInsets.all(EllaSizes.cardPadding),
+              child: Column(
+                children: [
+                  const Icon(Icons.auto_awesome_outlined, color: EllaColors.tealDeep, size: 28),
+                  const SizedBox(height: 12),
+                  Text(
+                    context.l10n.noSummaryForConversation,
+                    style: EllaTextStyles.noteBody.copyWith(fontSize: 21),
+                    textAlign: TextAlign.center,
                   ),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: MaterialButton(
-                  onPressed: () {
-                    showModalBottomSheet(
-                      context: context,
-                      isScrollControlled: true,
-                      backgroundColor: Colors.transparent,
-                      builder: (context) => const SummarizedAppsBottomSheet(),
-                    );
-                  },
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-                      child: Text(context.l10n.generateSummary,
-                          style: const TextStyle(color: Colors.white, fontSize: 16))),
-                ),
+                  const SizedBox(height: 8),
+                  Text(
+                    context.l10n.conversationSummaryPendingDescription,
+                    style: EllaTextStyles.secondary,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
           const SizedBox(height: 32),
         ],

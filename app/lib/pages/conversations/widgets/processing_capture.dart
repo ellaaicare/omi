@@ -33,6 +33,27 @@ class ConversationCaptureWidget extends StatefulWidget {
 class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
   bool _isPhoneMicPaused = false;
 
+  String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
+        PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
+        PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.consentUnavailable ||
+        PhoneCaptureStartResult.recorderUnavailable ||
+        PhoneCaptureStartResult.cancelled =>
+          context.l10n.todayRecordingUnavailable,
+        PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
+      };
+
+  Future<bool> _startPhoneCapture(CaptureProvider provider) async {
+    final result = await provider.streamRecording();
+    if (!mounted) return false;
+    if (result == PhoneCaptureStartResult.started && provider.recordingState == RecordingState.record) {
+      MixpanelManager().phoneMicRecordingStarted();
+      return true;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<CaptureProvider>(builder: (context, provider, child) {
@@ -124,19 +145,19 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
         MixpanelManager().phoneMicRecordingStopped();
       } else if (_isPhoneMicPaused) {
         // Resume recording
-        setState(() {
-          _isPhoneMicPaused = false;
-        });
-        await provider.streamRecording();
-        MixpanelManager().phoneMicRecordingStarted();
+        final started = await _startPhoneCapture(provider);
+        if (started && mounted) {
+          setState(() {
+            _isPhoneMicPaused = false;
+          });
+        }
       } else if (recordingState == RecordingState.initialising) {
         Logger.debug('initialising, have to wait');
       } else {
         setState(() {
           _isPhoneMicPaused = false;
         });
-        await provider.streamRecording();
-        MixpanelManager().phoneMicRecordingStarted();
+        await _startPhoneCapture(provider);
       }
     }
   }

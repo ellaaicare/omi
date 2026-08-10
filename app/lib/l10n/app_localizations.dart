@@ -16908,8 +16908,26 @@ abstract class AppLocalizations {
   /// No description provided for @todayWhispersUnavailable.
   ///
   /// In en, this message translates to:
-  /// **'Whispers are unavailable until Ella verifies your account'**
+  /// **'Whisper status couldn\'t be verified. Pull down to try again.'**
   String get todayWhispersUnavailable;
+
+  /// No description provided for @todayWhispersTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers'**
+  String get todayWhispersTitle;
+
+  /// No description provided for @todayWhispersOnDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers are on — Ella can speak up when she can help.'**
+  String get todayWhispersOnDescription;
+
+  /// No description provided for @todayWhispersOffDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers are off — open this section to see what Ella has said.'**
+  String get todayWhispersOffDescription;
 
   /// Small voice-surface estimate of remaining allowed voice time
   ///
@@ -17379,11 +17397,35 @@ abstract class AppLocalizations {
   /// **'Records with your necklace'**
   String get todayRecordWithNecklace;
 
+  /// No description provided for @todayNecklaceRecordingContinuously.
+  ///
+  /// In en, this message translates to:
+  /// **'Your necklace is recording continuously'**
+  String get todayNecklaceRecordingContinuously;
+
   /// No description provided for @todayRecordingUnavailable.
   ///
   /// In en, this message translates to:
   /// **'Recording isn\'t available right now.'**
   String get todayRecordingUnavailable;
+
+  /// No description provided for @todayMicrophonePermissionDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Microphone access is off. Allow it in Settings before recording a moment.'**
+  String get todayMicrophonePermissionDenied;
+
+  /// No description provided for @todayTranscriptionUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t connect to transcription, so recording didn\'t start.'**
+  String get todayTranscriptionUnavailable;
+
+  /// No description provided for @todayNoWordsCaptured.
+  ///
+  /// In en, this message translates to:
+  /// **'No words were captured, so no memory was created.'**
+  String get todayNoWordsCaptured;
 
   /// No description provided for @todayControlsTitle.
   ///
@@ -17432,6 +17474,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Record something you want to remember. Ella will bring meaningful moments back here.'**
   String get todayFirstMemoryBody;
+
+  /// No description provided for @conversationSummaryPendingDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella hasn\'t created a summary for this memory yet. The transcript remains available below.'**
+  String get conversationSummaryPendingDescription;
 
   /// No description provided for @todayGreetingFallbackName.
   ///

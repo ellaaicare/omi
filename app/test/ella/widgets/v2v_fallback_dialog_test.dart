@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
@@ -16,10 +17,11 @@ void main() {
     errorCode: 'isolated_voice_not_ready',
   );
 
-  Widget buildApp() => const MaterialApp(
+  Widget buildApp() => MaterialApp(
+        theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(body: V2VFallbackDialog(receipt: receipt)),
+        home: const Scaffold(body: V2VFallbackDialog(receipt: receipt)),
       );
 
   testWidgets('names failed provider, safe receipt, and explicit ElevenLabs fallback', (tester) async {
@@ -34,14 +36,24 @@ void main() {
     expect(find.text('Use ElevenLabs'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
     expect(find.byKey(const ValueKey('v2v-failure-cancel')), findsOneWidget);
+
+    final cancel = tester.widget<OutlinedButton>(find.byKey(const ValueKey('v2v-failure-cancel')));
+    final fallback = tester.widget<TextButton>(find.byKey(const ValueKey('v2v-failure-elevenlabs')));
+    final retry = tester.widget<FilledButton>(find.byKey(const ValueKey('v2v-failure-retry')));
+    expect(cancel.style?.foregroundColor?.resolve({}), EllaColors.tealDeep);
+    expect(fallback.style?.foregroundColor?.resolve({}), EllaColors.tealDeep);
+    expect(retry.style?.foregroundColor?.resolve({}), EllaColors.paper);
+    expect(retry.style?.backgroundColor?.resolve({}), EllaColors.tealDeep);
+    expect(tester.getSize(find.byKey(const ValueKey('v2v-failure-retry'))).width, lessThan(180));
   });
 
   testWidgets('transient scoped failures preserve Retry without offering unscoped fallback', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
+        theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(body: V2VFallbackDialog(receipt: receipt, allowStandardFallback: false)),
+        home: const Scaffold(body: V2VFallbackDialog(receipt: receipt, allowStandardFallback: false)),
       ),
     );
     await tester.pumpAndSettle();
@@ -63,10 +75,11 @@ void main() {
       errorCode: 'invalid_session_scope',
     );
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
+        theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(body: V2VFallbackDialog(receipt: permanentReceipt, allowStandardFallback: false)),
+        home: const Scaffold(body: V2VFallbackDialog(receipt: permanentReceipt, allowStandardFallback: false)),
       ),
     );
     await tester.pumpAndSettle();
@@ -80,6 +93,7 @@ void main() {
     V2VFailureChoice? choice;
     await tester.pumpWidget(
       MaterialApp(
+        theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: Builder(

@@ -9070,7 +9070,16 @@ class AppLocalizationsSk extends AppLocalizations {
   String get ellaSafetyDataUnavailable => 'Ella could not verify this information. Try again before making changes.';
 
   @override
-  String get todayWhispersUnavailable => 'Whispers are unavailable until Ella verifies your account';
+  String get todayWhispersUnavailable => 'Whisper status couldn\'t be verified. Pull down to try again.';
+
+  @override
+  String get todayWhispersTitle => 'Whispers';
+
+  @override
+  String get todayWhispersOnDescription => 'Whispers are on — Ella can speak up when she can help.';
+
+  @override
+  String get todayWhispersOffDescription => 'Whispers are off — open this section to see what Ella has said.';
 
   @override
   String ellaVoiceTimeRemaining(String time) {
@@ -9321,7 +9330,20 @@ class AppLocalizationsSk extends AppLocalizations {
   String get todayRecordWithNecklace => 'Records with your necklace';
 
   @override
+  String get todayNecklaceRecordingContinuously => 'Your necklace is recording continuously';
+
+  @override
   String get todayRecordingUnavailable => 'Recording isn\'t available right now.';
+
+  @override
+  String get todayMicrophonePermissionDenied =>
+      'Microphone access is off. Allow it in Settings before recording a moment.';
+
+  @override
+  String get todayTranscriptionUnavailable => 'Ella couldn\'t connect to transcription, so recording didn\'t start.';
+
+  @override
+  String get todayNoWordsCaptured => 'No words were captured, so no memory was created.';
 
   @override
   String get todayControlsTitle => 'Ella controls';
@@ -9347,6 +9369,10 @@ class AppLocalizationsSk extends AppLocalizations {
   @override
   String get todayFirstMemoryBody =>
       'Record something you want to remember. Ella will bring meaningful moments back here.';
+
+  @override
+  String get conversationSummaryPendingDescription =>
+      'Ella hasn\'t created a summary for this memory yet. The transcript remains available below.';
 
   @override
   String get todayGreetingFallbackName => 'there';
