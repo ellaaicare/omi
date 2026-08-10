@@ -7,6 +7,7 @@ import 'package:collection/collection.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/schema/geolocation.dart';
+import 'package:omi/backend/schema/generated_image.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
@@ -213,6 +214,7 @@ class ServerConversation {
   final List<TranscriptSegment> transcriptSegments;
   final Geolocation? geolocation;
   final List<ConversationPhoto> photos;
+  final GeneratedImageAsset? generatedImage;
   final List<AudioFile> audioFiles;
 
   final List<AppResponse> appResults;
@@ -280,6 +282,7 @@ class ServerConversation {
     this.suggestedSummarizationApps = const [],
     this.geolocation,
     this.photos = const [],
+    this.generatedImage,
     this.audioFiles = const [],
     this.discarded = false,
     this.deleted = false,
@@ -320,6 +323,7 @@ class ServerConversation {
       photos: json['photos'] != null
           ? ((json['photos'] ?? []) as List<dynamic>).map((photo) => ConversationPhoto.fromJson(photo)).toList()
           : [],
+      generatedImage: GeneratedImageAsset.tryFromJson(json['generated_image']),
       audioFiles: ((json['audio_files'] ?? []) as List<dynamic>).map((af) => AudioFile.fromJson(af)).toList(),
       discarded: json['discarded'] ?? false,
       source: json['source'] != null ? ConversationSource.values.asNameMap()[json['source']] : ConversationSource.omi,
@@ -363,6 +367,7 @@ class ServerConversation {
       'suggested_summarization_apps': suggestedSummarizationApps,
       'geolocation': geolocation?.toJson(),
       'photos': photos.map((photo) => photo.toJson()).toList(),
+      if (generatedImage != null) 'generated_image': generatedImage!.toJson(),
       'discarded': discarded,
       'deleted': deleted,
       'source': source?.toString(),

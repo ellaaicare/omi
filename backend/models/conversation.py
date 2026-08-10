@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from models.chat import Message
+from models.generated_image import GeneratedImageAssetRef
 from models.other import Person
 from models.transcript_segment import TranscriptSegment
 
@@ -354,6 +355,7 @@ class Conversation(BaseModel):
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None
     photos: List[ConversationPhoto] = []
+    generated_image: Optional[GeneratedImageAssetRef] = None
     audio_files: List[AudioFile] = []
     private_cloud_sync_enabled: bool = False
 

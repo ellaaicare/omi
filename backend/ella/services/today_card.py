@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator
 
+from models.generated_image import GeneratedImageAssetRef
+
 TODAY_CARD_CONTRACT_VERSION = "ella.today_card.v1"
 TODAY_CARD_RENDER_CONTRACT_VERSION = "ella.today_card.render.v1"
 TODAY_CARD_MATERIALIZATION_HOUR = 3
@@ -144,6 +146,7 @@ class TodayCardPresentation(BaseModel):
     style: str = "letter"
     artwork_ref: str | None = None
     alt_text: str | None = None
+    background_image: GeneratedImageAssetRef | None = None
 
 
 class TodayCardContent(BaseModel):
