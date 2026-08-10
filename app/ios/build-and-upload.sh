@@ -337,7 +337,7 @@ if [ ! -f "$APP_EXECUTABLE" ]; then
   exit 1
 fi
 "$RCODESIGN" verify "$APP_EXECUTABLE"
-"$RCODESIGN" print-signature-info "$APP_BUNDLE" > "$SIGNATURE_INFO"
+"$RCODESIGN" print-signature-info "$APP_EXECUTABLE" > "$SIGNATURE_INFO"
 if ! grep -q "apple_certificate_profile: apple-distribution" "$SIGNATURE_INFO"; then
   echo "ERROR: App signature does not contain an Apple Distribution certificate profile"
   exit 1
