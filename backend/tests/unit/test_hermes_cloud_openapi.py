@@ -83,6 +83,7 @@ def test_openapi_documents_exact_parallel_grounding_callback_contract():
         "semantic_outcome",
         "supporting_quotes",
         "policy_version",
+        "transcript_hash",
         "summary_request_id",
         "summary_response_id",
         "verifier_request_id",
@@ -90,6 +91,11 @@ def test_openapi_documents_exact_parallel_grounding_callback_contract():
     }
     assert evidence["properties"]["attester"]["const"] == "hermes_parallel_grounding_verifier"
     assert evidence["properties"]["supporting_quotes"]["maxItems"] == 3
+    assert evidence["properties"]["transcript_hash"]["pattern"] == "^sha256:[0-9a-f]{64}$"
+
+    conversation_data = contract["components"]["schemas"]["ConversationData"]
+    assert "transcript_hash" in conversation_data["required"]
+    assert conversation_data["properties"]["transcript_hash"]["pattern"] == "^sha256:[0-9a-f]{64}$"
 
 
 def test_openapi_processor_disclosure_uses_only_exact_v8_processor_ids():

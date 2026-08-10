@@ -123,12 +123,13 @@ def _segment_dict(segment: Any) -> dict[str, Any]:
     data = _model_to_dict(segment)
     if not data and isinstance(segment, dict):
         data = dict(segment)
+    segment_id = data.get("id")
     return {
-        "id": data.get("id"),
+        "id": str(segment_id) if segment_id is not None else None,
         "text": data.get("text") or "",
         "speaker": data.get("speaker"),
         "speaker_id": data.get("speaker_id"),
-        "is_user": data.get("is_user"),
+        "is_user": bool(data.get("is_user")),
         "person_id": data.get("person_id"),
         "start": data.get("start"),
         "end": data.get("end"),
@@ -138,11 +139,15 @@ def _segment_dict(segment: Any) -> dict[str, Any]:
 
 def _transcript_segments(conversation: Any) -> list[dict[str, Any]]:
     segments = _object_get(conversation, "transcript_segments") or []
-    return [_segment_dict(segment) for segment in segments]
+    return canonical_transcript_segments(segments)
+
+
+def canonical_transcript_segments(transcript_segments: list[Any]) -> list[dict[str, Any]]:
+    return [_json_safe(_segment_dict(segment)) for segment in transcript_segments]
 
 
 def transcript_grounding_hash(transcript_segments: list[dict[str, Any]]) -> str:
-    normalized_segments = [_json_safe(_segment_dict(segment)) for segment in transcript_segments]
+    normalized_segments = canonical_transcript_segments(transcript_segments)
     source = json.dumps(
         normalized_segments,
         ensure_ascii=False,

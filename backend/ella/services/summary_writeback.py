@@ -42,6 +42,18 @@ def _normalized_grounding_text(value: Any) -> str:
     return ' '.join(str(value or '').split()).strip()
 
 
+def _conversation_transcript_segments(conversation: dict[str, Any]) -> list[dict[str, Any]]:
+    transcript_segments: list[dict[str, Any]] = []
+    for segment in conversation.get('transcript_segments') or []:
+        if isinstance(segment, dict):
+            transcript_segments.append(dict(segment))
+        elif hasattr(segment, 'model_dump'):
+            transcript_segments.append(segment.model_dump(mode='json'))
+        elif hasattr(segment, 'dict'):
+            transcript_segments.append(segment.dict())
+    return transcript_segments
+
+
 def _parallel_grounding_attestation(
     evidence: dict[str, Any],
     *,
@@ -55,6 +67,7 @@ def _parallel_grounding_attestation(
         'semantic_outcome',
         'supporting_quotes',
         'policy_version',
+        'transcript_hash',
         'summary_request_id',
         'summary_response_id',
         'verifier_request_id',
@@ -80,11 +93,14 @@ def _parallel_grounding_attestation(
         raise ValueError('today_card_grounding_quote_not_in_transcript')
     if any(sum(character.isalnum() for character in quote) < 8 for quote in quotes):
         raise ValueError('today_card_grounding_quote_too_short')
+    observed_transcript_hash = str(evidence.get('transcript_hash') or '').strip()
+    if observed_transcript_hash != transcript_grounding_hash(transcript_segments):
+        raise ValueError('today_card_grounding_transcript_changed')
     receipt = {
         'contract_version': TODAY_CARD_GROUNDING_CONTRACT_VERSION,
         'attester': TODAY_CARD_PARALLEL_GROUNDING_ATTESTER,
         'semantic_outcome': 'supported',
-        'transcript_hash': transcript_grounding_hash(transcript_segments),
+        'transcript_hash': observed_transcript_hash,
         'summary_hash': summary_grounding_hash(structured),
         'supporting_quote_hashes': ['sha256:' + hashlib.sha256(quote.encode('utf-8')).hexdigest() for quote in quotes],
         'policy_version': 'hermes-parallel-grounding-verifier-v1',
@@ -133,6 +149,15 @@ async def write_conversation_summary(
 
     enrichment_state = conversation.get('enrichment_state') or {}
     same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
+    existing_grounding = enrichment_state.get('today_card_grounding')
+    if (
+        same_trace
+        and summary_source == 'hermes_parallel'
+        and isinstance(existing_grounding, dict)
+        and existing_grounding.get('transcript_hash')
+        != transcript_grounding_hash(_conversation_transcript_segments(conversation))
+    ):
+        raise ConcurrentConversationSummaryChangeError('transcript_changed')
     if (
         same_trace
         and enrichment_state.get('status') == 'writeback_applied'
@@ -233,15 +258,7 @@ async def write_conversation_summary(
         raise ValueError('today_card_grounding_inputs_conflict')
     grounding_bound_from_evidence = False
     bound_today_card_grounding: Optional[dict[str, Any]] = None
-    raw_segments = conversation.get('transcript_segments') or []
-    transcript_segments: list[dict[str, Any]] = []
-    for segment in raw_segments:
-        if isinstance(segment, dict):
-            transcript_segments.append(dict(segment))
-        elif hasattr(segment, 'model_dump'):
-            transcript_segments.append(segment.model_dump(mode='json'))
-        elif hasattr(segment, 'dict'):
-            transcript_segments.append(segment.dict())
+    transcript_segments = _conversation_transcript_segments(conversation)
     if today_card_grounding_evidence is not None:
         if summary_source != 'hermes_parallel' or summary_kind != 'hermes_enriched' or not require_canonical:
             raise ValueError('today_card_grounding_evidence_scope_invalid')
@@ -338,7 +355,17 @@ async def write_conversation_summary(
             'active_summary_version_id': version_update['active_summary_version_id'],
         }
 
-    if require_based_on_match:
+    if grounding_bound_from_evidence:
+        updated = conversations_db.update_conversation_if_transcript_hash(
+            uid,
+            conversation_id,
+            bound_today_card_grounding['transcript_hash'],
+            update_data,
+            expected_active_summary_version_id=(based_on_version_id if require_based_on_match else None),
+        )
+        if not updated:
+            raise ConcurrentConversationSummaryChangeError('transcript_changed')
+    elif require_based_on_match:
         updated = conversations_db.update_conversation_if_active_summary_version(
             uid,
             conversation_id,

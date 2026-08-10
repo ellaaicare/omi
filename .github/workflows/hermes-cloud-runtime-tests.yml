@@ -14,6 +14,7 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/conversations.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
@@ -118,6 +119,7 @@ on:
       - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
+      - "backend/tests/unit/test_conversation_summary_cas.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
@@ -157,6 +159,7 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/conversations.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
@@ -261,6 +264,7 @@ on:
       - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
+      - "backend/tests/unit/test_conversation_summary_cas.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
@@ -430,6 +434,7 @@ jobs:
         run: >-
           black --check --line-length 120 --skip-string-normalization
           database/authority_advisory_lock.py
+          database/conversations.py
           database/ella_caregivers.py
           database/ella_provisioning.py database/honcho_attestation.py database/invitations.py
           database/ella_postgres.py
@@ -471,6 +476,7 @@ jobs:
           scripts/ella_observer_cron.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
+          tests/unit/test_conversation_summary_cas.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
           tests/unit/test_ella_ai_consent.py
@@ -746,7 +752,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 558
+          test "$collected" -eq 557
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -912,8 +918,10 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 21
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 24
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
+          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 6
+          pytest tests/unit/test_conversation_summary_cas.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44

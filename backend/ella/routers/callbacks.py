@@ -62,12 +62,17 @@ from ella.services.runtime_resolver import (
 )
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
+    ConcurrentConversationSummaryChangeError,
     ConversationSummaryNotFoundError,
     InvalidConversationSummaryCategoryError,
     write_conversation_summary,
 )
 from utils.notifications import send_notification
-from utils.ella.canonical_omi import write_omi_canonical_event
+from utils.ella.canonical_omi import (
+    canonical_transcript_segments,
+    transcript_grounding_hash,
+    write_omi_canonical_event,
+)
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
     EllaRequestAuthority,
@@ -212,6 +217,7 @@ class ParallelTodayCardGroundingEvidence(BaseModel):
     semantic_outcome: Literal["supported"]
     supporting_quotes: List[str] = Field(min_length=1, max_length=3)
     policy_version: Literal["hermes-parallel-grounding-verifier-v1"]
+    transcript_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     summary_request_id: str = Field(min_length=1, max_length=512)
     summary_response_id: str = Field(min_length=1, max_length=512)
     verifier_request_id: str = Field(min_length=1, max_length=512)
@@ -440,6 +446,8 @@ async def update_conversation_summary(
         raise HTTPException(status_code=404, detail="Conversation not found")
     except InvalidConversationSummaryCategoryError as e:
         raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
+    except ConcurrentConversationSummaryChangeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -550,28 +558,13 @@ async def get_conversation_data(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     segments = _conversation_field(conversation, "transcript_segments", []) or []
+    transcript_segments = canonical_transcript_segments(list(segments))
     transcript_parts = []
-    transcript_segments = []
-    for segment in segments:
-        if isinstance(segment, dict):
-            is_user = bool(segment.get("is_user"))
-            speaker = "User" if is_user else str(segment.get("speaker") or "Other")
-            text = str(segment.get("text") or "")
-            segment_id = segment.get("id")
-        else:
-            is_user = bool(getattr(segment, "is_user", False))
-            speaker = "User" if is_user else str(getattr(segment, "speaker", None) or "Other")
-            text = str(getattr(segment, "text", None) or "")
-            segment_id = getattr(segment, "id", None)
+    for segment in transcript_segments:
+        is_user = bool(segment.get("is_user"))
+        speaker = "User" if is_user else str(segment.get("speaker") or "Other")
+        text = str(segment.get("text") or "")
         transcript_parts.append(f"{speaker}: {text}")
-        transcript_segments.append(
-            {
-                "id": str(segment_id) if segment_id is not None else None,
-                "text": text,
-                "speaker": speaker,
-                "is_user": is_user,
-            }
-        )
 
     structured_src = _conversation_field(conversation, "structured", {}) or {}
     structured = {}
@@ -590,6 +583,7 @@ async def get_conversation_data(
         "uid": uid,
         "transcript": "\n\n".join(transcript_parts),
         "transcript_segments": transcript_segments,
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
         "segment_count": len(segments),
         "structured": structured,
         "started_at": str(_conversation_field(conversation, "started_at", "")),

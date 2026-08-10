@@ -52,6 +52,13 @@ def _parallel_semantic_receipt(conversation, source_version_id, uid="uid-123"):
     return receipt
 
 
+def test_transcript_grounding_hash_matches_parallel_runtime_contract():
+    assert (
+        transcript_grounding_hash([{"text": "I ordered a waffle with oat milk after our morning walk."}])
+        == "sha256:504ea992fe2ddf25098ea54cc133e1bcaccd2e3cf65af79d3b9fab879b916c96"
+    )
+
+
 def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
     conversation = {
         "id": "cafe-123",

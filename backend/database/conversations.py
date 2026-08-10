@@ -616,6 +616,74 @@ def update_conversation_if_active_summary_version(
     )
 
 
+def _update_conversation_if_transcript_hash_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_transcript_hash: str,
+    update_data: dict,
+    *,
+    expected_active_summary_version_id: Optional[str] = None,
+) -> bool:
+    from utils.ella.canonical_omi import transcript_grounding_hash
+
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if transcript_grounding_hash(conversation.get('transcript_segments') or []) != expected_transcript_hash:
+        return False
+    if expected_active_summary_version_id is not None and str(
+        conversation.get('active_summary_version_id') or ''
+    ) != str(expected_active_summary_version_id or ''):
+        return False
+    doc_level = conversation.get('data_protection_level', 'standard')
+    prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    return True
+
+
+@transactional
+def _update_conversation_if_transcript_hash(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_transcript_hash: str,
+    update_data: dict,
+    *,
+    expected_active_summary_version_id: Optional[str] = None,
+) -> bool:
+    return _update_conversation_if_transcript_hash_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        expected_transcript_hash,
+        update_data,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+    )
+
+
+def update_conversation_if_transcript_hash(
+    uid: str,
+    conversation_id: str,
+    expected_transcript_hash: str,
+    update_data: dict,
+    *,
+    expected_active_summary_version_id: Optional[str] = None,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_if_transcript_hash(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        expected_transcript_hash,
+        update_data,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+    )
+
+
 def _ensure_voice_memory_summary_version_transaction(
     transaction,
     conversation_ref,

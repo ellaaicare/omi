@@ -464,6 +464,7 @@ components:
         - semantic_outcome
         - supporting_quotes
         - policy_version
+        - transcript_hash
         - summary_request_id
         - summary_response_id
         - verifier_request_id
@@ -485,6 +486,9 @@ components:
         policy_version:
           type: string
           const: hermes-parallel-grounding-verifier-v1
+        transcript_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
         summary_request_id:
           type: string
           minLength: 1
@@ -533,7 +537,7 @@ components:
           $ref: "#/components/schemas/ParallelTodayCardGroundingEvidence"
     ConversationData:
       type: object
-      required: [conversation_id, uid, transcript, transcript_segments, segment_count, structured]
+      required: [conversation_id, uid, transcript, transcript_segments, transcript_hash, segment_count, structured]
       properties:
         conversation_id:
           type: string
@@ -546,16 +550,29 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [id, text, speaker, is_user]
+            required: [id, text, speaker, speaker_id, is_user, person_id, start, end, timestamp]
             properties:
               id:
                 type: [string, "null"]
               text:
                 type: string
               speaker:
-                type: string
+                type: [string, "null"]
+              speaker_id:
+                type: [integer, "null"]
               is_user:
                 type: boolean
+              person_id:
+                type: [string, "null"]
+              start:
+                type: [number, "null"]
+              end:
+                type: [number, "null"]
+              timestamp:
+                type: [string, "null"]
+        transcript_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
         segment_count:
           type: integer
           minimum: 0

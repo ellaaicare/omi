@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from utils.ella.canonical_omi import transcript_grounding_hash
 
 sys.modules.setdefault("database._client", MagicMock())
 sys.modules.setdefault("database.conversations", MagicMock())
@@ -233,9 +234,30 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
     assert result["segment_count"] == 2
     assert result["transcript"] == "User: Can you reprocess this?\n\nOther: Yes, with the full transcript."
     assert result["transcript_segments"] == [
-        {"id": "7", "text": "Can you reprocess this?", "speaker": "User", "is_user": True},
-        {"id": None, "text": "Yes, with the full transcript.", "speaker": "Other", "is_user": False},
+        {
+            "id": "7",
+            "text": "Can you reprocess this?",
+            "speaker": None,
+            "speaker_id": None,
+            "is_user": True,
+            "person_id": None,
+            "start": None,
+            "end": None,
+            "timestamp": None,
+        },
+        {
+            "id": None,
+            "text": "Yes, with the full transcript.",
+            "speaker": "Other",
+            "speaker_id": None,
+            "is_user": False,
+            "person_id": None,
+            "start": None,
+            "end": None,
+            "timestamp": None,
+        },
     ]
+    assert result["transcript_hash"] == transcript_grounding_hash(result["transcript_segments"])
     assert result["structured"]["title"] == "Original title"
     assert result["structured"]["overview"] == "Original overview"
     assert result["structured"]["emoji"] == "🧠"
@@ -553,11 +575,13 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
 
 
 def _parallel_grounding_evidence():
+    transcript_segments = [{"is_user": True, "text": "I ordered a waffle with oat milk after our morning walk."}]
     return {
         "attester": "hermes_parallel_grounding_verifier",
         "semantic_outcome": "supported",
         "supporting_quotes": ["I ordered a waffle with oat milk after our morning walk."],
         "policy_version": "hermes-parallel-grounding-verifier-v1",
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
         "summary_request_id": "summary-request-1",
         "summary_response_id": "summary-response-1",
         "verifier_request_id": "verifier-request-1",
@@ -599,6 +623,15 @@ def _configure_parallel_grounding_write(monkeypatch):
             "active_summary_version_id": "parallel-v2",
             "new_summary_version_id": "parallel-v2",
         },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_transcript_hash",
+        lambda uid, conversation_id, expected_hash, update_data, **kwargs: (
+            captured.setdefault("cas_expected_hash", expected_hash),
+            captured.setdefault("update_data", update_data),
+            True,
+        )[-1],
     )
     monkeypatch.setattr(
         callbacks.conversations_db,
@@ -651,6 +684,7 @@ def test_parallel_enrichment_binds_independent_grounding_to_canonical_version(mo
     [
         ("quote", "today_card_grounding_quote_not_in_transcript"),
         ("identity", "today_card_grounding_identity_invalid"),
+        ("transcript", "today_card_grounding_transcript_changed"),
         ("scope", "today_card_grounding_evidence_scope_invalid"),
     ],
 )
@@ -663,6 +697,8 @@ def test_parallel_grounding_evidence_fails_closed(monkeypatch, mutation, expecte
     elif mutation == "identity":
         evidence["verifier_request_id"] = evidence["summary_request_id"]
         evidence["verifier_response_id"] = evidence["summary_response_id"]
+    elif mutation == "transcript":
+        evidence["transcript_hash"] = "sha256:" + ("f" * 64)
     elif mutation == "scope":
         summary_source = "observer"
 
@@ -687,6 +723,86 @@ def test_parallel_grounding_evidence_fails_closed(monkeypatch, mutation, expecte
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == expected
     assert "update_data" not in captured
+
+
+def test_parallel_grounding_transcript_compare_and_set_loses_race_without_publication(monkeypatch):
+    captured = _configure_parallel_grounding_write(monkeypatch)
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_transcript_hash",
+        lambda *args, **kwargs: False,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "cafe-123",
+                callbacks.ConversationSummaryUpdate(
+                    title="Cafe Coffee and Waffle Stop",
+                    overview="[Ella] You ordered a waffle with oat milk after your morning walk.",
+                    summary_source="hermes_parallel",
+                    summary_kind="hermes_enriched",
+                    trace_id="parallel-grounding:cafe-123",
+                    require_canonical=True,
+                    today_card_grounding_evidence=_parallel_grounding_evidence(),
+                ),
+                uid="user-123",
+                service=_service_authority("user-123"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "transcript_changed"
+    assert "canonical_conversation" not in captured
+
+
+def test_parallel_pending_canonical_replay_rejects_transcript_drift_without_publication(monkeypatch):
+    captured = _configure_parallel_grounding_write(monkeypatch)
+    original_hash = _parallel_grounding_evidence()["transcript_hash"]
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "id": conversation_id,
+            "structured": {
+                "title": "Cafe Coffee and Waffle Stop",
+                "overview": "[Ella] You ordered a waffle with oat milk after your morning walk.",
+                "emoji": "☕",
+                "category": callbacks.CategoryEnum.other,
+            },
+            "transcript_segments": [
+                {"is_user": True, "text": "The transcript was replaced after summary publication."}
+            ],
+            "enrichment_state": {
+                "status": "writeback_pending_canonical",
+                "canonical_status": "pending",
+                "trace_id": "parallel-grounding:cafe-123",
+                "today_card_grounding": {"transcript_hash": original_hash},
+            },
+        },
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "cafe-123",
+                callbacks.ConversationSummaryUpdate(
+                    title="Cafe Coffee and Waffle Stop",
+                    overview="[Ella] You ordered a waffle with oat milk after your morning walk.",
+                    summary_source="hermes_parallel",
+                    summary_kind="hermes_enriched",
+                    trace_id="parallel-grounding:cafe-123",
+                    require_canonical=True,
+                    today_card_grounding_evidence=_parallel_grounding_evidence(),
+                ),
+                uid="user-123",
+                service=_service_authority("user-123"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "transcript_changed"
+    assert "canonical_conversation" not in captured
 
 
 def test_parallel_grounding_evidence_rejects_unknown_fields_at_schema_boundary():

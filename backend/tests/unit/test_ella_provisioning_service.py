@@ -1721,6 +1721,9 @@ if module_name == "ella.routers.callbacks":
     fake_sanitizer.SummarySanitizationError = type("SummarySanitizationError", (Exception,), {})
     sys.modules["ella.services.summary_sanitizer"] = fake_sanitizer
     fake_writeback = types.ModuleType("ella.services.summary_writeback")
+    fake_writeback.ConcurrentConversationSummaryChangeError = type(
+        "ConcurrentConversationSummaryChangeError", (Exception,), {}
+    )
     fake_writeback.ConversationSummaryNotFoundError = type("ConversationSummaryNotFoundError", (Exception,), {})
     fake_writeback.InvalidConversationSummaryCategoryError = type(
         "InvalidConversationSummaryCategoryError", (Exception,), {}
@@ -1739,6 +1742,7 @@ if module_name == "ella.routers.callbacks":
         "attester": "hermes_cloud_grounding_verifier",
         "policy_version": "hermes-cloud-grounding-verifier-v1",
     }
+    fake_canonical_omi.canonical_transcript_segments = lambda value: value
     fake_canonical_omi.transcript_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
