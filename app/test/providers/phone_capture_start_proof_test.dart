@@ -28,6 +28,7 @@ void main() {
     final accepted = await ensurePhoneCaptureConsentAuthority(
       hasCurrentConsent: () => true,
       authenticatedUid: () => 'owner',
+      persistedConsentReceiptId: () => '',
       refreshAuthority: (_) async {
         refreshCalls++;
         return true;
@@ -45,6 +46,7 @@ void main() {
     final accepted = await ensurePhoneCaptureConsentAuthority(
       hasCurrentConsent: () => consentCurrent,
       authenticatedUid: () => ' owner ',
+      persistedConsentReceiptId: () => 'aicr-local-receipt',
       refreshAuthority: (uid) async {
         refreshCalls++;
         expect(uid, 'owner');
@@ -63,6 +65,24 @@ void main() {
     final accepted = await ensurePhoneCaptureConsentAuthority(
       hasCurrentConsent: () => false,
       authenticatedUid: () => '   ',
+      persistedConsentReceiptId: () => 'aicr-local-receipt',
+      refreshAuthority: (_) async {
+        refreshCalls++;
+        return true;
+      },
+    );
+
+    expect(accepted, isFalse);
+    expect(refreshCalls, 0);
+  });
+
+  test('phone capture cannot reconstruct consent without a local receipt', () async {
+    var refreshCalls = 0;
+
+    final accepted = await ensurePhoneCaptureConsentAuthority(
+      hasCurrentConsent: () => false,
+      authenticatedUid: () => 'owner',
+      persistedConsentReceiptId: () => '',
       refreshAuthority: (_) async {
         refreshCalls++;
         return true;
@@ -77,7 +97,26 @@ void main() {
     final accepted = await ensurePhoneCaptureConsentAuthority(
       hasCurrentConsent: () => false,
       authenticatedUid: () => 'owner',
+      persistedConsentReceiptId: () => 'aicr-local-receipt',
       refreshAuthority: (_) async => true,
+    );
+
+    expect(accepted, isFalse);
+  });
+
+  test('server refresh cannot replace the local capture receipt', () async {
+    var consentCurrent = false;
+    var receiptId = 'aicr-local-receipt';
+
+    final accepted = await ensurePhoneCaptureConsentAuthority(
+      hasCurrentConsent: () => consentCurrent,
+      authenticatedUid: () => 'owner',
+      persistedConsentReceiptId: () => receiptId,
+      refreshAuthority: (_) async {
+        consentCurrent = true;
+        receiptId = 'aicr-different-receipt';
+        return true;
+      },
     );
 
     expect(accepted, isFalse);

@@ -161,6 +161,7 @@ void main() {
     preferences.uid = 'uid-b';
 
     expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.persistedAiConsentReceiptIdForCurrentAccount, isEmpty);
     expect(preferences.hasAccountBoundAiConsent('uid-b'), isFalse);
   });
 
@@ -180,6 +181,7 @@ void main() {
     await SharedPreferencesUtil.init();
 
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+    expect(SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount, isEmpty);
   });
 
   test('expired server verification fails closed without deleting the cached receipt', () {
@@ -200,6 +202,7 @@ void main() {
 
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+    expect(preferences.persistedAiConsentReceiptIdForCurrentAccount, 'aicr_receipt-a');
   });
 
   test('provider, profile, or Photon scope drift fails closed without deleting the cached receipt', () async {

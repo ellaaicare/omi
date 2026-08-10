@@ -87,12 +87,14 @@ class PhoneCaptureStartProof {
 Future<bool> ensurePhoneCaptureConsentAuthority({
   required bool Function() hasCurrentConsent,
   required String Function() authenticatedUid,
+  required String Function() persistedConsentReceiptId,
   required Future<bool> Function(String uid) refreshAuthority,
 }) async {
   if (hasCurrentConsent()) return true;
   final uid = authenticatedUid().trim();
-  if (uid.isEmpty || !await refreshAuthority(uid)) return false;
-  return hasCurrentConsent();
+  final priorReceiptId = persistedConsentReceiptId().trim();
+  if (uid.isEmpty || priorReceiptId.isEmpty || !await refreshAuthority(uid)) return false;
+  return hasCurrentConsent() && persistedConsentReceiptId().trim() == priorReceiptId;
 }
 
 class CaptureProvider extends ChangeNotifier
@@ -1086,6 +1088,8 @@ class CaptureProvider extends ChangeNotifier
     final consentCurrent = await ensurePhoneCaptureConsentAuthority(
       hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
       authenticatedUid: () => WalOwnerAuthority.authenticatedUid,
+      persistedConsentReceiptId: () =>
+          SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount,
       refreshAuthority: (uid) => EllaAiConsentService().refreshServerAuthority(uid: uid),
     );
     if (!consentCurrent || generation != _captureGeneration) return PhoneCaptureStartResult.consentUnavailable;
