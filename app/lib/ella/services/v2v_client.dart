@@ -13,6 +13,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -308,6 +309,7 @@ class V2VClient {
   final Future<void> Function(V2VProtectedEgressBoundary boundary)? _beforeProtectedEgress;
   final void Function(V2VProtectedEgressBoundary boundary)? _onProtectedEgress;
   final Future<bool> Function()? _microphoneStarter;
+  final Future<bool> Function() _audibleOutputEnforcer;
 
   V2VClient({
     this.onEvent,
@@ -315,9 +317,11 @@ class V2VClient {
     @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
     @visibleForTesting Future<bool> Function()? microphoneStarter,
+    @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
-        _microphoneStarter = microphoneStarter;
+        _microphoneStarter = microphoneStarter,
+        _audibleOutputEnforcer = audibleOutputEnforcer ?? EllaVoiceAudioRoute.ensureAudibleOutput;
 
   bool get isConnected => _isConnected;
 
@@ -885,6 +889,9 @@ class V2VClient {
       ),
     );
     await session.setActive(true);
+    if (!await _audibleOutputEnforcer()) {
+      throw StateError('Ella voice output route could not be made audible');
+    }
     Logger.debug('[V2V] Audio session: playAndRecord + defaultToSpeaker + BT + AirPlay');
   }
 
@@ -1344,14 +1351,19 @@ class V2VClient {
 
     if (_streamPlaybackStarted) return;
 
-    _isPlaying = true;
-    _streamPlaybackStarted = true;
+    if (!await _audibleOutputEnforcer()) {
+      throw StateError('Ella voice output route could not be made audible');
+    }
+
+    await _streamPlayer.setVolume(1.0);
     await _streamPlayer.startPlayerFromStream(
       codec: Codec.pcm16,
       sampleRate: _pcmSampleRate,
       numChannels: _pcmChannels,
       bufferSize: 4096,
     );
+    _isPlaying = true;
+    _streamPlaybackStarted = true;
     _streamPlaybackStartedAt = DateTime.now();
     Logger.debug('[V2V] PCM stream player started');
   }

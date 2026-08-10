@@ -24,6 +24,7 @@ import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/standard_voice_turn.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
@@ -1278,6 +1279,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     );
     if (isCurrent?.call() == false) return false;
     await session.setActive(true);
+    if (isCurrent?.call() == false) return false;
+    if (!await EllaVoiceAudioRoute.ensureAudibleOutput()) return false;
     if (isCurrent?.call() == false) return false;
     debugPrint('[VoiceChat] Audio session prepared for TTS playback');
     return true;

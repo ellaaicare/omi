@@ -179,11 +179,14 @@ extension FlutterError: Error {}
         binaryMessenger: controller.binaryMessenger
     )
     audioRouteChannel?.setMethodCallHandler { [weak self] (call, result) in
-        guard call.method == "getCurrentRoute" else {
+        switch call.method {
+        case "getCurrentRoute":
+            result(self?.currentAudioRoutePayload() ?? [:])
+        case "ensureAudibleVoiceOutput":
+            result(self?.ensureAudibleVoiceOutput() ?? ["success": false])
+        default:
             result(FlutterMethodNotImplemented)
-            return
         }
-        result(self?.currentAudioRoutePayload() ?? [:])
     }
     print("AppDelegate: Audio Route MethodChannel registered")
 
@@ -298,7 +301,33 @@ extension FlutterError: Error {}
           "outputType": outputType.rawValue,
           "hasHeadset": hasHeadset,
           "usesPhoneSpeaker": outputType == .builtInSpeaker,
+          "usesReceiver": outputType == .builtInReceiver,
       ]
+  }
+
+  private func ensureAudibleVoiceOutput() -> [String: Any] {
+      let audioSession = AVAudioSession.sharedInstance()
+      do {
+          try audioSession.setCategory(
+              .playAndRecord,
+              mode: .voiceChat,
+              options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
+          )
+          try audioSession.setActive(true, options: [])
+
+          let outputType = audioSession.currentRoute.outputs.first?.portType
+          if outputType == nil || outputType == .builtInReceiver {
+              try audioSession.overrideOutputAudioPort(.speaker)
+          }
+
+          var payload = currentAudioRoutePayload()
+          payload["success"] = payload["usesReceiver"] as? Bool != true
+          return payload
+      } catch {
+          var payload = currentAudioRoutePayload()
+          payload["success"] = false
+          return payload
+      }
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {

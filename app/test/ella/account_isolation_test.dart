@@ -618,6 +618,49 @@ void main() {
     expect(fixture.native.startCalls, 1);
   });
 
+  test('production isolate bridge does not acknowledge start before the native recorder starts', () async {
+    final fixture = _ProductionRecorderFixture(
+      startTimeout: const Duration(seconds: 1),
+      stopTimeout: const Duration(seconds: 1),
+      holdNativeStart: true,
+    );
+    addTearDown(fixture.dispose);
+    var recordingCallbacks = 0;
+    var startCompleted = false;
+
+    final start = fixture.mic
+        .start(onByteReceived: (_) {}, onRecording: () => recordingCallbacks++)
+        .then((_) => startCompleted = true);
+    await fixture.native.startEntered.future;
+    await Future<void>.delayed(Duration.zero);
+
+    expect(startCompleted, isFalse);
+    expect(recordingCallbacks, 0);
+    expect(fixture.background.startResults, isEmpty);
+
+    fixture.native.releaseStart();
+    await start;
+
+    expect(startCompleted, isTrue);
+    expect(recordingCallbacks, 1);
+    expect(fixture.background.startResults.single['status'], 'recording');
+  });
+
+  test('production isolate bridge propagates native start failure', () async {
+    final fixture = _ProductionRecorderFixture(
+      startTimeout: const Duration(seconds: 1),
+      stopTimeout: const Duration(seconds: 1),
+      nativeStartError: StateError('physical recorder start failed'),
+    );
+    addTearDown(fixture.dispose);
+
+    await expectLater(
+      fixture.mic.start(onByteReceived: (_) {}),
+      throwsA(isA<BackgroundRecorderStartException>()),
+    );
+    expect(fixture.background.startResults.single['status'], 'error');
+  });
+
   test('production isolate bridge propagates native stop error and blocks transition mutation', () async {
     final fixture = _ProductionRecorderFixture(
       stopTimeout: const Duration(seconds: 1),
@@ -1159,13 +1202,26 @@ EllaAccountIsolationService _accountBarrier() => EllaAccountIsolationService(
     );
 
 class _ProductionRecorderFixture {
-  _ProductionRecorderFixture({required Duration stopTimeout, bool holdNativeStop = false, Object? nativeStopError})
-      : native = _ControlledFlutterSoundRecorderPlatform(holdStop: holdNativeStop, stopError: nativeStopError),
+  _ProductionRecorderFixture({
+    Duration startTimeout = const Duration(seconds: 5),
+    required Duration stopTimeout,
+    bool holdNativeStart = false,
+    bool holdNativeStop = false,
+    Object? nativeStartError,
+    Object? nativeStopError,
+  })  : native = _ControlledFlutterSoundRecorderPlatform(
+          holdStart: holdNativeStart,
+          holdStop: holdNativeStop,
+          startError: nativeStartError,
+          stopError: nativeStopError,
+        ),
         background = _FakeBackgroundServicePlatform() {
     _originalRecorderPlatform = FlutterSoundRecorderPlatform.instance;
     FlutterSoundRecorderPlatform.instance = native;
     FlutterBackgroundServicePlatform.instance = background;
-    mic = MicRecorderBackgroundService(runner: BackgroundService(recorderStopTimeout: stopTimeout));
+    mic = MicRecorderBackgroundService(
+      runner: BackgroundService(recorderStartTimeout: startTimeout, recorderStopTimeout: stopTimeout),
+    );
   }
 
   final _ControlledFlutterSoundRecorderPlatform native;
@@ -1174,6 +1230,7 @@ class _ProductionRecorderFixture {
   late final MicRecorderBackgroundService mic;
 
   Future<void> dispose() async {
+    native.releaseStart();
     native.releaseStop();
     background.shutdown();
     await Future<void>.delayed(Duration.zero);
@@ -1184,6 +1241,7 @@ class _ProductionRecorderFixture {
 class _FakeBackgroundServicePlatform extends FlutterBackgroundServicePlatform {
   final Map<String, StreamController<Map<String, dynamic>?>> _isolateStreams = {};
   final Map<String, StreamController<Map<String, dynamic>?>> _uiStreams = {};
+  final List<Map<String, dynamic>> startResults = [];
   final List<Map<String, dynamic>> stopResults = [];
   final Completer<void> _stopResultReceived = Completer<void>();
   late final _FakeServiceInstance _serviceInstance = _FakeServiceInstance(this);
@@ -1224,6 +1282,9 @@ class _FakeBackgroundServicePlatform extends FlutterBackgroundServicePlatform {
   Stream<Map<String, dynamic>?> on(String method) => _controller(_uiStreams, method).stream;
 
   void emitToUi(String method, Map<String, dynamic>? args) {
+    if (method == 'recorder.ui.startResult' && args != null) {
+      startResults.add(args);
+    }
     if (method == 'recorder.ui.stopResult' && args != null) {
       stopResults.add(args);
       if (!_stopResultReceived.isCompleted) _stopResultReceived.complete();
@@ -1256,10 +1317,17 @@ class _FakeServiceInstance implements ServiceInstance {
 }
 
 class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatform {
-  _ControlledFlutterSoundRecorderPlatform({required bool holdStop, this.stopError})
-      : _stopRelease = holdStop ? Completer<void>() : null;
+  _ControlledFlutterSoundRecorderPlatform({
+    required bool holdStart,
+    required bool holdStop,
+    this.startError,
+    this.stopError,
+  })  : _startRelease = holdStart ? Completer<void>() : null,
+        _stopRelease = holdStop ? Completer<void>() : null;
 
+  final Completer<void>? _startRelease;
   final Completer<void>? _stopRelease;
+  final Object? startError;
   final Object? stopError;
   final Completer<void> startEntered = Completer<void>();
   final Completer<void> stopEntered = Completer<void>();
@@ -1300,6 +1368,8 @@ class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatfo
     _callback = callback;
     startCalls++;
     if (!startEntered.isCompleted) startEntered.complete();
+    await _startRelease?.future;
+    if (startError != null) throw startError!;
     callback.startRecorderCompleted(RecorderState.isRecording.index, true);
   }
 
@@ -1317,6 +1387,11 @@ class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatfo
   }
 
   void emit(Uint8List bytes) => _callback?.interleavedRecording(data: bytes);
+
+  void releaseStart() {
+    final startRelease = _startRelease;
+    if (startRelease != null && !startRelease.isCompleted) startRelease.complete();
+  }
 
   void releaseStop() {
     final stopRelease = _stopRelease;
