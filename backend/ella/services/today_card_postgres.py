@@ -34,9 +34,10 @@ from ella.services.today_card import (
     today_card_source_pack,
 )
 from utils.ella.canonical_omi import (
-    TODAY_CARD_GROUNDING_ATTESTER,
     TODAY_CARD_GROUNDING_CONTRACT_VERSION,
     summary_grounding_hash,
+    today_card_grounding_identity_is_valid,
+    today_card_grounding_profile,
     transcript_grounding_hash,
 )
 
@@ -198,11 +199,12 @@ def _has_grounded_content_provenance(
     if len(matching_versions) != 1:
         return False
     active_version = matching_versions[0]
+    grounding_profile = today_card_grounding_profile(active_version.get("source"))
     if (
         str(active_version.get("title") or "").strip() != str(structured.get("title") or "").strip()
         or str(active_version.get("overview") or "").strip() != str(structured.get("overview") or "").strip()
-        or active_version.get("source") != "hermes_cloud"
         or active_version.get("kind") != "hermes_enriched"
+        or grounding_profile is None
     ):
         return False
     quote_hashes = grounding.get("supporting_quote_hashes")
@@ -220,7 +222,7 @@ def _has_grounded_content_provenance(
     )
     return (
         grounding.get("contract_version") == TODAY_CARD_GROUNDING_CONTRACT_VERSION
-        and grounding.get("attester") == TODAY_CARD_GROUNDING_ATTESTER
+        and grounding.get("attester") == grounding_profile["attester"]
         and grounding.get("semantic_outcome") == "supported"
         and grounding.get("source_version_id") == source_version_id
         and grounding.get("transcript_hash") == transcript_grounding_hash(normalized_segments)
@@ -230,11 +232,8 @@ def _has_grounded_content_provenance(
         == "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()
         and expected_owner_hash is not None
         and grounding.get("owner_hash") == expected_owner_hash
-        and bool(str(grounding.get("runtime_interaction_id") or "").strip())
-        and bool(str(grounding.get("canonical_assistant_event_id") or "").strip())
-        and bool(str(grounding.get("verifier_runtime_interaction_id") or "").strip())
-        and bool(str(grounding.get("verifier_canonical_assistant_event_id") or "").strip())
-        and grounding.get("policy_version") == "hermes-cloud-grounding-verifier-v1"
+        and today_card_grounding_identity_is_valid(grounding, active_version.get("source"))
+        and grounding.get("policy_version") == grounding_profile["policy_version"]
         and valid_quote_hashes
     )
 

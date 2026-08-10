@@ -72,6 +72,33 @@ def _attest_row(row):
     return row
 
 
+def _attest_parallel_row(row):
+    _attest_row(row)
+    source_version_id = row["source_ref"]["active_summary_version_id"]
+    active_version = row["metadata"]["summary_versions"][0]
+    active_version["source"] = "hermes_parallel"
+    grounding = row["metadata"]["today_card"]["grounding"]
+    for key in (
+        "runtime_interaction_id",
+        "canonical_assistant_event_id",
+        "verifier_runtime_interaction_id",
+        "verifier_canonical_assistant_event_id",
+    ):
+        grounding.pop(key)
+    grounding.update(
+        {
+            "attester": "hermes_parallel_grounding_verifier",
+            "policy_version": "hermes-parallel-grounding-verifier-v1",
+            "source_version_id": source_version_id,
+            "summary_request_id": "summary-request-a",
+            "summary_response_id": "summary-response-a",
+            "verifier_request_id": "verifier-request-a",
+            "verifier_response_id": "verifier-response-a",
+        }
+    )
+    return row
+
+
 def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none", grounded=True):
     row = {
         "uid": "uid-a",
@@ -94,6 +121,37 @@ def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_pol
         },
     }
     return _attest_row(row) if grounded else row
+
+
+def test_parallel_verifier_receipt_is_eligible_today_card_evidence():
+    row = _attest_parallel_row(_summary_row(grounded=False))
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is True
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
+def test_parallel_receipt_with_reused_verifier_identity_fails_closed():
+    row = _attest_parallel_row(_summary_row(grounded=False))
+    grounding = row["metadata"]["today_card"]["grounding"]
+    grounding["verifier_request_id"] = grounding["summary_request_id"]
+    grounding["verifier_response_id"] = grounding["summary_response_id"]
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
 def _card(version="summary-v2"):

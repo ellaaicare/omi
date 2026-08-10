@@ -31,7 +31,7 @@ import string
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import asyncpg
 import httpx
@@ -207,6 +207,19 @@ def _upload_audio_to_gcs(audio_bytes: bytes, uid: str) -> Optional[str]:
 # ============================================================================
 
 
+class ParallelTodayCardGroundingEvidence(BaseModel):
+    attester: Literal["hermes_parallel_grounding_verifier"]
+    semantic_outcome: Literal["supported"]
+    supporting_quotes: List[str] = Field(min_length=1, max_length=3)
+    policy_version: Literal["hermes-parallel-grounding-verifier-v1"]
+    summary_request_id: str = Field(min_length=1, max_length=512)
+    summary_response_id: str = Field(min_length=1, max_length=512)
+    verifier_request_id: str = Field(min_length=1, max_length=512)
+    verifier_response_id: str = Field(min_length=1, max_length=512)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ConversationSummaryUpdate(BaseModel):
     """Schema for updating conversation structured summary fields."""
 
@@ -223,6 +236,9 @@ class ConversationSummaryUpdate(BaseModel):
     require_canonical: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
+    today_card_grounding_evidence: Optional[ParallelTodayCardGroundingEvidence] = None
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _active_summary_version(conversation: dict) -> Optional[dict]:
@@ -409,6 +425,11 @@ async def update_conversation_summary(
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
             require_canonical=update.require_canonical,
+            today_card_grounding_evidence=(
+                update.today_card_grounding_evidence.model_dump()
+                if update.today_card_grounding_evidence is not None
+                else None
+            ),
         )
     except SummarySanitizationError as e:
         raise HTTPException(
@@ -530,14 +551,27 @@ async def get_conversation_data(
 
     segments = _conversation_field(conversation, "transcript_segments", []) or []
     transcript_parts = []
+    transcript_segments = []
     for segment in segments:
         if isinstance(segment, dict):
-            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
-            text = segment.get("text", "")
+            is_user = bool(segment.get("is_user"))
+            speaker = "User" if is_user else str(segment.get("speaker") or "Other")
+            text = str(segment.get("text") or "")
+            segment_id = segment.get("id")
         else:
-            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
-            text = getattr(segment, "text", "")
+            is_user = bool(getattr(segment, "is_user", False))
+            speaker = "User" if is_user else str(getattr(segment, "speaker", None) or "Other")
+            text = str(getattr(segment, "text", None) or "")
+            segment_id = getattr(segment, "id", None)
         transcript_parts.append(f"{speaker}: {text}")
+        transcript_segments.append(
+            {
+                "id": str(segment_id) if segment_id is not None else None,
+                "text": text,
+                "speaker": speaker,
+                "is_user": is_user,
+            }
+        )
 
     structured_src = _conversation_field(conversation, "structured", {}) or {}
     structured = {}
@@ -555,6 +589,7 @@ async def get_conversation_data(
         "conversation_id": conversation_id,
         "uid": uid,
         "transcript": "\n\n".join(transcript_parts),
+        "transcript_segments": transcript_segments,
         "segment_count": len(segments),
         "structured": structured,
         "started_at": str(_conversation_field(conversation, "started_at", "")),

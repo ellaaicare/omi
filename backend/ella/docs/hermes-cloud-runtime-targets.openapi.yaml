@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ella Hermes Cloud Runtime Targets
-  version: 0.2.0
+  version: 0.3.0
   description: >
     Backend-owned contract for account/profile Cloud runtime target resolution
     and AI processor consent. This fragment documents the Ella-specific surfaces;
@@ -309,12 +309,53 @@ paths:
   /v1/ella/conversation/{conversation_id}/summary:
     patch:
       tags: [Callbacks and Summary]
-      security: []
-      summary: Internal summary callback with no Cloud-to-Mini assessment fallback.
+      security:
+        - callbackServiceKey: []
+          callbackSubjectUid: []
+      summary: Internal summary callback with exact authority and bound grounding provenance.
       x-internal-only: true
       x-ella-runtime-target:
-        mode: hermes-cloud-transcript
         fallback: none
+        profiles:
+          hermes_cloud:
+            mode: hermes-cloud-transcript
+            summary-source: hermes_cloud
+            attester: hermes_cloud_grounding_verifier
+            policy-version: hermes-cloud-grounding-verifier-v1
+          hermes_parallel:
+            mode: retained-hermes-enrichment
+            summary-source: hermes_parallel
+            attester: hermes_parallel_grounding_verifier
+            policy-version: hermes-parallel-grounding-verifier-v1
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: uid
+          in: query
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationSummaryUpdate"
+      responses:
+        "200":
+          description: Summary writeback receipt.
+        "400":
+          description: UID or summary payload is invalid.
+        "422":
+          description: Summary content failed sanitization.
+  /v1/ella/conversation/{conversation_id}/data:
+    get:
+      tags: [Callbacks and Summary]
+      security:
+        - callbackServiceKey: []
+          callbackSubjectUid: []
+      summary: Return authoritative transcript segments for a first-party reprocessing worker.
+      x-internal-only: true
+      x-ella-authoritative-grounding-input: true
       parameters:
         - $ref: "#/components/parameters/ConversationId"
         - name: uid
@@ -324,11 +365,15 @@ paths:
             type: string
       responses:
         "200":
-          description: Summary writeback receipt.
+          description: Exact conversation transcript and structured summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationData"
         "400":
-          description: UID or summary payload is invalid.
-        "422":
-          description: Summary content failed sanitization.
+          description: UID or callback subject is invalid.
+        "404":
+          description: Conversation is not owned by the exact subject.
   /v1/conversations/{conversation_id}/processing-retries:
     post:
       tags: [Callbacks and Summary]
@@ -395,6 +440,14 @@ components:
       type: apiKey
       in: header
       name: X-Ella-Observer-Token
+    callbackServiceKey:
+      type: apiKey
+      in: header
+      name: X-Ella-Callback-Service-Key
+    callbackSubjectUid:
+      type: apiKey
+      in: header
+      name: X-Ella-Subject-Uid
   parameters:
     ConversationId:
       name: conversation_id
@@ -403,6 +456,111 @@ components:
       schema:
         type: string
   schemas:
+    ParallelTodayCardGroundingEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - attester
+        - semantic_outcome
+        - supporting_quotes
+        - policy_version
+        - summary_request_id
+        - summary_response_id
+        - verifier_request_id
+        - verifier_response_id
+      properties:
+        attester:
+          type: string
+          const: hermes_parallel_grounding_verifier
+        semantic_outcome:
+          type: string
+          const: supported
+        supporting_quotes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: string
+            minLength: 1
+        policy_version:
+          type: string
+          const: hermes-parallel-grounding-verifier-v1
+        summary_request_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        summary_response_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        verifier_request_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        verifier_response_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+    ConversationSummaryUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+        overview:
+          type: string
+        emoji:
+          type: string
+        category:
+          type: string
+        summary_source:
+          type: string
+        summary_kind:
+          type: string
+        trace_id:
+          type: string
+        set_active:
+          type: boolean
+        require_canonical:
+          type: boolean
+        ella_tags:
+          type: array
+          items:
+            type: string
+        ella_signal:
+          type: object
+        today_card_grounding_evidence:
+          $ref: "#/components/schemas/ParallelTodayCardGroundingEvidence"
+    ConversationData:
+      type: object
+      required: [conversation_id, uid, transcript, transcript_segments, segment_count, structured]
+      properties:
+        conversation_id:
+          type: string
+        uid:
+          type: string
+        transcript:
+          type: string
+        transcript_segments:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, text, speaker, is_user]
+            properties:
+              id:
+                type: [string, "null"]
+              text:
+                type: string
+              speaker:
+                type: string
+              is_user:
+                type: boolean
+        segment_count:
+          type: integer
+          minimum: 0
+        structured:
+          type: object
     AiConsentPolicy:
       type: object
       required:

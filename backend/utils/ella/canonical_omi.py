@@ -17,6 +17,45 @@ CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "tru
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
 TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
 TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_grounding_verifier"
+TODAY_CARD_PARALLEL_GROUNDING_ATTESTER = "hermes_parallel_grounding_verifier"
+TODAY_CARD_GROUNDING_PROFILES = {
+    "hermes_cloud": {
+        "attester": TODAY_CARD_GROUNDING_ATTESTER,
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
+        "identity_fields": (
+            "runtime_interaction_id",
+            "canonical_assistant_event_id",
+            "verifier_runtime_interaction_id",
+            "verifier_canonical_assistant_event_id",
+        ),
+    },
+    "hermes_parallel": {
+        "attester": TODAY_CARD_PARALLEL_GROUNDING_ATTESTER,
+        "policy_version": "hermes-parallel-grounding-verifier-v1",
+        "identity_fields": (
+            "summary_request_id",
+            "summary_response_id",
+            "verifier_request_id",
+            "verifier_response_id",
+        ),
+    },
+}
+
+
+def today_card_grounding_profile(summary_source: Any) -> Optional[dict[str, Any]]:
+    profile = TODAY_CARD_GROUNDING_PROFILES.get(str(summary_source or ""))
+    return dict(profile) if profile else None
+
+
+def today_card_grounding_identity_is_valid(receipt: dict[str, Any], summary_source: Any) -> bool:
+    profile = today_card_grounding_profile(summary_source)
+    if profile is None:
+        return False
+    fields = profile["identity_fields"]
+    values = [str(receipt.get(field) or "").strip() for field in fields]
+    if any(not value for value in values):
+        return False
+    return len(set(values)) == len(values)
 
 
 def _enum_value(value: Any) -> Any:
@@ -147,11 +186,12 @@ def _today_card_grounding(
     if len(matching_versions) != 1:
         return {}
     active_version = matching_versions[0]
+    grounding_profile = today_card_grounding_profile(active_version.get("source"))
     if (
         str(active_version.get("title") or "").strip() != str(structured.get("title") or "").strip()
         or str(active_version.get("overview") or "").strip() != str(structured.get("overview") or "").strip()
-        or active_version.get("source") != "hermes_cloud"
         or active_version.get("kind") != "hermes_enriched"
+        or grounding_profile is None
     ):
         return {}
     expected_transcript_hash = transcript_grounding_hash(transcript_segments)
@@ -170,7 +210,7 @@ def _today_card_grounding(
         return {}
     if not (
         receipt.get("contract_version") == TODAY_CARD_GROUNDING_CONTRACT_VERSION
-        and receipt.get("attester") == TODAY_CARD_GROUNDING_ATTESTER
+        and receipt.get("attester") == grounding_profile["attester"]
         and receipt.get("semantic_outcome") == "supported"
         and receipt.get("source_version_id") == source_version_id
         and receipt.get("transcript_hash") == expected_transcript_hash
@@ -178,11 +218,8 @@ def _today_card_grounding(
         and receipt.get("owner_hash") == "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest()
         and receipt.get("conversation_id_hash")
         == "sha256:" + hashlib.sha256(str(_object_get(conversation, "id") or "").encode("utf-8")).hexdigest()
-        and bool(str(receipt.get("runtime_interaction_id") or "").strip())
-        and bool(str(receipt.get("canonical_assistant_event_id") or "").strip())
-        and bool(str(receipt.get("verifier_runtime_interaction_id") or "").strip())
-        and bool(str(receipt.get("verifier_canonical_assistant_event_id") or "").strip())
-        and receipt.get("policy_version") == "hermes-cloud-grounding-verifier-v1"
+        and today_card_grounding_identity_is_valid(receipt, active_version.get("source"))
+        and receipt.get("policy_version") == grounding_profile["policy_version"]
     ):
         return {}
     return dict(receipt)

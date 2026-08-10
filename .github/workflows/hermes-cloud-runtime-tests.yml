@@ -796,7 +796,11 @@ jobs:
             "tests/unit/test_today_card_postgres.py::test_materialized_save_fails_closed_when_selected_source_is_tombstoned"
             "tests/unit/test_today_card_postgres.py::test_today_card_router_registration_has_no_function_local_imports"
             "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_emits_bound_semantic_grounding_provenance"
+            "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_preserves_parallel_verifier_receipt"
+            "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_rejects_any_cross_call_identity_reuse"
             "tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event"
+            "tests/unit/test_today_card_postgres.py::test_parallel_verifier_receipt_is_eligible_today_card_evidence"
+            "tests/unit/test_today_card_postgres.py::test_parallel_receipt_with_reused_verifier_identity_fails_closed"
             "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[summary]"
             "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[owner]"
             "tests/unit/test_today_card_api.py::test_internal_uid_mutations_require_exact_service_subject"
@@ -908,7 +912,7 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 15
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 21
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
           pytest tests/unit/test_ella_conversation_corrections.py -v

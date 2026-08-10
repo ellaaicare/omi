@@ -30,6 +30,28 @@ def _semantic_receipt(conversation, source_version_id, uid="uid-123"):
     }
 
 
+def _parallel_semantic_receipt(conversation, source_version_id, uid="uid-123"):
+    receipt = _semantic_receipt(conversation, source_version_id, uid)
+    for key in (
+        "runtime_interaction_id",
+        "canonical_assistant_event_id",
+        "verifier_runtime_interaction_id",
+        "verifier_canonical_assistant_event_id",
+    ):
+        receipt.pop(key)
+    receipt.update(
+        {
+            "attester": "hermes_parallel_grounding_verifier",
+            "policy_version": "hermes-parallel-grounding-verifier-v1",
+            "summary_request_id": "summary-request-a",
+            "summary_response_id": "summary-response-a",
+            "verifier_request_id": "verifier-request-a",
+            "verifier_response_id": "verifier-response-a",
+        }
+    )
+    return receipt
+
+
 def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
     conversation = {
         "id": "cafe-123",
@@ -122,6 +144,84 @@ def test_build_omi_canonical_event_emits_bound_semantic_grounding_provenance():
     assert english_grounding["transcript_hash"] == transcript_grounding_hash(
         english_event["metadata"]["transcript_segments"]
     )
+
+
+def test_build_omi_canonical_event_preserves_parallel_verifier_receipt():
+    conversation = {
+        "id": "grounded-parallel",
+        "started_at": datetime(2026, 5, 7, 18, 56, 59, tzinfo=timezone.utc),
+        "structured": {"title": "A grounded visit", "overview": "A meaningful visit in the garden."},
+        "active_summary_version_id": "parallel-v1",
+        "summary_versions": [
+            {
+                "id": "parallel-v1",
+                "title": "A grounded visit",
+                "overview": "A meaningful visit in the garden.",
+                "source": "hermes_parallel",
+                "kind": "hermes_enriched",
+            }
+        ],
+        "transcript_segments": [{"text": "We planted tomatoes together in the garden after lunch."}],
+    }
+    conversation["enrichment_state"] = {"today_card_grounding": _parallel_semantic_receipt(conversation, "parallel-v1")}
+
+    event = build_omi_canonical_event("uid-123", conversation)
+
+    grounding = event["metadata"]["today_card"]["grounding"]
+    assert grounding["attester"] == "hermes_parallel_grounding_verifier"
+    assert grounding["source_version_id"] == "parallel-v1"
+    assert grounding["verifier_request_id"] == "verifier-request-a"
+
+
+def test_build_omi_canonical_event_rejects_reused_parallel_verifier_identity():
+    conversation = {
+        "id": "grounded-parallel-reused",
+        "structured": {"title": "Garden visit", "overview": "We planted tomatoes in the garden."},
+        "active_summary_version_id": "parallel-v1",
+        "summary_versions": [
+            {
+                "id": "parallel-v1",
+                "title": "Garden visit",
+                "overview": "We planted tomatoes in the garden.",
+                "source": "hermes_parallel",
+                "kind": "hermes_enriched",
+            }
+        ],
+        "transcript_segments": [{"text": "We planted tomatoes in the garden after lunch."}],
+    }
+    receipt = _parallel_semantic_receipt(conversation, "parallel-v1")
+    receipt["verifier_request_id"] = receipt["summary_request_id"]
+    receipt["verifier_response_id"] = receipt["summary_response_id"]
+    conversation["enrichment_state"] = {"today_card_grounding": receipt}
+
+    event = build_omi_canonical_event("uid-123", conversation)
+
+    assert event["metadata"]["today_card"]["grounding"] == {}
+
+
+def test_build_omi_canonical_event_rejects_any_cross_call_identity_reuse():
+    conversation = {
+        "id": "grounded-parallel-cross-reuse",
+        "structured": {"title": "Garden visit", "overview": "We planted tomatoes in the garden."},
+        "active_summary_version_id": "parallel-v1",
+        "summary_versions": [
+            {
+                "id": "parallel-v1",
+                "title": "Garden visit",
+                "overview": "We planted tomatoes in the garden.",
+                "source": "hermes_parallel",
+                "kind": "hermes_enriched",
+            }
+        ],
+        "transcript_segments": [{"text": "We planted tomatoes in the garden after lunch."}],
+    }
+    receipt = _parallel_semantic_receipt(conversation, "parallel-v1")
+    receipt["verifier_request_id"] = receipt["summary_response_id"]
+    conversation["enrichment_state"] = {"today_card_grounding": receipt}
+
+    event = build_omi_canonical_event("uid-123", conversation)
+
+    assert event["metadata"]["today_card"]["grounding"] == {}
 
 
 def test_build_omi_canonical_event_rejects_forged_or_stale_semantic_grounding():

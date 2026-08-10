@@ -12,7 +12,9 @@ from models.conversation import CategoryEnum
 from utils.ella.canonical_omi import (
     TODAY_CARD_GROUNDING_ATTESTER,
     TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    TODAY_CARD_PARALLEL_GROUNDING_ATTESTER,
     summary_grounding_hash,
+    today_card_grounding_identity_is_valid,
     transcript_grounding_hash,
     write_omi_canonical_event,
 )
@@ -34,6 +36,68 @@ class CanonicalSummaryWriteUnconfirmedError(RuntimeError):
 
 class ConcurrentConversationSummaryChangeError(RuntimeError):
     pass
+
+
+def _normalized_grounding_text(value: Any) -> str:
+    return ' '.join(str(value or '').split()).strip()
+
+
+def _parallel_grounding_attestation(
+    evidence: dict[str, Any],
+    *,
+    uid: str,
+    conversation_id: str,
+    structured: dict[str, Any],
+    transcript_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    allowed_keys = {
+        'attester',
+        'semantic_outcome',
+        'supporting_quotes',
+        'policy_version',
+        'summary_request_id',
+        'summary_response_id',
+        'verifier_request_id',
+        'verifier_response_id',
+    }
+    if (
+        set(evidence) != allowed_keys
+        or evidence.get('attester') != TODAY_CARD_PARALLEL_GROUNDING_ATTESTER
+        or evidence.get('semantic_outcome') != 'supported'
+        or evidence.get('policy_version') != 'hermes-parallel-grounding-verifier-v1'
+    ):
+        raise ValueError('today_card_grounding_evidence_invalid')
+    transcript = _normalized_grounding_text(
+        ' '.join(str(segment.get('text') or '') for segment in transcript_segments if isinstance(segment, dict))
+    ).casefold()
+    raw_quotes = evidence.get('supporting_quotes')
+    if not isinstance(raw_quotes, list):
+        raise ValueError('today_card_grounding_evidence_invalid')
+    quotes = [_normalized_grounding_text(value) for value in raw_quotes]
+    if not 1 <= len(quotes) <= 3 or any(not quote for quote in quotes):
+        raise ValueError('today_card_grounding_evidence_invalid')
+    if any(quote.casefold() not in transcript for quote in quotes):
+        raise ValueError('today_card_grounding_quote_not_in_transcript')
+    if any(sum(character.isalnum() for character in quote) < 8 for quote in quotes):
+        raise ValueError('today_card_grounding_quote_too_short')
+    receipt = {
+        'contract_version': TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        'attester': TODAY_CARD_PARALLEL_GROUNDING_ATTESTER,
+        'semantic_outcome': 'supported',
+        'transcript_hash': transcript_grounding_hash(transcript_segments),
+        'summary_hash': summary_grounding_hash(structured),
+        'supporting_quote_hashes': ['sha256:' + hashlib.sha256(quote.encode('utf-8')).hexdigest() for quote in quotes],
+        'policy_version': 'hermes-parallel-grounding-verifier-v1',
+        'owner_hash': 'sha256:' + hashlib.sha256(uid.encode('utf-8')).hexdigest(),
+        'conversation_id_hash': 'sha256:' + hashlib.sha256(conversation_id.encode('utf-8')).hexdigest(),
+        'summary_request_id': str(evidence.get('summary_request_id') or '').strip(),
+        'summary_response_id': str(evidence.get('summary_response_id') or '').strip(),
+        'verifier_request_id': str(evidence.get('verifier_request_id') or '').strip(),
+        'verifier_response_id': str(evidence.get('verifier_response_id') or '').strip(),
+    }
+    if not today_card_grounding_identity_is_valid(receipt, 'hermes_parallel'):
+        raise ValueError('today_card_grounding_identity_invalid')
+    return receipt
 
 
 async def write_conversation_summary(
@@ -59,6 +123,7 @@ async def write_conversation_summary(
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
     today_card_grounding: Optional[dict[str, Any]] = None,
+    today_card_grounding_evidence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -164,17 +229,31 @@ async def write_conversation_summary(
         based_on_version_id=based_on_version_id,
         activate=set_active,
     )
+    if today_card_grounding is not None and today_card_grounding_evidence is not None:
+        raise ValueError('today_card_grounding_inputs_conflict')
+    grounding_bound_from_evidence = False
     bound_today_card_grounding: Optional[dict[str, Any]] = None
+    raw_segments = conversation.get('transcript_segments') or []
+    transcript_segments: list[dict[str, Any]] = []
+    for segment in raw_segments:
+        if isinstance(segment, dict):
+            transcript_segments.append(dict(segment))
+        elif hasattr(segment, 'model_dump'):
+            transcript_segments.append(segment.model_dump(mode='json'))
+        elif hasattr(segment, 'dict'):
+            transcript_segments.append(segment.dict())
+    if today_card_grounding_evidence is not None:
+        if summary_source != 'hermes_parallel' or summary_kind != 'hermes_enriched' or not require_canonical:
+            raise ValueError('today_card_grounding_evidence_scope_invalid')
+        today_card_grounding = _parallel_grounding_attestation(
+            today_card_grounding_evidence,
+            uid=uid,
+            conversation_id=conversation_id,
+            structured=structured,
+            transcript_segments=transcript_segments,
+        )
+        grounding_bound_from_evidence = True
     if today_card_grounding is not None:
-        raw_segments = conversation.get('transcript_segments') or []
-        transcript_segments: list[dict[str, Any]] = []
-        for segment in raw_segments:
-            if isinstance(segment, dict):
-                transcript_segments.append(dict(segment))
-            elif hasattr(segment, 'model_dump'):
-                transcript_segments.append(segment.model_dump(mode='json'))
-            elif hasattr(segment, 'dict'):
-                transcript_segments.append(segment.dict())
         quote_hashes = today_card_grounding.get('supporting_quote_hashes')
         quote_hashes_are_valid = (
             isinstance(quote_hashes, list)
@@ -188,21 +267,29 @@ async def write_conversation_summary(
             )
         )
         if not (
-            summary_source == 'hermes_cloud'
+            summary_source in {'hermes_cloud', 'hermes_parallel'}
+            and (summary_source != 'hermes_parallel' or grounding_bound_from_evidence)
             and summary_kind == 'hermes_enriched'
             and today_card_grounding.get('contract_version') == TODAY_CARD_GROUNDING_CONTRACT_VERSION
-            and today_card_grounding.get('attester') == TODAY_CARD_GROUNDING_ATTESTER
+            and today_card_grounding.get('attester')
+            == (
+                TODAY_CARD_GROUNDING_ATTESTER
+                if summary_source == 'hermes_cloud'
+                else TODAY_CARD_PARALLEL_GROUNDING_ATTESTER
+            )
             and today_card_grounding.get('semantic_outcome') == 'supported'
             and today_card_grounding.get('transcript_hash') == transcript_grounding_hash(transcript_segments)
             and today_card_grounding.get('summary_hash') == summary_grounding_hash(structured)
             and today_card_grounding.get('owner_hash') == 'sha256:' + hashlib.sha256(uid.encode('utf-8')).hexdigest()
             and today_card_grounding.get('conversation_id_hash')
             == 'sha256:' + hashlib.sha256(conversation_id.encode('utf-8')).hexdigest()
-            and bool(str(today_card_grounding.get('runtime_interaction_id') or '').strip())
-            and bool(str(today_card_grounding.get('canonical_assistant_event_id') or '').strip())
-            and bool(str(today_card_grounding.get('verifier_runtime_interaction_id') or '').strip())
-            and bool(str(today_card_grounding.get('verifier_canonical_assistant_event_id') or '').strip())
-            and today_card_grounding.get('policy_version') == 'hermes-cloud-grounding-verifier-v1'
+            and today_card_grounding_identity_is_valid(today_card_grounding, summary_source)
+            and today_card_grounding.get('policy_version')
+            == (
+                'hermes-cloud-grounding-verifier-v1'
+                if summary_source == 'hermes_cloud'
+                else 'hermes-parallel-grounding-verifier-v1'
+            )
             and quote_hashes_are_valid
         ):
             raise ValueError('today_card_grounding_attestation_invalid')
