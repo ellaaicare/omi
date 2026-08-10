@@ -161,6 +161,32 @@ def test_low_value_fragment_and_meta_summary_are_never_safe_sources():
     assert evidence_is_safe(short_capture) is False
 
 
+def test_meaningful_non_latin_and_title_rich_sources_are_safe():
+    non_latin = _source(
+        TodayCardKind.recap,
+        "japanese-garden",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "庭の思い出",
+            "summary": "今日は母と庭でトマトを植えました",
+        }
+    )
+    title_rich = _source(
+        TodayCardKind.recap,
+        "title-rich",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "Alex and Priya planted tomatoes together",
+            "summary": "Garden",
+        }
+    )
+
+    assert evidence_is_safe(non_latin) is True
+    assert evidence_is_safe(title_rich) is True
+
+
 def test_active_day_materializes_truthful_recap_before_older_memory():
     repository = InMemoryTodayCardRepository(
         [

@@ -45,7 +45,7 @@ _DENIED_TAGS = {
     "self_harm",
 }
 _WHITESPACE = re.compile(r"\s+")
-_WORD = re.compile(r"[a-z0-9]+(?:['’][a-z0-9]+)?", re.IGNORECASE)
+_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
 _LOW_VALUE_META_COMMENTARY = (
     re.compile(r"\b(?:tiny|very short|too short|brief) (?:audio|capture|clip|recording|transcript)\b", re.IGNORECASE),
     re.compile(r"\b(?:audio|capture|clip|recording|transcript) (?:caught|contains?|captured) only\b", re.IGNORECASE),
@@ -246,8 +246,16 @@ def source_text_is_meaningful(title: str, summary: str) -> bool:
     text = _WHITESPACE.sub(" ", f"{title} {summary}").strip()
     if any(pattern.search(text) for pattern in _LOW_VALUE_META_COMMENTARY):
         return False
-    words = _WORD.findall(summary or title)
-    return len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.lower() for word in words}) >= 3
+    words = _WORD.findall(text)
+    if len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.casefold() for word in words}) >= 3:
+        return True
+
+    # Languages without whitespace-delimited words can express a complete
+    # thought in one token. Keep the fragment boundary script-agnostic by
+    # accepting a sufficiently varied non-ASCII alphanumeric sequence.
+    alphanumeric = [character.casefold() for character in text if character.isalnum()]
+    non_ascii_alphanumeric = [character for character in alphanumeric if not character.isascii()]
+    return len(alphanumeric) >= 8 and len(non_ascii_alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
 
 
 def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
