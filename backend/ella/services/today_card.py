@@ -54,6 +54,20 @@ _LOW_VALUE_META_COMMENTARY = (
     re.compile(r"\b(?:cannot|can't|could not|couldn't) (?:know|tell|determine|infer|summarize)\b", re.IGNORECASE),
     re.compile(r"\b(?:insufficient|missing) context\b", re.IGNORECASE),
 )
+_LOW_VALUE_SOURCE_MEDIUM = re.compile(
+    r"\b(?:audio|capture|clip|recording|transcript|speech)\b",
+    re.IGNORECASE,
+)
+_LOW_VALUE_INSUFFICIENCY = (
+    re.compile(r"\btoo\s+(?:short|little)\b", re.IGNORECASE),
+    re.compile(r"\b(?:not|wasn't|isn't|was not|is not)\s+enough\b", re.IGNORECASE),
+    re.compile(r"\binsufficient\b", re.IGNORECASE),
+    re.compile(r"\bended?\s+before\s+enough\b", re.IGNORECASE),
+)
+_LOW_VALUE_INTERPRETATION = re.compile(
+    r"\b(?:context|determine|infer|meaning|meant|summar(?:y|ize|ise)|understand|useful)\b",
+    re.IGNORECASE,
+)
 
 
 class TodayCardState(str, Enum):
@@ -245,6 +259,12 @@ def source_text_is_meaningful(title: str, summary: str) -> bool:
     """Reject fragments and model commentary about an unusable source."""
     text = _WHITESPACE.sub(" ", f"{title} {summary}").strip()
     if any(pattern.search(text) for pattern in _LOW_VALUE_META_COMMENTARY):
+        return False
+    if (
+        _LOW_VALUE_SOURCE_MEDIUM.search(text)
+        and any(pattern.search(text) for pattern in _LOW_VALUE_INSUFFICIENCY)
+        and _LOW_VALUE_INTERPRETATION.search(text)
+    ):
         return False
     words = _WORD.findall(text)
     if len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.casefold() for word in words}) >= 3:

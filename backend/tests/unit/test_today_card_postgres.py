@@ -603,6 +603,54 @@ def test_enriched_adapter_does_not_promote_missing_context_meta_summary():
     assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The recording was too short to provide a useful summary of what happened.",
+        "The recording ended before enough speech was captured to create a useful summary.",
+        "There was too little audio to determine what the person meant.",
+    ],
+)
+def test_enriched_adapter_rejects_alternative_insufficient_capture_commentary(summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count is None
+    assert evidence.capture_duration_seconds is None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_enriched_adapter_keeps_substantive_title_with_terse_summary():
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "Alex and Priya planted tomatoes together",
+        "overview": "Garden",
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is True
+    assert evidence.confidence == 0.82
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
 def test_enriched_adapter_honors_explicit_capture_quality_metrics():
     row = _summary_row()
     row["metadata"]["source_quality"] = {
