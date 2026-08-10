@@ -296,6 +296,8 @@ class V2VClient {
   bool _streamPlaybackStarted = false;
   DateTime? _streamPlaybackStartedAt;
   Future<void> _streamFeedFuture = Future.value();
+  int _streamFeedGeneration = 0;
+  bool _streamFeedRecoveryActive = false;
   Timer? _finishPlaybackTimer;
   bool _finishingPlayback = false;
 
@@ -850,6 +852,7 @@ class V2VClient {
 
   /// Interrupt current playback (e.g., user started speaking).
   Future<void> interruptPlayback() async {
+    _streamFeedGeneration++;
     if (_isPlaying) {
       try {
         await _stopStreamingPlayback();
@@ -879,6 +882,8 @@ class V2VClient {
   }
 
   void _resetTurnState() {
+    _streamFeedGeneration++;
+    _streamFeedRecoveryActive = false;
     _isPlaying = false;
     _micMuted = false;
     _micSuspendedForPlayback = false;
@@ -1340,11 +1345,15 @@ class V2VClient {
 
   bool get _hasLiveSessionTransport => _isConnected && (_channel != null || _liveChannelForTesting?.call() == true);
 
+  bool _isCurrentStreamFeed(int generation) =>
+      generation == _streamFeedGeneration && !_streamFeedRecoveryActive && _hasLiveSessionTransport;
+
   // --- Low-latency PCM streaming playback ---
 
   /// Stream incoming PCM16 audio chunk to the platform player.
   void _streamAudioChunk(Uint8List pcmData) {
-    if (pcmData.isEmpty) return;
+    if (pcmData.isEmpty || _streamFeedRecoveryActive || !_hasLiveSessionTransport) return;
+    final generation = _streamFeedGeneration;
 
     // Gate the microphone before enqueueing playback so provider VAD cannot
     // hear Ella's own response audio and interrupt the active turn.
@@ -1354,9 +1363,22 @@ class V2VClient {
     _pcmBuffer.add(pcmData);
 
     _streamFeedFuture = _streamFeedFuture.then<void>((_) async {
+      if (!_isCurrentStreamFeed(generation)) return;
+      // A prior feed may have completed failure recovery and reopened the
+      // microphone while this operation was queued. Re-establish and await the
+      // gate immediately before every surviving playback start.
+      _suspendMicForPlayback('queued_audio_chunk');
+      await _micGateFuture;
+      if (!_isCurrentStreamFeed(generation)) return;
       await _ensureStreamingPlaybackStarted();
+      if (!_isCurrentStreamFeed(generation)) {
+        await _stopStreamingPlayback();
+        return;
+      }
       _streamPlayer.uint8ListSink?.add(pcmData);
-    }).catchError(_recoverFromStreamFeedFailure);
+    }).catchError(
+      (Object error, StackTrace stackTrace) => _recoverFromStreamFeedFailure(error, stackTrace, generation),
+    );
 
     if (_chunkCount == 1) {
       onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
@@ -1399,7 +1421,10 @@ class V2VClient {
     Logger.debug('[V2V] PCM stream player started');
   }
 
-  Future<void> _recoverFromStreamFeedFailure(Object error, StackTrace stackTrace) async {
+  Future<void> _recoverFromStreamFeedFailure(Object error, StackTrace stackTrace, int generation) async {
+    if (generation != _streamFeedGeneration || _streamFeedRecoveryActive) return;
+    _streamFeedRecoveryActive = true;
+    _streamFeedGeneration++;
     Logger.error('[V2V] Stream playback feed error: $error');
     onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
     _finishPlaybackTimer?.cancel();
@@ -1432,6 +1457,7 @@ class V2VClient {
         _micSuspendedForPlayback = false;
         _micMuted = false;
       }
+      _streamFeedRecoveryActive = false;
       onEvent?.call(const V2VEvent(type: 'playback_complete'));
     }
   }

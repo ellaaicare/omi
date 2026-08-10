@@ -599,6 +599,125 @@ void main() {
       expect(events.where((event) => event.type == 'playback_complete'), hasLength(1));
       await client.disconnect();
     });
+
+    test('failed stream generation drops queued PCM and re-gates the next generation', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final firstStartEntered = Completer<void>();
+      final releaseFirstStart = Completer<void>();
+      final nextStartEntered = Completer<void>();
+      final releaseNextStart = Completer<void>();
+      var playbackStarts = 0;
+      var microphoneStarts = 0;
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+        streamPlaybackStarter: () async {
+          playbackStarts++;
+          if (playbackStarts == 1) {
+            firstStartEntered.complete();
+            await releaseFirstStart.future;
+            throw StateError('route unavailable');
+          }
+          nextStartEntered.complete();
+          await releaseNextStart.future;
+        },
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.streamAudioChunkForTesting(Uint8List.fromList([1]));
+      await firstStartEntered.future;
+      client.streamAudioChunkForTesting(Uint8List.fromList([2]));
+      final failedGeneration = client.waitForStreamFeedForTesting();
+
+      expect(client.micMutedForTesting, isTrue);
+      expect(client.micSuspendedForPlaybackForTesting, isTrue);
+      releaseFirstStart.complete();
+      await failedGeneration;
+
+      expect(playbackStarts, 1, reason: 'the second stale chunk must be dropped');
+      expect(microphoneStarts, 2, reason: 'failure recovery should reopen the authorized microphone');
+      expect(client.micMutedForTesting, isFalse);
+      expect(client.micSuspendedForPlaybackForTesting, isFalse);
+
+      client.streamAudioChunkForTesting(Uint8List.fromList([3]));
+      await nextStartEntered.future;
+      expect(playbackStarts, 2);
+      expect(client.micMutedForTesting, isTrue);
+      expect(client.micSuspendedForPlaybackForTesting, isTrue);
+      releaseNextStart.complete();
+      await client.waitForStreamFeedForTesting();
+      await client.disconnect();
+    });
+
+    test('disconnect invalidates held and queued stream feeds', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final firstStartEntered = Completer<void>();
+      final releaseFirstStart = Completer<void>();
+      var playbackStarts = 0;
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async => true,
+        streamPlaybackStarter: () async {
+          playbackStarts++;
+          if (playbackStarts > 1) fail('stale queued PCM restarted playback after disconnect');
+          firstStartEntered.complete();
+          await releaseFirstStart.future;
+          throw StateError('late route failure');
+        },
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.streamAudioChunkForTesting(Uint8List.fromList([1]));
+      await firstStartEntered.future;
+      client.streamAudioChunkForTesting(Uint8List.fromList([2]));
+      final queuedFeeds = client.waitForStreamFeedForTesting();
+
+      await client.disconnect();
+      releaseFirstStart.complete();
+      await queuedFeeds;
+      client.streamAudioChunkForTesting(Uint8List.fromList([3]));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(playbackStarts, 1);
+      expect(client.isConnected, isFalse);
+      expect(client.micMutedForTesting, isFalse);
+      expect(client.micSuspendedForPlaybackForTesting, isFalse);
+    });
   });
 
   group('V2VClient proxy event mapping', () {
