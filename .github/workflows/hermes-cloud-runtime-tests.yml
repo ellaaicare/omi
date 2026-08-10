@@ -715,7 +715,8 @@ jobs:
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_ignores_self_attestation_and_requires_independent_verifier"
             "tests/unit/test_hermes_cloud_runtime.py::test_grounding_verifier_is_stateless_and_uses_transcript_admission"
-            "tests/unit/test_hermes_broker_prototype.py::test_enrichment_channels_use_transcript_lane[omi_enrichment_grounding_verifier]"
+            "tests/unit/test_hermes_cloud_runtime.py::test_broker_grounding_verifier_fails_closed_before_admission"
+            "tests/unit/test_hermes_broker_prototype.py::test_grounding_verifier_fails_closed_before_broker_admission"
             "tests/unit/test_ella_provisioning_repository.py::test_stateless_runtime_interaction_skips_predecessor_at_create_and_claim"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_activation_rejects_tampered_attestation_before_publication"
@@ -731,6 +732,9 @@ jobs:
               tests/unit/test_ella_runtime_route_isolation.py \
               tests/unit/test_voice_proxy_auth.py \
               tests/unit/test_hermes_cloud_enrichment.py \
+              tests/unit/test_hermes_cloud_runtime.py \
+              tests/unit/test_hermes_broker_prototype.py \
+              tests/unit/test_ella_provisioning_repository.py \
               tests/postgres/test_hermes_cloud_pool_postgres.py \
               tests/postgres/test_invitation_redemption_postgres.py |
               sed '/^$/d'
@@ -742,7 +746,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 557
+          test "$collected" -eq 558
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

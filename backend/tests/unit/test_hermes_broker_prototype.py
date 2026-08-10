@@ -1040,11 +1040,7 @@ def test_provider_turn_rejects_missing_persisted_consent_authority_epoch(monkeyp
     assert error.value.code == "hermes_broker_prototype_consent_authority_epoch_missing"
 
 
-@pytest.mark.parametrize(
-    "channel",
-    [HERMES_CLOUD_ENRICHMENT_CHANNEL, HERMES_CLOUD_GROUNDING_CHANNEL],
-)
-def test_enrichment_channels_use_transcript_lane(monkeypatch, channel):
+def test_enrichment_summary_uses_transcript_lane(monkeypatch):
     _enable(monkeypatch)
     seen = {}
 
@@ -1084,7 +1080,7 @@ def test_enrichment_channels_use_transcript_lane(monkeypatch, channel):
                 uid=AUTH_UID,
                 client_interaction_id="evt-enrich",
                 correlation_id="c-enrich",
-                channel=channel,
+                channel=HERMES_CLOUD_ENRICHMENT_CHANNEL,
                 user_input="transcript text",
                 instructions="enrich",
                 started_at=datetime.now(timezone.utc),
@@ -1099,6 +1095,45 @@ def test_enrichment_channels_use_transcript_lane(monkeypatch, channel):
     assert "title" in turn.text
     assert seen["account_id"] == ACCOUNT_UUID
     assert seen["source_event_id"] == "evt-enrich"
+
+
+def test_grounding_verifier_fails_closed_before_broker_admission(monkeypatch):
+    _enable(monkeypatch)
+
+    service = HermesCloudRuntimeService(
+        repository=object(),  # type: ignore[arg-type]
+        event_store=object(),  # type: ignore[arg-type]
+    )
+    service.broker_client_factory = lambda _config: (_ for _ in ()).throw(
+        AssertionError("broker admission must not start")
+    )
+    service.cloud_client = object()  # type: ignore[assignment]
+
+    async def boundary():
+        raise AssertionError("provider boundary must not run")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service._provider_turn(
+                runtime=_runtime(mode=HERMES_CLOUD_ENRICHMENT_MODE),
+                request=HermesCloudTurnRequest(
+                    uid=AUTH_UID,
+                    client_interaction_id="evt-verify",
+                    correlation_id="c-verify",
+                    channel=HERMES_CLOUD_GROUNDING_CHANNEL,
+                    user_input="server-owned verifier envelope",
+                    instructions="grounding instructions",
+                    started_at=datetime.now(timezone.utc),
+                    client_metadata={},
+                ),
+                scope={"session_key": "sk"},
+                claimed={"hermes_session_id": "sid", "idempotency_key": "ik"},
+                budget={"max_output_tokens": 64, "max_tool_calls": 0},
+                mark_provider_send_boundary=boundary,
+            )
+        )
+
+    assert error.value.code == "hermes_broker_grounding_verifier_unsupported"
 
 
 def test_sse_mapping_preserves_answer_text():

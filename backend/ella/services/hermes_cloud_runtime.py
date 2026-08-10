@@ -382,10 +382,15 @@ class HermesCloudRuntimeService:
                 "hermes_broker_prototype_consent_authority_epoch_missing",
                 retryable=False,
             )
+        if request.channel == HERMES_CLOUD_GROUNDING_CHANNEL:
+            raise ProvisioningError(
+                "hermes_broker_grounding_verifier_unsupported",
+                retryable=False,
+            )
         await mark_provider_send_boundary()
         client = self.broker_client_factory(prototype_config)
         source_event_id = str(request.client_interaction_id or request.correlation_id)
-        if request.channel in HERMES_CLOUD_ENRICHMENT_CHANNELS:
+        if request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL:
             # Enrichment instructions already embed transcript JSON; surface a
             # bounded segment list for the broker transcript lane.
             terminal = await client.run_transcript_user_summary(

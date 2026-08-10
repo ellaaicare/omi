@@ -460,6 +460,71 @@ def test_grounding_verifier_is_stateless_and_uses_transcript_admission():
     assert cloud.calls[0][1]["previous_response_id"] is None
 
 
+def test_broker_grounding_verifier_fails_closed_before_admission(monkeypatch):
+    account_id = "11111111-1111-4111-8111-111111111111"
+    profile_id = "22222222-2222-4222-8222-222222222222"
+    binding_id = "00000000-0000-0000-0000-000000000001"
+    for key, value in {
+        "ELLA_HERMES_BROKER_PROTOTYPE_ENABLED": "true",
+        "ELLA_HERMES_BROKER_PROTOTYPE_ACCOUNT_ID": account_id,
+        "ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID": profile_id,
+        "ELLA_HERMES_BROKER_PROTOTYPE_BINDING_ID": binding_id,
+        "ELLA_HERMES_BROKER_BASE_URL": "https://broker.ella.internal",
+        "ELLA_HERMES_BROKER_ALLOWED_HOST": "broker.ella.internal",
+        "ELLA_HERMES_BROKER_SERVICE_TOKEN_REF": "env:ELLA_HERMES_BROKER_SERVICE_TOKEN",
+        "ELLA_HERMES_BROKER_SERVICE_TOKEN": "service-token-test",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    runtime = _runtime(
+        binding_id=binding_id,
+        runtime_target_mode="hermes-cloud-transcript",
+        account_user_id=account_id,
+        profile_user_id=profile_id,
+    )
+
+    async def revalidate_runtime(_identity, _runtime_repository):
+        return runtime
+
+    monkeypatch.setattr(
+        hermes_cloud_runtime,
+        "revalidate_cloud_runtime_authority",
+        revalidate_runtime,
+    )
+
+    repository = FakeRepository(previous_response_id="poisoned-response")
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=object(),  # type: ignore[arg-type]
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    service.broker_client_factory = lambda _config: (_ for _ in ()).throw(
+        AssertionError("broker admission must not start")
+    )
+    request = HermesCloudTurnRequest(
+        **{
+            **_request().__dict__,
+            "channel": "omi_enrichment_grounding_verifier",
+            "user_scan_policy": "none",
+            "allow_previous_response": False,
+        }
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service.run_turn(
+                runtime,
+                request,
+            )
+        )
+
+    assert error.value.code == "hermes_broker_grounding_verifier_unsupported"
+    assert repository.failures == ["hermes_broker_grounding_verifier_unsupported"]
+
+
 def test_enrichment_rejects_chat_target_before_admission_or_provider():
     policy = FakePolicy()
     cloud = FakeCloudClient()
