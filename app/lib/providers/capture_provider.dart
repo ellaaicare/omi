@@ -24,6 +24,7 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -80,6 +81,18 @@ class PhoneCaptureStartProof {
 
   Future<void> waitForAudio({Duration timeout = const Duration(seconds: 5)}) =>
       _firstAudioFrame.future.timeout(timeout);
+}
+
+@visibleForTesting
+Future<bool> ensurePhoneCaptureConsentAuthority({
+  required bool Function() hasCurrentConsent,
+  required String Function() authenticatedUid,
+  required Future<bool> Function(String uid) refreshAuthority,
+}) async {
+  if (hasCurrentConsent()) return true;
+  final uid = authenticatedUid().trim();
+  if (uid.isEmpty || !await refreshAuthority(uid)) return false;
+  return hasCurrentConsent();
 }
 
 class CaptureProvider extends ChangeNotifier
@@ -1069,8 +1082,13 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<PhoneCaptureStartResult> _streamRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return PhoneCaptureStartResult.consentUnavailable;
     final generation = _captureGeneration;
+    final consentCurrent = await ensurePhoneCaptureConsentAuthority(
+      hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
+      authenticatedUid: () => WalOwnerAuthority.authenticatedUid,
+      refreshAuthority: (uid) => EllaAiConsentService().refreshServerAuthority(uid: uid),
+    );
+    if (!consentCurrent || generation != _captureGeneration) return PhoneCaptureStartResult.consentUnavailable;
     final captureAuthority = WalOwnerAuthority.active();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
       return PhoneCaptureStartResult.cancelled;
