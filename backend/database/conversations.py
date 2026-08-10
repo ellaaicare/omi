@@ -407,6 +407,37 @@ def _prepare_conversation_for_read(conversation_data: Optional[Dict[str, Any]], 
     return data
 
 
+def _prepare_conversation_for_transcript_hash(
+    conversation_data: Optional[Dict[str, Any]], uid: str
+) -> Optional[Dict[str, Any]]:
+    """Return a silent, fail-closed transcript projection for protected CAS admission."""
+    if not conversation_data:
+        return None
+
+    data = copy.deepcopy(conversation_data)
+    segments = data.get('transcript_segments')
+
+    try:
+        if data.get('data_protection_level') == 'enhanced' and isinstance(segments, str):
+            segments = encryption.decrypt_strict(segments, uid)
+
+        if data.get('transcript_segments_compressed'):
+            if isinstance(segments, str):
+                segments = bytes.fromhex(segments)
+            if not isinstance(segments, bytes):
+                return None
+            segments = json.loads(zlib.decompress(segments).decode('utf-8'))
+        elif isinstance(segments, str):
+            segments = json.loads(segments)
+    except Exception:
+        return None
+
+    if not isinstance(segments, list):
+        return None
+    data['transcript_segments'] = segments
+    return data
+
+
 def _prepare_photo_for_write(data: Dict[str, Any], uid: str, level: str) -> Dict[str, Any]:
     data = copy.deepcopy(data)
     data['data_protection_level'] = level
@@ -631,7 +662,9 @@ def _update_conversation_if_transcript_hash_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
-    readable_conversation = _prepare_conversation_for_read(conversation, uid) or {}
+    readable_conversation = _prepare_conversation_for_transcript_hash(conversation, uid)
+    if readable_conversation is None:
+        return False
     if transcript_grounding_hash(readable_conversation.get('transcript_segments') or []) != expected_transcript_hash:
         return False
     if expected_active_summary_version_id is not None and str(

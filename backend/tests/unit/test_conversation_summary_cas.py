@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import logging
 import sys
 import zlib
 from pathlib import Path
@@ -188,7 +189,7 @@ def test_transcript_hash_compare_and_set_uses_decrypted_transaction_snapshot(mon
     stored_segments = compressed
     if protection_level == "enhanced":
         stored_segments = "encrypted-transcript"
-        conversations.encryption.decrypt.return_value = compressed.hex()
+        conversations.encryption.decrypt_strict.return_value = compressed.hex()
 
     class ConversationRef:
         def get(self, transaction=None):
@@ -225,9 +226,14 @@ def test_transcript_hash_compare_and_set_uses_decrypted_transaction_snapshot(mon
     assert transaction.updates == [(conversation_ref, {"active_summary_version_id": "summary-v2"})]
 
 
-def test_transcript_hash_compare_and_set_fails_closed_when_protected_source_cannot_decrypt(monkeypatch):
+def test_transcript_hash_compare_and_set_fails_closed_silently_when_protected_source_cannot_decrypt(
+    monkeypatch, caplog, capsys
+):
     conversations = _load_conversations_module(monkeypatch)
-    conversations.encryption.decrypt.side_effect = ValueError("invalid ciphertext")
+    subject = "private-subject-uid"
+    ciphertext = "private-ciphertext"
+    exception_detail = "private-decryption-exception"
+    conversations.encryption.decrypt_strict.side_effect = ValueError(exception_detail)
 
     class ConversationRef:
         def get(self, transaction=None):
@@ -236,7 +242,7 @@ def test_transcript_hash_compare_and_set_fails_closed_when_protected_source_cann
                 to_dict=lambda: {
                     "active_summary_version_id": "source-v1",
                     "data_protection_level": "enhanced",
-                    "transcript_segments": "invalid-ciphertext",
+                    "transcript_segments": ciphertext,
                     "transcript_segments_compressed": True,
                 },
             )
@@ -249,14 +255,40 @@ def test_transcript_hash_compare_and_set_fails_closed_when_protected_source_cann
             self.updates.append((ref, payload))
 
     transaction = Transaction()
-    assert (
-        conversations._update_conversation_if_transcript_hash_transaction(
-            transaction,
-            ConversationRef(),
-            "uid-1",
-            transcript_grounding_hash([{"text": "Expected protected source."}]),
-            {"active_summary_version_id": "summary-v2"},
+    with caplog.at_level(logging.DEBUG):
+        assert (
+            conversations._update_conversation_if_transcript_hash_transaction(
+                transaction,
+                ConversationRef(),
+                subject,
+                transcript_grounding_hash([{"text": "Expected protected source."}]),
+                {"active_summary_version_id": "summary-v2"},
+            )
+            is False
         )
-        is False
-    )
     assert transaction.updates == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert caplog.records == []
+
+
+def test_strict_decrypt_round_trip_and_failure_emit_no_protected_context(monkeypatch, caplog, capsys):
+    monkeypatch.setenv("ENCRYPTION_SECRET", "test-encryption-secret-exactly-32-bytes")
+    path = Path(__file__).resolve().parents[2] / "utils" / "encryption.py"
+    spec = importlib.util.spec_from_file_location("utils.encryption_strict_cas_test", path)
+    encryption = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(encryption)
+
+    subject = "private-subject-uid"
+    ciphertext = "private-ciphertext"
+    plaintext = "private-transcript-payload"
+    assert encryption.decrypt_strict(encryption.encrypt(plaintext, subject), subject) == plaintext
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception):
+        encryption.decrypt_strict(ciphertext, subject)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert caplog.records == []
