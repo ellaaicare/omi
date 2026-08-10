@@ -14,6 +14,9 @@ from database.ella_postgres import get_ella_postgres_pool
 
 from ella.services.today_card import (
     TODAY_CARD_CONTRACT_VERSION,
+    TODAY_CARD_MIN_CAPTURE_SECONDS,
+    TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC,
+    TODAY_CARD_MIN_TRANSCRIPT_WORDS,
     TODAY_CARD_RENDER_CONTRACT_VERSION,
     TODAY_CARD_SOURCE_COOLDOWN_DAYS,
     TodayCardAvoidance,
@@ -34,6 +37,7 @@ from ella.services.today_card import (
 )
 
 logger = logging.getLogger("ella.today_card")
+TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.grounding.v1"
 
 _SOURCE_VALIDITY_LOCK_PREFIX = "ella.today-card-source-validity"
 
@@ -169,6 +173,35 @@ def _source_tags(metadata: dict[str, Any], scan_policy: str) -> list[str]:
     return sorted({str(tag).strip().lower() for tag in raw_tags if str(tag).strip()})
 
 
+def _has_grounded_content_provenance(today: dict[str, Any], source_version_id: str | None) -> bool:
+    grounding = today.get("grounding")
+    if not isinstance(grounding, dict) or not source_version_id:
+        return False
+    transcript_word_count = _first_nonnegative_number(grounding.get("transcript_word_count"))
+    transcript_non_ascii_count = _first_nonnegative_number(grounding.get("transcript_non_ascii_alphanumeric_count"))
+    capture_duration_seconds = _first_nonnegative_number(grounding.get("capture_duration_seconds"))
+    transcript_hash = str(grounding.get("transcript_hash") or "")
+    transcript_hash_digest = transcript_hash.removeprefix("sha256:")
+    has_grounded_transcript = bool(
+        (transcript_word_count is not None and transcript_word_count >= TODAY_CARD_MIN_TRANSCRIPT_WORDS)
+        or (
+            transcript_non_ascii_count is not None
+            and transcript_non_ascii_count >= TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC
+        )
+    )
+    return (
+        grounding.get("contract_version") == TODAY_CARD_GROUNDING_CONTRACT_VERSION
+        and grounding.get("grounded_content") is True
+        and grounding.get("source_version_id") == source_version_id
+        and capture_duration_seconds is not None
+        and capture_duration_seconds >= TODAY_CARD_MIN_CAPTURE_SECONDS
+        and has_grounded_transcript
+        and transcript_hash.startswith("sha256:")
+        and len(transcript_hash_digest) == 64
+        and all(character in "0123456789abcdef" for character in transcript_hash_digest)
+    )
+
+
 async def lock_today_card_source_validity(conn: Any, uid: str) -> None:
     """Serialize canonical evidence writes, invalidation, and card publication per owner."""
     await conn.execute(
@@ -241,13 +274,18 @@ def _evidence_from_row(
         metadata.get("duration_seconds"),
     )
     source_text_meaningful = source_text_is_meaningful(title, summary)
+    if adapter == "omi-enriched-conversation":
+        source_text_meaningful = source_text_meaningful and _has_grounded_content_provenance(
+            today,
+            source_version_id,
+        )
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = (
             0.82 if adapter == "omi-enriched-conversation" and source_version_id and source_text_meaningful else 0.0
         )
     privacy_scope = str(_record_value(row, "privacy_scope") or "user_private")
     scan_policy = str(_record_value(row, "scan_policy") or "none")
-    meaningful = _strict_bool(today, "meaningful", source_text_meaningful)
+    meaningful = source_text_meaningful and _strict_bool(today, "meaningful", source_text_meaningful)
     confirmed = _strict_bool(today, "confirmed", False)
     positive_or_neutral = _strict_bool(today, "positive_or_neutral", True)
     superseded = _strict_bool(today, "superseded", False)

@@ -97,7 +97,7 @@ async def _insert_summary(pool: asyncpg.Pool, *, uid: str, conversation_id: str)
             provider, role, text, started_at, source_ref, metadata
         )
         VALUES ($1, $1, $2, $3, 'omi', 'omi-backend', 'assistant',
-                'Eligible summary.', $4, $5::jsonb, $6::jsonb)
+                'Eligible summary with grounded details.', $4, $5::jsonb, $6::jsonb)
         ON CONFLICT (event_id, source_identity) DO UPDATE
         SET text = EXCLUDED.text, source_ref = EXCLUDED.source_ref, metadata = EXCLUDED.metadata
         """,
@@ -109,7 +109,18 @@ async def _insert_summary(pool: asyncpg.Pool, *, uid: str, conversation_id: str)
         json.dumps(
             {
                 "adapter": "omi-enriched-conversation",
-                "structured": {"title": "Eligible source", "overview": "Eligible summary."},
+                "structured": {"title": "Eligible source", "overview": "Eligible summary with grounded details."},
+                "today_card": {
+                    "grounding": {
+                        "contract_version": "ella.today_card.grounding.v1",
+                        "grounded_content": True,
+                        "source_version_id": "summary-v1",
+                        "transcript_hash": "sha256:" + ("a" * 64),
+                        "transcript_word_count": 14,
+                        "transcript_non_ascii_alphanumeric_count": 0,
+                        "capture_duration_seconds": 18.0,
+                    }
+                },
             }
         ),
     )
@@ -323,13 +334,24 @@ def test_source_advance_during_materialization_cannot_publish_stale_card(monkeyp
                                 channel="omi",
                                 provider="omi-backend",
                                 role="assistant",
-                                text="New canonical summary.",
+                                text="New canonical summary with grounded details.",
                                 started_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
                                 metadata={
                                     "adapter": "omi-enriched-conversation",
                                     "structured": {
                                         "title": "New canonical source",
-                                        "overview": "New canonical summary.",
+                                        "overview": "New canonical summary with grounded details.",
+                                    },
+                                    "today_card": {
+                                        "grounding": {
+                                            "contract_version": "ella.today_card.grounding.v1",
+                                            "grounded_content": True,
+                                            "source_version_id": "summary-v2",
+                                            "transcript_hash": "sha256:" + ("b" * 64),
+                                            "transcript_word_count": 14,
+                                            "transcript_non_ascii_alphanumeric_count": 0,
+                                            "capture_duration_seconds": 18.0,
+                                        }
                                     },
                                 },
                             )

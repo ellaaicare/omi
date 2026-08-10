@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -13,6 +15,12 @@ from utils.ella.canonical_auth import canonical_event_service_headers
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
+TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.grounding.v1"
+TODAY_CARD_MIN_TRANSCRIPT_WORDS = 12
+TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC = 12
+TODAY_CARD_MIN_CAPTURE_SECONDS = 8.0
+_GROUNDING_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
+_GROUNDING_WHITESPACE = re.compile(r"\s+")
 
 
 def _enum_value(value: Any) -> Any:
@@ -98,6 +106,61 @@ def _transcript_segments(conversation: Any) -> list[dict[str, Any]]:
     return [_segment_dict(segment) for segment in segments]
 
 
+def _datetime_value(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _today_card_grounding(
+    transcript_segments: list[dict[str, Any]],
+    *,
+    source_version_id: Optional[str],
+    started_at: Any,
+    finished_at: Any,
+) -> dict[str, Any]:
+    transcript = _GROUNDING_WHITESPACE.sub(
+        " ",
+        " ".join(str(segment.get("text") or "") for segment in transcript_segments),
+    ).strip()
+    transcript_word_count = len(_GROUNDING_WORD.findall(transcript))
+    transcript_non_ascii_alphanumeric_count = sum(
+        1 for character in transcript if character.isalnum() and not character.isascii()
+    )
+    started = _datetime_value(started_at)
+    finished = _datetime_value(finished_at)
+    capture_duration_seconds = (
+        max(0.0, (finished - started).total_seconds()) if started is not None and finished is not None else 0.0
+    )
+    transcript_hash = "sha256:" + hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+    grounded_content = bool(
+        source_version_id
+        and capture_duration_seconds >= TODAY_CARD_MIN_CAPTURE_SECONDS
+        and (
+            transcript_word_count >= TODAY_CARD_MIN_TRANSCRIPT_WORDS
+            or transcript_non_ascii_alphanumeric_count >= TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC
+        )
+    )
+    return {
+        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        "grounded_content": grounded_content,
+        "source_version_id": source_version_id,
+        "transcript_hash": transcript_hash,
+        "transcript_word_count": transcript_word_count,
+        "transcript_non_ascii_alphanumeric_count": transcript_non_ascii_alphanumeric_count,
+        "capture_duration_seconds": capture_duration_seconds,
+    }
+
+
 def _summary_versions(conversation: Any) -> list[dict[str, Any]]:
     versions = _object_get(conversation, "summary_versions") or []
     return [_model_to_dict(version) if not isinstance(version, dict) else dict(version) for version in versions]
@@ -136,6 +199,12 @@ def build_omi_canonical_event(
     finished_at = _object_get(conversation, "finished_at")
     active_summary_version_id = _active_summary_version_id(conversation)
     transcript_segments = _transcript_segments(conversation)
+    today_card_grounding = _today_card_grounding(
+        transcript_segments,
+        source_version_id=active_summary_version_id,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
 
     event = {
         "uid": uid,
@@ -169,6 +238,7 @@ def build_omi_canonical_event(
             "ella_signal": _model_to_dict(_object_get(conversation, "ella_signal")),
             "transcript_segments": transcript_segments,
             "segment_count": len(transcript_segments),
+            "today_card": {"grounding": today_card_grounding},
             "created_at": _iso(_object_get(conversation, "created_at")),
             "source": _enum_value(_object_get(conversation, "source")),
             "status": _enum_value(_object_get(conversation, "status")),

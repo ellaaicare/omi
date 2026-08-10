@@ -50,6 +50,41 @@ def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
     assert event["metadata"]["active_summary_version_id"] == "obs-v2"
     assert event["metadata"]["transcript_segments"][0]["text"] == "Can I get the waffle?"
     assert event["metadata"]["trace_id"] == "trace-cafe"
+    grounding = event["metadata"]["today_card"]["grounding"]
+    assert grounding["contract_version"] == "ella.today_card.grounding.v1"
+    assert grounding["source_version_id"] == "obs-v2"
+    assert grounding["grounded_content"] is False
+    assert grounding["transcript_hash"].startswith("sha256:")
+
+
+def test_build_omi_canonical_event_emits_language_independent_grounding_provenance():
+    base = {
+        "id": "grounded-123",
+        "started_at": datetime(2026, 5, 7, 18, 56, 59, tzinfo=timezone.utc),
+        "finished_at": datetime(2026, 5, 7, 18, 57, 20, tzinfo=timezone.utc),
+        "structured": {"title": "A grounded visit", "overview": "A meaningful visit in the garden."},
+        "active_summary_version_id": "obs-v3",
+        "summary_versions": [{"id": "obs-v3"}],
+    }
+    english = dict(base)
+    english["transcript_segments"] = [
+        {"text": "We planted tomatoes together and planned another garden visit for next Sunday morning."}
+    ]
+    japanese = dict(base)
+    japanese["id"] = "grounded-ja"
+    japanese["transcript_segments"] = [{"text": "今日は母と一緒に庭でトマトを植えて来週また会う約束をしました"}]
+
+    english_event = build_omi_canonical_event("uid-123", english)
+    japanese_event = build_omi_canonical_event("uid-123", japanese)
+
+    english_grounding = english_event["metadata"]["today_card"]["grounding"]
+    japanese_grounding = japanese_event["metadata"]["today_card"]["grounding"]
+    assert english_grounding["grounded_content"] is True
+    assert english_grounding["transcript_word_count"] >= 12
+    assert japanese_grounding["grounded_content"] is True
+    assert japanese_grounding["transcript_non_ascii_alphanumeric_count"] >= 12
+    assert english_grounding["capture_duration_seconds"] == 21.0
+    assert japanese_grounding["capture_duration_seconds"] == 21.0
 
 
 def test_build_omi_canonical_event_json_normalizes_nested_timestamps():

@@ -165,7 +165,7 @@ def test_low_value_fragment_and_meta_summary_are_never_safe_sources():
     assert evidence_is_safe(short_capture) is False
 
 
-def test_meaningful_non_latin_and_title_rich_sources_are_safe():
+def test_meaningful_non_latin_is_safe_but_title_cannot_rescue_terse_body():
     non_latin = _source(
         TodayCardKind.recap,
         "japanese-garden",
@@ -188,7 +188,7 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
     )
 
     assert evidence_is_safe(non_latin) is True
-    assert evidence_is_safe(title_rich) is True
+    assert evidence_is_safe(title_rich) is False
 
 
 @pytest.mark.parametrize(

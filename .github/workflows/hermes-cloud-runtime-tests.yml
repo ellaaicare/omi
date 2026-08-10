@@ -120,6 +120,7 @@ on:
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
       - "backend/tests/unit/test_ella_incident_1182_*.py"
       - "backend/tests/unit/test_ella_escalations_router_auth.py"
@@ -261,6 +262,7 @@ on:
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
       - "backend/tests/unit/test_ella_incident_1182_*.py"
       - "backend/tests/unit/test_ella_escalations_router_auth.py"
@@ -768,6 +770,7 @@ jobs:
               tests/unit/test_today_card.py \
               tests/unit/test_today_card_api.py \
               tests/unit/test_today_card_postgres.py \
+              tests/unit/test_ella_canonical_omi.py \
               tests/unit/test_today_card_reinterpretation.py \
               tests/unit/test_conversation_processing_failures.py \
               tests/postgres/test_today_card_lifecycle_postgres.py |
@@ -778,6 +781,7 @@ jobs:
             "tests/unit/test_today_card_postgres.py::test_deleted_source_invalidation_is_exact_uid_and_source"
             "tests/unit/test_today_card_postgres.py::test_materialized_save_fails_closed_when_selected_source_is_tombstoned"
             "tests/unit/test_today_card_postgres.py::test_today_card_router_registration_has_no_function_local_imports"
+            "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_emits_language_independent_grounding_provenance"
             "tests/unit/test_today_card_api.py::test_internal_uid_mutations_require_exact_service_subject"
             "tests/unit/test_today_card_api.py::test_cross_account_materialize_due_route_is_not_exposed"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
@@ -795,6 +799,7 @@ jobs:
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
             tests/unit/test_today_card_postgres.py \
+            tests/unit/test_ella_canonical_omi.py \
             tests/unit/test_today_card_reinterpretation.py \
             tests/unit/test_conversation_processing_failures.py \
             tests/postgres/test_today_card_lifecycle_postgres.py \

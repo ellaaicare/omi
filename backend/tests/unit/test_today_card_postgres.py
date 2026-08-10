@@ -10,11 +10,16 @@ from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEve
 from ella.services import today_card_postgres
 from ella.services.today_card import (
     DeterministicTodayCardRenderer,
+    TodayCardAvoidance,
     TodayCardContent,
     TodayCardKind,
+    TodayCardMaterializationClaim,
+    TodayCardMaterializer,
     TodayCardRecord,
     TodayCardSourceRef,
     TodayCardState,
+    TodayCardUserContext,
+    deterministic_card_id,
     sha256_ref,
     today_card_source_pack,
 )
@@ -23,7 +28,18 @@ from ella.services.today_card_postgres import PostgresTodayCardRepository
 NOW = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
 
 
-def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none"):
+def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none", grounded=True):
+    today_card = {}
+    if grounded:
+        today_card["grounding"] = {
+            "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+            "grounded_content": True,
+            "source_version_id": version,
+            "transcript_hash": "sha256:" + ("a" * 64),
+            "transcript_word_count": 14,
+            "transcript_non_ascii_alphanumeric_count": 0,
+            "capture_duration_seconds": 18.0,
+        }
     return {
         "event_id": "omi:conversation-a:summary",
         "text": "Grounded body with a useful remembered detail.",
@@ -37,6 +53,7 @@ def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_pol
         "metadata": {
             "adapter": "omi-enriched-conversation",
             "structured": {"title": "Grounded", "overview": "Grounded body with a useful remembered detail."},
+            "today_card": today_card,
         },
     }
 
@@ -87,6 +104,53 @@ class Pool:
 
     async def fetch(self, *_args):
         return []
+
+
+class MaterializationRepository:
+    def __init__(self, evidence):
+        self.evidence = [evidence]
+        self.current = None
+
+    async def get_user_context(self, uid):
+        return TodayCardUserContext(uid=uid, timezone="UTC", canonical_event_count=1)
+
+    async def get_current(self, _uid, _local_date):
+        return self.current
+
+    async def claim_materialization(self, *, uid, local_date, timezone_name, now, force_regenerate):
+        del force_regenerate
+        self.current = TodayCardRecord(
+            card_id=deterministic_card_id(uid, local_date),
+            uid=uid,
+            local_date=local_date,
+            timezone=timezone_name,
+            version=1,
+            state=TodayCardState.preparing,
+            updated_at=now,
+        )
+        return TodayCardMaterializationClaim(card=self.current, acquired=True)
+
+    async def load_evidence(self, **_kwargs):
+        return self.evidence
+
+    async def load_avoidance(self, _uid, _local_date):
+        return TodayCardAvoidance()
+
+    async def sources_are_current(self, _card):
+        return True
+
+    async def save_materialized(self, card):
+        self.current = card
+        return card
+
+
+def _materialize_evidence(evidence):
+    return asyncio.run(
+        TodayCardMaterializer(
+            MaterializationRepository(evidence),
+            clock=lambda: NOW,
+        ).materialize("uid-a", date(2026, 8, 1))
+    ).card
 
 
 def test_sources_are_current_requires_exact_owner_conversation_and_active_version():
@@ -163,6 +227,17 @@ def test_source_less_card_becomes_stale_when_delayed_canonical_evidence_arrives(
                     "metadata": {
                         "adapter": "omi-enriched-conversation",
                         "structured": {"title": "Late source", "overview": "A delayed but eligible source."},
+                        "today_card": {
+                            "grounding": {
+                                "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+                                "grounded_content": True,
+                                "source_version_id": "summary-v1",
+                                "transcript_hash": "sha256:" + ("a" * 64),
+                                "transcript_word_count": 14,
+                                "transcript_non_ascii_alphanumeric_count": 0,
+                                "capture_duration_seconds": 18.0,
+                            }
+                        },
                     },
                 }
             ]
@@ -583,7 +658,7 @@ def test_internal_assessment_risk_and_string_booleans_fail_closed():
 
 
 def test_enriched_adapter_does_not_promote_missing_context_meta_summary():
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A very short moment",
         "overview": (
@@ -613,7 +688,7 @@ def test_enriched_adapter_does_not_promote_missing_context_meta_summary():
     ],
 )
 def test_enriched_adapter_rejects_alternative_insufficient_capture_commentary(summary):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
@@ -647,7 +722,7 @@ def test_enriched_adapter_rejects_alternative_insufficient_capture_commentary(su
     ],
 )
 def test_enriched_adapter_rejects_structural_insufficiency_commentary(summary):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
@@ -667,7 +742,7 @@ def test_enriched_adapter_rejects_structural_insufficiency_commentary(summary):
     assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
-def test_enriched_adapter_keeps_substantive_title_with_terse_summary():
+def test_enriched_adapter_rejects_terse_summary_despite_substantive_title_and_provenance():
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": "Alex and Priya planted tomatoes together",
@@ -681,9 +756,9 @@ def test_enriched_adapter_keeps_substantive_title_with_terse_summary():
     )
 
     assert evidence is not None
-    assert evidence.meaningful is True
-    assert evidence.confidence == 0.82
-    assert today_card_postgres.evidence_is_safe(evidence) is True
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
 @pytest.mark.parametrize(
@@ -749,7 +824,7 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
     ],
 )
 def test_enriched_adapter_rejects_source_commentary_without_structured_content_provenance(summary):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
@@ -813,7 +888,7 @@ def test_enriched_adapter_rejects_source_commentary_without_structured_content_p
     ],
 )
 def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
@@ -839,7 +914,7 @@ def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary
     ],
 )
 def test_partial_explicit_quality_cannot_override_source_commentary(quality_key, quality_value):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": "The recording was too short to summarize what happened.",
@@ -860,7 +935,7 @@ def test_partial_explicit_quality_cannot_override_source_commentary(quality_key,
 
 def test_complete_quality_metrics_cannot_override_pure_source_commentary():
     summary = "The recording was too short to summarize what happened. No useful context was available."
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": "A captured moment",
         "overview": summary,
@@ -881,9 +956,113 @@ def test_complete_quality_metrics_cannot_override_pure_source_commentary():
     assert summary in evidence.summary
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "La grabación era demasiado corta para resumir lo ocurrido.",
+        "L’enregistrement était trop court pour résumer ce qui s’est passé.",
+        "录音太短，无法总结发生了什么。",
+        "كان التسجيل قصيرًا جدًا بحيث لا يمكن تلخيص ما حدث.",
+        "Die Aufnahme war zu kurz, um zusammenzufassen, was passiert ist.",
+    ],
+)
+def test_unproven_multilingual_commentary_fails_closed_through_materialization(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["today_card"]["meaningful"] = True
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+    card = _materialize_evidence(evidence)
+    serialized = card.model_dump_json()
+    assert card.state == TodayCardState.degraded
+    assert card.reason_code == "no_safe_source"
+    assert card.content is None
+    assert summary not in serialized
+
+
+@pytest.mark.parametrize(
+    ("title", "summary"),
+    [
+        ("庭の思い出", "今日は母と庭でトマトを植えました。"),
+        ("Una tarde tranquila", "Plantamos tomates juntos en el jardín."),
+        ("زيارة عائلية", "تحدثنا وضحكنا معًا في الحديقة."),
+    ],
+)
+def test_structurally_grounded_unicode_content_remains_eligible(title, summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": title,
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is True
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+    card = _materialize_evidence(evidence)
+    assert card.state == TodayCardState.ready
+    assert card.content is not None
+    assert card.content.body == summary
+    assert summary in card.content.spoken_text
+
+
+@pytest.mark.parametrize(
+    "grounding",
+    [
+        None,
+        {},
+        {"contract_version": "ella.today_card.grounding.v0", "grounded_content": True},
+        {
+            "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+            "grounded_content": False,
+            "source_version_id": "summary-v2",
+        },
+        {
+            "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+            "grounded_content": True,
+            "source_version_id": "wrong-version",
+        },
+    ],
+)
+def test_legacy_adapter_requires_exact_grounding_provenance(grounding):
+    row = _summary_row(grounded=False)
+    row["metadata"]["today_card"] = {"grounding": grounding}
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
 @pytest.mark.parametrize("with_quality", [False, True])
 def test_enriched_adapter_rejects_one_word_body_despite_generic_title(with_quality):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     structured = {
         "title": "A captured moment",
         "overview": "So",
@@ -959,7 +1138,7 @@ def test_enriched_adapter_preserves_multiline_punctuation_in_rendered_output(sum
     ],
 )
 def test_enriched_adapter_rejects_low_value_summary_despite_substantive_title(title):
-    row = _summary_row()
+    row = _summary_row(grounded=False)
     row["metadata"]["structured"] = {
         "title": title,
         "overview": "The recording was too short to provide a useful summary.",

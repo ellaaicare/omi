@@ -22,6 +22,7 @@ TODAY_CARD_TOPIC_COOLDOWN_DAYS = 14
 TODAY_CARD_MIN_CONFIDENCE = 0.75
 TODAY_CARD_MIN_SOURCE_WORDS = 4
 TODAY_CARD_MIN_TRANSCRIPT_WORDS = 12
+TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC = 12
 TODAY_CARD_MIN_CAPTURE_SECONDS = 8.0
 
 _DENIED_PRIVACY_SCOPES = {
@@ -288,14 +289,7 @@ def _summary_is_low_value_commentary(summary: str) -> bool:
 
 
 def _summary_has_minimum_grounding(summary: str) -> bool:
-    if _text_has_substance(summary):
-        return True
-
-    words = _WORD.findall(summary)
-    if len(words) != 1:
-        return False
-    alphanumeric = [character.casefold() for character in summary if character.isalnum()]
-    return len(alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
+    return _text_has_substance(summary)
 
 
 def source_text_is_meaningful(title: str, summary: str) -> bool:
