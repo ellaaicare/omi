@@ -67,14 +67,20 @@ _LOW_VALUE_SOURCE_LIMITATION = (
     re.compile(
         r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,32}\b(?:"
         r"(?:entirely|mostly)\s+(?:silent|silence)|"
-        r"(?:captured|contained|had|included)\s+no\s+(?:audio|speech|words?))\b",
+        r"(?:dead\s+quiet|pure\s+static)|"
+        r"(?:captured|contained|had|included)\s+(?:no|zero)\s+(?:audio|speech|words?))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:録音|音声|クリップ|文字起こし).{0,24}(?:短すぎ|短い|不十分|無音|雑音|言葉がない|音声がない)",
         re.IGNORECASE,
     ),
 )
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
     r"\b(?:recap|summar(?:y|iz(?:e|ed|ing)|is(?:e|ed|ing))|to\s+(?:determine|infer|know|tell|understand)|"
     r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
-    r"only\s+(?:the\s+)?(?:fragment|word|words))\b",
+    r"only\s+(?:the\s+)?(?:fragment|word|words))\b|"
+    r"(?:要約|判断|推測|理解).{0,12}(?:でき(?:な|ません|ず)|不能|困難)",
     re.IGNORECASE,
 )
 
@@ -281,16 +287,24 @@ def _summary_is_low_value_commentary(summary: str) -> bool:
     return has_source_limitation and has_summary_outcome
 
 
-def source_text_is_meaningful(
-    title: str,
-    summary: str,
-    *,
-    has_explicit_quality_metrics: bool = False,
-) -> bool:
-    """Fail closed on legacy source-quality commentary before it can render."""
+def _summary_has_minimum_grounding(summary: str) -> bool:
+    if _text_has_substance(summary):
+        return True
+
+    words = _WORD.findall(summary)
+    if len(words) != 1:
+        return False
+    alphanumeric = [character.casefold() for character in summary if character.isalnum()]
+    return len(alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
+
+
+def source_text_is_meaningful(title: str, summary: str) -> bool:
+    """Require a grounded body and reject source-quality commentary before render."""
     normalized_title = _WHITESPACE.sub(" ", title).strip()
     normalized_summary = _WHITESPACE.sub(" ", summary).strip()
-    if not has_explicit_quality_metrics and _summary_is_low_value_commentary(summary):
+    if _summary_is_low_value_commentary(normalized_summary):
+        return False
+    if not _summary_has_minimum_grounding(normalized_summary):
         return False
     return _text_has_substance(f"{normalized_title} {normalized_summary}".strip())
 
@@ -309,13 +323,7 @@ def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
         return False
     if not evidence.title and not evidence.summary:
         return False
-    if not source_text_is_meaningful(
-        evidence.title,
-        evidence.summary,
-        has_explicit_quality_metrics=(
-            evidence.transcript_word_count is not None and evidence.capture_duration_seconds is not None
-        ),
-    ):
+    if not source_text_is_meaningful(evidence.title, evidence.summary):
         return False
     if evidence.transcript_word_count is not None and evidence.transcript_word_count < TODAY_CARD_MIN_TRANSCRIPT_WORDS:
         return False

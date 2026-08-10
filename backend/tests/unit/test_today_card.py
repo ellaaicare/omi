@@ -146,6 +146,7 @@ def test_low_value_fragment_and_meta_summary_are_never_safe_sources():
         }
     )
     one_word = fragment.model_copy(update={"title": "So", "summary": "So"})
+    generic_title_one_word = fragment.model_copy(update={"title": "A captured moment", "summary": "So"})
     short_transcript = _source(
         TodayCardKind.recap,
         "short-transcript",
@@ -159,6 +160,7 @@ def test_low_value_fragment_and_meta_summary_are_never_safe_sources():
 
     assert evidence_is_safe(fragment) is False
     assert evidence_is_safe(one_word) is False
+    assert evidence_is_safe(generic_title_one_word) is False
     assert evidence_is_safe(short_transcript) is False
     assert evidence_is_safe(short_capture) is False
 
@@ -219,6 +221,10 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
         ("The recording was too short to summarize what happened. " "The rest was silence."),
         "The audio was entirely silent and could not be summarized.",
         "The clip contained no speech and could not be summarized.",
+        "The recording was pure static and could not be summarized.",
+        "The audio was dead quiet and impossible to summarize.",
+        "The clip had zero words and could not be summarized.",
+        "録音が短すぎて内容を要約できませんでした。",
         ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
         ("The recording was too short to summarize what happened. " "Everything was lost."),
         ("The recording was too short to summarize what happened. " "It did not provide any new information."),

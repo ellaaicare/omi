@@ -240,11 +240,7 @@ def _evidence_from_row(
         structured.get("duration_seconds"),
         metadata.get("duration_seconds"),
     )
-    source_text_meaningful = source_text_is_meaningful(
-        title,
-        summary,
-        has_explicit_quality_metrics=(transcript_word_count is not None and capture_duration_seconds is not None),
-    )
+    source_text_meaningful = source_text_is_meaningful(title, summary)
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = (
             0.82 if adapter == "omi-enriched-conversation" and source_version_id and source_text_meaningful else 0.0

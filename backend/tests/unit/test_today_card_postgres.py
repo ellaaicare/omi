@@ -748,7 +748,7 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
         ),
     ],
 )
-def test_enriched_adapter_keeps_quality_backed_substantive_documentary_editing_summary(summary):
+def test_enriched_adapter_rejects_source_commentary_without_structured_content_provenance(summary):
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": "A captured moment",
@@ -764,9 +764,9 @@ def test_enriched_adapter_keeps_quality_backed_substantive_documentary_editing_s
     )
 
     assert evidence is not None
-    assert evidence.meaningful is True
-    assert evidence.confidence == 0.82
-    assert today_card_postgres.evidence_is_safe(evidence) is True
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
 @pytest.mark.parametrize(
@@ -798,6 +798,10 @@ def test_enriched_adapter_keeps_quality_backed_substantive_documentary_editing_s
         ("The recording was too short to summarize what happened. " "The rest was silence."),
         "The audio was entirely silent and could not be summarized.",
         "The clip contained no speech and could not be summarized.",
+        "The recording was pure static and could not be summarized.",
+        "The audio was dead quiet and impossible to summarize.",
+        "The clip had zero words and could not be summarized.",
+        "録音が短すぎて内容を要約できませんでした。",
         ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
         ("The recording was too short to summarize what happened. " "Everything was lost."),
         ("The recording was too short to summarize what happened. " "It did not provide any new information."),
@@ -834,7 +838,7 @@ def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary
         ("duration_seconds", 18.0),
     ],
 )
-def test_legacy_adapter_requires_complete_explicit_quality_to_override_source_commentary(quality_key, quality_value):
+def test_partial_explicit_quality_cannot_override_source_commentary(quality_key, quality_value):
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": "A captured moment",
@@ -854,16 +858,62 @@ def test_legacy_adapter_requires_complete_explicit_quality_to_override_source_co
     assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
+def test_complete_quality_metrics_cannot_override_pure_source_commentary():
+    summary = "The recording was too short to summarize what happened. No useful context was available."
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+    assert summary in evidence.summary
+
+
+@pytest.mark.parametrize("with_quality", [False, True])
+def test_enriched_adapter_rejects_one_word_body_despite_generic_title(with_quality):
+    row = _summary_row()
+    structured = {
+        "title": "A captured moment",
+        "overview": "So",
+    }
+    if with_quality:
+        structured.update({"transcript_word_count": 24, "duration_seconds": 18.0})
+    row["metadata"]["structured"] = structured
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
 @pytest.mark.parametrize(
     ("summary", "expected"),
     [
         (
-            "The recording was too short to summarize the documentary,\nand everyone chose the missing scenes to film next.",
-            "The recording was too short to summarize the documentary, and everyone chose the missing scenes to film next.",
+            "Everyone chose the missing documentary scenes,\nand planned a second filming day.",
+            "Everyone chose the missing documentary scenes, and planned a second filming day.",
         ),
         (
-            "The recording was too short to summarize the documentary —\neveryone planned a second filming day.",
-            "The recording was too short to summarize the documentary — everyone planned a second filming day.",
+            "Maria described the neighborhood garden —\neveryone planned another visit.",
+            "Maria described the neighborhood garden — everyone planned another visit.",
         ),
     ],
 )
