@@ -179,11 +179,14 @@ extension FlutterError: Error {}
         binaryMessenger: controller.binaryMessenger
     )
     audioRouteChannel?.setMethodCallHandler { [weak self] (call, result) in
-        guard call.method == "getCurrentRoute" else {
+        switch call.method {
+        case "getCurrentRoute":
+            result(self?.currentAudioRoutePayload() ?? [:])
+        case "ensureAudibleVoiceOutput":
+            result(self?.ensureAudibleVoiceOutput() ?? ["success": false])
+        default:
             result(FlutterMethodNotImplemented)
-            return
         }
-        result(self?.currentAudioRoutePayload() ?? [:])
     }
     print("AppDelegate: Audio Route MethodChannel registered")
 
@@ -290,15 +293,42 @@ extension FlutterError: Error {}
           .bluetoothLE,
           .headphones,
       ]
-      let outputType = output?.portType ?? .builtInSpeaker
-      let hasHeadset = privateOutputTypes.contains(outputType)
+      let outputType = output?.portType
+      let hasHeadset = outputType.map(privateOutputTypes.contains) ?? false
 
       return [
-          "outputName": output?.portName ?? "iPhone speaker",
-          "outputType": outputType.rawValue,
+          "outputName": output?.portName ?? "",
+          "outputType": outputType?.rawValue ?? "",
+          "hasOutput": output != nil,
           "hasHeadset": hasHeadset,
           "usesPhoneSpeaker": outputType == .builtInSpeaker,
+          "usesReceiver": outputType == .builtInReceiver,
       ]
+  }
+
+  private func ensureAudibleVoiceOutput() -> [String: Any] {
+      let audioSession = AVAudioSession.sharedInstance()
+      do {
+          try audioSession.setCategory(
+              .playAndRecord,
+              mode: .voiceChat,
+              options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
+          )
+          try audioSession.setActive(true, options: [])
+
+          let outputType = audioSession.currentRoute.outputs.first?.portType
+          if outputType == nil || outputType == .builtInReceiver {
+              try audioSession.overrideOutputAudioPort(.speaker)
+          }
+
+          var payload = currentAudioRoutePayload()
+          payload["success"] = payload["hasOutput"] as? Bool == true && payload["usesReceiver"] as? Bool != true
+          return payload
+      } catch {
+          var payload = currentAudioRoutePayload()
+          payload["success"] = false
+          return payload
+      }
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {

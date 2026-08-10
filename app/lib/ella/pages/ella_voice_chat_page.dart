@@ -24,6 +24,7 @@ import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/standard_voice_turn.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
@@ -76,6 +77,10 @@ class EllaVoiceChatPage extends StatefulWidget {
 
   @visibleForTesting
   static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
+
+  @visibleForTesting
+  static bool shouldResumeAfterStandardTurn(StandardVoiceTurnResult result) =>
+      result.reply.isEmpty || result.usedOnDeviceTts;
 
   @visibleForTesting
   static bool shouldInitializeSpeech(EllaVoiceDemoState? demoState) => demoState == null;
@@ -1206,7 +1211,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             playFile: (audioPath) async {
               if (!mounted || !operation.isCurrent) return;
               debugPrint('[VoiceChat] Playing authority-bound audio: $audioPath');
-              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) return;
+              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) {
+                throw const StandardVoicePlaybackUnavailable();
+              }
               if (!mounted || !operation.isCurrent) return;
               await _audioPlayer.setVolume(1.0);
               if (!mounted || !operation.isCurrent) return;
@@ -1217,7 +1224,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           );
 
           if (!mounted || !operation.isCurrent || result.discarded) return;
-          if (result.reply.isEmpty || result.usedOnDeviceTts) {
+          if (EllaVoiceChatPage.shouldResumeAfterStandardTurn(result)) {
             if (_voiceModeActive) {
               _startListening();
             } else {
@@ -1278,6 +1285,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     );
     if (isCurrent?.call() == false) return false;
     await session.setActive(true);
+    if (isCurrent?.call() == false) return false;
+    if (!await EllaVoiceAudioRoute.ensureAudibleOutput()) return false;
     if (isCurrent?.call() == false) return false;
     debugPrint('[VoiceChat] Audio session prepared for TTS playback');
     return true;

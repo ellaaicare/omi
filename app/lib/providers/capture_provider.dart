@@ -68,6 +68,20 @@ enum PhoneCaptureStartResult {
   cancelled,
 }
 
+@visibleForTesting
+class PhoneCaptureStartProof {
+  final Completer<void> _firstAudioFrame = Completer<void>();
+
+  bool acceptFrame(List<int> bytes) {
+    if (bytes.isEmpty) return false;
+    if (!_firstAudioFrame.isCompleted) _firstAudioFrame.complete();
+    return true;
+  }
+
+  Future<void> waitForAudio({Duration timeout = const Duration(seconds: 5)}) =>
+      _firstAudioFrame.future.timeout(timeout);
+}
+
 class CaptureProvider extends ChangeNotifier
     with MessageNotifierMixin, WidgetsBindingObserver
     implements ITransctiptSegmentSocketServiceListener {
@@ -1101,23 +1115,35 @@ class CaptureProvider extends ChangeNotifier
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
 
-    // record
+    // A native start receipt proves the recorder is physically running. The
+    // first non-empty frame additionally proves that audio reached this
+    // account-scoped transcription boundary before Home reports success.
+    final startProof = PhoneCaptureStartProof();
     try {
       await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
-        if (_isCaptureCurrent(generation, captureAuthority) && _socket?.state == SocketServiceState.connected) {
+        if (_isCaptureCurrent(generation, captureAuthority) &&
+            _socket?.state == SocketServiceState.connected &&
+            startProof.acceptFrame(bytes)) {
           _socket?.send(bytes);
         }
       }, onRecording: () {
-        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.record);
+        // The isolate receipt is authoritative for physical start. Keep the UI
+        // initialising until the first frame also reaches transcription.
       }, onStop: () {
         if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
       }, onInitializing: () {
         if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
       });
+      await startProof.waitForAudio();
     } catch (error) {
-      Logger.error('Phone microphone could not start: $error');
+      Logger.error('Phone microphone did not produce an acknowledged audio frame: $error');
       updateRecordingState(RecordingState.stop);
-      await _socket?.stop(reason: 'phone recorder unavailable');
+      try {
+        await ServiceManager.instance().mic.stop();
+      } catch (stopError) {
+        Logger.error('Phone microphone cleanup failed after start failure: $stopError');
+      }
+      await _socket?.stop(reason: 'phone recorder did not produce audio');
       return PhoneCaptureStartResult.recorderUnavailable;
     }
     if (!_isCaptureCurrent(generation, captureAuthority)) {
@@ -1133,12 +1159,7 @@ class CaptureProvider extends ChangeNotifier
       await _socket?.stop(reason: 'phone capture transcript disconnected');
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
-    if (recordingState != RecordingState.record) {
-      await ServiceManager.instance().mic.stop();
-      updateRecordingState(RecordingState.stop);
-      await _socket?.stop(reason: 'phone recorder did not start');
-      return PhoneCaptureStartResult.recorderUnavailable;
-    }
+    updateRecordingState(RecordingState.record);
     // Capture has actually started; do not send location for failed attempts.
     _sendCurrentGeolocation();
     return PhoneCaptureStartResult.started;

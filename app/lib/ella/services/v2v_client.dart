@@ -13,6 +13,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -258,7 +259,6 @@ class V2VClient {
   static const int _pcmSampleRate = 24000;
   static const int _pcmBytesPerSample = 2;
   static const int _pcmChannels = 1;
-  static const Duration _postPlaybackMicCooldown = Duration(seconds: 2);
   static const Duration _playbackFinishQuietPeriod = Duration(milliseconds: 900);
 
   static V2VClient? _activeClient;
@@ -296,6 +296,8 @@ class V2VClient {
   bool _streamPlaybackStarted = false;
   DateTime? _streamPlaybackStartedAt;
   Future<void> _streamFeedFuture = Future.value();
+  int _streamFeedGeneration = 0;
+  bool _streamFeedRecoveryActive = false;
   Timer? _finishPlaybackTimer;
   bool _finishingPlayback = false;
 
@@ -308,6 +310,10 @@ class V2VClient {
   final Future<void> Function(V2VProtectedEgressBoundary boundary)? _beforeProtectedEgress;
   final void Function(V2VProtectedEgressBoundary boundary)? _onProtectedEgress;
   final Future<bool> Function()? _microphoneStarter;
+  final Future<bool> Function() _audibleOutputEnforcer;
+  final Future<void> Function()? _streamPlaybackStarter;
+  final bool Function()? _liveChannelForTesting;
+  final Duration _playbackMicCooldown;
 
   V2VClient({
     this.onEvent,
@@ -315,9 +321,17 @@ class V2VClient {
     @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
     @visibleForTesting Future<bool> Function()? microphoneStarter,
+    @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
+    @visibleForTesting Future<void> Function()? streamPlaybackStarter,
+    @visibleForTesting bool Function()? liveChannelForTesting,
+    @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
-        _microphoneStarter = microphoneStarter;
+        _microphoneStarter = microphoneStarter,
+        _audibleOutputEnforcer = audibleOutputEnforcer ?? EllaVoiceAudioRoute.ensureAudibleOutput,
+        _streamPlaybackStarter = streamPlaybackStarter,
+        _liveChannelForTesting = liveChannelForTesting,
+        _playbackMicCooldown = playbackMicCooldown;
 
   bool get isConnected => _isConnected;
 
@@ -326,6 +340,21 @@ class V2VClient {
 
   @visibleForTesting
   bool get hasActiveConsentLeaseForTesting => _aiConsentLease?.isActive == true;
+
+  @visibleForTesting
+  bool get micMutedForTesting => _micMuted;
+
+  @visibleForTesting
+  bool get micSuspendedForPlaybackForTesting => _micSuspendedForPlayback;
+
+  @visibleForTesting
+  void markConnectedForTesting() => _isConnected = true;
+
+  @visibleForTesting
+  void streamAudioChunkForTesting(Uint8List pcmData) => _streamAudioChunk(pcmData);
+
+  @visibleForTesting
+  Future<void> waitForStreamFeedForTesting() => _streamFeedFuture;
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
@@ -823,6 +852,7 @@ class V2VClient {
 
   /// Interrupt current playback (e.g., user started speaking).
   Future<void> interruptPlayback() async {
+    _streamFeedGeneration++;
     if (_isPlaying) {
       try {
         await _stopStreamingPlayback();
@@ -852,6 +882,8 @@ class V2VClient {
   }
 
   void _resetTurnState() {
+    _streamFeedGeneration++;
+    _streamFeedRecoveryActive = false;
     _isPlaying = false;
     _micMuted = false;
     _micSuspendedForPlayback = false;
@@ -885,6 +917,9 @@ class V2VClient {
       ),
     );
     await session.setActive(true);
+    if (!await _audibleOutputEnforcer()) {
+      throw StateError('Ella voice output route could not be made audible');
+    }
     Logger.debug('[V2V] Audio session: playAndRecord + defaultToSpeaker + BT + AirPlay');
   }
 
@@ -1173,6 +1208,8 @@ class V2VClient {
       _aiConsentLease = null;
       return false;
     }
+    _micMuted = false;
+    _micSuspendedForPlayback = false;
     return true;
   }
 
@@ -1274,12 +1311,12 @@ class V2VClient {
       return;
     }
 
-    Logger.debug('[V2V] Mic gate cooldown: ${_postPlaybackMicCooldown.inMilliseconds}ms');
+    Logger.debug('[V2V] Mic gate cooldown: ${_playbackMicCooldown.inMilliseconds}ms');
     onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic gate cooldown'));
-    await Future.delayed(_postPlaybackMicCooldown);
+    await Future.delayed(_playbackMicCooldown);
     await _micGateFuture;
 
-    if (!_isConnected || _channel == null) {
+    if (!_hasLiveSessionTransport) {
       Logger.debug('[V2V] Mic gate remains closed: session disconnected');
       _micSuspendedForPlayback = false;
       _micMuted = false;
@@ -1302,14 +1339,21 @@ class V2VClient {
       await _handleRuntimeAuthorityLoss();
       return;
     }
-    await _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
+    final resumed = await _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
+    if (!resumed) await disconnect();
   }
+
+  bool get _hasLiveSessionTransport => _isConnected && (_channel != null || _liveChannelForTesting?.call() == true);
+
+  bool _isCurrentStreamFeed(int generation) =>
+      generation == _streamFeedGeneration && !_streamFeedRecoveryActive && _hasLiveSessionTransport;
 
   // --- Low-latency PCM streaming playback ---
 
   /// Stream incoming PCM16 audio chunk to the platform player.
   void _streamAudioChunk(Uint8List pcmData) {
-    if (pcmData.isEmpty) return;
+    if (pcmData.isEmpty || _streamFeedRecoveryActive || !_hasLiveSessionTransport) return;
+    final generation = _streamFeedGeneration;
 
     // Gate the microphone before enqueueing playback so provider VAD cannot
     // hear Ella's own response audio and interrupt the active turn.
@@ -1318,13 +1362,23 @@ class V2VClient {
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
-    _streamFeedFuture = _streamFeedFuture.then((_) async {
+    _streamFeedFuture = _streamFeedFuture.then<void>((_) async {
+      if (!_isCurrentStreamFeed(generation)) return;
+      // A prior feed may have completed failure recovery and reopened the
+      // microphone while this operation was queued. Re-establish and await the
+      // gate immediately before every surviving playback start.
+      _suspendMicForPlayback('queued_audio_chunk');
+      await _micGateFuture;
+      if (!_isCurrentStreamFeed(generation)) return;
       await _ensureStreamingPlaybackStarted();
+      if (!_isCurrentStreamFeed(generation)) {
+        await _stopStreamingPlayback();
+        return;
+      }
       _streamPlayer.uint8ListSink?.add(pcmData);
-    }).catchError((error) {
-      Logger.error('[V2V] Stream playback feed error: $error');
-      onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
-    });
+    }).catchError(
+      (Object error, StackTrace stackTrace) => _recoverFromStreamFeedFailure(error, stackTrace, generation),
+    );
 
     if (_chunkCount == 1) {
       onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
@@ -1337,6 +1391,12 @@ class V2VClient {
   }
 
   Future<void> _ensureStreamingPlaybackStarted() async {
+    final injectedStarter = _streamPlaybackStarter;
+    if (injectedStarter != null) {
+      await injectedStarter();
+      return;
+    }
+
     if (!_streamPlayerOpen) {
       await _streamPlayer.openPlayer();
       _streamPlayerOpen = true;
@@ -1344,16 +1404,62 @@ class V2VClient {
 
     if (_streamPlaybackStarted) return;
 
-    _isPlaying = true;
-    _streamPlaybackStarted = true;
+    if (!await _audibleOutputEnforcer()) {
+      throw StateError('Ella voice output route could not be made audible');
+    }
+
+    await _streamPlayer.setVolume(1.0);
     await _streamPlayer.startPlayerFromStream(
       codec: Codec.pcm16,
       sampleRate: _pcmSampleRate,
       numChannels: _pcmChannels,
       bufferSize: 4096,
     );
+    _isPlaying = true;
+    _streamPlaybackStarted = true;
     _streamPlaybackStartedAt = DateTime.now();
     Logger.debug('[V2V] PCM stream player started');
+  }
+
+  Future<void> _recoverFromStreamFeedFailure(Object error, StackTrace stackTrace, int generation) async {
+    if (generation != _streamFeedGeneration || _streamFeedRecoveryActive) return;
+    _streamFeedRecoveryActive = true;
+    _streamFeedGeneration++;
+    Logger.error('[V2V] Stream playback feed error: $error');
+    onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
+    _finishPlaybackTimer?.cancel();
+    _finishPlaybackTimer = null;
+    try {
+      await _stopStreamingPlayback();
+    } catch (_) {}
+    _isPlaying = false;
+    _streamPlaybackStarted = false;
+    _streamPlaybackStartedAt = null;
+    _pcmBuffer.clear();
+    _chunkCount = 0;
+
+    try {
+      if (_hasLiveSessionTransport && _hasCurrentSessionAuthority() && _aiConsentLease?.isActive == true) {
+        await _resumeMicAfterPlayback();
+      } else if (_isConnected) {
+        await disconnect();
+      } else {
+        _micSuspendedForPlayback = false;
+        _micMuted = false;
+      }
+    } catch (recoveryError) {
+      Logger.error('[V2V] Stream playback recovery failed: ${recoveryError.runtimeType}');
+      try {
+        await disconnect();
+      } catch (_) {}
+    } finally {
+      if (!_isConnected) {
+        _micSuspendedForPlayback = false;
+        _micMuted = false;
+      }
+      _streamFeedRecoveryActive = false;
+      onEvent?.call(const V2VEvent(type: 'playback_complete'));
+    }
   }
 
   Future<void> _stopStreamingPlayback() async {
