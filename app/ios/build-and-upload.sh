@@ -327,13 +327,22 @@ log "Signing with rcodesign (Distribution)"
   -e "$ENTITLEMENTS" \
   "$APP_BUNDLE"
 
-# Verify
-AUTHORITY=$(codesign -dvvv "$APP_BUNDLE" 2>&1 | grep "^Authority=" | head -1)
-log "Signature: $AUTHORITY"
-if [[ "$AUTHORITY" != *"Apple Distribution"* ]]; then
-  echo "ERROR: App not signed with Distribution cert"
+# Verify with rcodesign as well; the host's system verifier is not reliable for
+# distribution signatures in this environment.
+SIGNATURE_INFO="/tmp/ella-rcodesign-signature-info.yaml"
+APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_BUNDLE/Info.plist")"
+APP_EXECUTABLE="$APP_BUNDLE/$APP_EXECUTABLE_NAME"
+if [ ! -f "$APP_EXECUTABLE" ]; then
+  echo "ERROR: Signed app executable is missing"
   exit 1
 fi
+"$RCODESIGN" verify "$APP_EXECUTABLE"
+"$RCODESIGN" print-signature-info "$APP_BUNDLE" > "$SIGNATURE_INFO"
+if ! grep -q "apple_certificate_profile: apple-distribution" "$SIGNATURE_INFO"; then
+  echo "ERROR: App signature does not contain an Apple Distribution certificate profile"
+  exit 1
+fi
+log "Signature verified by rcodesign with Apple Distribution profile"
 
 # ── Step 9: Package IPA ──────────────────────────────────────
 log "Packaging IPA"
