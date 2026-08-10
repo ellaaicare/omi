@@ -5,9 +5,10 @@ import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class TodayCardSurface extends StatelessWidget {
-  const TodayCardSurface({super.key, required this.state, required this.onTalk});
+  const TodayCardSurface({super.key, required this.state, required this.onReadMore, required this.onTalk});
 
   final TodayCardViewState state;
+  final VoidCallback? onReadMore;
   final VoidCallback? onTalk;
 
   static const double _botanicalOpacity = 0.18;
@@ -17,6 +18,9 @@ class TodayCardSurface extends StatelessWidget {
     final card = state.card;
     final content = card == null ? _fallbackContent(context, state) : _TodayCardContent.fromCard(context, card);
     final showBotanical = card != null && _showsBotanical(card);
+    final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
+    final headlineLines = card == null ? null : 2;
+    final bodyLines = card == null ? null : (textScale > 1.3 ? 2 : 4);
 
     return EllaCardSurface(
       borderRadius: 24,
@@ -57,6 +61,8 @@ class TodayCardSurface extends StatelessWidget {
                     child: Text(
                       content.headline,
                       key: const Key('today-card-headline'),
+                      maxLines: headlineLines,
+                      overflow: headlineLines == null ? null : TextOverflow.ellipsis,
                       style: EllaTextStyles.noteBody.copyWith(fontSize: 26, height: 1.12),
                     ),
                   ),
@@ -64,6 +70,8 @@ class TodayCardSurface extends StatelessWidget {
                   Text(
                     content.body,
                     key: const Key('today-card-body'),
+                    maxLines: bodyLines,
+                    overflow: bodyLines == null ? null : TextOverflow.ellipsis,
                     style: EllaTextStyles.noteBody.copyWith(fontSize: 19, height: 1.35, fontWeight: FontWeight.w400),
                   ),
                   if (state.isCached) ...[
@@ -89,7 +97,7 @@ class TodayCardSurface extends StatelessWidget {
                     const SizedBox(height: 18),
                     const Divider(height: 1, color: EllaColors.cardDeep),
                     const SizedBox(height: 6),
-                    _TodayCardFooter(provenance: content.provenance, onTalk: onTalk),
+                    _TodayCardFooter(provenance: content.provenance, onReadMore: onReadMore, onTalk: onTalk),
                   ],
                 ],
               ),
@@ -137,9 +145,10 @@ class TodayCardSurface extends StatelessWidget {
 }
 
 class _TodayCardFooter extends StatelessWidget {
-  const _TodayCardFooter({required this.provenance, required this.onTalk});
+  const _TodayCardFooter({required this.provenance, required this.onReadMore, required this.onTalk});
 
   final String? provenance;
+  final VoidCallback? onReadMore;
   final VoidCallback? onTalk;
 
   @override
@@ -151,6 +160,17 @@ class _TodayCardFooter extends StatelessWidget {
         final source = provenance == null
             ? const SizedBox.shrink()
             : _StatusLine(key: const Key('today-card-provenance'), icon: Icons.eco_outlined, label: provenance!);
+        final readMore = TextButton(
+          key: const Key('today-card-read-more'),
+          onPressed: onReadMore,
+          style: TextButton.styleFrom(
+            foregroundColor: EllaColors.tealDeep,
+            minimumSize: const Size(0, EllaSizes.minTouchTarget),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            textStyle: EllaTextStyles.secondary.copyWith(fontSize: 15, fontWeight: FontWeight.w700),
+          ),
+          child: Text(context.l10n.todayReadMore),
+        );
         final talk = TextButton.icon(
           key: const Key('today-card-talk'),
           onPressed: onTalk,
@@ -171,17 +191,18 @@ class _TodayCardFooter extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               source,
+              Align(alignment: Alignment.centerRight, child: readMore),
               Align(alignment: Alignment.centerRight, child: talk),
             ],
           );
         }
 
-        return Row(
+        return Column(
           key: const Key('today-card-actions-row'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(child: source),
-            const SizedBox(width: 8),
-            talk,
+            source,
+            Row(mainAxisAlignment: MainAxisAlignment.end, children: [readMore, const SizedBox(width: 4), talk]),
           ],
         );
       },

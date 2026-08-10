@@ -9,8 +9,10 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/services/app_review_service.dart';
 import 'package:omi/services/notifications/merge_notification_handler.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -21,6 +23,10 @@ typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResu
 });
 
 typedef ConversationsFetchCall = Future<ConversationsFetchResult> Function();
+typedef ConversationDeleteCall = Future<bool> Function(
+  String conversationId,
+  ExactAccountAuthorityVerifier exactAuthority,
+);
 
 class _ProcessingRetryPoll {
   final String requestId;
@@ -83,8 +89,11 @@ class ConversationProvider extends ChangeNotifier {
   final RetryConversationProcessingCall _retryConversationProcessing;
   final ConversationsFetchCall? _conversationsFetch;
   final ConversationsFetchCall? _failedConversationsFetch;
+  final ConversationDeleteCall _conversationDelete;
+  final ActiveAccountAuthorityProvider _activeAuthority;
   final Duration _conversationsFetchTimeout;
   final Duration _failedConversationsFetchTimeout;
+  int _operationGeneration = 0;
 
   bool isFetchingConversations = false;
 
@@ -92,11 +101,20 @@ class ConversationProvider extends ChangeNotifier {
     RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing,
     ConversationsFetchCall? conversationsFetchCall,
     ConversationsFetchCall? failedConversationsFetchCall,
+    ConversationDeleteCall? conversationDeleteCall,
+    ActiveAccountAuthorityProvider activeAuthority = WalOwnerAuthority.activeAccount,
     Duration conversationsFetchTimeout = const Duration(seconds: 15),
     Duration failedConversationsFetchTimeout = const Duration(seconds: 8),
   })  : _retryConversationProcessing = retryConversationProcessingCall,
         _conversationsFetch = conversationsFetchCall,
         _failedConversationsFetch = failedConversationsFetchCall,
+        _conversationDelete = conversationDeleteCall ??
+            ((conversationId, authority) => deleteConversationServer(
+                  conversationId,
+                  expectedAuthenticatedUid: authority.uid,
+                  exactAuthority: authority,
+                )),
+        _activeAuthority = activeAuthority,
         _conversationsFetchTimeout = conversationsFetchTimeout,
         _failedConversationsFetchTimeout = failedConversationsFetchTimeout {
     _setupMergeListener();
@@ -111,6 +129,7 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   void reset() {
+    _operationGeneration++;
     conversations = [];
     searchedConversations = [];
     groupedConversations = {};
@@ -1089,6 +1108,39 @@ class ConversationProvider extends ChangeNotifier {
     deleteConversationServer(conversation.id);
     _groupConversationsByDateWithoutNotify();
     notifyListeners();
+  }
+
+  /// Permanently deletes an Ella journal memory only after the authenticated
+  /// server confirms deletion. A failed request leaves every local projection
+  /// intact so a transient network failure cannot masquerade as data removal.
+  Future<bool> deleteConversationPermanently(ServerConversation conversation) async {
+    final lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+    if (lease == null) return false;
+    final generation = _operationGeneration;
+    try {
+      final deleted = await _conversationDelete(conversation.id, lease);
+      if (!deleted || generation != _operationGeneration || !lease.isCurrent) return false;
+
+      conversations.removeWhere((item) => item.id == conversation.id);
+      searchedConversations.removeWhere((item) => item.id == conversation.id);
+      processingConversations.removeWhere((item) => item.id == conversation.id);
+      failedConversations.removeWhere((item) => item.id == conversation.id);
+      _groupConversationsByDateWithoutNotify();
+      final cachedConversations = SharedPreferencesUtil()
+          .cachedConversations
+          .where((item) => item.id != conversation.id)
+          .toList(growable: false);
+      SharedPreferencesUtil().cachedConversations = cachedConversations;
+      notifyListeners();
+      return true;
+    } on ExactAccountAuthorityChangedException {
+      return false;
+    } catch (_) {
+      Logger.error('Permanent memory deletion request failed');
+      return false;
+    } finally {
+      lease.close();
+    }
   }
 
   @override
