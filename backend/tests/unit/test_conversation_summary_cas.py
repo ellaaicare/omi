@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import sys
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -173,3 +175,88 @@ def test_transcript_hash_compare_and_set_publishes_once_for_exact_source(monkeyp
         is True
     )
     assert transaction.updates == [(conversation_ref, {"active_summary_version_id": "summary-v2"})]
+
+
+@pytest.mark.parametrize("protection_level", ["standard", "enhanced"])
+def test_transcript_hash_compare_and_set_uses_decrypted_transaction_snapshot(monkeypatch, protection_level):
+    conversations = _load_conversations_module(monkeypatch)
+    observed_segments = [
+        {"id": "one", "text": "The exact protected source statement.", "start": 0.0, "end": 2.0},
+        {"id": "two", "text": "A second protected source segment.", "start": 2.0, "end": 4.0},
+    ]
+    compressed = zlib.compress(json.dumps(observed_segments).encode("utf-8"))
+    stored_segments = compressed
+    if protection_level == "enhanced":
+        stored_segments = "encrypted-transcript"
+        conversations.encryption.decrypt.return_value = compressed.hex()
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "active_summary_version_id": "source-v1",
+                    "data_protection_level": protection_level,
+                    "transcript_segments": stored_segments,
+                    "transcript_segments_compressed": True,
+                },
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    conversation_ref = ConversationRef()
+    transaction = Transaction()
+    assert (
+        conversations._update_conversation_if_transcript_hash_transaction(
+            transaction,
+            conversation_ref,
+            "uid-1",
+            transcript_grounding_hash(observed_segments),
+            {"active_summary_version_id": "summary-v2"},
+            expected_active_summary_version_id="source-v1",
+        )
+        is True
+    )
+    assert transaction.updates == [(conversation_ref, {"active_summary_version_id": "summary-v2"})]
+
+
+def test_transcript_hash_compare_and_set_fails_closed_when_protected_source_cannot_decrypt(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    conversations.encryption.decrypt.side_effect = ValueError("invalid ciphertext")
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "active_summary_version_id": "source-v1",
+                    "data_protection_level": "enhanced",
+                    "transcript_segments": "invalid-ciphertext",
+                    "transcript_segments_compressed": True,
+                },
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    transaction = Transaction()
+    assert (
+        conversations._update_conversation_if_transcript_hash_transaction(
+            transaction,
+            ConversationRef(),
+            "uid-1",
+            transcript_grounding_hash([{"text": "Expected protected source."}]),
+            {"active_summary_version_id": "summary-v2"},
+        )
+        is False
+    )
+    assert transaction.updates == []

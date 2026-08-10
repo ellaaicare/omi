@@ -631,7 +631,8 @@ def _update_conversation_if_transcript_hash_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
-    if transcript_grounding_hash(conversation.get('transcript_segments') or []) != expected_transcript_hash:
+    readable_conversation = _prepare_conversation_for_read(conversation, uid) or {}
+    if transcript_grounding_hash(readable_conversation.get('transcript_segments') or []) != expected_transcript_hash:
         return False
     if expected_active_summary_version_id is not None and str(
         conversation.get('active_summary_version_id') or ''
