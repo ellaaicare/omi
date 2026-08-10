@@ -49,12 +49,13 @@ _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
 _LOW_VALUE_SOURCE_LIMITATION = (
     re.compile(
         r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,48}\b"
-        r"(?:brief|caught\s+only|captured\s+only|contains?\s+only|did\s+not\s+contain\s+enough|"
-        r"ended?\s+before\s+enough|too\s+short|too\s+little)\b",
+        r"(?:brief|caught\s+only|captured\s+only|contains?\s+only|"
+        r"did\s+not\s+(?:capture|contain|include|provide)\s+enough|ended?\s+(?:before\s+enough|prematurely)|"
+        r"inaudible|lacks?|lacked\s+(?:enough|sufficient)|too\s+(?:few|little|short)|unusable)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:brief|insufficient|too\s+little|too\s+short)\b.{0,24}\b"
+        r"\b(?:almost\s+no|brief|inaudible|insufficient|too\s+(?:few|little|short)|unusable)\b.{0,24}\b"
         r"(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b",
         re.IGNORECASE,
     ),
@@ -64,6 +65,7 @@ _LOW_VALUE_SOURCE_LIMITATION = (
         re.IGNORECASE,
     ),
 )
+_LOW_VALUE_CLAUSE_BREAK = re.compile(r"[.!?;]+|,\s*(?:and|but|so|then|yet)\s+", re.IGNORECASE)
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
     r"\b(?:recap|summar(?:y|ize|ise)|to\s+(?:determine|infer|know|tell|understand)|"
     r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
@@ -257,11 +259,9 @@ def materialization_window(local_date: date, timezone_name: str) -> tuple[dateti
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
-def _text_has_substance(text: str, *, title_only: bool = False) -> bool:
+def _text_has_substance(text: str) -> bool:
     words = _WORD.findall(text)
-    minimum_words = TODAY_CARD_MIN_SOURCE_WORDS + 1 if title_only else TODAY_CARD_MIN_SOURCE_WORDS
-    minimum_distinct = 4 if title_only else 3
-    if len(words) >= minimum_words and len({word.casefold() for word in words}) >= minimum_distinct:
+    if len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.casefold() for word in words}) >= 3:
         return True
 
     alphanumeric = [character.casefold() for character in text if character.isalnum()]
@@ -271,17 +271,24 @@ def _text_has_substance(text: str, *, title_only: bool = False) -> bool:
 
 def _summary_is_low_value_commentary(summary: str) -> bool:
     normalized = _WHITESPACE.sub(" ", summary).strip()
-    return any(pattern.search(normalized) for pattern in _LOW_VALUE_SOURCE_LIMITATION) and bool(
-        _LOW_VALUE_SUMMARY_OUTCOME.search(normalized)
-    )
+    clauses = [clause.strip(" ,:-") for clause in _LOW_VALUE_CLAUSE_BREAK.split(normalized) if clause.strip(" ,:-")]
+    low_value_clauses = [
+        clause
+        for clause in clauses
+        if any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
+        and _LOW_VALUE_SUMMARY_OUTCOME.search(clause)
+    ]
+    if not low_value_clauses:
+        return False
+    return not any(_text_has_substance(clause) for clause in clauses if clause not in low_value_clauses)
 
 
 def source_text_is_meaningful(title: str, summary: str) -> bool:
-    """Reject unusable-source commentary unless the title stands on its own."""
+    """Reject unusable-source commentary before it can become rendered body text."""
     normalized_title = _WHITESPACE.sub(" ", title).strip()
     normalized_summary = _WHITESPACE.sub(" ", summary).strip()
     if _summary_is_low_value_commentary(normalized_summary):
-        return _text_has_substance(normalized_title, title_only=True)
+        return False
     return _text_has_substance(f"{normalized_title} {normalized_summary}".strip())
 
 

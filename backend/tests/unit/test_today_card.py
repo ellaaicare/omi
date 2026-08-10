@@ -187,6 +187,29 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
     assert evidence_is_safe(title_rich) is True
 
 
+def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title():
+    junk_summary = "The recording was too short to provide a useful summary."
+    evidence = _source(
+        TodayCardKind.recap,
+        "title-cannot-rescue-junk",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "Alex and Priya planted tomatoes together",
+            "summary": junk_summary,
+        }
+    )
+
+    result = _materialize(InMemoryTodayCardRepository([evidence]))
+    serialized = result.card.model_dump_json()
+
+    assert evidence_is_safe(evidence) is False
+    assert result.card.state == TodayCardState.degraded
+    assert result.card.reason_code == "no_safe_source"
+    assert result.card.content is None
+    assert junk_summary not in serialized
+
+
 def test_active_day_materializes_truthful_recap_before_older_memory():
     repository = InMemoryTodayCardRepository(
         [

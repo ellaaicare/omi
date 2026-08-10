@@ -638,6 +638,11 @@ def test_enriched_adapter_rejects_alternative_insufficient_capture_commentary(su
         "The audio did not contain enough information to create a summary.",
         "The clip was brief and could not support a useful summary.",
         "There was insufficient audio for a coherent recap.",
+        "The recording lacked enough detail to summarize what happened.",
+        "There were too few words in the clip to tell what happened.",
+        "The recording ended prematurely and could not support a useful summary.",
+        "The audio was inaudible and could not support a useful summary.",
+        "Almost no speech was captured to summarize what happened.",
     ],
 )
 def test_enriched_adapter_rejects_structural_insufficiency_commentary(summary):
@@ -712,10 +717,10 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
 def test_enriched_adapter_keeps_substantive_documentary_editing_summary():
     row = _summary_row()
     row["metadata"]["structured"] = {
-        "title": "Editing the neighborhood documentary together",
+        "title": "A captured moment",
         "overview": (
-            "The recording was too short for the documentary, but it still gave us useful pacing context "
-            "for the final edit."
+            "The recording was too short to summarize the whole documentary, "
+            "so everyone chose the missing scenes to film next."
         ),
     }
 
@@ -734,11 +739,12 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary():
 @pytest.mark.parametrize(
     "title",
     [
-        "Alex and Priya planted tomatoes together",
+        "Alex planted tomatoes today",
+        "Morning tea with Margaret",
         "母と庭でトマトを植えた朝",
     ],
 )
-def test_enriched_adapter_preserves_independently_substantive_title(title):
+def test_enriched_adapter_rejects_low_value_summary_despite_substantive_title(title):
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": title,
@@ -752,9 +758,9 @@ def test_enriched_adapter_preserves_independently_substantive_title(title):
     )
 
     assert evidence is not None
-    assert evidence.meaningful is True
-    assert evidence.confidence == 0.82
-    assert today_card_postgres.evidence_is_safe(evidence) is True
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
 def test_enriched_adapter_honors_explicit_capture_quality_metrics():
