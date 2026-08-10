@@ -233,6 +233,28 @@ class SharedPreferencesUtil {
 
   bool get aiConsentAccepted => hasCurrentAiConsentAuthority();
 
+  /// Returns the durable receipt for the current account and bundled contract
+  /// without treating it as live data authority. Callers must still perform a
+  /// fresh server verification before any protected capture or egress.
+  String get persistedAiConsentReceiptIdForCurrentAccount {
+    if (isEllaInternalPilotEnabled &&
+        !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
+      return '';
+    }
+    final receiptId = aiConsentReceiptId;
+    final persistedGrant = getBool('aiConsentAccepted', defaultValue: false) &&
+        aiConsentContractVersion == currentAiConsentContractVersion &&
+        aiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
+        uid.isNotEmpty &&
+        receiptId.startsWith(currentAiConsentReceiptPrefix) &&
+        aiConsentReceiptUid == uid &&
+        aiConsentProfileBindingId.isNotEmpty &&
+        aiConsentScopeVersion == currentAiConsentScopeVersion &&
+        aiConsentScopeHash == currentAiConsentScopeHash &&
+        DateTime.tryParse(aiConsentServerDecidedAt) != null;
+    return persistedGrant ? receiptId : '';
+  }
+
   bool hasCurrentAiConsentAuthority({bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled}) {
     if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return false;
