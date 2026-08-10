@@ -219,6 +219,8 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
         ("The recording was too short to summarize what happened. " "The rest was silence."),
         "The audio was entirely silent and could not be summarized.",
         "The clip contained no speech and could not be summarized.",
+        ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
+        ("The recording was too short to summarize what happened. " "Everything was lost."),
     ],
 )
 def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title(junk_summary):

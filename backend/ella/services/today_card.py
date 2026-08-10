@@ -445,13 +445,8 @@ def _clause_has_concrete_content(clause: str) -> bool:
     distinct_words = {word.casefold() for word in words}
     if len(distinct_words) >= 3:
         return True
-    if len(distinct_words) >= 2:
-        first_word = all_words[0] if all_words else ""
-        named_actor = bool(
-            first_word and first_word[0].isupper() and first_word.casefold() not in _LOW_VALUE_META_WORDS
-        )
-        if named_actor or _CONCRETE_ACTOR.search(clause):
-            return True
+    if len(distinct_words) >= 2 and _CONCRETE_ACTOR.search(clause):
+        return True
 
     non_ascii = [character.casefold() for character in clause if character.isalnum() and not character.isascii()]
     return len(non_ascii) >= 4 and len(set(non_ascii)) >= 3

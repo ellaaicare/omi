@@ -796,6 +796,8 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary)
         ("The recording was too short to summarize what happened. " "The rest was silence."),
         "The audio was entirely silent and could not be summarized.",
         "The clip contained no speech and could not be summarized.",
+        ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
+        ("The recording was too short to summarize what happened. " "Everything was lost."),
     ],
 )
 def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
