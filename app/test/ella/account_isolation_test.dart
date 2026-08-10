@@ -20,6 +20,7 @@ import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
@@ -646,6 +647,33 @@ void main() {
     expect(fixture.background.startResults.single['status'], 'recording');
   });
 
+  test('production start timeout queues cleanup behind a late native start', () async {
+    final fixture = _ProductionRecorderFixture(
+      startTimeout: const Duration(milliseconds: 20),
+      stopTimeout: const Duration(seconds: 1),
+      holdNativeStart: true,
+    );
+    addTearDown(fixture.dispose);
+
+    final start = fixture.mic.start(onByteReceived: (_) {});
+    await fixture.native.startEntered.future;
+    await expectLater(start, throwsA(isA<TimeoutException>()));
+
+    var stopCompleted = false;
+    final stop = fixture.mic.stop().then((_) => stopCompleted = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(stopCompleted, isFalse);
+
+    fixture.native.releaseStart();
+    await stop;
+
+    expect(stopCompleted, isTrue);
+    // FlutterSound performs one stopped-state preflight before start; the
+    // second native stop is the cleanup queued after the timed-out start.
+    expect(fixture.native.stopCalls, 2);
+    expect(fixture.background.stopResults.single['status'], 'stopped');
+  });
+
   test('production isolate bridge propagates native start failure', () async {
     final fixture = _ProductionRecorderFixture(
       startTimeout: const Duration(seconds: 1),
@@ -953,6 +981,28 @@ void main() {
     expect(provider.messages.map((message) => message.text), ['Current question', 'Current reply']);
     expect(prefs.cachedMessages.map((message) => message.text), ['Current question', 'Current reply']);
     expect(playbacks, 1);
+  });
+
+  test('standard voice route failure falls back and returns from speaking state', () async {
+    var onDeviceFallbacks = 0;
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) => _completedVoiceStream('Audible reply'),
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async => '/tmp/route-failure.mp3',
+    );
+
+    final result = await coordinator.run(
+      transcript: 'Current question',
+      authority: _activeAuthority('uid-a', () => true),
+      commitMessages: (_, __) => true,
+      onReplyReady: (_) {},
+      playFile: (_) async => throw const StandardVoicePlaybackUnavailable(),
+      speakOnDevice: (_) async => onDeviceFallbacks++,
+    );
+
+    expect(result.usedOnDeviceTts, isTrue);
+    expect(result.reply, 'Audible reply');
+    expect(onDeviceFallbacks, 1);
+    expect(EllaVoiceChatPage.shouldResumeAfterStandardTurn(result), isTrue);
   });
 
   test('typed backend failure is never committed or spoken by standard voice', () async {

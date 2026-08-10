@@ -79,6 +79,10 @@ class EllaVoiceChatPage extends StatefulWidget {
   static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
 
   @visibleForTesting
+  static bool shouldResumeAfterStandardTurn(StandardVoiceTurnResult result) =>
+      result.reply.isEmpty || result.usedOnDeviceTts;
+
+  @visibleForTesting
   static bool shouldInitializeSpeech(EllaVoiceDemoState? demoState) => demoState == null;
 
   @visibleForTesting
@@ -1207,7 +1211,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             playFile: (audioPath) async {
               if (!mounted || !operation.isCurrent) return;
               debugPrint('[VoiceChat] Playing authority-bound audio: $audioPath');
-              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) return;
+              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) {
+                throw const StandardVoicePlaybackUnavailable();
+              }
               if (!mounted || !operation.isCurrent) return;
               await _audioPlayer.setVolume(1.0);
               if (!mounted || !operation.isCurrent) return;
@@ -1218,7 +1224,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           );
 
           if (!mounted || !operation.isCurrent || result.discarded) return;
-          if (result.reply.isEmpty || result.usedOnDeviceTts) {
+          if (EllaVoiceChatPage.shouldResumeAfterStandardTurn(result)) {
             if (_voiceModeActive) {
               _startListening();
             } else {

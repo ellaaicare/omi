@@ -293,12 +293,13 @@ extension FlutterError: Error {}
           .bluetoothLE,
           .headphones,
       ]
-      let outputType = output?.portType ?? .builtInSpeaker
-      let hasHeadset = privateOutputTypes.contains(outputType)
+      let outputType = output?.portType
+      let hasHeadset = outputType.map(privateOutputTypes.contains) ?? false
 
       return [
-          "outputName": output?.portName ?? "iPhone speaker",
-          "outputType": outputType.rawValue,
+          "outputName": output?.portName ?? "",
+          "outputType": outputType?.rawValue ?? "",
+          "hasOutput": output != nil,
           "hasHeadset": hasHeadset,
           "usesPhoneSpeaker": outputType == .builtInSpeaker,
           "usesReceiver": outputType == .builtInReceiver,
@@ -321,7 +322,7 @@ extension FlutterError: Error {}
           }
 
           var payload = currentAudioRoutePayload()
-          payload["success"] = payload["usesReceiver"] as? Bool != true
+          payload["success"] = payload["hasOutput"] as? Bool == true && payload["usesReceiver"] as? Bool != true
           return payload
       } catch {
           var payload = currentAudioRoutePayload()

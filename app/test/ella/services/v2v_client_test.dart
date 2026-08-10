@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -220,7 +221,8 @@ void main() {
           'conversation_id': 'another-conversation',
           'active_summary_version_id': 'summary-v2',
           'can_reinterpret': true,
-        })!.matches(requested),
+        })!
+            .matches(requested),
         isFalse,
       );
     });
@@ -242,7 +244,8 @@ void main() {
           'card_id': 'today-card-42',
           'card_version': 4,
           'can_reinterpret': false,
-        })!.matches(requested),
+        })!
+            .matches(requested),
         isFalse,
       );
     });
@@ -553,6 +556,47 @@ void main() {
         isTrue,
       );
       expect(microphoneStarts, 1);
+      await client.disconnect();
+    });
+
+    test('stream playback startup failure reopens the authorized microphone gate', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final events = <V2VEvent>[];
+      var microphoneStarts = 0;
+      final client = V2VClient(
+        onEvent: events.add,
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+        streamPlaybackStarter: () async => throw StateError('route unavailable'),
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.streamAudioChunkForTesting(Uint8List.fromList([1, 2, 3]));
+      await client.waitForStreamFeedForTesting();
+
+      expect(microphoneStarts, 2);
+      expect(client.micMutedForTesting, isFalse);
+      expect(client.micSuspendedForPlaybackForTesting, isFalse);
+      expect(events.where((event) => event.type == 'error'), hasLength(1));
+      expect(events.where((event) => event.type == 'playback_complete'), hasLength(1));
       await client.disconnect();
     });
   });

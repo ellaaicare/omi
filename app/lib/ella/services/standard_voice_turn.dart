@@ -18,6 +18,10 @@ typedef StandardVoiceSynthesizer = Future<String?> Function(
   ExactAccountAuthorityVerifier? exactAuthority,
 });
 
+class StandardVoicePlaybackUnavailable implements Exception {
+  const StandardVoicePlaybackUnavailable();
+}
+
 class StandardVoiceTurnResult {
   const StandardVoiceTurnResult({
     required this.reply,
@@ -105,6 +109,7 @@ class StandardVoiceTurnCoordinator {
       } on ExactAccountAuthorityChangedException {
         rethrow;
       } catch (_) {
+        await ElevenLabsTts.discardSynthesizedFile(audioPath);
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         await speakOnDevice(ttsText);
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);

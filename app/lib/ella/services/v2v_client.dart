@@ -259,7 +259,6 @@ class V2VClient {
   static const int _pcmSampleRate = 24000;
   static const int _pcmBytesPerSample = 2;
   static const int _pcmChannels = 1;
-  static const Duration _postPlaybackMicCooldown = Duration(seconds: 2);
   static const Duration _playbackFinishQuietPeriod = Duration(milliseconds: 900);
 
   static V2VClient? _activeClient;
@@ -310,6 +309,9 @@ class V2VClient {
   final void Function(V2VProtectedEgressBoundary boundary)? _onProtectedEgress;
   final Future<bool> Function()? _microphoneStarter;
   final Future<bool> Function() _audibleOutputEnforcer;
+  final Future<void> Function()? _streamPlaybackStarter;
+  final bool Function()? _liveChannelForTesting;
+  final Duration _playbackMicCooldown;
 
   V2VClient({
     this.onEvent,
@@ -318,10 +320,16 @@ class V2VClient {
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
     @visibleForTesting Future<bool> Function()? microphoneStarter,
     @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
+    @visibleForTesting Future<void> Function()? streamPlaybackStarter,
+    @visibleForTesting bool Function()? liveChannelForTesting,
+    @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
         _microphoneStarter = microphoneStarter,
-        _audibleOutputEnforcer = audibleOutputEnforcer ?? EllaVoiceAudioRoute.ensureAudibleOutput;
+        _audibleOutputEnforcer = audibleOutputEnforcer ?? EllaVoiceAudioRoute.ensureAudibleOutput,
+        _streamPlaybackStarter = streamPlaybackStarter,
+        _liveChannelForTesting = liveChannelForTesting,
+        _playbackMicCooldown = playbackMicCooldown;
 
   bool get isConnected => _isConnected;
 
@@ -330,6 +338,21 @@ class V2VClient {
 
   @visibleForTesting
   bool get hasActiveConsentLeaseForTesting => _aiConsentLease?.isActive == true;
+
+  @visibleForTesting
+  bool get micMutedForTesting => _micMuted;
+
+  @visibleForTesting
+  bool get micSuspendedForPlaybackForTesting => _micSuspendedForPlayback;
+
+  @visibleForTesting
+  void markConnectedForTesting() => _isConnected = true;
+
+  @visibleForTesting
+  void streamAudioChunkForTesting(Uint8List pcmData) => _streamAudioChunk(pcmData);
+
+  @visibleForTesting
+  Future<void> waitForStreamFeedForTesting() => _streamFeedFuture;
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
@@ -1180,6 +1203,8 @@ class V2VClient {
       _aiConsentLease = null;
       return false;
     }
+    _micMuted = false;
+    _micSuspendedForPlayback = false;
     return true;
   }
 
@@ -1281,12 +1306,12 @@ class V2VClient {
       return;
     }
 
-    Logger.debug('[V2V] Mic gate cooldown: ${_postPlaybackMicCooldown.inMilliseconds}ms');
+    Logger.debug('[V2V] Mic gate cooldown: ${_playbackMicCooldown.inMilliseconds}ms');
     onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic gate cooldown'));
-    await Future.delayed(_postPlaybackMicCooldown);
+    await Future.delayed(_playbackMicCooldown);
     await _micGateFuture;
 
-    if (!_isConnected || _channel == null) {
+    if (!_hasLiveSessionTransport) {
       Logger.debug('[V2V] Mic gate remains closed: session disconnected');
       _micSuspendedForPlayback = false;
       _micMuted = false;
@@ -1309,8 +1334,11 @@ class V2VClient {
       await _handleRuntimeAuthorityLoss();
       return;
     }
-    await _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
+    final resumed = await _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
+    if (!resumed) await disconnect();
   }
+
+  bool get _hasLiveSessionTransport => _isConnected && (_channel != null || _liveChannelForTesting?.call() == true);
 
   // --- Low-latency PCM streaming playback ---
 
@@ -1325,13 +1353,10 @@ class V2VClient {
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
-    _streamFeedFuture = _streamFeedFuture.then((_) async {
+    _streamFeedFuture = _streamFeedFuture.then<void>((_) async {
       await _ensureStreamingPlaybackStarted();
       _streamPlayer.uint8ListSink?.add(pcmData);
-    }).catchError((error) {
-      Logger.error('[V2V] Stream playback feed error: $error');
-      onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
-    });
+    }).catchError(_recoverFromStreamFeedFailure);
 
     if (_chunkCount == 1) {
       onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
@@ -1344,6 +1369,12 @@ class V2VClient {
   }
 
   Future<void> _ensureStreamingPlaybackStarted() async {
+    final injectedStarter = _streamPlaybackStarter;
+    if (injectedStarter != null) {
+      await injectedStarter();
+      return;
+    }
+
     if (!_streamPlayerOpen) {
       await _streamPlayer.openPlayer();
       _streamPlayerOpen = true;
@@ -1366,6 +1397,43 @@ class V2VClient {
     _streamPlaybackStarted = true;
     _streamPlaybackStartedAt = DateTime.now();
     Logger.debug('[V2V] PCM stream player started');
+  }
+
+  Future<void> _recoverFromStreamFeedFailure(Object error, StackTrace stackTrace) async {
+    Logger.error('[V2V] Stream playback feed error: $error');
+    onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
+    _finishPlaybackTimer?.cancel();
+    _finishPlaybackTimer = null;
+    try {
+      await _stopStreamingPlayback();
+    } catch (_) {}
+    _isPlaying = false;
+    _streamPlaybackStarted = false;
+    _streamPlaybackStartedAt = null;
+    _pcmBuffer.clear();
+    _chunkCount = 0;
+
+    try {
+      if (_hasLiveSessionTransport && _hasCurrentSessionAuthority() && _aiConsentLease?.isActive == true) {
+        await _resumeMicAfterPlayback();
+      } else if (_isConnected) {
+        await disconnect();
+      } else {
+        _micSuspendedForPlayback = false;
+        _micMuted = false;
+      }
+    } catch (recoveryError) {
+      Logger.error('[V2V] Stream playback recovery failed: ${recoveryError.runtimeType}');
+      try {
+        await disconnect();
+      } catch (_) {}
+    } finally {
+      if (!_isConnected) {
+        _micSuspendedForPlayback = false;
+        _micMuted = false;
+      }
+      onEvent?.call(const V2VEvent(type: 'playback_complete'));
+    }
   }
 
   Future<void> _stopStreamingPlayback() async {
