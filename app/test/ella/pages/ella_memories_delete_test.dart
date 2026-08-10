@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -8,10 +10,26 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+
+class _MutableAuthority implements AccountCommitAuthority {
+  _MutableAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isCurrent() => current;
+
+  @override
+  bool isExactCurrent() => current;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -58,8 +76,11 @@ void main() {
 
   testWidgets('memory row exposes a 48-point delete action and confirms permanent deletion', (tester) async {
     final requestedIds = <String>[];
+    final authority = _MutableAuthority('test-user');
     final provider = ConversationProvider(
-      conversationDeleteCall: (id) async {
+      activeAuthority: () => authority,
+      conversationDeleteCall: (id, exactAuthority) async {
+        expect(exactAuthority.uid, 'test-user');
         requestedIds.add(id);
         return true;
       },
@@ -92,8 +113,10 @@ void main() {
 
   testWidgets('cancelling memory deletion leaves the memory untouched', (tester) async {
     final requestedIds = <String>[];
+    final authority = _MutableAuthority('test-user');
     final provider = ConversationProvider(
-      conversationDeleteCall: (id) async {
+      activeAuthority: () => authority,
+      conversationDeleteCall: (id, _) async {
         requestedIds.add(id);
         return true;
       },
@@ -111,5 +134,34 @@ void main() {
 
     expect(requestedIds, isEmpty);
     expect(find.text('A test memory'), findsOneWidget);
+  });
+
+  testWidgets('account transition rejects delayed success and never shows deletion success', (tester) async {
+    final authority = _MutableAuthority('test-user');
+    final response = Completer<bool>();
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationDeleteCall: (_, __) => response.future,
+    )
+      ..conversations = [memory('memory-delayed')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+    await tester.tap(find.byKey(const Key('delete-memory-memory-delayed')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-delete-memory')));
+    await tester.pump();
+    expect(find.byKey(const Key('deleting-memory-progress')), findsOneWidget);
+
+    authority.current = false;
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    response.complete(true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Memory Deleted.'), findsNothing);
+    expect(find.text('An error occurred. Please try again.'), findsOneWidget);
   });
 }

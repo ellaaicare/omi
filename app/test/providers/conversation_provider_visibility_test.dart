@@ -2,16 +2,35 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/env/env.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+
+class _MutableAuthority implements AccountCommitAuthority {
+  _MutableAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isCurrent() => current;
+
+  @override
+  bool isExactCurrent() => current;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  Env.init();
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -70,8 +89,12 @@ void main() {
     final deleted = conversation('delete-me');
     final kept = conversation('keep-me');
     final requestedIds = <String>[];
+    final authority = _MutableAuthority('current-user');
     final provider = ConversationProvider(
-      conversationDeleteCall: (id) async {
+      activeAuthority: () => authority,
+      conversationDeleteCall: (id, exactAuthority) async {
+        expect(exactAuthority.uid, authority.uid);
+        expect(exactAuthority.isExactCurrent(), isTrue);
         requestedIds.add(id);
         return true;
       },
@@ -97,7 +120,11 @@ void main() {
     await SharedPreferencesUtil.init();
     final deleted = conversation('delete-from-folder');
     final globallyCached = conversation('global-cache-entry');
-    final provider = ConversationProvider(conversationDeleteCall: (_) async => true)
+    final authority = _MutableAuthority('current-user');
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationDeleteCall: (_, __) async => true,
+    )
       ..selectedFolderId = 'folder-1'
       ..conversations = [deleted];
     addTearDown(provider.dispose);
@@ -111,7 +138,11 @@ void main() {
 
   test('failed permanent deletion preserves every local projection', () async {
     final memory = conversation('still-here');
-    final provider = ConversationProvider(conversationDeleteCall: (_) async => false);
+    final authority = _MutableAuthority('test-user');
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationDeleteCall: (_, __) async => false,
+    );
     addTearDown(provider.dispose);
     provider.conversations = [memory];
     provider.searchedConversations = [memory];
@@ -125,8 +156,10 @@ void main() {
 
   test('thrown permanent deletion request preserves every local projection', () async {
     final memory = conversation('still-here-after-error');
+    final authority = _MutableAuthority('test-user');
     final provider = ConversationProvider(
-      conversationDeleteCall: (_) async => throw StateError('network unavailable'),
+      activeAuthority: () => authority,
+      conversationDeleteCall: (_, __) async => throw StateError('network unavailable'),
     );
     addTearDown(provider.dispose);
     provider.conversations = [memory];
@@ -137,6 +170,58 @@ void main() {
     expect(result, isFalse);
     expect(provider.conversations, [memory]);
     expect(provider.searchedConversations, [memory]);
+  });
+
+  test('account transition rejects delayed delete success without mutating replacement state', () async {
+    SharedPreferences.setMockInitialValues({'uid': 'uid-a'});
+    await SharedPreferencesUtil.init();
+    final authority = _MutableAuthority('uid-a');
+    final response = Completer<http.Response?>();
+    late ExactAccountAuthorityVerifier requestAuthority;
+    final original = conversation('account-a-memory');
+    final replacement = conversation('account-b-memory');
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationDeleteCall: (id, exactAuthority) {
+        expect(id, 'account-a-memory');
+        return deleteConversationServer(
+          id,
+          expectedAuthenticatedUid: exactAuthority.uid,
+          exactAuthority: exactAuthority,
+          transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) {
+            expect(url, endsWith('/v1/conversations/account-a-memory'));
+            expect(expectedAuthenticatedUid, 'uid-a');
+            requestAuthority = exactAuthority!;
+            return response.future;
+          },
+        );
+      },
+    )..conversations = [original];
+    addTearDown(provider.dispose);
+    var notifications = 0;
+    provider.addListener(() => notifications++);
+
+    final deletion = provider.deleteConversationPermanently(original);
+    await pumpEventQueue();
+    expect(requestAuthority.uid, 'uid-a');
+    expect(requestAuthority.isExactCurrent(), isTrue);
+
+    authority.current = false;
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    SharedPreferencesUtil().uid = 'uid-b';
+    provider.conversations = [replacement];
+    provider.searchedConversations = [replacement];
+    SharedPreferencesUtil().cachedConversations = [replacement];
+    final notificationsAfterTransition = notifications;
+
+    response.complete(http.Response('', 204));
+    expect(await deletion, isFalse);
+
+    expect(requestAuthority.isExactCurrent(), isFalse);
+    expect(provider.conversations, [replacement]);
+    expect(provider.searchedConversations, [replacement]);
+    expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), ['account-b-memory']);
+    expect(notifications, notificationsAfterTransition);
   });
 
   test('primary memories finish loading while failed-summary request is still pending', () async {

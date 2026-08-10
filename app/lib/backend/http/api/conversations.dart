@@ -1,12 +1,35 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:http/http.dart' as http;
+
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/schema.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
+
+typedef ConversationDeleteTransport = Future<http.Response?> Function({
+  required String url,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+});
+
+Future<http.Response?> _defaultConversationDeleteTransport({
+  required String url,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: const {},
+      method: 'DELETE',
+      body: '',
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
 
 Future<CreateConversationResponse?> processInProgressConversation() async {
   var response = await makeApiCall(
@@ -420,12 +443,16 @@ Future<ConversationCorrectionReceipt?> undoConversationCorrection({
   return ConversationCorrectionReceipt.fromJson(Map<String, dynamic>.from(decoded));
 }
 
-Future<bool> deleteConversationServer(String conversationId) async {
-  var response = await makeApiCall(
+Future<bool> deleteConversationServer(
+  String conversationId, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  ConversationDeleteTransport transport = _defaultConversationDeleteTransport,
+}) async {
+  final response = await transport(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId',
-    headers: {},
-    method: 'DELETE',
-    body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('deleteConversation: ${response.statusCode}');
