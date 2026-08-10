@@ -46,26 +46,28 @@ _DENIED_TAGS = {
 }
 _WHITESPACE = re.compile(r"\s+")
 _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
-_LOW_VALUE_META_COMMENTARY = (
-    re.compile(r"\b(?:tiny|very short|too short|brief) (?:audio|capture|clip|recording|transcript)\b", re.IGNORECASE),
-    re.compile(r"\b(?:audio|capture|clip|recording|transcript) (?:caught|contains?|captured) only\b", re.IGNORECASE),
-    re.compile(r"\bonly (?:the )?(?:word|words|fragment)\b", re.IGNORECASE),
-    re.compile(r"\b(?:not|isn't|wasn't|is not|was not) enough (?:context|detail|information)\b", re.IGNORECASE),
-    re.compile(r"\b(?:cannot|can't|could not|couldn't) (?:know|tell|determine|infer|summarize)\b", re.IGNORECASE),
-    re.compile(r"\b(?:insufficient|missing) context\b", re.IGNORECASE),
+_LOW_VALUE_SOURCE_LIMITATION = (
+    re.compile(
+        r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,48}\b"
+        r"(?:brief|caught\s+only|captured\s+only|contains?\s+only|did\s+not\s+contain\s+enough|"
+        r"ended?\s+before\s+enough|too\s+short|too\s+little)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:brief|insufficient|too\s+little|too\s+short)\b.{0,24}\b"
+        r"(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:not|isn't|wasn't|is\s+not|was\s+not)\s+enough\b.{0,24}\b"
+        r"(?:audio|context|detail|information|speech)\b",
+        re.IGNORECASE,
+    ),
 )
-_LOW_VALUE_SOURCE_MEDIUM = re.compile(
-    r"\b(?:audio|capture|clip|recording|transcript|speech)\b",
-    re.IGNORECASE,
-)
-_LOW_VALUE_INSUFFICIENCY = (
-    re.compile(r"\btoo\s+(?:short|little)\b", re.IGNORECASE),
-    re.compile(r"\b(?:not|wasn't|isn't|was not|is not)\s+enough\b", re.IGNORECASE),
-    re.compile(r"\binsufficient\b", re.IGNORECASE),
-    re.compile(r"\bended?\s+before\s+enough\b", re.IGNORECASE),
-)
-_LOW_VALUE_INTERPRETATION = re.compile(
-    r"\b(?:context|determine|infer|meaning|meant|summar(?:y|ize|ise)|understand|useful)\b",
+_LOW_VALUE_SUMMARY_OUTCOME = re.compile(
+    r"\b(?:recap|summar(?:y|ize|ise)|to\s+(?:determine|infer|know|tell|understand)|"
+    r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
+    r"only\s+(?:the\s+)?(?:fragment|word|words))\b",
     re.IGNORECASE,
 )
 
@@ -255,27 +257,32 @@ def materialization_window(local_date: date, timezone_name: str) -> tuple[dateti
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
-def source_text_is_meaningful(title: str, summary: str) -> bool:
-    """Reject fragments and model commentary about an unusable source."""
-    text = _WHITESPACE.sub(" ", f"{title} {summary}").strip()
-    if any(pattern.search(text) for pattern in _LOW_VALUE_META_COMMENTARY):
-        return False
-    if (
-        _LOW_VALUE_SOURCE_MEDIUM.search(text)
-        and any(pattern.search(text) for pattern in _LOW_VALUE_INSUFFICIENCY)
-        and _LOW_VALUE_INTERPRETATION.search(text)
-    ):
-        return False
+def _text_has_substance(text: str, *, title_only: bool = False) -> bool:
     words = _WORD.findall(text)
-    if len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.casefold() for word in words}) >= 3:
+    minimum_words = TODAY_CARD_MIN_SOURCE_WORDS + 1 if title_only else TODAY_CARD_MIN_SOURCE_WORDS
+    minimum_distinct = 4 if title_only else 3
+    if len(words) >= minimum_words and len({word.casefold() for word in words}) >= minimum_distinct:
         return True
 
-    # Languages without whitespace-delimited words can express a complete
-    # thought in one token. Keep the fragment boundary script-agnostic by
-    # accepting a sufficiently varied non-ASCII alphanumeric sequence.
     alphanumeric = [character.casefold() for character in text if character.isalnum()]
     non_ascii_alphanumeric = [character for character in alphanumeric if not character.isascii()]
     return len(alphanumeric) >= 8 and len(non_ascii_alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
+
+
+def _summary_is_low_value_commentary(summary: str) -> bool:
+    normalized = _WHITESPACE.sub(" ", summary).strip()
+    return any(pattern.search(normalized) for pattern in _LOW_VALUE_SOURCE_LIMITATION) and bool(
+        _LOW_VALUE_SUMMARY_OUTCOME.search(normalized)
+    )
+
+
+def source_text_is_meaningful(title: str, summary: str) -> bool:
+    """Reject unusable-source commentary unless the title stands on its own."""
+    normalized_title = _WHITESPACE.sub(" ", title).strip()
+    normalized_summary = _WHITESPACE.sub(" ", summary).strip()
+    if _summary_is_low_value_commentary(normalized_summary):
+        return _text_has_substance(normalized_title, title_only=True)
+    return _text_has_substance(f"{normalized_title} {normalized_summary}".strip())
 
 
 def evidence_is_safe(evidence: TodayCardEvidence) -> bool:

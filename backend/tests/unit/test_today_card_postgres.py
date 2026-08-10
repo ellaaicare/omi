@@ -632,11 +632,117 @@ def test_enriched_adapter_rejects_alternative_insufficient_capture_commentary(su
     assert today_card_postgres.evidence_is_safe(evidence) is False
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The audio did not contain enough information to create a summary.",
+        "The clip was brief and could not support a useful summary.",
+        "There was insufficient audio for a coherent recap.",
+    ],
+)
+def test_enriched_adapter_rejects_structural_insufficiency_commentary(summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count is None
+    assert evidence.capture_duration_seconds is None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
 def test_enriched_adapter_keeps_substantive_title_with_terse_summary():
     row = _summary_row()
     row["metadata"]["structured"] = {
         "title": "Alex and Priya planted tomatoes together",
         "overview": "Garden",
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is True
+    assert evidence.confidence == 0.82
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The audio was too short for the story, so we discussed what it meant.",
+        "The recording was too short, yet it was useful for understanding the song.",
+        "They discussed a recording and agreed there was not enough evidence to understand the decision.",
+    ],
+)
+def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A thoughtful conversation",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count is None
+    assert evidence.capture_duration_seconds is None
+    assert evidence.meaningful is True
+    assert evidence.confidence == 0.82
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
+def test_enriched_adapter_keeps_substantive_documentary_editing_summary():
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "Editing the neighborhood documentary together",
+        "overview": (
+            "The recording was too short for the documentary, but it still gave us useful pacing context "
+            "for the final edit."
+        ),
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is True
+    assert evidence.confidence == 0.82
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Alex and Priya planted tomatoes together",
+        "母と庭でトマトを植えた朝",
+    ],
+)
+def test_enriched_adapter_preserves_independently_substantive_title(title):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": title,
+        "overview": "The recording was too short to provide a useful summary.",
     }
 
     evidence = today_card_postgres._evidence_from_row(
