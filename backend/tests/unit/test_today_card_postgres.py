@@ -9,6 +9,7 @@ from ella.routers import canonical_events
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services import today_card_postgres
 from ella.services.today_card import (
+    DeterministicTodayCardRenderer,
     TodayCardContent,
     TodayCardKind,
     TodayCardRecord,
@@ -732,6 +733,10 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
         ),
         "The recording was too short to summarize the documentary while everyone kept editing the final scene.",
         "The recording was too short to summarize the documentary\nEveryone planned a second filming day.",
+        (
+            "The recording was too short to summarize the documentary, but the hosts wrote a summary of Maria's "
+            "neighborhood garden plan."
+        ),
     ],
 )
 def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary):
@@ -760,6 +765,21 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary)
         ("The clip was inaudible and could not support a useful summary. " "Nothing meaningful could be recovered."),
         "Almost no speech was captured to summarize what happened; no usable detail remained.",
         ("The recording lacked enough detail to summarize what happened. " "No coherent account could be produced."),
+        "The recording was too short to summarize what happened. No one could tell what it meant.",
+        ("The clip was inaudible and could not support a useful summary. " "There was nothing useful to work with."),
+        ("The recording lacked enough detail to summarize what happened. " "No clear account could be produced."),
+        (
+            "The recording lacked enough detail to summarize what happened. "
+            "No intelligible meaning could be recovered."
+        ),
+        (
+            "Almost no speech was captured to summarize what happened. "
+            "The remaining words did not form a coherent thought."
+        ),
+        "The audio was mostly silence and could not be summarized.",
+        ("The recording was too short to summarize what happened. " "There was too little to work with."),
+        ("The recording was too short to summarize what happened. " "Only silence remained."),
+        ("The recording was too short to summarize what happened. " "What remained was unusable."),
     ],
 )
 def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
@@ -779,6 +799,50 @@ def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary
     assert evidence.meaningful is False
     assert evidence.confidence == 0.0
     assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (
+            "The recording was too short to summarize the documentary,\nand everyone chose the missing scenes to film next.",
+            "The recording was too short to summarize the documentary, and everyone chose the missing scenes to film next.",
+        ),
+        (
+            "The recording was too short to summarize the documentary —\neveryone planned a second filming day.",
+            "The recording was too short to summarize the documentary — everyone planned a second filming day.",
+        ),
+    ],
+)
+def test_enriched_adapter_preserves_multiline_punctuation_in_rendered_output(summary, expected):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.summary == expected
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+    content = asyncio.run(
+        DeterministicTodayCardRenderer().render(
+            selected=evidence,
+            local_date=date(2026, 8, 1),
+            timezone_name="UTC",
+            private_consolidation={},
+        )
+    )
+    serialized = content.model_dump_json()
+    assert content.body == expected
+    assert content.spoken_text.endswith(expected)
+    assert ",." not in serialized
+    assert "—." not in serialized
 
 
 @pytest.mark.parametrize(

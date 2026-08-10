@@ -197,6 +197,21 @@ def test_meaningful_non_latin_and_title_rich_sources_are_safe():
         ("The clip was inaudible and could not support a useful summary. " "Nothing meaningful could be recovered."),
         "Almost no speech was captured to summarize what happened; no usable detail remained.",
         ("The recording lacked enough detail to summarize what happened. " "No coherent account could be produced."),
+        "The recording was too short to summarize what happened. No one could tell what it meant.",
+        ("The clip was inaudible and could not support a useful summary. " "There was nothing useful to work with."),
+        ("The recording lacked enough detail to summarize what happened. " "No clear account could be produced."),
+        (
+            "The recording lacked enough detail to summarize what happened. "
+            "No intelligible meaning could be recovered."
+        ),
+        (
+            "Almost no speech was captured to summarize what happened. "
+            "The remaining words did not form a coherent thought."
+        ),
+        "The audio was mostly silence and could not be summarized.",
+        ("The recording was too short to summarize what happened. " "There was too little to work with."),
+        ("The recording was too short to summarize what happened. " "Only silence remained."),
+        ("The recording was too short to summarize what happened. " "What remained was unusable."),
     ],
 )
 def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title(junk_summary):

@@ -51,7 +51,7 @@ _LOW_VALUE_SOURCE_LIMITATION = (
         r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,48}\b"
         r"(?:brief|caught\s+only|captured\s+only|contains?\s+only|"
         r"did\s+not\s+(?:capture|contain|include|provide)\s+enough|ended?\s+(?:before\s+enough|prematurely)|"
-        r"inaudible|lacks?|lacked\s+(?:enough|sufficient)|too\s+(?:few|little|short)|unusable)\b",
+        r"inaudible|lacks?|lacked\s+(?:enough|sufficient)|mostly\s+silence|too\s+(?:few|little|short)|unusable)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -76,8 +76,15 @@ _LOW_VALUE_COMPANION_COMMENTARY = re.compile(
     r"(?:available|could\s+be\s+(?:determined|inferred|produced|recovered|summarized)|remained))",
     re.IGNORECASE,
 )
+_LOW_VALUE_NEGATIVE_CLAUSE = re.compile(
+    r"\b(?:barely|cannot|can't|could\s+not|couldn't|did\s+not|didn't|does\s+not|doesn't|failed\s+to|"
+    r"hardly|insufficient|isn't|meaningless|no|none|not|nothing|unable|unavailable|unclear|unintelligible|"
+    r"unusable|wasn't|weren't|without)\b|\btoo\s+(?:few|little)\b|"
+    r"\bonly\s+(?:fragments?|noise|silence|words?)\b",
+    re.IGNORECASE,
+)
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
-    r"\b(?:recap|summar(?:y|ize|ise)|to\s+(?:determine|infer|know|tell|understand)|"
+    r"\b(?:recap|summar(?:y|iz(?:e|ed|ing)|is(?:e|ed|ing))|to\s+(?:determine|infer|know|tell|understand)|"
     r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
     r"only\s+(?:the\s+)?(?:fragment|word|words))\b",
     re.IGNORECASE,
@@ -295,8 +302,8 @@ def _summary_is_low_value_commentary(summary: str) -> bool:
         _text_has_substance(clause)
         for clause in clauses
         if not any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
-        and not _LOW_VALUE_SUMMARY_OUTCOME.search(clause)
         and not _LOW_VALUE_COMPANION_COMMENTARY.search(clause)
+        and not _LOW_VALUE_NEGATIVE_CLAUSE.search(clause)
     )
 
 
