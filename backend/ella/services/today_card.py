@@ -64,6 +64,12 @@ _LOW_VALUE_SOURCE_LIMITATION = (
         r"(?:audio|context|detail|information|speech)\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,32}\b(?:"
+        r"(?:entirely|mostly)\s+(?:silent|silence)|"
+        r"(?:captured|contained|had|included)\s+no\s+(?:audio|speech|words?))\b",
+        re.IGNORECASE,
+    ),
 )
 _LOW_VALUE_CLAUSE_BREAK = re.compile(
     r"[\n.!?;:(),]+|\s*[—–]\s*|\s+(?:and|but|or|so|then|while|yet)\s+",
@@ -76,19 +82,166 @@ _LOW_VALUE_COMPANION_COMMENTARY = re.compile(
     r"(?:available|could\s+be\s+(?:determined|inferred|produced|recovered|summarized)|remained))",
     re.IGNORECASE,
 )
-_LOW_VALUE_NEGATIVE_CLAUSE = re.compile(
-    r"\b(?:barely|cannot|can't|could\s+not|couldn't|did\s+not|didn't|does\s+not|doesn't|failed\s+to|"
-    r"hardly|insufficient|isn't|meaningless|no|none|not|nothing|unable|unavailable|unclear|unintelligible|"
-    r"unusable|wasn't|weren't|without)\b|\btoo\s+(?:few|little)\b|"
-    r"\bonly\s+(?:fragments?|noise|silence|words?)\b",
-    re.IGNORECASE,
-)
 _LOW_VALUE_SUMMARY_OUTCOME = re.compile(
     r"\b(?:recap|summar(?:y|iz(?:e|ed|ing)|is(?:e|ed|ing))|to\s+(?:determine|infer|know|tell|understand)|"
     r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
     r"only\s+(?:the\s+)?(?:fragment|word|words))\b",
     re.IGNORECASE,
 )
+_CONCRETE_ACTOR = re.compile(
+    r"\b(?:children|everyone|famil(?:y|ies)|friends?|guests?|he|hosts?|i|neighbors?|people|she|they|visitors?|we|you)\b",
+    re.IGNORECASE,
+)
+_LOW_VALUE_META_WORDS = {
+    "a",
+    "account",
+    "an",
+    "and",
+    "as",
+    "at",
+    "audio",
+    "available",
+    "barely",
+    "be",
+    "been",
+    "being",
+    "before",
+    "but",
+    "by",
+    "capture",
+    "captured",
+    "captures",
+    "clear",
+    "clip",
+    "clips",
+    "coherent",
+    "content",
+    "context",
+    "could",
+    "detail",
+    "details",
+    "determine",
+    "did",
+    "do",
+    "does",
+    "discussed",
+    "discussing",
+    "discussion",
+    "ended",
+    "entirely",
+    "failed",
+    "few",
+    "for",
+    "form",
+    "fragment",
+    "fragments",
+    "from",
+    "had",
+    "hardly",
+    "has",
+    "have",
+    "he",
+    "her",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "i",
+    "impossible",
+    "in",
+    "inaudible",
+    "incoherent",
+    "inconclusive",
+    "indeterminate",
+    "infer",
+    "information",
+    "insufficient",
+    "intelligible",
+    "is",
+    "it",
+    "its",
+    "little",
+    "may",
+    "meaning",
+    "meaningful",
+    "meaningless",
+    "meant",
+    "message",
+    "might",
+    "mostly",
+    "no",
+    "noise",
+    "none",
+    "not",
+    "nothing",
+    "of",
+    "offered",
+    "on",
+    "one",
+    "only",
+    "or",
+    "our",
+    "produced",
+    "recap",
+    "recording",
+    "recordings",
+    "recovered",
+    "remaining",
+    "remained",
+    "rest",
+    "result",
+    "she",
+    "short",
+    "should",
+    "silence",
+    "silent",
+    "speech",
+    "summarize",
+    "summarized",
+    "summary",
+    "tell",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "they",
+    "this",
+    "thought",
+    "to",
+    "topic",
+    "transcript",
+    "transcripts",
+    "unable",
+    "unavailable",
+    "unclear",
+    "undecipherable",
+    "understand",
+    "unintelligible",
+    "unknown",
+    "unusable",
+    "usable",
+    "useful",
+    "useless",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "without",
+    "word",
+    "words",
+    "work",
+    "would",
+    "you",
+    "your",
+    "zero",
+}
 
 
 class TodayCardState(str, Enum):
@@ -286,6 +439,24 @@ def _text_has_substance(text: str) -> bool:
     return len(alphanumeric) >= 8 and len(non_ascii_alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
 
 
+def _clause_has_concrete_content(clause: str) -> bool:
+    all_words = _WORD.findall(clause)
+    words = [word for word in all_words if word.casefold() not in _LOW_VALUE_META_WORDS]
+    distinct_words = {word.casefold() for word in words}
+    if len(distinct_words) >= 3:
+        return True
+    if len(distinct_words) >= 2:
+        first_word = all_words[0] if all_words else ""
+        named_actor = bool(
+            first_word and first_word[0].isupper() and first_word.casefold() not in _LOW_VALUE_META_WORDS
+        )
+        if named_actor or _CONCRETE_ACTOR.search(clause):
+            return True
+
+    non_ascii = [character.casefold() for character in clause if character.isalnum() and not character.isascii()]
+    return len(non_ascii) >= 4 and len(set(non_ascii)) >= 3
+
+
 def _summary_is_low_value_commentary(summary: str) -> bool:
     normalized = _WHITESPACE.sub(" ", summary).strip()
     has_source_limitation = any(pattern.search(normalized) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
@@ -299,11 +470,10 @@ def _summary_is_low_value_commentary(summary: str) -> bool:
         if _WHITESPACE.sub(" ", clause).strip(" ,:-")
     ]
     return not any(
-        _text_has_substance(clause)
+        _clause_has_concrete_content(clause)
         for clause in clauses
         if not any(pattern.search(clause) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
         and not _LOW_VALUE_COMPANION_COMMENTARY.search(clause)
-        and not _LOW_VALUE_NEGATIVE_CLAUSE.search(clause)
     )
 
 

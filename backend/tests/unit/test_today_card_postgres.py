@@ -737,6 +737,15 @@ def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
             "The recording was too short to summarize the documentary, but the hosts wrote a summary of Maria's "
             "neighborhood garden plan."
         ),
+        (
+            "The recording was too short to summarize the documentary, but Maria did not cancel the neighborhood "
+            "screening."
+        ),
+        ("The recording was too short to summarize the podcast, but the hosts were not discouraged."),
+        (
+            "The recording was too short to summarize the documentary, but Maria continued without delaying the "
+            "neighborhood screening."
+        ),
     ],
 )
 def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary):
@@ -780,6 +789,13 @@ def test_enriched_adapter_keeps_substantive_documentary_editing_summary(summary)
         ("The recording was too short to summarize what happened. " "There was too little to work with."),
         ("The recording was too short to summarize what happened. " "Only silence remained."),
         ("The recording was too short to summarize what happened. " "What remained was unusable."),
+        ("The recording was too short to summarize what happened. " "The fragment offered zero usable context."),
+        ("The recording was too short to summarize what happened. " "The meaning remained unknown."),
+        ("The recording was too short to summarize what happened. " "A coherent account was impossible."),
+        ("The recording was too short to summarize what happened. " "The captured words were useless."),
+        ("The recording was too short to summarize what happened. " "The rest was silence."),
+        "The audio was entirely silent and could not be summarized.",
+        "The clip contained no speech and could not be summarized.",
     ],
 )
 def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
