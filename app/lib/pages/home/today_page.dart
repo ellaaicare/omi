@@ -479,7 +479,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           // The necklace may already be streaming continuously. Finalize that
           // pre-tap audio so this intentional moment starts at an exact boundary
           // without stopping the user's ambient capture.
-          await _finalizeHomeMoment(capture);
+          if (capture.hasCapturableContent) {
+            await capture.forceProcessingCurrentConversation();
+          }
         }
         if (!mounted) return;
         final started = capture.recordingState == RecordingState.deviceRecord;

@@ -197,6 +197,32 @@ void main() {
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
+  testWidgets('empty continuous necklace start opens a moment without false finish feedback', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+      captureHasContent: false,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.finishes, 0);
+    expect(harness.capture.deviceStarts, 0);
+    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
+    expect(find.text('Listening… tap to finish'), findsOneWidget);
+  });
+
   testWidgets('day-one state is useful and reduced motion removes capture transitions', (tester) async {
     final harness = await _pumpHome(
       tester,
