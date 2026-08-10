@@ -1734,6 +1734,11 @@ if module_name == "ella.routers.callbacks":
     fake_canonical_omi.TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_grounding_verifier"
     fake_canonical_omi.TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
     fake_canonical_omi.summary_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
+    fake_canonical_omi.today_card_grounding_identity_is_valid = lambda *_args, **_kwargs: True
+    fake_canonical_omi.today_card_grounding_profile = lambda _source: {
+        "attester": "hermes_cloud_grounding_verifier",
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
+    }
     fake_canonical_omi.transcript_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
