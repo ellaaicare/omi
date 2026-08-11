@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -43,6 +44,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   late bool showSummarizeConfirmation;
   late AnimationController _animationController;
   bool _isMuted = false;
+  bool _isProcessDialogOpen = false;
+  Future<bool>? _processNowInFlight;
   final ScrollController _timelineScrollController = ScrollController();
 
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
@@ -146,66 +149,94 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     return '${twoDigits(hours)}:${twoDigits(minutes)}:${twoDigits(remainingSeconds)}';
   }
 
-  Future<void> _stopConversation(CaptureProvider provider) async {
-    if (provider.segments.isNotEmpty || provider.photos.isNotEmpty) {
-      // Helper function to stop recording and process conversation
-      Future<bool> stopRecordingAndProcess() async {
-        final processNow = widget.onProcessNow;
-        if (processNow != null) return processNow();
-        // Stop any active recording (phone mic or system audio)
-        if (provider.recordingState == RecordingState.record) {
-          await provider.stopStreamRecording();
-        } else if (provider.recordingState == RecordingState.systemAudioRecord) {
-          await provider.stopSystemAudioRecording();
-        }
-        // Then process the conversation
-        return provider.forceProcessingCurrentConversation();
-      }
+  Future<bool> _runProcessNow(CaptureProvider provider) {
+    final existing = _processNowInFlight;
+    if (existing != null) return existing;
 
+    final processNow = widget.onProcessNow;
+    final operation = Future<bool>.sync(() async {
+      if (processNow != null) return processNow();
+      if (provider.recordingState == RecordingState.record) {
+        await provider.stopStreamRecording();
+      } else if (provider.recordingState == RecordingState.systemAudioRecord) {
+        await provider.stopSystemAudioRecording();
+      }
+      return provider.forceProcessingCurrentConversation();
+    });
+    _processNowInFlight = operation;
+    if (mounted) setState(() {});
+    unawaited(
+      operation.then<void>(
+        (_) => _clearProcessNow(operation),
+        onError: (Object _, StackTrace __) => _clearProcessNow(operation),
+      ),
+    );
+    return operation;
+  }
+
+  void _clearProcessNow(Future<bool> operation) {
+    if (!identical(_processNowInFlight, operation)) return;
+    _processNowInFlight = null;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _stopConversation(CaptureProvider provider) async {
+    if (_processNowInFlight != null || _isProcessDialogOpen) return;
+    if (provider.segments.isNotEmpty || provider.photos.isNotEmpty) {
       if (!showSummarizeConfirmation) {
-        final processed = await stopRecordingAndProcess();
+        final processed = await _runProcessNow(provider);
         if (processed && mounted) Navigator.of(context).pop();
         return;
       }
-      showDialog(
-        context: context,
-        builder: (context) {
-          return StatefulBuilder(
-            builder: (context, setState) {
-              final timeoutDuration = SharedPreferencesUtil().conversationSilenceDuration;
-              String timeoutText;
-              if (timeoutDuration == -1) {
-                timeoutText = context.l10n.conversationEndsManually;
-              } else {
-                final minutes = timeoutDuration ~/ 60;
-                timeoutText = context.l10n.conversationSummarizedAfterMinutes(minutes, minutes == 1 ? '' : 's');
-              }
+      setState(() => _isProcessDialogOpen = true);
+      var confirmationInFlight = false;
+      try {
+        await showDialog(
+          context: context,
+          builder: (context) {
+            return StatefulBuilder(
+              builder: (context, setState) {
+                final timeoutDuration = SharedPreferencesUtil().conversationSilenceDuration;
+                String timeoutText;
+                if (timeoutDuration == -1) {
+                  timeoutText = context.l10n.conversationEndsManually;
+                } else {
+                  final minutes = timeoutDuration ~/ 60;
+                  timeoutText = context.l10n.conversationSummarizedAfterMinutes(minutes, minutes == 1 ? '' : 's');
+                }
 
-              return ConfirmationDialog(
-                title: context.l10n.finishedConversation,
-                description: "${context.l10n.stopRecordingConfirmation}\n\n${context.l10n.hints(timeoutText)}",
-                checkboxValue: !showSummarizeConfirmation,
-                checkboxText: context.l10n.dontAskAgain,
-                onCheckboxChanged: (value) {
-                  setState(() {
-                    showSummarizeConfirmation = !value;
-                  });
-                },
-                onCancel: () {
-                  Navigator.of(context).pop();
-                },
-                onConfirm: () async {
-                  SharedPreferencesUtil().showSummarizeConfirmation = showSummarizeConfirmation;
-                  final processed = await stopRecordingAndProcess();
-                  if (!context.mounted) return;
-                  Navigator.of(context).pop();
-                  if (processed && mounted) Navigator.of(this.context).pop();
-                },
-              );
-            },
-          );
-        },
-      );
+                return ConfirmationDialog(
+                  title: context.l10n.finishedConversation,
+                  description: "${context.l10n.stopRecordingConfirmation}\n\n${context.l10n.hints(timeoutText)}",
+                  checkboxValue: !showSummarizeConfirmation,
+                  checkboxText: context.l10n.dontAskAgain,
+                  confirmText: confirmationInFlight ? context.l10n.processing : null,
+                  onCheckboxChanged: (value) {
+                    setState(() {
+                      showSummarizeConfirmation = !value;
+                    });
+                  },
+                  onCancel: () {
+                    if (confirmationInFlight) return;
+                    Navigator.of(context).pop();
+                  },
+                  onConfirm: () async {
+                    if (confirmationInFlight) return;
+                    setState(() => confirmationInFlight = true);
+                    SharedPreferencesUtil().showSummarizeConfirmation = showSummarizeConfirmation;
+                    final processed = await _runProcessNow(provider);
+                    if (!context.mounted) return;
+                    Navigator.of(context).pop();
+                    if (processed && mounted) Navigator.of(this.context).pop();
+                  },
+                );
+              },
+            );
+          },
+        );
+      } finally {
+        if (mounted) setState(() => _isProcessDialogOpen = false);
+      }
     }
   }
 
@@ -333,7 +364,10 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                     children: [
                       // Process Now button
                       GestureDetector(
-                        onTap: () => _stopConversation(provider),
+                        key: const Key('conversation-process-now'),
+                        onTap: _processNowInFlight == null && !_isProcessDialogOpen
+                            ? () => _stopConversation(provider)
+                            : null,
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                           decoration: BoxDecoration(
@@ -351,14 +385,25 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const FaIcon(
-                                FontAwesomeIcons.stop,
-                                color: Colors.black,
-                                size: 16.0,
-                              ),
+                              if (_processNowInFlight == null)
+                                const FaIcon(
+                                  FontAwesomeIcons.stop,
+                                  color: Colors.black,
+                                  size: 16.0,
+                                )
+                              else
+                                const SizedBox(
+                                  key: Key('conversation-process-now-progress'),
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.black,
+                                  ),
+                                ),
                               const SizedBox(width: 10),
                               Text(
-                                context.l10n.processNow,
+                                _processNowInFlight == null ? context.l10n.processNow : context.l10n.processing,
                                 style: const TextStyle(
                                   color: Colors.black,
                                   fontSize: 16,

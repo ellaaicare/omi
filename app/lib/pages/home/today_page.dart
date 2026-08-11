@@ -134,6 +134,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _homeCaptureActive = false;
   bool _homeCaptureStarting = false;
   bool _homeCaptureFinalizationPending = false;
+  Future<bool>? _homeCaptureFinalizationInFlight;
+  bool _abandonHomeCaptureAfterFinalization = false;
   int _homeCaptureAuthorityGeneration = 0;
   _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
@@ -214,7 +216,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     // authority is recaptured only after the old card is no longer renderable.
     _homeCaptureAuthorityGeneration++;
     _todayCardController.invalidateAuthority();
-    if (_homeCaptureFinalizationPending && mounted) {
+    final finalization = _homeCaptureFinalizationInFlight;
+    if (finalization != null) {
+      _abandonHomeCaptureAfterFinalization = true;
+      unawaited(_joinHomeCaptureFinalization(finalization));
+    } else if (_homeCaptureFinalizationPending && mounted) {
       setState(() {
         _homeCaptureFinalizationPending = false;
         _homeCaptureSource = null;
@@ -489,7 +495,60 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     return false;
   }
 
-  Future<bool> _finishHomeCapture(CaptureProvider capture) async {
+  Future<void> _joinHomeCaptureFinalization(Future<bool> operation) async {
+    try {
+      await operation;
+    } catch (_) {
+      // The initiating UI reports the failure. This join exists only to keep
+      // old capture work behind the transition/route barrier until it settles.
+    }
+  }
+
+  Future<bool> _finishHomeCapture(CaptureProvider capture) {
+    final existing = _homeCaptureFinalizationInFlight;
+    if (existing != null) return existing;
+
+    final completer = Completer<bool>();
+    final operation = completer.future;
+    _homeCaptureFinalizationInFlight = operation;
+    if (mounted) setState(() {});
+    unawaited(_runHomeCaptureFinalization(capture, operation, completer));
+    return operation;
+  }
+
+  Future<void> _runHomeCaptureFinalization(
+    CaptureProvider capture,
+    Future<bool> operation,
+    Completer<bool> completer,
+  ) async {
+    Object? error;
+    StackTrace? stackTrace;
+    var result = false;
+    try {
+      result = await _finishHomeCaptureOnce(capture);
+    } catch (caughtError, caughtStackTrace) {
+      error = caughtError;
+      stackTrace = caughtStackTrace;
+    }
+
+    if (identical(_homeCaptureFinalizationInFlight, operation)) {
+      _homeCaptureFinalizationInFlight = null;
+      if (_abandonHomeCaptureAfterFinalization) {
+        _abandonHomeCaptureAfterFinalization = false;
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      }
+      if (mounted) setState(() {});
+    }
+
+    if (error != null) {
+      completer.completeError(error, stackTrace!);
+    } else {
+      completer.complete(result);
+    }
+  }
+
+  Future<bool> _finishHomeCaptureOnce(CaptureProvider capture) async {
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     if (_homeCaptureFinalizationPending) {
       final finalized = await _finalizeHomeMoment(
@@ -564,7 +623,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       MaterialPageRoute(
         builder: (_) => ConversationCapturingPage(
           onProcessNow: () async {
-            if (_homeCaptureActive || _homeCaptureFinalizationPending) {
+            if (_homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null) {
               return _finishHomeCapture(capture);
             }
             if (capture.recordingState == RecordingState.deviceRecord) {
@@ -579,6 +638,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         ),
       ),
     );
+    final finalization = _homeCaptureFinalizationInFlight;
+    if (finalization != null) {
+      _abandonHomeCaptureAfterFinalization = true;
+      await _joinHomeCaptureFinalization(finalization);
+      return;
+    }
     if (_homeCaptureFinalizationPending && mounted) {
       setState(() {
         _homeCaptureFinalizationPending = false;
@@ -596,6 +661,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (_homeCaptureStarting) return;
     setState(() => _homeCaptureStarting = true);
     try {
+      final finalization = _homeCaptureFinalizationInFlight;
+      if (finalization != null) {
+        await _joinHomeCaptureFinalization(finalization);
+        return;
+      }
       if (_homeCaptureFinalizationPending) {
         await _finishHomeCapture(capture);
         return;

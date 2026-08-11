@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -17,6 +18,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/home/today_page.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -329,6 +331,82 @@ void main() {
     expect(harness.capture.finalizationCalls, 2);
     expect(harness.capture.finishes, 1);
     expect(find.text('Process Now'), findsNothing);
+  });
+
+  testWidgets('rapid Process Now taps share one Home finalization', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final finalizationGate = Completer<void>();
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationGate: finalizationGate,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-double-tap')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final processNow = find.text('Process Now');
+    await tester.tap(processNow);
+    await tester.tap(processNow);
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.byKey(const Key('conversation-process-now-progress')), findsOneWidget);
+
+    finalizationGate.complete();
+    await tester.pumpAndSettle();
+
+    expect(harness.capture.finalizationCalls, 1);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Process Now'), findsNothing);
+  });
+
+  testWidgets('leaving transcript blocks a new capture until Home finalization settles', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final finalizationGate = Completer<void>();
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationResults: [false],
+      finalizationGate: finalizationGate,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-route-abandon')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+
+    expect(harness.capture.finalizationCalls, 1);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(ConversationCapturingPage), findsNothing);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStarts, 1, reason: 'old finalization must remain a capture barrier after route exit');
+
+    finalizationGate.complete();
+    await tester.pumpAndSettle();
+    expect(harness.capture.finalizationCalls, 1);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.phoneStarts, 2, reason: 'a later tap may start only after the old operation settles');
   });
 
   testWidgets('account authority change invalidates a pending Home finalization retry', (tester) async {
@@ -648,6 +726,7 @@ Future<_HomeHarness> _pumpHome(
   bool captureHasContent = true,
   bool captureHasFinalContent = false,
   List<bool> finalizationResults = const [],
+  Completer<void>? finalizationGate,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
 }) async {
   tester.view.physicalSize = viewport;
@@ -661,6 +740,7 @@ Future<_HomeHarness> _pumpHome(
     hasContent: captureHasContent,
     hasFinalContent: captureHasFinalContent,
     finalizationResults: finalizationResults,
+    finalizationGate: finalizationGate,
   );
   final actionItems = _NoActionsProvider();
   final conversationProvider = _FixtureConversationProvider(conversations);
@@ -778,6 +858,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.hasContent,
     required this.hasFinalContent,
     required List<bool> finalizationResults,
+    this.finalizationGate,
   }) : finalizationResults = List<bool>.of(finalizationResults) {
     recordingState = initialState;
   }
@@ -786,6 +867,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   final bool hasContent;
   final bool hasFinalContent;
   final List<bool> finalizationResults;
+  final Completer<void>? finalizationGate;
 
   int phoneStarts = 0;
   int phoneStops = 0;
@@ -815,6 +897,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     finalContentChecks++;
     if (!hasContent && !hasFinalContent) return false;
     finalizationCalls++;
+    await finalizationGate?.future;
     final result = finalizationResults.isEmpty ? true : finalizationResults.removeAt(0);
     if (!result) return false;
     finishes++;
