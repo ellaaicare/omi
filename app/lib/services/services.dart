@@ -312,6 +312,7 @@ class BackgroundService implements IBackgroundRecorderRunner {
   BackgroundServiceStatus? _status;
   StreamSubscription? _recordAudioByteStream;
   StreamSubscription? _recordStateStream;
+  StreamSubscription? _heartbeatStream;
   final Map<String, Completer<void>> _pendingStarts = {};
   final Map<String, Completer<void>> _pendingStops = {};
   bool _initialized = false;
@@ -381,15 +382,21 @@ class BackgroundService implements IBackgroundRecorderRunner {
   }
 
   Future<void> start() async {
-    _service.startService();
-
-    // status
-    if (await _service.isRunning()) {
-      _status = BackgroundServiceStatus.running;
+    await _service.startService();
+    var running = await _service.isRunning();
+    final maxAttempts = (recorderStartTimeout.inMilliseconds / 50).ceil().clamp(1, 100);
+    for (var attempt = 0; !running && attempt < maxAttempts; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      running = await _service.isRunning();
     }
+    if (!running) {
+      throw BackgroundRecorderStartException('Background recorder service did not become ready');
+    }
+    _status = BackgroundServiceStatus.running;
 
     // heartbeat
-    _service.on('ui.ping').listen((event) {
+    await _heartbeatStream?.cancel();
+    _heartbeatStream = _service.on('ui.ping').listen((event) {
       _service.invoke("pong");
     });
   }

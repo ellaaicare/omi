@@ -181,6 +181,7 @@ class DeviceService implements IDeviceService {
   @override
   void start() {
     _status = DeviceServiceStatus.ready;
+    onStatusChanged(_status);
 
     // TODO: Start watchdog to discover automatically, re-connect automatically
   }
@@ -195,7 +196,6 @@ class DeviceService implements IDeviceService {
 
     await disconnectDevice();
 
-    _subscriptions.clear();
     _devices.clear();
   }
 

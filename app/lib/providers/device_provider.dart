@@ -604,7 +604,34 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   void onDevices(List<BtDevice> devices) async {}
 
   @override
-  void onStatusChanged(DeviceServiceStatus status) {}
+  void onStatusChanged(DeviceServiceStatus status) {
+    switch (status) {
+      case DeviceServiceStatus.stop:
+        _reconnectionTimer?.cancel();
+        _bleBatteryLevelListener?.cancel();
+        _bleBatteryLevelListener = null;
+        connectedDevice = null;
+        pairedDevice = null;
+        isConnected = false;
+        isConnecting = false;
+        isDeviceStorageSupport = false;
+        batteryLevel = -1;
+        captureProvider?.updateRecordingDevice(null);
+        notifyListeners();
+        break;
+      case DeviceServiceStatus.ready:
+        final stored = SharedPreferencesUtil().btDevice;
+        pairedDevice = stored.id.isEmpty ? null : stored;
+        notifyListeners();
+        if (pairedDevice != null) {
+          unawaited(periodicConnect('device service resumed', boundDeviceOnly: true));
+        }
+        break;
+      case DeviceServiceStatus.init:
+      case DeviceServiceStatus.scanning:
+        break;
+    }
+  }
 
   prepareDFU() {
     if (connectedDevice == null) {

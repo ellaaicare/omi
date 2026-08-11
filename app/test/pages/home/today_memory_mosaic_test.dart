@@ -169,6 +169,30 @@ void main() {
     expect(find.text('Record a moment'), findsOneWidget);
   });
 
+  testWidgets('confirmed phone audio remains visibly identified outside a Home-owned moment', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+    );
+    addTearDown(harness.dispose);
+
+    expect(find.byKey(const Key('today-confirmed-recording-status')), findsOneWidget);
+    expect(find.text('Records on this iPhone · Listening… tap to finish'), findsOneWidget);
+  });
+
+  testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.error,
+    );
+    addTearDown(harness.dispose);
+
+    expect(find.byKey(const Key('today-recording-error-status')), findsOneWidget);
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
+  });
+
   testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {
     final harness = await _pumpHome(
       tester,

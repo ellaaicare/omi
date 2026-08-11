@@ -626,9 +626,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       hasMemories: visibleConversations.isNotEmpty,
     );
     final showGuardianSurfaces = _guardianAvailable;
-    final captureIsActive = deviceConnected
-        ? capture.recordingState == RecordingState.deviceRecord
-        : capture.recordingState == RecordingState.record || capture.recordingState == RecordingState.initialising;
+    final captureIsActive = capture.recordingState == RecordingState.deviceRecord ||
+        capture.recordingState == RecordingState.record ||
+        capture.recordingState == RecordingState.initialising;
     final homeCaptureActive = _homeCaptureActive && captureIsActive;
 
     return SafeArea(
@@ -672,6 +672,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               active: homeCaptureActive,
               starting: _homeCaptureStarting,
               necklaceConnected: deviceConnected,
+              recordingState: capture.recordingState,
               necklaceContinuouslyRecording:
                   deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureActive,
               onTap: () => _toggleHomeCapture(
@@ -856,6 +857,7 @@ class _RecordMomentControl extends StatelessWidget {
     required this.active,
     required this.starting,
     required this.necklaceConnected,
+    required this.recordingState,
     required this.necklaceContinuouslyRecording,
     required this.onTap,
   });
@@ -863,6 +865,7 @@ class _RecordMomentControl extends StatelessWidget {
   final bool active;
   final bool starting;
   final bool necklaceConnected;
+  final RecordingState recordingState;
   final bool necklaceContinuouslyRecording;
   final VoidCallback onTap;
 
@@ -875,6 +878,9 @@ class _RecordMomentControl extends StatelessWidget {
             ? context.l10n.todayRecordListening
             : context.l10n.todayRecordMoment;
     final source = necklaceConnected ? context.l10n.todayRecordWithNecklace : context.l10n.todayRecordOnPhone;
+    final confirmedPhoneRecording = recordingState == RecordingState.record;
+    final confirmedNecklaceRecording = recordingState == RecordingState.deviceRecord;
+    final captureFailed = recordingState == RecordingState.error;
     return Semantics(
       button: true,
       label: '$label. $source',
@@ -936,6 +942,60 @@ class _RecordMomentControl extends StatelessWidget {
             textAlign: TextAlign.center,
             style: EllaTextStyles.caption.copyWith(fontSize: 14),
           ),
+          if (confirmedPhoneRecording || (confirmedNecklaceRecording && !necklaceContinuouslyRecording)) ...[
+            const SizedBox(height: 8),
+            Semantics(
+              liveRegion: true,
+              label: confirmedPhoneRecording
+                  ? '${context.l10n.todayRecordOnPhone}. ${context.l10n.todayRecordListening}'
+                  : context.l10n.todayNecklaceRecordingContinuously,
+              child: Row(
+                key: const Key('today-confirmed-recording-status'),
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const EllaBreathingDot(active: true, live: true, size: 10),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      confirmedPhoneRecording
+                          ? '${context.l10n.todayRecordOnPhone} · ${context.l10n.todayRecordListening}'
+                          : context.l10n.todayNecklaceRecordingContinuously,
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: EllaColors.tealDeep,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (captureFailed) ...[
+            const SizedBox(height: 8),
+            Semantics(
+              liveRegion: true,
+              label: context.l10n.todayRecordingUnavailable,
+              child: Row(
+                key: const Key('today-recording-error-status'),
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.error_outline_rounded, size: 18, color: EllaColors.error),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      context.l10n.todayRecordingUnavailable,
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: EllaColors.error,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (necklaceContinuouslyRecording) ...[
             const SizedBox(height: 8),
             Semantics(

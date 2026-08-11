@@ -15,6 +15,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/enums.dart';
 
 /// Mock PeopleProvider that tracks setPeople calls
 class MockPeopleProvider extends PeopleProvider {
@@ -256,6 +257,26 @@ void main() {
     } catch (_) {
       // Ignore if already initialized by another test.
     }
+  });
+
+  test('phone capture becomes visibly unavailable when transcription closes', () async {
+    final provider = CaptureProvider()..updateRecordingState(RecordingState.record);
+    addTearDown(provider.dispose);
+
+    provider.onClosed();
+
+    expect(provider.recordingState, RecordingState.error);
+    await pumpEventQueue();
+  });
+
+  test('necklace capture becomes visibly unavailable when transcription errors', () async {
+    final provider = CaptureProvider()..updateRecordingState(RecordingState.deviceRecord);
+    addTearDown(provider.dispose);
+
+    provider.onError(StateError('socket unavailable'));
+
+    expect(provider.recordingState, RecordingState.error);
+    await pumpEventQueue();
   });
 
   tearDownAll(() {

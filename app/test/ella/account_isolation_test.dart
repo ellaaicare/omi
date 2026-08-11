@@ -15,6 +15,7 @@ import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/backend/schema/message.dart';
@@ -593,6 +594,23 @@ void main() {
     expect(stopped, isTrue);
   });
 
+  test('device transition preserves long-lived subscribers and publishes restart readiness', () async {
+    final service = DeviceService(discoverers: []);
+    final subscriber = _RecordingDeviceSubscription();
+    service.subscribe(subscriber, subscriber);
+
+    service.start();
+    await service.stop();
+    service.start();
+
+    expect(subscriber.statuses, [
+      DeviceServiceStatus.init,
+      DeviceServiceStatus.ready,
+      DeviceServiceStatus.stop,
+      DeviceServiceStatus.ready,
+    ]);
+  });
+
   test('mobile mic transition waits for an in-flight start and suppresses its late callback', () async {
     final runner = _DelayedRecorderRunner();
     final service = MicRecorderBackgroundService(runner: runner);
@@ -671,6 +689,28 @@ void main() {
 
     expect(startCompleted, isTrue);
     expect(recordingCallbacks, 1);
+    expect(fixture.background.startResults.single['status'], 'recording');
+  });
+
+  test('production recorder waits for the background service before requesting native capture', () async {
+    final fixture = _ProductionRecorderFixture(
+      startTimeout: const Duration(seconds: 1),
+      stopTimeout: const Duration(seconds: 1),
+      holdServiceStart: true,
+    );
+    addTearDown(fixture.dispose);
+
+    final start = fixture.mic.start(onByteReceived: (_) {});
+    await fixture.background.serviceStartEntered.future;
+    await Future<void>.delayed(Duration.zero);
+
+    expect(fixture.native.startCalls, 0);
+    expect(fixture.background.startResults, isEmpty);
+
+    fixture.background.releaseServiceStart();
+    await start;
+
+    expect(fixture.native.startCalls, 1);
     expect(fixture.background.startResults.single['status'], 'recording');
   });
 
@@ -1313,6 +1353,7 @@ class _ProductionRecorderFixture {
     required Duration stopTimeout,
     bool holdNativeStart = false,
     bool holdNativeStop = false,
+    bool holdServiceStart = false,
     Object? nativeStartError,
     Object? nativeStopError,
   })  : native = _ControlledFlutterSoundRecorderPlatform(
@@ -1321,7 +1362,7 @@ class _ProductionRecorderFixture {
           startError: nativeStartError,
           stopError: nativeStopError,
         ),
-        background = _FakeBackgroundServicePlatform() {
+        background = _FakeBackgroundServicePlatform(holdStart: holdServiceStart) {
     _originalRecorderPlatform = FlutterSoundRecorderPlatform.instance;
     FlutterSoundRecorderPlatform.instance = native;
     FlutterBackgroundServicePlatform.instance = background;
@@ -1338,6 +1379,7 @@ class _ProductionRecorderFixture {
   Future<void> dispose() async {
     native.releaseStart();
     native.releaseStop();
+    background.releaseServiceStart();
     background.shutdown();
     await Future<void>.delayed(Duration.zero);
     FlutterSoundRecorderPlatform.instance = _originalRecorderPlatform;
@@ -1345,11 +1387,19 @@ class _ProductionRecorderFixture {
 }
 
 class _FakeBackgroundServicePlatform extends FlutterBackgroundServicePlatform {
+  _FakeBackgroundServicePlatform({bool holdStart = false}) : _serviceStartGate = Completer<void>() {
+    if (!holdStart) {
+      _serviceStartGate.complete();
+    }
+  }
+
   final Map<String, StreamController<Map<String, dynamic>?>> _isolateStreams = {};
   final Map<String, StreamController<Map<String, dynamic>?>> _uiStreams = {};
   final List<Map<String, dynamic>> startResults = [];
   final List<Map<String, dynamic>> stopResults = [];
   final Completer<void> _stopResultReceived = Completer<void>();
+  final Completer<void> _serviceStartGate;
+  final Completer<void> serviceStartEntered = Completer<void>();
   late final _FakeServiceInstance _serviceInstance = _FakeServiceInstance(this);
   Function(ServiceInstance service)? _onStart;
   bool _running = false;
@@ -1371,6 +1421,10 @@ class _FakeBackgroundServicePlatform extends FlutterBackgroundServicePlatform {
 
   @override
   Future<bool> start() async {
+    if (!serviceStartEntered.isCompleted) {
+      serviceStartEntered.complete();
+    }
+    await _serviceStartGate.future;
     _running = true;
     _onStart?.call(_serviceInstance);
     return true;
@@ -1401,6 +1455,12 @@ class _FakeBackgroundServicePlatform extends FlutterBackgroundServicePlatform {
   Stream<Map<String, dynamic>?> isolateStream(String method) => _controller(_isolateStreams, method).stream;
 
   Future<void> waitForStopResult() => _stopResultReceived.future;
+
+  void releaseServiceStart() {
+    if (!_serviceStartGate.isCompleted) {
+      _serviceStartGate.complete();
+    }
+  }
 
   void shutdown() => invoke('stop');
 }
@@ -1630,6 +1690,19 @@ class _DelayedDiscoverer implements DeviceDiscoverer {
     stopCalls++;
     return _stop;
   }
+}
+
+class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
+  final List<DeviceServiceStatus> statuses = [];
+
+  @override
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {}
+
+  @override
+  void onDevices(List<BtDevice> devices) {}
+
+  @override
+  void onStatusChanged(DeviceServiceStatus status) => statuses.add(status);
 }
 
 class _DelayedRecorderRunner implements IBackgroundRecorderRunner {

@@ -2,7 +2,9 @@ import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/services/devices.dart';
 import 'package:omi/services/services.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
@@ -167,5 +169,23 @@ void main() {
       expect(result, true);
       expect(notifyCount, 2);
     });
+  });
+
+  test('device service stop clears stale connected presentation before restart', () {
+    final provider = DeviceProvider();
+    addTearDown(provider.dispose);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    provider
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true
+      ..isConnecting = true;
+
+    provider.onStatusChanged(DeviceServiceStatus.stop);
+
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.connectedDevice, isNull);
+    expect(provider.pairedDevice, isNull);
+    expect(provider.isConnecting, isFalse);
   });
 }
