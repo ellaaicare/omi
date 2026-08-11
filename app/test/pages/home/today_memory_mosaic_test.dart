@@ -127,6 +127,27 @@ void main() {
     expect(find.byKey(const Key('today-card-detail-scroll')), findsNothing);
   });
 
+  testWidgets('Home exposes confirmed permanent deletion on each recent memory', (tester) async {
+    final conversations = _ConversationFixtures.manyMemories();
+    final harness = await _pumpHome(tester, conversations: conversations);
+    addTearDown(harness.dispose);
+
+    final deleteTarget = find.byKey(const Key('home-delete-memory-memory-1'));
+    expect(deleteTarget, findsOneWidget);
+    expect(tester.getSize(deleteTarget).height, greaterThanOrEqualTo(48));
+
+    await tester.tap(deleteTarget);
+    await tester.pumpAndSettle();
+    expect(find.text('Are you sure you want to delete this memory? This action cannot be undone.'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('confirm-home-delete-memory')));
+    await tester.pumpAndSettle();
+
+    expect(harness.conversations.permanentDeletes, ['memory-1']);
+    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsNothing);
+    expect(find.text('Memory Deleted.'), findsOneWidget);
+  });
+
   testWidgets('phone capture transforms in place and finishes the moment', (tester) async {
     final harness = await _pumpHome(tester, conversations: const []);
     addTearDown(harness.dispose);
@@ -177,6 +198,26 @@ void main() {
     expect(harness.capture.phoneStops, 1);
     expect(harness.capture.finishes, 0);
     expect(find.text('No words were captured, so no memory was created.'), findsOneWidget);
+  });
+
+  testWidgets('phone stop waits for the server-final transcript before processing', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      captureHasContent: false,
+      captureHasFinalContent: true,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalContentChecks, 1);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
   });
 
   testWidgets('Home-owned necklace capture stops its stream before finishing', (tester) async {
@@ -381,6 +422,7 @@ Future<_HomeHarness> _pumpHome(
   RecordingState initialRecordingState = RecordingState.stop,
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
+  bool captureHasFinalContent = false,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
 }) async {
   tester.view.physicalSize = viewport;
@@ -392,6 +434,7 @@ Future<_HomeHarness> _pumpHome(
     initialRecordingState,
     phoneStartResult: phoneStartResult,
     hasContent: captureHasContent,
+    hasFinalContent: captureHasFinalContent,
   );
   final actionItems = _NoActionsProvider();
   final conversationProvider = _FixtureConversationProvider(conversations);
@@ -490,24 +533,61 @@ class _FixtureConversationProvider extends ConversationProvider {
 
   @override
   Future<void> ensureFreshConversations() async {}
+
+  final List<String> permanentDeletes = [];
+
+  @override
+  Future<bool> deleteConversationPermanently(ServerConversation conversation) async {
+    permanentDeletes.add(conversation.id);
+    conversations.removeWhere((item) => item.id == conversation.id);
+    notifyListeners();
+    return true;
+  }
 }
 
 class _FakeCaptureProvider extends CaptureProvider {
-  _FakeCaptureProvider(RecordingState initialState, {required this.phoneStartResult, required this.hasContent}) {
+  _FakeCaptureProvider(
+    RecordingState initialState, {
+    required this.phoneStartResult,
+    required this.hasContent,
+    required this.hasFinalContent,
+  }) {
     recordingState = initialState;
   }
 
   final PhoneCaptureStartResult phoneStartResult;
   final bool hasContent;
+  final bool hasFinalContent;
 
   int phoneStarts = 0;
   int phoneStops = 0;
   int deviceStarts = 0;
   int deviceStops = 0;
   int finishes = 0;
+  int finalContentChecks = 0;
 
   @override
   bool get hasCapturableContent => hasContent;
+
+  @override
+  Future<bool> awaitFinalCapturableContent({
+    int maxAttempts = 3,
+    Duration retryDelay = const Duration(milliseconds: 250),
+  }) async {
+    finalContentChecks++;
+    return hasFinalContent;
+  }
+
+  @override
+  Future<bool> finalizeCurrentConversation({
+    int maxTranscriptAttempts = 3,
+    Duration transcriptRetryDelay = const Duration(milliseconds: 250),
+  }) async {
+    finalContentChecks++;
+    if (!hasContent && !hasFinalContent) return false;
+    finishes++;
+    return true;
+  }
 
   @override
   Future<PhoneCaptureStartResult> streamRecording() async {
@@ -538,8 +618,9 @@ class _FakeCaptureProvider extends CaptureProvider {
   }
 
   @override
-  Future<void> forceProcessingCurrentConversation() async {
+  Future<bool> forceProcessingCurrentConversation({CaptureFinalizationOperation? operation}) async {
     finishes++;
+    return true;
   }
 }
 

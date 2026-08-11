@@ -39,6 +39,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/ella_entitlement_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -1207,14 +1208,18 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
                 _orbState = VoiceOrbState.speaking;
               });
             },
+            preparePlayback: () async {
+              if (!mounted || !operation.isCurrent) {
+                throw ExactAccountAuthorityChangedException('Exact account authority changed before playback');
+              }
+              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) {
+                throw const StandardVoicePlaybackUnavailable();
+              }
+            },
             speakOnDevice: (ttsText) => ElevenLabsTts.speakOnDevice(ttsText, exactAuthority: operation.exactAuthority),
             playFile: (audioPath) async {
               if (!mounted || !operation.isCurrent) return;
               debugPrint('[VoiceChat] Playing authority-bound audio: $audioPath');
-              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) {
-                throw const StandardVoicePlaybackUnavailable();
-              }
-              if (!mounted || !operation.isCurrent) return;
               await _audioPlayer.setVolume(1.0);
               if (!mounted || !operation.isCurrent) return;
               await _audioPlayer.setFilePath(audioPath);
@@ -1226,7 +1231,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           if (!mounted || !operation.isCurrent || result.discarded) return;
           if (EllaVoiceChatPage.shouldResumeAfterStandardTurn(result)) {
             if (_voiceModeActive) {
-              _startListening();
+              await _startListening();
             } else {
               _returnToIdle();
             }
@@ -1286,7 +1291,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (isCurrent?.call() == false) return false;
     await session.setActive(true);
     if (isCurrent?.call() == false) return false;
-    if (!await EllaVoiceAudioRoute.ensureAudibleOutput()) return false;
+    if (!await EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback)) return false;
     if (isCurrent?.call() == false) return false;
     debugPrint('[VoiceChat] Audio session prepared for TTS playback');
     return true;

@@ -77,6 +77,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   bool _isSharing = false;
   bool _isTogglingStarred = false;
   bool _isDownloadingAudio = false;
+  bool _isDeletingMemory = false;
 
   // Search functionality
   bool _isSearching = false;
@@ -369,6 +370,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   }
 
   void _handleDelete(BuildContext context, ConversationDetailProvider provider) {
+    if (_isDeletingMemory) return;
     HapticFeedback.mediumImpact();
     final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
     if (connectivityProvider.isConnected) {
@@ -377,15 +379,23 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
         builder: (c) => getDialog(
           context,
           () => Navigator.pop(context),
-          () {
-            {
-              final convoProvider = context.read<ConversationProvider>();
-              final date = provider.selectedDate;
-              final idx = convoProvider.getConversationIndexById(provider.conversation.id, date);
-              convoProvider.deleteConversation(provider.conversation, idx);
+          () async {
+            final navigator = Navigator.of(context);
+            final messenger = ScaffoldMessenger.of(context);
+            final failureMessage = context.l10n.anErrorOccurredTryAgain;
+            navigator.pop();
+            if (!mounted) return;
+            setState(() => _isDeletingMemory = true);
+            final deleted = await context.read<ConversationProvider>().deleteConversationPermanently(
+                  provider.conversation,
+                );
+            if (!mounted) return;
+            setState(() => _isDeletingMemory = false);
+            if (deleted) {
+              navigator.pop({'deleted': true});
+            } else {
+              messenger.showSnackBar(SnackBar(content: Text(failureMessage)));
             }
-            Navigator.pop(context); // Close dialog
-            Navigator.pop(context, {'deleted': true}); // Close detail page
           },
           context.l10n.deleteConversationTitle,
           context.l10n.deleteConversationMessage,

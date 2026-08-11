@@ -136,6 +136,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _whispersOn = false;
   bool _whispersVerified = false;
   bool _updatingWhispers = false;
+  final Set<String> _deletingMemoryIds = <String>{};
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
@@ -275,6 +276,35 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _whispersOn = resolvedEnabled;
       _whispersVerified = resolvedVerified;
     });
+  }
+
+  Future<void> _confirmMemoryDelete(ServerConversation conversation) async {
+    if (_deletingMemoryIds.contains(conversation.id)) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(context.l10n.deleteMemory),
+        content: Text(context.l10n.deleteMemoryConfirmation),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(context.l10n.cancel)),
+          FilledButton(
+            key: const Key('confirm-home-delete-memory'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: EllaColors.warning, foregroundColor: Colors.white),
+            child: Text(context.l10n.delete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _deletingMemoryIds.add(conversation.id));
+    final deleted = await context.read<ConversationProvider>().deleteConversationPermanently(conversation);
+    if (!mounted) return;
+    setState(() => _deletingMemoryIds.remove(conversation.id));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(deleted ? context.l10n.memoryDeleted : context.l10n.anErrorOccurredTryAgain)),
+    );
   }
 
   Future<GuardianModeInfo?> _readWhisperState() async {
@@ -437,10 +467,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       };
 
   Future<void> _finalizeHomeMoment(CaptureProvider capture) async {
-    if (capture.hasCapturableContent) {
-      await capture.forceProcessingCurrentConversation();
-      return;
-    }
+    if (await capture.finalizeCurrentConversation()) return;
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
   }
@@ -505,7 +532,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           // pre-tap audio so this intentional moment starts at an exact boundary
           // without stopping the user's ambient capture.
           if (capture.hasCapturableContent) {
-            await capture.forceProcessingCurrentConversation();
+            await capture.finalizeCurrentConversation();
           }
         }
         if (!mounted) return;
@@ -670,6 +697,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               _RecentMemories(
                 conversations: visibleConversations.take(6).toList(),
                 refreshing: conversations.isLoadingConversations,
+                deletingConversationIds: _deletingMemoryIds,
+                onDelete: _confirmMemoryDelete,
                 onOpenAll: () =>
                     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EllaMemoriesPage())),
               ),
@@ -1574,10 +1603,18 @@ class _ReminderRow extends StatelessWidget {
 /// The journal is the Home product: real source photos when present, with a
 /// house-style app-owned illustration only when a memory has no source media.
 class _RecentMemories extends StatelessWidget {
-  const _RecentMemories({required this.conversations, required this.refreshing, required this.onOpenAll});
+  const _RecentMemories({
+    required this.conversations,
+    required this.refreshing,
+    required this.deletingConversationIds,
+    required this.onDelete,
+    required this.onOpenAll,
+  });
 
   final List<ServerConversation> conversations;
   final bool refreshing;
+  final Set<String> deletingConversationIds;
+  final ValueChanged<ServerConversation> onDelete;
   final VoidCallback onOpenAll;
 
   @override
@@ -1629,6 +1666,8 @@ class _RecentMemories extends StatelessWidget {
                     (conversation) => _MemoryJournalCard(
                       conversation: conversation,
                       compact: !stack,
+                      deleting: deletingConversationIds.contains(conversation.id),
+                      onDelete: () => onDelete(conversation),
                       onTap: () => _openDetail(context, conversation),
                     ),
                   )
@@ -1678,10 +1717,18 @@ String _memoryOverview(ServerConversation conversation) =>
     conversation.structured.overview.replaceFirst(RegExp(r'^\[Ella\]\s*'), '').trim();
 
 class _MemoryJournalCard extends StatelessWidget {
-  const _MemoryJournalCard({required this.conversation, required this.compact, required this.onTap});
+  const _MemoryJournalCard({
+    required this.conversation,
+    required this.compact,
+    required this.deleting,
+    required this.onDelete,
+    required this.onTap,
+  });
 
   final ServerConversation conversation;
   final bool compact;
+  final bool deleting;
+  final VoidCallback onDelete;
   final VoidCallback onTap;
 
   @override
@@ -1707,11 +1754,43 @@ class _MemoryJournalCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    _memoryTitle(conversation),
-                    maxLines: compact ? 2 : null,
-                    overflow: compact ? TextOverflow.ellipsis : null,
-                    style: EllaTextStyles.noteBody.copyWith(fontSize: compact ? 20 : 22, height: 1.15),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _memoryTitle(conversation),
+                          maxLines: compact ? 2 : null,
+                          overflow: compact ? TextOverflow.ellipsis : null,
+                          style: EllaTextStyles.noteBody.copyWith(fontSize: compact ? 20 : 22, height: 1.15),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      if (deleting)
+                        const SizedBox(
+                          key: Key('home-deleting-memory-progress'),
+                          width: EllaSizes.minTouchTarget,
+                          height: EllaSizes.minTouchTarget,
+                          child: Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                            ),
+                          ),
+                        )
+                      else
+                        IconButton(
+                          key: Key('home-delete-memory-${conversation.id}'),
+                          tooltip: context.l10n.deleteMemory,
+                          onPressed: onDelete,
+                          constraints: const BoxConstraints(
+                            minWidth: EllaSizes.minTouchTarget,
+                            minHeight: EllaSizes.minTouchTarget,
+                          ),
+                          icon: const Icon(Icons.delete_outline_rounded, color: EllaColors.warning),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 6),
                   Text(

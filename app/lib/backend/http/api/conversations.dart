@@ -31,12 +31,17 @@ Future<http.Response?> _defaultConversationDeleteTransport({
       exactAuthority: exactAuthority,
     );
 
-Future<CreateConversationResponse?> processInProgressConversation() async {
+Future<CreateConversationResponse?> processInProgressConversation({
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations',
     headers: {},
     method: 'POST',
     body: jsonEncode({}),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return null;
   Logger.debug('createConversationServer: ${response.body}');
@@ -73,6 +78,8 @@ Future<List<ServerConversation>> getConversations({
   DateTime? endDate,
   String? folderId,
   bool? starred,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   final result = await getConversationsResult(
     limit: limit,
@@ -83,6 +90,8 @@ Future<List<ServerConversation>> getConversations({
     endDate: endDate,
     folderId: folderId,
     starred: starred,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   return result.conversations;
 }
@@ -96,6 +105,8 @@ Future<ConversationsFetchResult> getConversationsResult({
   DateTime? endDate,
   String? folderId,
   bool? starred,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   String url =
       '${Env.apiBaseUrl}v1/conversations?include_discarded=$includeDiscarded&limit=$limit&offset=$offset&statuses=${statuses.map((val) => val.toString().split(".").last).join(",")}';
@@ -114,7 +125,14 @@ Future<ConversationsFetchResult> getConversationsResult({
     url += '&starred=$starred';
   }
 
-  var response = await makeApiCall(url: url, headers: {}, method: 'GET', body: '');
+  var response = await makeApiCall(
+    url: url,
+    headers: {},
+    method: 'GET',
+    body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
   if (response == null) return const ConversationsFetchResult.failure();
   if (response.statusCode == 200) {
     try {
@@ -601,12 +619,19 @@ Future<bool> setConversationVisibility(String conversationId, {String visibility
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationStarred(String conversationId, bool starred) async {
+Future<bool> setConversationStarred(
+  String conversationId,
+  bool starred, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/starred?starred=$starred',
     headers: {},
     method: 'PATCH',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('setConversationStarred: ${response.body}');
