@@ -38,9 +38,36 @@ import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
+class _TestEnv implements EnvFields {
+  @override
+  String? get apiBaseUrl => 'https://api.ella.test/';
+  @override
+  String? get googleClientId => null;
+  @override
+  String? get googleClientSecret => null;
+  @override
+  String? get googleMapsApiKey => null;
+  @override
+  String? get growthbookApiKey => null;
+  @override
+  String? get intercomAndroidApiKey => null;
+  @override
+  String? get intercomAppId => null;
+  @override
+  String? get intercomIOSApiKey => null;
+  @override
+  String? get mixpanelProjectToken => null;
+  @override
+  String? get openAIAPIKey => null;
+  @override
+  bool? get useAuthCustomToken => false;
+  @override
+  bool? get useWebAuth => false;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  Env.init();
+  Env.init(_TestEnv());
   PlatformManager.initializeForTesting();
 
   setUp(() async {
@@ -951,6 +978,7 @@ void main() {
       if (await audio.exists()) await audio.delete();
     });
     var playbacks = 0;
+    var playbackPreparations = 0;
     StandardVoiceTurnResult? result;
     final provider = MessageProvider(activeAuthority: () => _activeAuthority('uid-a', () => true));
     final coordinator = StandardVoiceTurnCoordinator(
@@ -968,6 +996,7 @@ void main() {
           operation,
         ),
         onReplyReady: (_) {},
+        preparePlayback: () async => playbackPreparations++,
         playFile: (path) async {
           expect(path, audio.path);
           playbacks++;
@@ -980,11 +1009,13 @@ void main() {
     expect(result?.reply, 'Current reply');
     expect(provider.messages.map((message) => message.text), ['Current question', 'Current reply']);
     expect(prefs.cachedMessages.map((message) => message.text), ['Current question', 'Current reply']);
+    expect(playbackPreparations, 1);
     expect(playbacks, 1);
   });
 
   test('standard voice route failure falls back and returns from speaking state', () async {
     var onDeviceFallbacks = 0;
+    var playbackPreparations = 0;
     final coordinator = StandardVoiceTurnCoordinator(
       streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) => _completedVoiceStream('Audible reply'),
       synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async => '/tmp/route-failure.mp3',
@@ -995,14 +1026,39 @@ void main() {
       authority: _activeAuthority('uid-a', () => true),
       commitMessages: (_, __) => true,
       onReplyReady: (_) {},
+      preparePlayback: () async => playbackPreparations++,
       playFile: (_) async => throw const StandardVoicePlaybackUnavailable(),
       speakOnDevice: (_) async => onDeviceFallbacks++,
     );
 
     expect(result.usedOnDeviceTts, isTrue);
     expect(result.reply, 'Audible reply');
+    expect(playbackPreparations, 2, reason: 'fallback must reassert the playback route before on-device TTS');
     expect(onDeviceFallbacks, 1);
     expect(EllaVoiceChatPage.shouldResumeAfterStandardTurn(result), isTrue);
+  });
+
+  test('missing synthesized file prepares playback before on-device fallback', () async {
+    var playbackPreparations = 0;
+    var onDeviceFallbacks = 0;
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) => _completedVoiceStream('Local reply'),
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async => null,
+    );
+
+    final result = await coordinator.run(
+      transcript: 'Current question',
+      authority: _activeAuthority('uid-a', () => true),
+      commitMessages: (_, __) => true,
+      onReplyReady: (_) {},
+      preparePlayback: () async => playbackPreparations++,
+      playFile: (_) async => fail('missing synthesis must not attempt file playback'),
+      speakOnDevice: (_) async => onDeviceFallbacks++,
+    );
+
+    expect(result.usedOnDeviceTts, isTrue);
+    expect(playbackPreparations, 1);
+    expect(onDeviceFallbacks, 1);
   });
 
   test('typed backend failure is never committed or spoken by standard voice', () async {

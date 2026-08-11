@@ -183,7 +183,9 @@ extension FlutterError: Error {}
         case "getCurrentRoute":
             result(self?.currentAudioRoutePayload() ?? [:])
         case "ensureAudibleVoiceOutput":
-            result(self?.ensureAudibleVoiceOutput() ?? ["success": false])
+            let arguments = call.arguments as? [String: Any]
+            let usage = arguments?["usage"] as? String ?? "interactive"
+            result(self?.ensureAudibleVoiceOutput(usage: usage) ?? ["success": false])
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -303,21 +305,36 @@ extension FlutterError: Error {}
           "hasHeadset": hasHeadset,
           "usesPhoneSpeaker": outputType == .builtInSpeaker,
           "usesReceiver": outputType == .builtInReceiver,
+          "outputVolume": AVAudioSession.sharedInstance().outputVolume,
       ]
   }
 
-  private func ensureAudibleVoiceOutput() -> [String: Any] {
+  private func ensureAudibleVoiceOutput(usage: String) -> [String: Any] {
       let audioSession = AVAudioSession.sharedInstance()
       do {
-          try audioSession.setCategory(
-              .playAndRecord,
-              mode: .voiceChat,
-              options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
-          )
+          if usage == "playback" {
+              // Standard Ella replies do not capture while audio is playing.
+              // Keep them out of the quieter bidirectional voice-processing
+              // path and let iOS use its normal media/headset output route.
+              try audioSession.setCategory(
+                  .playback,
+                  mode: .spokenAudio,
+                  options: [.allowBluetoothA2DP, .allowAirPlay]
+              )
+          } else {
+              // V2V gates its microphone while remote PCM is playing, so the
+              // default mode preserves full-range output without applying a
+              // second voice-processing profile over the streamed response.
+              try audioSession.setCategory(
+                  .playAndRecord,
+                  mode: .default,
+                  options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
+              )
+          }
           try audioSession.setActive(true, options: [])
 
           let outputType = audioSession.currentRoute.outputs.first?.portType
-          if outputType == nil || outputType == .builtInReceiver {
+          if usage != "playback" && (outputType == nil || outputType == .builtInReceiver) {
               try audioSession.overrideOutputAudioPort(.speaker)
           }
 

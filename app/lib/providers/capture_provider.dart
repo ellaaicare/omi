@@ -23,6 +23,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/models/custom_stt_config.dart';
@@ -97,6 +98,59 @@ Future<bool> ensurePhoneCaptureConsentAuthority({
   return hasCurrentConsent() && persistedConsentReceiptId().trim() == priorReceiptId;
 }
 
+typedef InProgressConversationFetchCall = Future<List<ServerConversation>> Function({
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+typedef InProgressConversationProcessCall = Future<CreateConversationResponse?> Function({
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+
+Future<List<ServerConversation>> _fetchInProgressConversation({
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    getConversations(
+      statuses: [ConversationStatus.in_progress],
+      limit: 1,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<CreateConversationResponse?> _processInProgressConversation({
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    processInProgressConversation(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+@visibleForTesting
+class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
+  CaptureFinalizationOperation({
+    required EllaAccountCommitLease accountLease,
+    required this.captureGeneration,
+    required int Function() currentCaptureGeneration,
+  })  : _accountLease = accountLease,
+        _currentCaptureGeneration = currentCaptureGeneration;
+
+  final EllaAccountCommitLease _accountLease;
+  final int captureGeneration;
+  final int Function() _currentCaptureGeneration;
+
+  bool get isCurrent => _accountLease.isExactCurrent() && captureGeneration == _currentCaptureGeneration();
+
+  @override
+  String get uid => _accountLease.uid;
+
+  @override
+  bool isExactCurrent() => isCurrent;
+
+  void close() => _accountLease.close();
+}
+
 class CaptureProvider extends ChangeNotifier
     with MessageNotifierMixin, WidgetsBindingObserver
     implements ITransctiptSegmentSocketServiceListener {
@@ -167,6 +221,9 @@ class CaptureProvider extends ChangeNotifier
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
+  final ActiveAccountAuthorityProvider _activeAccountAuthority;
+  final InProgressConversationFetchCall _inProgressConversationFetch;
+  final InProgressConversationProcessCall _inProgressConversationProcess;
 
   bool _isCaptureCurrent(int generation, ActiveWalAuthority authority) =>
       generation == _captureGeneration && authority.isCurrent();
@@ -214,7 +271,13 @@ class CaptureProvider extends ChangeNotifier
     return segmentPersonIds.difference(cachedIds).isNotEmpty;
   }
 
-  CaptureProvider() {
+  CaptureProvider({
+    ActiveAccountAuthorityProvider activeAccountAuthority = WalOwnerAuthority.activeAccount,
+    InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
+    InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
+  })  : _activeAccountAuthority = activeAccountAuthority,
+        _inProgressConversationFetch = inProgressConversationFetch,
+        _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
     _connectionStateListener = ConnectivityService().onConnectionChange.listen((bool isConnected) {
       onConnectionStateChanged(isConnected);
@@ -284,6 +347,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   void reset() {
+    _captureGeneration++;
     _conversation = null;
     segments = [];
     photos = [];
@@ -394,7 +458,9 @@ class CaptureProvider extends ChangeNotifier
 
   bool get havingRecordingDevice => _recordingDevice != null;
 
-  bool get hasCapturableContent => segments.isNotEmpty || photos.isNotEmpty;
+  bool get hasCapturableContent =>
+      segments.any((segment) => segment.text.trim().isNotEmpty) ||
+      photos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty);
 
   BtDevice? get recordingDevice => _recordingDevice;
 
@@ -539,7 +605,7 @@ class CaptureProvider extends ChangeNotifier
     _socket?.subscribe(this, this);
     _transcriptServiceReady = true;
 
-    _loadInProgressConversation();
+    unawaited(refreshInProgressConversations());
 
     notifyListeners();
   }
@@ -1088,8 +1154,7 @@ class CaptureProvider extends ChangeNotifier
     final consentCurrent = await ensurePhoneCaptureConsentAuthority(
       hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
       authenticatedUid: () => WalOwnerAuthority.authenticatedUid,
-      persistedConsentReceiptId: () =>
-          SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount,
+      persistedConsentReceiptId: () => SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount,
       refreshAuthority: (uid) => EllaAiConsentService().refreshServerAuthority(uid: uid),
     );
     if (!consentCurrent || generation != _captureGeneration) return PhoneCaptureStartResult.consentUnavailable;
@@ -1689,12 +1754,82 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
   }
 
-  Future refreshInProgressConversations() async {
-    _loadInProgressConversation();
+  CaptureFinalizationOperation? _beginFinalizationOperation() {
+    final accountLease = EllaAccountCommitBarrier.begin(
+      authorityProvider: _activeAccountAuthority,
+      onInvalidated: reset,
+    );
+    if (accountLease == null) return null;
+    return CaptureFinalizationOperation(
+      accountLease: accountLease,
+      captureGeneration: _captureGeneration,
+      currentCaptureGeneration: () => _captureGeneration,
+    );
   }
 
-  Future _loadInProgressConversation() async {
-    var convos = await getConversations(statuses: [ConversationStatus.in_progress], limit: 1);
+  Future<bool> refreshInProgressConversations() async {
+    final operation = _beginFinalizationOperation();
+    if (operation == null) return false;
+    try {
+      return await _loadInProgressConversation(operation);
+    } on ExactAccountAuthorityChangedException {
+      return false;
+    } finally {
+      operation.close();
+    }
+  }
+
+  /// Gives the transcription service a short, bounded window to publish its
+  /// final segment after microphone/socket shutdown. Empty placeholder
+  /// segments never qualify, so Home cannot create a blank processing memory.
+  Future<bool> awaitFinalCapturableContent({
+    int maxAttempts = 3,
+    Duration retryDelay = const Duration(milliseconds: 250),
+  }) async {
+    final operation = _beginFinalizationOperation();
+    if (operation == null) return false;
+    try {
+      return await _awaitFinalCapturableContent(
+        operation,
+        maxAttempts: maxAttempts,
+        retryDelay: retryDelay,
+      );
+    } finally {
+      operation.close();
+    }
+  }
+
+  Future<bool> _awaitFinalCapturableContent(
+    CaptureFinalizationOperation operation, {
+    required int maxAttempts,
+    required Duration retryDelay,
+  }) async {
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (!await _loadInProgressConversation(operation)) return false;
+      } on ExactAccountAuthorityChangedException {
+        return false;
+      } catch (_) {
+        // A final refresh failure must not turn an empty capture into a blank
+        // server memory. Keep the retry bounded and report no content.
+      }
+      if (!operation.isCurrent) return false;
+      if (hasCapturableContent) return true;
+      if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
+        await Future<void>.delayed(retryDelay);
+        if (!operation.isCurrent) return false;
+      }
+    }
+    return false;
+  }
+
+  Future<bool> _loadInProgressConversation(CaptureFinalizationOperation operation) async {
+    if (!operation.isCurrent) return false;
+    final convos = await _inProgressConversationFetch(
+      expectedAuthenticatedUid: operation.uid,
+      exactAuthority: operation,
+    );
+    if (!operation.isCurrent) return false;
     _conversation = convos.isNotEmpty ? convos.first : null;
     if (_conversation != null) {
       segments = _conversation!.transcriptSegments;
@@ -1718,6 +1853,7 @@ class CaptureProvider extends ChangeNotifier
     _segmentsPhotosVersion++; // Bump version so Selector rebuilds
     setHasTranscripts(segments.isNotEmpty);
     notifyListeners();
+    return true;
   }
 
   @override
@@ -1804,39 +1940,98 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  Future<void> forceProcessingCurrentConversation() async {
-    _resetStateVariables();
-    conversationProvider!.addProcessingConversation(
-      ServerConversation(
-          id: '0', createdAt: DateTime.now(), structured: Structured('', ''), status: ConversationStatus.processing),
-    );
-    processInProgressConversation().then((result) {
-      if (result == null || result.conversation == null) {
-        conversationProvider!.removeProcessingConversation('0');
-        return;
-      }
-      conversationProvider!.removeProcessingConversation('0');
-      result.conversation!.isNew = true;
-      _processConversationCreated(result.conversation, result.messages);
-    });
-
-    return;
+  /// Performs one authoritative final transcript read and processing request
+  /// under the same account lease and capture generation.
+  Future<bool> finalizeCurrentConversation({
+    int maxTranscriptAttempts = 3,
+    Duration transcriptRetryDelay = const Duration(milliseconds: 250),
+  }) async {
+    final operation = _beginFinalizationOperation();
+    if (operation == null) return false;
+    try {
+      final hasContent = await _awaitFinalCapturableContent(
+        operation,
+        maxAttempts: maxTranscriptAttempts,
+        retryDelay: transcriptRetryDelay,
+      );
+      if (!hasContent || !operation.isCurrent) return false;
+      return await forceProcessingCurrentConversation(operation: operation);
+    } finally {
+      operation.close();
+    }
   }
 
-  Future<void> _processConversationCreated(ServerConversation? conversation, List<ServerMessage> messages) async {
-    if (conversation == null) return;
+  Future<bool> forceProcessingCurrentConversation({CaptureFinalizationOperation? operation}) async {
+    final activeOperation = operation ?? _beginFinalizationOperation();
+    if (activeOperation == null) return false;
+    final ownsOperation = operation == null;
+    final conversations = conversationProvider;
+    if (conversations == null) {
+      if (ownsOperation) activeOperation.close();
+      return false;
+    }
+    try {
+      if (!activeOperation.isCurrent) return false;
+      await _resetStateVariables();
+      if (!activeOperation.isCurrent) return false;
+      conversations.addProcessingConversation(
+        ServerConversation(
+          id: '0',
+          createdAt: DateTime.now(),
+          structured: Structured('', ''),
+          status: ConversationStatus.processing,
+        ),
+      );
+      final result = await _inProgressConversationProcess(
+        expectedAuthenticatedUid: activeOperation.uid,
+        exactAuthority: activeOperation,
+      );
+      if (!activeOperation.isCurrent) return false;
+      if (result == null || result.conversation == null) {
+        conversations.removeProcessingConversation('0');
+        return false;
+      }
+      conversations.removeProcessingConversation('0');
+      result.conversation!.isNew = true;
+      return await _processConversationCreated(
+        result.conversation,
+        result.messages,
+        operation: activeOperation,
+      );
+    } on ExactAccountAuthorityChangedException {
+      return false;
+    } finally {
+      if (ownsOperation) activeOperation.close();
+    }
+  }
+
+  Future<bool> _processConversationCreated(
+    ServerConversation? conversation,
+    List<ServerMessage> messages, {
+    CaptureFinalizationOperation? operation,
+  }) async {
+    if (conversation == null || operation?.isCurrent == false) return false;
 
     // Star the conversation if it was marked for starring
     if (_starOngoingConversation) {
       Logger.debug("Conversation was marked for starring, applying star");
-      _starOngoingConversation = false; // Reset the flag
       conversation.starred = true;
       // Call API to star the conversation
-      await setConversationStarred(conversation.id, true);
+      await setConversationStarred(
+        conversation.id,
+        true,
+        expectedAuthenticatedUid: operation?.uid,
+        exactAuthority: operation,
+      );
+      if (operation?.isCurrent == false) return false;
+      _starOngoingConversation = false;
     }
 
+    if (operation?.isCurrent == false) return false;
     conversationProvider?.upsertConversation(conversation);
+    if (operation?.isCurrent == false) return false;
     MixpanelManager().conversationCreated(conversation);
+    return true;
   }
 
   Future<void> _handleLastConvoEvent(String memoryId) async {
@@ -2002,6 +2197,7 @@ class CaptureProvider extends ChangeNotifier
 
   void _processNewSegmentReceived(List<TranscriptSegment> newSegments) async {
     if (newSegments.isEmpty) return;
+    final captureGeneration = _captureGeneration;
 
     if (segments.isEmpty && !_isLoadingInProgressConversation) {
       _isLoadingInProgressConversation = true;
@@ -2009,11 +2205,12 @@ class CaptureProvider extends ChangeNotifier
         FlutterForegroundTask.sendDataToTask(jsonEncode({'location': true}));
       }
       try {
-        await _loadInProgressConversation();
+        await refreshInProgressConversations();
       } finally {
         _isLoadingInProgressConversation = false;
       }
     }
+    if (captureGeneration != _captureGeneration) return;
 
     final remainSegments = TranscriptSegment.updateSegments(segments, newSegments);
     segments.addAll(remainSegments);

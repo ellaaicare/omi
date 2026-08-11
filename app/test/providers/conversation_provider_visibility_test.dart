@@ -28,9 +28,36 @@ class _MutableAuthority implements AccountCommitAuthority {
   bool isExactCurrent() => current;
 }
 
+class _TestEnv implements EnvFields {
+  @override
+  String? get apiBaseUrl => 'https://api.ella.test/';
+  @override
+  String? get googleClientId => null;
+  @override
+  String? get googleClientSecret => null;
+  @override
+  String? get googleMapsApiKey => null;
+  @override
+  String? get growthbookApiKey => null;
+  @override
+  String? get intercomAndroidApiKey => null;
+  @override
+  String? get intercomAppId => null;
+  @override
+  String? get intercomIOSApiKey => null;
+  @override
+  String? get mixpanelProjectToken => null;
+  @override
+  String? get openAIAPIKey => null;
+  @override
+  bool? get useAuthCustomToken => false;
+  @override
+  bool? get useWebAuth => false;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  Env.init();
+  Env.init(_TestEnv());
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});

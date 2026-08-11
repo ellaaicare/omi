@@ -14,6 +14,7 @@ void main() {
     'Ella empty memory summary is readable and exposes no legacy template picker',
     (tester) async {
       final provider = ConversationDetailProvider()
+        ..selectedDate = DateTime(2026, 8, 10)
         ..setCachedConversation(
           ServerConversation(
             id: 'memory-without-summary',

@@ -492,6 +492,110 @@ void main() {
     expect(controller.state.card, isNull);
   });
 
+  test('a transient first-open failure retries into the grounded Daily Note', () async {
+    final repository = _TransientFailureTodayCardRepository(
+      remainingFailures: 1,
+      response: TodayCardResponse(
+        contractVersion: todayCardContractVersion,
+        status: TodayCardStatus.ready,
+        card: card,
+      ),
+    );
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      pollScheduler: scheduler.schedule,
+      transientRetryDelay: const Duration(seconds: 2),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+
+    expect(controller.state.status, TodayCardStatus.preparing);
+    expect(controller.state.card, isNull);
+    expect(scheduler.latestDuration, const Duration(seconds: 2));
+    scheduler.fireLatest();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(repository.fetches, 2);
+    expect(controller.state.status, TodayCardStatus.ready);
+    expect(controller.state.card?.id, card.id);
+  });
+
+  test('a non-authoritative first-open unavailable response retries into ready', () async {
+    final repository = _QueueTodayCardRepository([
+      const TodayCardResponse(
+        contractVersion: todayCardContractVersion,
+        status: TodayCardStatus.degraded,
+        errorCode: 'today_card_unavailable',
+      ),
+      TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.ready, card: card),
+    ]);
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      pollScheduler: scheduler.schedule,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    expect(controller.state.status, TodayCardStatus.preparing);
+
+    scheduler.fireLatest();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(repository.fetches, 2);
+    expect(controller.state.status, TodayCardStatus.ready);
+    expect(controller.state.card?.id, card.id);
+  });
+
+  test('transient first-open retries are bounded and end truthfully empty', () async {
+    final repository = _TransientFailureTodayCardRepository(
+      remainingFailures: 3,
+      response: TodayCardResponse(
+        contractVersion: todayCardContractVersion,
+        status: TodayCardStatus.ready,
+        card: card,
+      ),
+    );
+    final scheduler = _ManualExpiryScheduler();
+    final controller = TodayCardController(
+      repository: repository,
+      cache: _MemoryTodayCardCache(),
+      pollScheduler: scheduler.schedule,
+      maxTransientRetries: 2,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.updateAuthority(
+      uid: 'account-a',
+      authorityKey: 'authority-a',
+      isProvisioningReady: true,
+    );
+    for (var retry = 0; retry < 2; retry++) {
+      scheduler.fireLatest();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(repository.fetches, 3);
+    expect(controller.state.status, TodayCardStatus.degraded);
+    expect(controller.state.errorCode, 'today_card_unavailable');
+    expect(controller.state.card, isNull);
+  });
+
   test('daily-card stale scope refresh stays daily-card and never loads a conversation', () async {
     final refreshed = await EllaVoiceChatPage.refreshSessionScope(
       const V2VSessionScope.dailyCard(cardId: 'today-1', expectedVersion: 1),
@@ -539,6 +643,24 @@ class _DeferredTodayCardRepository implements TodayCardRepository {
 
   @override
   Future<TodayCardResponse> fetch({required String uid}) => response;
+}
+
+class _TransientFailureTodayCardRepository implements TodayCardRepository {
+  _TransientFailureTodayCardRepository({required this.remainingFailures, required this.response});
+
+  int remainingFailures;
+  final TodayCardResponse response;
+  int fetches = 0;
+
+  @override
+  Future<TodayCardResponse> fetch({required String uid}) async {
+    fetches++;
+    if (remainingFailures > 0) {
+      remainingFailures--;
+      throw StateError('transport unavailable');
+    }
+    return response;
+  }
 }
 
 class _FutureQueueTodayCardRepository implements TodayCardRepository {

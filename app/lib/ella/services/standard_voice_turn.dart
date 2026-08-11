@@ -51,6 +51,7 @@ class StandardVoiceTurnCoordinator {
     required ExactAccountAuthorityVerifier authority,
     required bool Function(String transcript, String reply) commitMessages,
     required FutureOr<void> Function(String reply) onReplyReady,
+    Future<void> Function()? preparePlayback,
     required Future<void> Function(String audioPath) playFile,
     required Future<void> Function(String text) speakOnDevice,
     String Function(String text)? prepareTtsText,
@@ -99,17 +100,23 @@ class StandardVoiceTurnCoordinator {
       }
 
       if (audioPath == null) {
+        await preparePlayback?.call();
+        if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         await speakOnDevice(ttsText);
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         return StandardVoiceTurnResult(reply: reply, usedOnDeviceTts: true);
       }
 
       try {
+        await preparePlayback?.call();
+        if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         await playFile(audioPath);
       } on ExactAccountAuthorityChangedException {
         rethrow;
       } catch (_) {
         await ElevenLabsTts.discardSynthesizedFile(audioPath);
+        if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
+        await preparePlayback?.call();
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);
         await speakOnDevice(ttsText);
         if (!authority.isExactCurrent()) return const StandardVoiceTurnResult(reply: '', discarded: true);

@@ -16,13 +16,17 @@ class TodayCardController extends ChangeNotifier {
     TodayCardExpiryScheduler pollScheduler = _defaultExpiryScheduler,
     Duration authorityWaitTimeout = const Duration(seconds: 12),
     int maxPreparingPolls = 3,
+    int maxTransientRetries = 2,
+    Duration transientRetryDelay = const Duration(seconds: 2),
   })  : _repository = repository,
         _cache = cache,
         _onRevalidationRequired = onRevalidationRequired,
         _expiryScheduler = expiryScheduler,
         _pollScheduler = pollScheduler,
         _authorityWaitTimeout = authorityWaitTimeout,
-        _maxPreparingPolls = maxPreparingPolls;
+        _maxPreparingPolls = maxPreparingPolls,
+        _maxTransientRetries = maxTransientRetries,
+        _transientRetryDelay = transientRetryDelay;
 
   static Timer _defaultExpiryScheduler(Duration duration, void Function() callback) => Timer(duration, callback);
 
@@ -33,6 +37,8 @@ class TodayCardController extends ChangeNotifier {
   final TodayCardExpiryScheduler _pollScheduler;
   final Duration _authorityWaitTimeout;
   final int _maxPreparingPolls;
+  final int _maxTransientRetries;
+  final Duration _transientRetryDelay;
 
   TodayCardViewState state = const TodayCardViewState.preparing();
 
@@ -45,6 +51,7 @@ class TodayCardController extends ChangeNotifier {
   Timer? _pollTimer;
   Timer? _authorityTimer;
   int _preparingPolls = 0;
+  int _transientRetries = 0;
 
   String get uid => _uid;
 
@@ -102,6 +109,7 @@ class TodayCardController extends ChangeNotifier {
     _authorityTimer = null;
     if (accountChanged || authorityChanged || becameReady || forceReload) {
       _preparingPolls = 0;
+      _transientRetries = 0;
     }
     await _load();
   }
@@ -174,6 +182,7 @@ class TodayCardController extends ChangeNotifier {
         case TodayCardStatus.ready:
           _cancelPoll();
           _preparingPolls = 0;
+          _transientRetries = 0;
           final card = response.card!;
           final stored = await _cache.write(
             uid: uid,
@@ -206,6 +215,7 @@ class TodayCardController extends ChangeNotifier {
         case TodayCardStatus.newUser:
           _cancelPoll();
           _preparingPolls = 0;
+          _transientRetries = 0;
           _cancelExpiry();
           await _cache.clear(uid: uid, authorityKey: authorityKey);
           if (!_isCurrent(uid, authorityKey, generation)) return;
@@ -214,8 +224,14 @@ class TodayCardController extends ChangeNotifier {
             _scheduleExpiry(response.cacheMaxAge, uid: uid, authorityKey: authorityKey);
           }
         case TodayCardStatus.degraded:
+          if (!response.isAuthoritative &&
+              response.errorCode == 'today_card_unavailable' &&
+              _scheduleTransientRetry(uid: uid, authorityKey: authorityKey, cached: cached)) {
+            return;
+          }
           _cancelPoll();
           _preparingPolls = 0;
+          _transientRetries = 0;
           final invalidatesCache = response.isAuthoritative || response.invalidatesCachedCard;
           if (invalidatesCache && response.card == null) {
             _cancelExpiry();
@@ -236,8 +252,27 @@ class TodayCardController extends ChangeNotifier {
       _notify();
     } catch (_) {
       if (!_isCurrent(uid, authorityKey, generation)) return;
+      if (_scheduleTransientRetry(uid: uid, authorityKey: authorityKey, cached: cached)) return;
       _applyDegraded(cached, 'today_card_unavailable');
     }
+  }
+
+  bool _scheduleTransientRetry({
+    required String uid,
+    required String authorityKey,
+    required TodayCard? cached,
+  }) {
+    _cancelPoll();
+    if (_transientRetries >= _maxTransientRetries) return false;
+    state = TodayCardViewState.preparing(card: cached, isCached: cached != null);
+    _notify();
+    _pollTimer = _pollScheduler(_transientRetryDelay, () {
+      _pollTimer = null;
+      if (_disposed || _uid != uid || _authorityKey != authorityKey || !_isProvisioningReady) return;
+      _transientRetries++;
+      unawaited(_load());
+    });
+    return true;
   }
 
   void _applyDegraded(TodayCard? card, String errorCode, {bool? isCached}) {

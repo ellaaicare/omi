@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+enum EllaVoiceAudioUsage { playback, interactive }
+
 /// Keeps Ella voice playback on a private route when one is connected and on
 /// the iPhone loudspeaker otherwise. `playAndRecord` sessions can fall back to
 /// the receiver after microphone or route transitions, so `defaultToSpeaker`
@@ -15,6 +17,7 @@ class EllaVoiceAudioRoute {
   );
 
   static Future<bool> ensureAudibleOutput({
+    EllaVoiceAudioUsage usage = EllaVoiceAudioUsage.interactive,
     @visibleForTesting MethodChannel channel = _channel,
     @visibleForTesting bool? isIos,
   }) async {
@@ -22,6 +25,7 @@ class EllaVoiceAudioRoute {
     try {
       final result = await channel.invokeMapMethod<String, dynamic>(
         'ensureAudibleVoiceOutput',
+        {'usage': usage.name},
       );
       return result?['success'] == true && result?['usesReceiver'] != true;
     } on PlatformException {

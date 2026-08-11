@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -19,6 +19,20 @@ class ElevenLabsTts {
 
   static FlutterTts? _flutterTts;
   static String? _cachedTempDir;
+
+  @visibleForTesting
+  static ({
+    IosTextToSpeechAudioCategory category,
+    List<IosTextToSpeechAudioCategoryOptions> options,
+    IosTextToSpeechAudioMode mode,
+  }) get onDeviceIosAudioConfiguration => (
+        category: IosTextToSpeechAudioCategory.playback,
+        options: const [
+          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+          IosTextToSpeechAudioCategoryOptions.allowAirPlay,
+        ],
+        mode: IosTextToSpeechAudioMode.spokenAudio,
+      );
 
   /// Synthesize [text] to speech via the backend TTS proxy.
   /// Returns the path to a temporary audio file, or null on failure.
@@ -144,19 +158,15 @@ class ElevenLabsTts {
     final tts = _flutterTts!;
 
     if (Platform.isIOS) {
+      final configuration = onDeviceIosAudioConfiguration;
       await tts.setSharedInstance(true);
       _requireCurrent(exactAuthority, 'during on-device TTS setup');
       await tts.autoStopSharedSession(false);
       _requireCurrent(exactAuthority, 'during on-device TTS setup');
       await tts.setIosAudioCategory(
-        IosTextToSpeechAudioCategory.playAndRecord,
-        const [
-          IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
-          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
-          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
-          IosTextToSpeechAudioCategoryOptions.allowAirPlay,
-        ],
-        IosTextToSpeechAudioMode.voicePrompt,
+        configuration.category,
+        configuration.options,
+        configuration.mode,
       );
       _requireCurrent(exactAuthority, 'during on-device TTS setup');
     }

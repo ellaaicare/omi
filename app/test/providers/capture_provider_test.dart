@@ -1,15 +1,20 @@
 import 'dart:async';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message_event.dart';
+import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 /// Mock PeopleProvider that tracks setPeople calls
 class MockPeopleProvider extends PeopleProvider {
@@ -54,9 +59,196 @@ TranscriptSegment _segment(String id, String text) {
   );
 }
 
+class _CaptureAuthority implements AccountCommitAuthority {
+  _CaptureAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isCurrent() => current;
+
+  @override
+  bool isExactCurrent() => current;
+}
+
+ServerConversation _conversation(String id, String transcript,
+    {ConversationStatus status = ConversationStatus.in_progress}) {
+  final startedAt = DateTime.parse('2026-08-10T20:00:00Z');
+  return ServerConversation(
+    id: id,
+    createdAt: startedAt,
+    startedAt: startedAt,
+    finishedAt: startedAt.add(const Duration(minutes: 1)),
+    structured: Structured('Memory $id', 'Overview'),
+    status: status,
+    transcriptSegments: [_segment('segment-$id', transcript)],
+  );
+}
+
 void main() {
+  test('blank transcript placeholders are not capturable content', () {
+    final provider = CaptureProvider();
+    provider.segments = [_segment('blank', '   \n  ')];
+
+    expect(provider.hasCapturableContent, isFalse);
+
+    provider.segments = [_segment('spoken', 'A real moment')];
+    expect(provider.hasCapturableContent, isTrue);
+  });
+
+  test('final transcript refresh failures are bounded and never create blank content', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var refreshes = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        refreshes++;
+        throw StateError('transient refresh failure');
+      },
+    );
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.awaitFinalCapturableContent(maxAttempts: 3, retryDelay: Duration.zero),
+      isFalse,
+    );
+    expect(refreshes, 3);
+  });
+
+  test('delayed final transcript cannot cross an account and capture transition', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final response = Completer<List<ServerConversation>>();
+    ExactAccountAuthorityVerifier? requestAuthority;
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        requestAuthority = exactAuthority;
+        return response.future;
+      },
+      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    final finalization = provider.finalizeCurrentConversation(
+      maxTranscriptAttempts: 1,
+      transcriptRetryDelay: Duration.zero,
+    );
+    await pumpEventQueue();
+    expect(requestAuthority?.isExactCurrent(), isTrue);
+
+    authority.current = false;
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    await provider.stopForAccountTransition();
+    response.complete([_conversation('account-a', 'Account A final words')]);
+
+    expect(await finalization, isFalse);
+    expect(requestAuthority?.isExactCurrent(), isFalse);
+    expect(provider.segments, isEmpty);
+    expect(processCalls, 0);
+  });
+
+  test('delayed processing completion cannot mutate replacement-account memories', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final response = Completer<CreateConversationResponse?>();
+    ExactAccountAuthorityVerifier? fetchAuthority;
+    ExactAccountAuthorityVerifier? processAuthority;
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        fetchAuthority = exactAuthority;
+        return [_conversation('account-a', 'Account A final words')];
+      },
+      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        processAuthority = exactAuthority;
+        return response.future;
+      },
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    final finalization = provider.finalizeCurrentConversation(
+      maxTranscriptAttempts: 1,
+      transcriptRetryDelay: Duration.zero,
+    );
+    await pumpEventQueue();
+    expect(identical(fetchAuthority, processAuthority), isTrue);
+    expect(processAuthority?.isExactCurrent(), isTrue);
+
+    authority.current = false;
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    await provider.stopForAccountTransition();
+    conversations.reset();
+    final replacement = _conversation('account-b', 'Replacement account', status: ConversationStatus.completed);
+    conversations.conversations = [replacement];
+    response.complete(
+      CreateConversationResponse(
+        messages: const [],
+        conversation: _conversation('processed-a', 'Processed A', status: ConversationStatus.completed),
+      ),
+    );
+
+    expect(await finalization, isFalse);
+    expect(processAuthority?.isExactCurrent(), isFalse);
+    expect(conversations.conversations, [replacement]);
+    expect(conversations.processingConversations, isEmpty);
+  });
+
+  test('a local partial still performs one authoritative GET before processing', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var fetches = 0;
+    var processes = 0;
+    ExactAccountAuthorityVerifier? fetchAuthority;
+    ExactAccountAuthorityVerifier? processAuthority;
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        fetches++;
+        fetchAuthority = exactAuthority;
+        return [_conversation('authoritative', 'Authoritative final words')];
+      },
+      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        processes++;
+        processAuthority = exactAuthority;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('processed', 'Processed words', status: ConversationStatus.completed),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..segments = [_segment('local-partial', 'Local partial')];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isTrue,
+    );
+    expect(fetches, 1);
+    expect(processes, 1);
+    expect(identical(fetchAuthority, processAuthority), isTrue);
+    expect(conversations.conversations.single.id, 'processed');
+  });
+
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      (_) async => null,
+    );
     SharedPreferences.setMockInitialValues({});
     ConnectivityPlatform.instance = _TestConnectivityPlatform();
     try {
@@ -64,6 +256,13 @@ void main() {
     } catch (_) {
       // Ignore if already initialized by another test.
     }
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      null,
+    );
   });
 
   test('removes segments and related state on deletion event', () {
