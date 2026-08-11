@@ -92,6 +92,9 @@ class DeviceService implements IDeviceService {
       logCommonErrorMessage("Device service is not ready, may busying or stop");
       return;
     }
+    final operationGeneration = _operationGeneration;
+
+    bool isCurrentDiscovery() => operationGeneration == _operationGeneration && _status != DeviceServiceStatus.stop;
 
     _status = DeviceServiceStatus.scanning;
 
@@ -102,6 +105,7 @@ class DeviceService implements IDeviceService {
       final discoveryFutures = supportedDiscoverers.map((d) async {
         try {
           final result = await d.discover(timeout: timeout);
+          if (!isCurrentDiscovery()) return <BtDevice>[];
           return result.devices;
         } catch (e, st) {
           Logger.debug('Discovery failed for ${d.name}: $e');
@@ -112,21 +116,25 @@ class DeviceService implements IDeviceService {
 
       // Wait for all discoveries to complete
       final results = await Future.wait(discoveryFutures);
+      if (!isCurrentDiscovery()) return;
 
       // Combine all discovered devices
-      if (_status == DeviceServiceStatus.stop) return;
       for (final devices in results) {
         discoveredDevices.addAll(devices);
       }
 
+      if (!isCurrentDiscovery()) return;
       _devices = discoveredDevices;
+      if (!isCurrentDiscovery()) return;
       onDevices(devices);
 
       if (desirableDeviceId != null && desirableDeviceId.isNotEmpty) {
+        if (!isCurrentDiscovery()) return;
         await ensureConnection(desirableDeviceId, force: true);
+        if (!isCurrentDiscovery()) return;
       }
     } finally {
-      if (_status != DeviceServiceStatus.stop) _status = DeviceServiceStatus.ready;
+      if (isCurrentDiscovery()) _status = DeviceServiceStatus.ready;
     }
   }
 

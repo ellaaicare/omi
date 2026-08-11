@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/http/client_api_failure.dart';
@@ -9,6 +11,7 @@ import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/geolocation.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -88,6 +91,56 @@ void main() {
     await _expectConsentFailure(sendVoiceMessageStreamServer([file]));
     expect(await updateUserGeolocation(geolocation: Geolocation(latitude: 1, longitude: 2)), isFalse);
   });
+
+  test('delayed location response is rejected after exact account authority changes', () async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    final authority = _MutableExactAuthority('uid-a');
+    final entered = Completer<void>();
+    final response = Completer<http.Response?>();
+
+    final update = updateUserGeolocation(
+      geolocation: Geolocation(latitude: 1, longitude: 2),
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required body, expectedAuthenticatedUid, exactAuthority}) {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(identical(exactAuthority, authority), isTrue);
+        entered.complete();
+        return response.future;
+      },
+    );
+    await entered.future;
+    authority.current = false;
+    response.complete(http.Response('', 200));
+
+    expect(await update, isFalse);
+  });
+}
+
+class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
+  _MutableExactAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isExactCurrent() => current;
 }
 
 Future<void> _expectConsentFailure(Stream<Object?> stream) async {

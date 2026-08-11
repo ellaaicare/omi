@@ -611,6 +611,30 @@ void main() {
     ]);
   });
 
+  test('delayed discovery cannot cross stop and restart into the next service generation', () async {
+    final discoverer = _DelayedResultDiscoverer();
+    final service = DeviceService(discoverers: [discoverer]);
+    final subscriber = _RecordingDeviceSubscription();
+    service.subscribe(subscriber, subscriber);
+    service.start();
+
+    final discovery = service.discover(desirableDeviceId: 'necklace-a');
+    await discoverer.entered.future;
+    await service.stop();
+    service.start();
+    discoverer.result.complete(
+      DeviceDiscoveryResult(
+        devices: [BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30)],
+      ),
+    );
+    await discovery;
+
+    expect(service.devices, isEmpty);
+    expect(subscriber.deviceSnapshots.every((devices) => devices.isEmpty), isTrue);
+    expect(subscriber.connectionStates, isEmpty);
+    expect(service.status, DeviceServiceStatus.ready);
+  });
+
   test('stopped device service rejects connection work after mutex acquisition', () async {
     final service = DeviceService(discoverers: []);
     service.start();
@@ -1700,14 +1724,40 @@ class _DelayedDiscoverer implements DeviceDiscoverer {
   }
 }
 
+class _DelayedResultDiscoverer implements DeviceDiscoverer {
+  final entered = Completer<void>();
+  final result = Completer<DeviceDiscoveryResult>();
+
+  @override
+  String get name => 'delayed-result';
+
+  @override
+  bool get isSupported => true;
+
+  @override
+  Future<DeviceDiscoveryResult> discover({int timeout = 5}) {
+    entered.complete();
+    return result.future;
+  }
+
+  @override
+  Future<void> stop() async {}
+}
+
 class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
   final List<DeviceServiceStatus> statuses = [];
+  final List<List<BtDevice>> deviceSnapshots = [];
+  final List<DeviceConnectionState> connectionStates = [];
 
   @override
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {}
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {
+    connectionStates.add(state);
+  }
 
   @override
-  void onDevices(List<BtDevice> devices) {}
+  void onDevices(List<BtDevice> devices) {
+    deviceSnapshots.add(List<BtDevice>.unmodifiable(devices));
+  }
 
   @override
   void onStatusChanged(DeviceServiceStatus status) => statuses.add(status);

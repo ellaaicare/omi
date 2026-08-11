@@ -123,9 +123,13 @@ typedef InProgressConversationProcessCall = Future<CreateConversationResponse?> 
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 typedef ActiveWalAuthorityProvider = ActiveWalAuthority? Function();
-typedef CaptureGeolocationSender = Future<void> Function();
+typedef CaptureGeolocationSender = Future<bool> Function({
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
 typedef CaptureConsentAuthorityEnsurer = Future<bool> Function();
 typedef DeviceCaptureStarter = Future<bool> Function();
+typedef PhoneCaptureStarter = Future<PhoneCaptureStartResult> Function();
 
 Future<List<ServerConversation>> _fetchInProgressConversation({
   required String expectedAuthenticatedUid,
@@ -169,6 +173,26 @@ class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
   bool isExactCurrent() => isCurrent;
 
   void close() => _accountLease.close();
+}
+
+@visibleForTesting
+class CaptureGeolocationOperation implements ExactAccountAuthorityVerifier {
+  CaptureGeolocationOperation({
+    required ActiveWalAuthority captureAuthority,
+    required this.captureGeneration,
+    required int Function() currentCaptureGeneration,
+  })  : _captureAuthority = captureAuthority,
+        _currentCaptureGeneration = currentCaptureGeneration;
+
+  final ActiveWalAuthority _captureAuthority;
+  final int captureGeneration;
+  final int Function() _currentCaptureGeneration;
+
+  @override
+  String get uid => _captureAuthority.uid;
+
+  @override
+  bool isExactCurrent() => captureGeneration == _currentCaptureGeneration() && _captureAuthority.isExactCurrent();
 }
 
 class CaptureProvider extends ChangeNotifier
@@ -245,8 +269,10 @@ class CaptureProvider extends ChangeNotifier
   final ActiveAccountAuthorityProvider _activeAccountAuthority;
   final ActiveWalAuthorityProvider _activeWalAuthority;
   final CaptureGeolocationSender? _geolocationSender;
+  final Set<Future<bool>> _captureGeolocationFutures = <Future<bool>>{};
   final CaptureConsentAuthorityEnsurer? _captureConsentAuthorityEnsurer;
   final DeviceCaptureStarter? _deviceCaptureStarter;
+  final PhoneCaptureStarter? _phoneCaptureStarter;
   final InProgressConversationFetchCall _inProgressConversationFetch;
   final InProgressConversationProcessCall _inProgressConversationProcess;
 
@@ -305,6 +331,7 @@ class CaptureProvider extends ChangeNotifier
     CaptureGeolocationSender? geolocationSender,
     CaptureConsentAuthorityEnsurer? captureConsentAuthorityEnsurer,
     DeviceCaptureStarter? deviceCaptureStarter,
+    PhoneCaptureStarter? phoneCaptureStarter,
     InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
     InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
   })  : _activeAccountAuthority = activeAccountAuthority,
@@ -312,6 +339,7 @@ class CaptureProvider extends ChangeNotifier
         _geolocationSender = geolocationSender,
         _captureConsentAuthorityEnsurer = captureConsentAuthorityEnsurer,
         _deviceCaptureStarter = deviceCaptureStarter,
+        _phoneCaptureStarter = phoneCaptureStarter,
         _inProgressConversationFetch = inProgressConversationFetch,
         _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
@@ -1166,6 +1194,7 @@ class CaptureProvider extends ChangeNotifier
 
   @override
   void dispose() {
+    _captureGeneration++;
     EllaAccountIsolationService.unregisterCaptureProducer(_accountIsolationProducerToken);
     _bleBytesStream?.cancel();
     _blePhotoStream?.cancel();
@@ -1190,21 +1219,35 @@ class CaptureProvider extends ChangeNotifier
     _broadcastRecordingState();
   }
 
-  /// Sends current geolocation to backend if location services are enabled and permission is granted
-  Future<void> _sendCurrentGeolocation() async {
+  /// Sends current geolocation to backend if location services are enabled and permission is granted.
+  /// Every protected await is fenced to the exact capture operation that
+  /// produced the recording proof.
+  Future<bool> _sendCurrentGeolocation({
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) async {
+    bool isCurrent() =>
+        expectedAuthenticatedUid.isNotEmpty &&
+        exactAuthority.uid == expectedAuthenticatedUid &&
+        exactAuthority.isExactCurrent();
+
     try {
+      if (!isCurrent()) return false;
       if (!await Geolocator.isLocationServiceEnabled()) {
         Logger.log('Location service is not enabled, skipping geolocation update');
-        return;
+        return false;
       }
+      if (!isCurrent()) return false;
 
       final permission = await Geolocator.checkPermission();
+      if (!isCurrent()) return false;
       if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
         Logger.log('Location permission not granted, skipping geolocation update');
-        return;
+        return false;
       }
 
       final position = await Geolocator.getCurrentPosition();
+      if (!isCurrent()) return false;
       final geolocation = Geolocation(
         latitude: position.latitude,
         longitude: position.longitude,
@@ -1213,13 +1256,59 @@ class CaptureProvider extends ChangeNotifier
         time: position.timestamp.toUtc(),
       );
 
-      await updateUserGeolocation(geolocation: geolocation);
+      final accepted = await updateUserGeolocation(
+        geolocation: geolocation,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      );
+      return accepted && isCurrent();
     } catch (e) {
       Logger.error('Error sending geolocation: $e');
+      return false;
     }
   }
 
-  Future<void> _sendCaptureGeolocation() => _geolocationSender?.call() ?? _sendCurrentGeolocation();
+  Future<bool> _sendCaptureGeolocation({
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) async {
+    if (expectedAuthenticatedUid.isEmpty ||
+        exactAuthority.uid != expectedAuthenticatedUid ||
+        !exactAuthority.isExactCurrent()) {
+      return false;
+    }
+    final accepted = await (_geolocationSender?.call(
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
+        ) ??
+        _sendCurrentGeolocation(
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
+        ));
+    return accepted && exactAuthority.isExactCurrent();
+  }
+
+  Future<bool> _queueCaptureGeolocation(int generation, ActiveWalAuthority captureAuthority) {
+    final operation = CaptureGeolocationOperation(
+      captureAuthority: captureAuthority,
+      captureGeneration: generation,
+      currentCaptureGeneration: () => _captureGeneration,
+    );
+    late final Future<bool> tracked;
+    tracked = _sendCaptureGeolocation(
+      expectedAuthenticatedUid: operation.uid,
+      exactAuthority: operation,
+    ).catchError((Object error, StackTrace stackTrace) {
+      Logger.debug('Capture geolocation was rejected: $error');
+      return false;
+    }).whenComplete(() => _captureGeolocationFutures.remove(tracked));
+    _captureGeolocationFutures.add(tracked);
+    return tracked;
+  }
+
+  @visibleForTesting
+  Future<List<bool>> waitForCaptureGeolocationForTesting() =>
+      Future.wait(_captureGeolocationFutures.toList(growable: false));
 
   Future<bool> _ensureCurrentCaptureConsentAuthority() =>
       _captureConsentAuthorityEnsurer?.call() ??
@@ -1249,6 +1338,18 @@ class CaptureProvider extends ChangeNotifier
     final captureAuthority = _activeWalAuthority();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
       return PhoneCaptureStartResult.cancelled;
+    }
+    final phoneCaptureStarter = _phoneCaptureStarter;
+    if (phoneCaptureStarter != null) {
+      final result = await phoneCaptureStarter();
+      if (!_isCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
+      if (result == PhoneCaptureStartResult.started) {
+        updateRecordingState(RecordingState.record);
+        unawaited(_queueCaptureGeolocation(generation, captureAuthority));
+      } else {
+        updateRecordingState(RecordingState.stop);
+      }
+      return result;
     }
     updateRecordingState(RecordingState.initialising);
     PermissionStatus microphonePermission;
@@ -1336,7 +1437,7 @@ class CaptureProvider extends ChangeNotifier
     }
     updateRecordingState(RecordingState.record);
     // Capture has actually started; do not send location for failed attempts.
-    unawaited(_sendCaptureGeolocation());
+    unawaited(_queueCaptureGeolocation(generation, captureAuthority));
     return PhoneCaptureStartResult.started;
   }
 
@@ -1349,6 +1450,10 @@ class CaptureProvider extends ChangeNotifier
 
   Future<void> stopForAccountTransition() async {
     _captureGeneration++;
+    final pendingGeolocation = _captureGeolocationFutures.toList(growable: false);
+    final pendingGeolocationStops = pendingGeolocation.map(
+      (future) => future.timeout(const Duration(seconds: 5), onTimeout: () => false).then<void>((_) {}),
+    );
     final micStart = _micStartFuture;
     final systemAudioStart = _systemAudioStartFuture;
     _voiceCommandTimeoutTimer?.cancel();
@@ -1373,8 +1478,11 @@ class CaptureProvider extends ChangeNotifier
       await Future.wait([
         if (micStart != null) micStart,
         if (systemAudioStart != null) systemAudioStart.then<void>((_) {}),
+        ...pendingGeolocationStops,
         ...stops,
       ]);
+    } else {
+      await Future.wait(pendingGeolocationStops);
     }
     _systemAudioCaptureAuthority = null;
     await _socket?.stop(reason: 'account transition');
@@ -1422,7 +1530,7 @@ class CaptureProvider extends ChangeNotifier
     // Location is protected capture context. Emit it only after a non-empty
     // necklace frame reached a connected transcription socket under the same
     // exact account/capture authority.
-    unawaited(_sendCaptureGeolocation());
+    unawaited(_queueCaptureGeolocation(generation, captureAuthority));
 
     if (wasPaused) {
       await pauseDeviceRecording();

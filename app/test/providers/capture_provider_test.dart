@@ -123,7 +123,10 @@ void main() {
         authorityReads++;
         return null;
       },
-      geolocationSender: () async => geolocationSends++,
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        geolocationSends++;
+        return true;
+      },
     );
     addTearDown(provider.dispose);
 
@@ -143,7 +146,10 @@ void main() {
         authorityReads++;
         return null;
       },
-      geolocationSender: () async => geolocationSends++,
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        geolocationSends++;
+        return true;
+      },
     );
     addTearDown(provider.dispose);
 
@@ -361,8 +367,9 @@ void main() {
         transportStarts++;
         return true;
       },
-      geolocationSender: () async {
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         locationCalls++;
+        return true;
       },
     );
     addTearDown(provider.dispose);
@@ -383,8 +390,9 @@ void main() {
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
       deviceCaptureStarter: () async => false,
-      geolocationSender: () async {
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         locationCalls++;
+        return true;
       },
     );
     addTearDown(provider.dispose);
@@ -405,8 +413,9 @@ void main() {
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
       deviceCaptureStarter: () => transport.future,
-      geolocationSender: () async {
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         locationCalls++;
+        return true;
       },
     );
     addTearDown(provider.dispose);
@@ -434,8 +443,9 @@ void main() {
         provider.updateRecordingState(RecordingState.deviceRecord);
         return true;
       },
-      geolocationSender: () async {
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         locationCalls++;
+        return true;
       },
     );
     addTearDown(provider.dispose);
@@ -461,7 +471,7 @@ void main() {
         provider.updateRecordingState(RecordingState.deviceRecord);
         return true;
       },
-      geolocationSender: () async {},
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateRecordingState(RecordingState.error);
     addTearDown(provider.dispose);
 
@@ -471,6 +481,88 @@ void main() {
 
     expect(transportStarts, 1);
     expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('phone post-proof location is cancelled and awaited across account transition', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    late ExactAccountAuthorityVerifier requestAuthority;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneCaptureStarter: () async => PhoneCaptureStartResult.started,
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        requestAuthority = exactAuthority;
+        entered.complete();
+        await release.future;
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    expect(await provider.streamRecording(), PhoneCaptureStartResult.started);
+    await entered.future;
+    final location = provider.waitForCaptureGeolocationForTesting();
+    expect(requestAuthority.isExactCurrent(), isTrue);
+
+    var transitionComplete = false;
+    final transition = provider.stopForAccountTransition().whenComplete(() => transitionComplete = true);
+    await pumpEventQueue();
+    expect(transitionComplete, isFalse);
+    expect(requestAuthority.isExactCurrent(), isFalse);
+    release.complete();
+
+    final results = await location;
+    expect(results, hasLength(1));
+    expect(results.single, isFalse);
+    await transition;
+    expect(provider.recordingState, RecordingState.stop);
+  });
+
+  test('necklace post-proof location is cancelled and awaited across account transition', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    late ExactAccountAuthorityVerifier requestAuthority;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        requestAuthority = exactAuthority;
+        entered.complete();
+        await release.future;
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    await entered.future;
+    final location = provider.waitForCaptureGeolocationForTesting();
+    expect(requestAuthority.isExactCurrent(), isTrue);
+
+    var transitionComplete = false;
+    final transition = provider.stopForAccountTransition().whenComplete(() => transitionComplete = true);
+    await pumpEventQueue();
+    expect(transitionComplete, isFalse);
+    expect(requestAuthority.isExactCurrent(), isFalse);
+    release.complete();
+
+    final results = await location;
+    expect(results, hasLength(1));
+    expect(results.single, isFalse);
+    await transition;
+    expect(provider.recordingState, RecordingState.stop);
   });
 
   tearDownAll(() {
