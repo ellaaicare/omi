@@ -294,6 +294,78 @@ void main() {
     expect(find.text('No words were captured, so no memory was created.'), findsNothing);
   });
 
+  testWidgets('failed Home phone processing retries without restarting or re-stopping capture', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationResults: [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-retry')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Process Now'), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Process Now'), findsNothing);
+  });
+
+  testWidgets('account authority change invalidates a pending Home finalization retry', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationResults: [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-transition')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.finalizationCalls, 1);
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1, reason: 'replacement authority must not retry old-account work');
+    expect(harness.capture.finishes, 0);
+    expect(find.text('Process Now'), findsOneWidget);
+  });
+
   testWidgets('Home-owned necklace capture stops its stream before finishing', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -319,6 +391,49 @@ void main() {
     expect(harness.capture.finishes, 1);
     expect(harness.capture.recordingState, RecordingState.stop);
     expect(find.text('Record a moment'), findsOneWidget);
+  });
+
+  testWidgets('failed Home necklace processing retries without restarting or re-stopping capture', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      finalizationResults: [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('necklace-retry')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Process Now'), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Process Now'), findsNothing);
   });
 
   testWidgets('necklace transport error retries through a fresh Home capture start', (tester) async {
@@ -481,6 +596,17 @@ void main() {
   });
 }
 
+TranscriptSegment _liveTranscriptSegment(String id) => TranscriptSegment(
+      id: id,
+      text: 'A live transcript that is ready to process.',
+      speaker: 'SPEAKER_00',
+      isUser: false,
+      personId: null,
+      start: 0,
+      end: 1,
+      translations: const [],
+    );
+
 class _HomeHarness {
   const _HomeHarness({
     required this.capture,
@@ -521,6 +647,7 @@ Future<_HomeHarness> _pumpHome(
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
   bool captureHasFinalContent = false,
+  List<bool> finalizationResults = const [],
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
 }) async {
   tester.view.physicalSize = viewport;
@@ -533,6 +660,7 @@ Future<_HomeHarness> _pumpHome(
     phoneStartResult: phoneStartResult,
     hasContent: captureHasContent,
     hasFinalContent: captureHasFinalContent,
+    finalizationResults: finalizationResults,
   );
   final actionItems = _NoActionsProvider();
   final conversationProvider = _FixtureConversationProvider(conversations);
@@ -649,19 +777,22 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.phoneStartResult,
     required this.hasContent,
     required this.hasFinalContent,
-  }) {
+    required List<bool> finalizationResults,
+  }) : finalizationResults = List<bool>.of(finalizationResults) {
     recordingState = initialState;
   }
 
   final PhoneCaptureStartResult phoneStartResult;
   final bool hasContent;
   final bool hasFinalContent;
+  final List<bool> finalizationResults;
 
   int phoneStarts = 0;
   int phoneStops = 0;
   int deviceStarts = 0;
   int deviceStops = 0;
   int finishes = 0;
+  int finalizationCalls = 0;
   int finalContentChecks = 0;
 
   @override
@@ -683,6 +814,9 @@ class _FakeCaptureProvider extends CaptureProvider {
   }) async {
     finalContentChecks++;
     if (!hasContent && !hasFinalContent) return false;
+    finalizationCalls++;
+    final result = finalizationResults.isEmpty ? true : finalizationResults.removeAt(0);
+    if (!result) return false;
     finishes++;
     return true;
   }

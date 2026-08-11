@@ -133,6 +133,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   EllaProvisioningProvider? _provisioningProvider;
   bool _homeCaptureActive = false;
   bool _homeCaptureStarting = false;
+  bool _homeCaptureFinalizationPending = false;
+  int _homeCaptureAuthorityGeneration = 0;
   _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
   bool _whispersVerified = false;
@@ -210,7 +212,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   void _onTodayCardAuthorityChanged() {
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
+    _homeCaptureAuthorityGeneration++;
     _todayCardController.invalidateAuthority();
+    if (_homeCaptureFinalizationPending && mounted) {
+      setState(() {
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      });
+    }
     unawaited(_syncTodayCardAuthority(forceReload: true));
   }
 
@@ -468,15 +477,37 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
-  Future<bool> _finalizeHomeMoment(CaptureProvider capture) async {
-    if (await capture.finalizeCurrentConversation()) return true;
+  Future<bool> _finalizeHomeMoment(
+    CaptureProvider capture, {
+    bool Function()? isCurrent,
+  }) async {
+    final finalized = await capture.finalizeCurrentConversation();
+    if (isCurrent != null && !isCurrent()) return false;
+    if (finalized) return true;
     if (!mounted) return false;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
     return false;
   }
 
   Future<bool> _finishHomeCapture(CaptureProvider capture) async {
-    switch (_homeCaptureSource) {
+    final authorityGeneration = _homeCaptureAuthorityGeneration;
+    if (_homeCaptureFinalizationPending) {
+      final finalized = await _finalizeHomeMoment(
+        capture,
+        isCurrent: () => authorityGeneration == _homeCaptureAuthorityGeneration,
+      );
+      final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
+      if (finalized && isCurrent && mounted) {
+        setState(() {
+          _homeCaptureFinalizationPending = false;
+          _homeCaptureSource = null;
+        });
+      }
+      return finalized && isCurrent;
+    }
+
+    final source = _homeCaptureSource;
+    switch (source) {
       case _HomeCaptureSource.phone:
         await capture.stopStreamRecording();
         break;
@@ -494,13 +525,38 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         }
         break;
     }
+    if (authorityGeneration != _homeCaptureAuthorityGeneration) {
+      if (mounted) {
+        setState(() {
+          _homeCaptureActive = false;
+          _homeCaptureFinalizationPending = false;
+          _homeCaptureSource = null;
+        });
+      }
+      return false;
+    }
     if (mounted) {
       setState(() {
         _homeCaptureActive = false;
+        if (source == _HomeCaptureSource.phone || source == _HomeCaptureSource.necklaceOwned) {
+          _homeCaptureFinalizationPending = true;
+        } else {
+          _homeCaptureSource = null;
+        }
+      });
+    }
+    final finalized = await _finalizeHomeMoment(
+      capture,
+      isCurrent: () => authorityGeneration == _homeCaptureAuthorityGeneration,
+    );
+    final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
+    if (finalized && isCurrent && mounted) {
+      setState(() {
+        _homeCaptureFinalizationPending = false;
         _homeCaptureSource = null;
       });
     }
-    return _finalizeHomeMoment(capture);
+    return finalized && isCurrent;
   }
 
   Future<void> _openLiveTranscript(CaptureProvider capture) async {
@@ -508,7 +564,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       MaterialPageRoute(
         builder: (_) => ConversationCapturingPage(
           onProcessNow: () async {
-            if (_homeCaptureActive) return _finishHomeCapture(capture);
+            if (_homeCaptureActive || _homeCaptureFinalizationPending) {
+              return _finishHomeCapture(capture);
+            }
             if (capture.recordingState == RecordingState.deviceRecord) {
               return _finalizeHomeMoment(capture);
             }
@@ -521,6 +579,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         ),
       ),
     );
+    if (_homeCaptureFinalizationPending && mounted) {
+      setState(() {
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      });
+    }
   }
 
   Future<void> _toggleHomeCapture({
@@ -532,6 +596,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (_homeCaptureStarting) return;
     setState(() => _homeCaptureStarting = true);
     try {
+      if (_homeCaptureFinalizationPending) {
+        await _finishHomeCapture(capture);
+        return;
+      }
       if (isActive) {
         await _finishHomeCapture(capture);
         return;
