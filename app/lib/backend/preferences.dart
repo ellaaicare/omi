@@ -237,8 +237,7 @@ class SharedPreferencesUtil {
   /// without treating it as live data authority. Callers must still perform a
   /// fresh server verification before any protected capture or egress.
   String get persistedAiConsentReceiptIdForCurrentAccount {
-    if (isEllaInternalPilotEnabled &&
-        !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
+    if (isEllaInternalPilotEnabled && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return '';
     }
     final receiptId = aiConsentReceiptId;
@@ -885,6 +884,12 @@ class SharedPreferencesUtil {
         await remove(key);
       }
       await remove(_ellaProvisioningReceiptKey(previousUid));
+      // BLE pairing is a convenience binding, not cross-account authority.
+      // Never carry the prior account's remembered necklace into a replacement
+      // account; the replacement user must pair or select their own device.
+      for (final key in const ['btDevice', 'deviceName', 'hasOmiDevice', 'deviceIsV2']) {
+        await remove(key);
+      }
     }
     await remove(_ellaProvisioningReceiptKey(newUid));
     await remove(_ellaProvisioningVerifiedAtKey(newUid));

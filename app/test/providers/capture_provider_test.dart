@@ -6,15 +6,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/services/wals/wal.dart';
 import 'package:omi/utils/enums.dart';
 
 /// Mock PeopleProvider that tracks setPeople calls
@@ -74,6 +77,28 @@ class _CaptureAuthority implements AccountCommitAuthority {
   bool isExactCurrent() => current;
 }
 
+ActiveWalAuthority _activeCaptureAuthority(_CaptureAuthority authority) => ActiveWalAuthority(
+      owner: WalOwner(
+        uid: authority.uid,
+        profileBindingId: 'profile-a',
+        bindingRevision: 1,
+        consentReceiptId: 'receipt-a',
+        authorityGenerationAtCapture: 1,
+      ),
+      consent: AiConsentAuthoritySnapshot(
+        generation: 1,
+        uid: authority.uid,
+        verifiedPersonaId: null,
+        profileBindingId: 'profile-a',
+        receiptId: 'receipt-a',
+        policyVersion: 'policy-a',
+        processorSetHash: 'processors-a',
+        scopeVersion: 'scope-a',
+        scopeHash: 'scope-hash-a',
+      ),
+      currentCheck: authority.isCurrent,
+    );
+
 ServerConversation _conversation(String id, String transcript,
     {ConversationStatus status = ConversationStatus.in_progress}) {
   final startedAt = DateTime.parse('2026-08-10T20:00:00Z');
@@ -89,6 +114,50 @@ ServerConversation _conversation(String id, String transcript,
 }
 
 void main() {
+  test('rejected phone consent stops before capture authority or transport work', () async {
+    var authorityReads = 0;
+    var geolocationSends = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () async => false,
+      activeWalAuthority: () {
+        authorityReads++;
+        return null;
+      },
+      geolocationSender: () async => geolocationSends++,
+    );
+    addTearDown(provider.dispose);
+
+    expect(await provider.streamRecording(), PhoneCaptureStartResult.consentUnavailable);
+    expect(authorityReads, 0);
+    expect(geolocationSends, 0);
+    expect(provider.recordingState, RecordingState.stop);
+  });
+
+  test('delayed phone consent cannot start after capture generation changes', () async {
+    final consent = Completer<bool>();
+    var authorityReads = 0;
+    var geolocationSends = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () => consent.future,
+      activeWalAuthority: () {
+        authorityReads++;
+        return null;
+      },
+      geolocationSender: () async => geolocationSends++,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    provider.reset();
+    consent.complete(true);
+
+    expect(await start, PhoneCaptureStartResult.consentUnavailable);
+    expect(authorityReads, 0);
+    expect(geolocationSends, 0);
+    expect(provider.recordingState, RecordingState.stop);
+  });
+
   test('blank transcript placeholders are not capturable content', () {
     final provider = CaptureProvider();
     provider.segments = [_segment('blank', '   \n  ')];
@@ -276,7 +345,132 @@ void main() {
     provider.onError(StateError('socket unavailable'));
 
     expect(provider.recordingState, RecordingState.error);
+    provider.onClosed();
+    expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
     await pumpEventQueue();
+  });
+
+  test('rejected necklace start performs no location work', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var locationCalls = 0;
+    var transportStarts = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => false,
+      deviceCaptureStarter: () async {
+        transportStarts++;
+        return true;
+      },
+      geolocationSender: () async {
+        locationCalls++;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+
+    expect(transportStarts, 0);
+    expect(locationCalls, 0);
+    expect(provider.recordingState, RecordingState.error);
+  });
+
+  test('failed necklace transport performs no location work', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var locationCalls = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceCaptureStarter: () async => false,
+      geolocationSender: () async {
+        locationCalls++;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+
+    expect(locationCalls, 0);
+    expect(provider.recordingState, RecordingState.error);
+  });
+
+  test('stale necklace start performs no location work', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final transport = Completer<bool>();
+    var locationCalls = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceCaptureStarter: () => transport.future,
+      geolocationSender: () async {
+        locationCalls++;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    await pumpEventQueue();
+    authority.current = false;
+    transport.complete(true);
+    await start;
+
+    expect(locationCalls, 0);
+  });
+
+  test('proven necklace transport emits location only after recording is current', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var locationCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceCaptureStarter: () async {
+        expect(locationCalls, 0);
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      geolocationSender: () async {
+        locationCalls++;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    await pumpEventQueue();
+
+    expect(locationCalls, 1);
+    expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('failed necklace state retries through a fresh exact-authority start', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var transportStarts = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceCaptureStarter: () async {
+        transportStarts++;
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      geolocationSender: () async {},
+    )..updateRecordingState(RecordingState.error);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+
+    expect(transportStarts, 1);
+    expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
   tearDownAll(() {

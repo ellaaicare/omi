@@ -271,6 +271,30 @@ void main() {
     expect(find.text('Record a moment'), findsOneWidget);
   });
 
+  testWidgets('necklace transport error retries through a fresh Home capture start', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.error,
+    );
+    addTearDown(harness.dispose);
+
+    expect(find.byKey(const Key('today-recording-error-status')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.byKey(const Key('today-recording-error-status')), findsNothing);
+    expect(find.text('Listening… tap to finish'), findsOneWidget);
+  });
+
   testWidgets('continuous necklace stream gets exact moment boundaries without being stopped', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()

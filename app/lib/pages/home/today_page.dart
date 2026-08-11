@@ -524,7 +524,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
       if (necklaceConnected && connectedDevice != null) {
         var startedHere = false;
-        if (capture.recordingState == RecordingState.stop) {
+        if (capture.recordingState == RecordingState.stop || capture.recordingState == RecordingState.error) {
           await capture.streamDeviceRecording(device: connectedDevice);
           startedHere = capture.recordingState == RecordingState.deviceRecord;
         } else if (capture.recordingState == RecordingState.deviceRecord) {

@@ -122,6 +122,10 @@ typedef InProgressConversationProcessCall = Future<CreateConversationResponse?> 
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
+typedef ActiveWalAuthorityProvider = ActiveWalAuthority? Function();
+typedef CaptureGeolocationSender = Future<void> Function();
+typedef CaptureConsentAuthorityEnsurer = Future<bool> Function();
+typedef DeviceCaptureStarter = Future<bool> Function();
 
 Future<List<ServerConversation>> _fetchInProgressConversation({
   required String expectedAuthenticatedUid,
@@ -239,6 +243,10 @@ class CaptureProvider extends ChangeNotifier
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
   final ActiveAccountAuthorityProvider _activeAccountAuthority;
+  final ActiveWalAuthorityProvider _activeWalAuthority;
+  final CaptureGeolocationSender? _geolocationSender;
+  final CaptureConsentAuthorityEnsurer? _captureConsentAuthorityEnsurer;
+  final DeviceCaptureStarter? _deviceCaptureStarter;
   final InProgressConversationFetchCall _inProgressConversationFetch;
   final InProgressConversationProcessCall _inProgressConversationProcess;
 
@@ -262,6 +270,9 @@ class CaptureProvider extends ChangeNotifier
 
   double get bleReceiveRateKbps => _bleReceiveRateKbps;
   double get wsSendRateKbps => _wsSendRateKbps;
+
+  @visibleForTesting
+  bool get hasActiveKeepAliveTimerForTesting => _keepAliveTimer?.isActive ?? false;
 
   /// Call this in initState of a widget that needs BLE/WS metrics
   void addMetricsListener() {
@@ -290,9 +301,17 @@ class CaptureProvider extends ChangeNotifier
 
   CaptureProvider({
     ActiveAccountAuthorityProvider activeAccountAuthority = WalOwnerAuthority.activeAccount,
+    ActiveWalAuthorityProvider? activeWalAuthority,
+    CaptureGeolocationSender? geolocationSender,
+    CaptureConsentAuthorityEnsurer? captureConsentAuthorityEnsurer,
+    DeviceCaptureStarter? deviceCaptureStarter,
     InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
     InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
   })  : _activeAccountAuthority = activeAccountAuthority,
+        _activeWalAuthority = activeWalAuthority ?? WalOwnerAuthority.active,
+        _geolocationSender = geolocationSender,
+        _captureConsentAuthorityEnsurer = captureConsentAuthorityEnsurer,
+        _deviceCaptureStarter = deviceCaptureStarter,
         _inProgressConversationFetch = inProgressConversationFetch,
         _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
@@ -795,7 +814,7 @@ class CaptureProvider extends ChangeNotifier
       return null;
     }
     final generation = _captureGeneration;
-    final captureAuthority = WalOwnerAuthority.active();
+    final captureAuthority = _activeWalAuthority();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
       _bleBytesStream = null;
       return null;
@@ -883,6 +902,11 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
   }
 
+  Future<bool> _startDeviceCaptureTransport() async {
+    await _resetState();
+    return recordingState == RecordingState.deviceRecord;
+  }
+
   Future _cleanupCurrentState() async {
     await _closeBleStream();
     notifyListeners();
@@ -954,7 +978,7 @@ class CaptureProvider extends ChangeNotifier
       return false;
     }
     final generation = _captureGeneration;
-    final captureAuthority = WalOwnerAuthority.active();
+    final captureAuthority = _activeWalAuthority();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
       return false;
     }
@@ -1005,7 +1029,7 @@ class CaptureProvider extends ChangeNotifier
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (_recordingDevice == null) return;
     final generation = _captureGeneration;
-    final captureAuthority = WalOwnerAuthority.active();
+    final captureAuthority = _activeWalAuthority();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
     final deviceId = _recordingDevice!.id;
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
@@ -1195,6 +1219,17 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
+  Future<void> _sendCaptureGeolocation() => _geolocationSender?.call() ?? _sendCurrentGeolocation();
+
+  Future<bool> _ensureCurrentCaptureConsentAuthority() =>
+      _captureConsentAuthorityEnsurer?.call() ??
+      ensureCaptureConsentAuthority(
+        hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
+        authenticatedUid: () => WalOwnerAuthority.authenticatedUid,
+        persistedConsentReceiptId: () => SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount,
+        refreshAuthority: (uid) => EllaAiConsentService().refreshServerAuthority(uid: uid),
+      );
+
   Future<PhoneCaptureStartResult> streamRecording() {
     final activeStart = _micStartFuture;
     if (activeStart != null) return activeStart;
@@ -1209,14 +1244,9 @@ class CaptureProvider extends ChangeNotifier
 
   Future<PhoneCaptureStartResult> _streamRecording() async {
     final generation = _captureGeneration;
-    final consentCurrent = await ensureCaptureConsentAuthority(
-      hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
-      authenticatedUid: () => WalOwnerAuthority.authenticatedUid,
-      persistedConsentReceiptId: () => SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount,
-      refreshAuthority: (uid) => EllaAiConsentService().refreshServerAuthority(uid: uid),
-    );
+    final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
     if (!consentCurrent || generation != _captureGeneration) return PhoneCaptureStartResult.consentUnavailable;
-    final captureAuthority = WalOwnerAuthority.active();
+    final captureAuthority = _activeWalAuthority();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
       return PhoneCaptureStartResult.cancelled;
     }
@@ -1306,7 +1336,7 @@ class CaptureProvider extends ChangeNotifier
     }
     updateRecordingState(RecordingState.record);
     // Capture has actually started; do not send location for failed attempts.
-    _sendCurrentGeolocation();
+    unawaited(_sendCaptureGeolocation());
     return PhoneCaptureStartResult.started;
   }
 
@@ -1354,37 +1384,45 @@ class CaptureProvider extends ChangeNotifier
 
   Future streamDeviceRecording({BtDevice? device}) async {
     final generation = _captureGeneration;
-    final consentCurrent = await ensureCaptureConsentAuthority(
-      hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
-      authenticatedUid: () => WalOwnerAuthority.authenticatedUid,
-      persistedConsentReceiptId: () => SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount,
-      refreshAuthority: (uid) => EllaAiConsentService().refreshServerAuthority(uid: uid),
-    );
+    if (recordingState == RecordingState.error) {
+      _keepAliveTimer?.cancel();
+      _keepAliveTimer = null;
+      await _closeBleStream();
+      await _socket?.stop(reason: 'retry necklace capture after transport failure');
+      if (generation != _captureGeneration) return;
+      updateRecordingState(RecordingState.stop);
+    }
+    final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
     if (!consentCurrent || generation != _captureGeneration) {
       if (generation == _captureGeneration) {
         updateRecordingState(RecordingState.error);
       }
       return;
     }
-    final captureAuthority = WalOwnerAuthority.active();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
+    final captureAuthority = _activeWalAuthority();
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
+      if (generation == _captureGeneration) updateRecordingState(RecordingState.error);
+      return;
+    }
     Logger.debug("streamDeviceRecording $device");
     if (device != null) _updateRecordingDevice(device);
     updateRecordingState(RecordingState.initialising);
 
     bool wasPaused = _isPaused;
 
-    // Send current location when conversation starts
-    _sendCurrentGeolocation();
-
     await _resetStateVariables();
-    await _resetState();
+    final started = await (_deviceCaptureStarter?.call() ?? _startDeviceCaptureTransport());
     if (!_isCaptureCurrent(generation, captureAuthority)) return;
-    if (recordingState != RecordingState.deviceRecord) {
+    if (!started || recordingState != RecordingState.deviceRecord) {
       updateRecordingState(RecordingState.error);
       await _socket?.stop(reason: 'necklace recorder did not produce audio');
       return;
     }
+
+    // Location is protected capture context. Emit it only after a non-empty
+    // necklace frame reached a connected transcription socket under the same
+    // exact account/capture authority.
+    unawaited(_sendCaptureGeolocation());
 
     if (wasPaused) {
       await pauseDeviceRecording();
@@ -1433,7 +1471,7 @@ class CaptureProvider extends ChangeNotifier
 
     _systemAudioBuffer = [];
     _systemAudioCaching = true;
-    _systemAudioCaptureAuthority = WalOwnerAuthority.active();
+    _systemAudioCaptureAuthority = _activeWalAuthority();
     final captureAuthority = _systemAudioCaptureAuthority;
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return false;
     _systemAudioCacheTimer?.cancel();
@@ -1761,6 +1799,10 @@ class CaptureProvider extends ChangeNotifier
     }
 
     notifyListeners();
+    if (recordingState == RecordingState.error) {
+      _keepAliveTimer?.cancel();
+      return;
+    }
     if (!SharedPreferencesUtil().aiConsentAccepted) {
       _keepAliveTimer?.cancel();
       return;
@@ -1770,7 +1812,15 @@ class CaptureProvider extends ChangeNotifier
 
   void _startKeepAliveServices() {
     _keepAliveTimer?.cancel();
+    if (recordingState == RecordingState.error) {
+      _keepAliveTimer = null;
+      return;
+    }
     _keepAliveTimer = Timer.periodic(const Duration(seconds: 15), (t) async {
+      if (recordingState == RecordingState.error) {
+        t.cancel();
+        return;
+      }
       Logger.debug("[Provider] keep alive");
       // rate 1/15s
       if (_keepAliveLastExecutedAt != null &&
@@ -1836,6 +1886,10 @@ class CaptureProvider extends ChangeNotifier
     }
 
     notifyListeners();
+    if (recordingState == RecordingState.error) {
+      _keepAliveTimer?.cancel();
+      return;
+    }
     _startKeepAliveServices();
   }
 

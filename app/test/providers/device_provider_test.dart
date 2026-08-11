@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
+import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
@@ -15,6 +20,63 @@ class _TestConnectivityPlatform extends ConnectivityPlatform {
 
   @override
   Stream<List<ConnectivityResult>> get onConnectivityChanged => const Stream.empty();
+}
+
+class _FakeDeviceService implements IDeviceService {
+  _FakeDeviceService([this.status = DeviceServiceStatus.init]);
+
+  DeviceServiceStatus status;
+  final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
+
+  void publish(DeviceServiceStatus next) {
+    status = next;
+    for (final subscriber in _subscriptions.values.toList()) {
+      subscriber.onStatusChanged(next);
+    }
+  }
+
+  @override
+  void start() => publish(DeviceServiceStatus.ready);
+
+  @override
+  Future<void> stop() async => publish(DeviceServiceStatus.stop);
+
+  @override
+  Future<void> discover({String? desirableDeviceId, int timeout = 5}) async {}
+
+  @override
+  Future<DeviceConnection?> ensureConnection(String deviceId, {bool force = false}) async => null;
+
+  @override
+  void subscribe(IDeviceServiceSubsciption subscription, Object context) {
+    _subscriptions[context] = subscription;
+    subscription.onStatusChanged(status);
+  }
+
+  @override
+  void unsubscribe(Object context) => _subscriptions.remove(context);
+
+  @override
+  DateTime? getFirstConnectedAt() => null;
+
+  @override
+  void setWifiSyncInProgress(bool value) {}
+
+  @override
+  Future<void> disconnectDevice() async {}
+}
+
+class _RecordingCaptureProvider extends CaptureProvider {
+  _RecordingCaptureProvider({this.startGate});
+
+  final Completer<void>? startGate;
+  int deviceStarts = 0;
+
+  @override
+  Future<void> streamDeviceRecording({BtDevice? device}) async {
+    deviceStarts++;
+    await startGate?.future;
+  }
 }
 
 void main() {
@@ -187,5 +249,121 @@ void main() {
     expect(provider.connectedDevice, isNull);
     expect(provider.pairedDevice, isNull);
     expect(provider.isConnecting, isFalse);
+  });
+
+  test('queued connected callback is cancelled by device-service stop', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    var resolverCalls = 0;
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async {
+        resolverCalls++;
+        return BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+      },
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
+    service.publish(DeviceServiceStatus.stop);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(resolverCalls, 0);
+    expect(capture.deviceStarts, 0);
+    expect(provider.presentationIsConnected, isFalse);
+  });
+
+  test('in-flight connected resolution cannot repopulate after stop', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final resolution = Completer<BtDevice?>();
+    final resolverEntered = Completer<void>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) {
+        resolverEntered.complete();
+        return resolution.future;
+      },
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
+    await resolverEntered.future;
+    service.publish(DeviceServiceStatus.stop);
+    resolution.complete(BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30));
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 0);
+    expect(provider.connectedDevice, isNull);
+    expect(provider.pairedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
+  });
+
+  test('in-flight reconnect scan cannot commit after stop', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final scan = Completer<BtDevice?>();
+    final scanEntered = Completer<void>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        scanEntered.complete();
+        return scan.future;
+      },
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    final reconnect = provider.scanAndConnectToDevice();
+    await scanEntered.future;
+    service.publish(DeviceServiceStatus.stop);
+    scan.complete(BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30));
+    await reconnect;
+
+    expect(capture.deviceStarts, 0);
+    expect(provider.connectedDevice, isNull);
+    expect(provider.pairedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
+  });
+
+  test('only a later ready generation reconnects the retained bound device', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
+    var scanCalls = 0;
+    final startGate = Completer<void>();
+    final capture = _RecordingCaptureProvider(startGate: startGate);
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        return null;
+      },
+      connectionResolver: (_) async => necklace,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(scanCalls, 0);
+    expect(capture.deviceStarts, 0);
+
+    service.publish(DeviceServiceStatus.ready);
+    await pumpEventQueue();
+    expect(scanCalls, 1);
+    expect(provider.pairedDevice?.id, necklace.id);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(capture.deviceStarts, 1);
+
+    service.publish(DeviceServiceStatus.stop);
+    startGate.complete();
+    await pumpEventQueue();
+    expect(provider.presentationIsConnected, isFalse);
   });
 }

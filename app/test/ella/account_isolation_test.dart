@@ -611,6 +611,14 @@ void main() {
     ]);
   });
 
+  test('stopped device service rejects connection work after mutex acquisition', () async {
+    final service = DeviceService(discoverers: []);
+    service.start();
+    await service.stop();
+
+    expect(await service.ensureConnection('necklace-1', force: true), isNull);
+  });
+
   test('mobile mic transition waits for an in-flight start and suppresses its late callback', () async {
     final runner = _DelayedRecorderRunner();
     final service = MicRecorderBackgroundService(runner: runner);

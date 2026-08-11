@@ -21,7 +21,23 @@ import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/widgets/confirmation_dialog.dart';
 
+typedef DeviceConnectionResolver = Future<BtDevice?> Function(String deviceId);
+typedef DeviceScanConnector = Future<BtDevice?> Function();
+
 class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption {
+  DeviceProvider({
+    IDeviceService? deviceService,
+    DeviceConnectionResolver? connectionResolver,
+    DeviceScanConnector? scanConnector,
+  })  : _deviceService = deviceService ?? ServiceManager.instance().device,
+        _connectionResolver = connectionResolver,
+        _scanConnector = scanConnector {
+    _deviceService.subscribe(this, this);
+  }
+
+  final IDeviceService _deviceService;
+  final DeviceConnectionResolver? _connectionResolver;
+  final DeviceScanConnector? _scanConnector;
   CaptureProvider? captureProvider;
 
   bool isConnecting = false;
@@ -74,11 +90,17 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   Timer? _disconnectNotificationTimer;
   final Debouncer _disconnectDebouncer = Debouncer(delay: const Duration(milliseconds: 500));
   final Debouncer _connectDebouncer = Debouncer(delay: const Duration(milliseconds: 100));
+  int _deviceOperationGeneration = 0;
+  bool _deviceServiceReady = false;
 
   void Function(BtDevice device)? onDeviceConnected;
 
-  DeviceProvider() {
-    ServiceManager.instance().device.subscribe(this, this);
+  bool _isDeviceOperationCurrent(int generation) => _deviceServiceReady && generation == _deviceOperationGeneration;
+
+  Future<BtDevice?> _resolveConnectedDevice(String deviceId) async {
+    final resolver = _connectionResolver;
+    if (resolver != null) return resolver(deviceId);
+    return (await _deviceService.ensureConnection(deviceId))?.device;
   }
 
   void setProviders(CaptureProvider provider) {
@@ -86,22 +108,29 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     notifyListeners();
   }
 
-  void setConnectedDevice(BtDevice? device) async {
+  Future<void> setConnectedDevice(BtDevice? device, {int? operationGeneration}) async {
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     connectedDevice = device;
     pairedDevice = device;
-    await getDeviceInfo();
+    await getDeviceInfo(operationGeneration: operationGeneration);
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     Logger.debug('setConnectedDevice: $device');
     notifyListeners();
   }
 
-  Future getDeviceInfo() async {
+  Future getDeviceInfo({int? operationGeneration}) async {
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     if (connectedDevice != null) {
       if (pairedDevice?.firmwareRevision != null && pairedDevice?.firmwareRevision != 'Unknown') {
         return;
       }
-      var connection = await ServiceManager.instance().device.ensureConnection(connectedDevice!.id);
-      pairedDevice = await connectedDevice?.getDeviceInfo(connection);
-      SharedPreferencesUtil().btDevice = pairedDevice!;
+      var connection = await _deviceService.ensureConnection(connectedDevice!.id);
+      if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+      final info = await connectedDevice?.getDeviceInfo(connection);
+      if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+      pairedDevice = info;
+      await SharedPreferencesUtil().btDeviceSet(pairedDevice!);
+      if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     } else {
       if (SharedPreferencesUtil().btDevice.id.isEmpty) {
         pairedDevice = BtDevice.empty();
@@ -109,12 +138,13 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         pairedDevice = SharedPreferencesUtil().btDevice;
       }
     }
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     notifyListeners();
   }
 
   // TODO: thinh, use connection directly
   Future _bleDisconnectDevice(BtDevice btDevice) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(btDevice.id);
+    var connection = await _deviceService.ensureConnection(btDevice.id);
     if (connection == null) {
       return Future.value(null);
     }
@@ -122,7 +152,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   Future<int> _retrieveBatteryLevel(String deviceId) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+    var connection = await _deviceService.ensureConnection(deviceId);
     if (connection == null) {
       return -1;
     }
@@ -134,7 +164,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     void Function(int)? onBatteryLevelChange,
   }) async {
     {
-      var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+      var connection = await _deviceService.ensureConnection(deviceId);
       if (connection == null) {
         return Future.value(null);
       }
@@ -143,7 +173,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   Future<List<int>> _getStorageList(String deviceId) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+    var connection = await _deviceService.ensureConnection(deviceId);
     if (connection == null) {
       return [];
     }
@@ -155,18 +185,20 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     if (deviceId.isEmpty) {
       return null;
     }
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+    var connection = await _deviceService.ensureConnection(deviceId);
     return connection?.device;
   }
 
-  initiateBleBatteryListener() async {
+  initiateBleBatteryListener({int? operationGeneration}) async {
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     if (connectedDevice == null) {
       return;
     }
     _bleBatteryLevelListener?.cancel();
-    _bleBatteryLevelListener = await _getBleBatteryLevelListener(
+    final listener = await _getBleBatteryLevelListener(
       connectedDevice!.id,
       onBatteryLevelChange: (int value) {
+        if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
         batteryLevel = value;
         if (batteryLevel < 20 && !_hasLowBatteryAlerted) {
           _hasLowBatteryAlerted = true;
@@ -195,6 +227,11 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         }
       },
     );
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) {
+      await listener?.cancel();
+      return;
+    }
+    _bleBatteryLevelListener = listener;
     notifyListeners();
   }
 
@@ -230,12 +267,22 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _lastBatteryNotifyTime = null;
   }
 
-  Future periodicConnect(String printer, {bool boundDeviceOnly = false}) async {
+  Future periodicConnect(
+    String printer, {
+    bool boundDeviceOnly = false,
+    int? operationGeneration,
+  }) async {
+    final generation = operationGeneration ?? _deviceOperationGeneration;
+    if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
     scan(t) async {
+      if (!_isDeviceOperationCurrent(generation)) {
+        t.cancel();
+        return;
+      }
       debugPrint("Period connect seconds: $_connectionCheckSeconds, triggered timer at ${DateTime.now()}");
 
-      final deviceService = ServiceManager.instance().device;
+      final deviceService = _deviceService;
       if (deviceService is DeviceService && deviceService.isWifiSyncInProgress) {
         debugPrint("Skipping BLE reconnect - WiFi sync in progress");
         return;
@@ -252,7 +299,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         if (isConnecting) {
           return;
         }
-        await scanAndConnectToDevice();
+        await scanAndConnectToDevice(operationGeneration: generation);
       } else {
         t.cancel();
       }
@@ -262,8 +309,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     scan(_reconnectionTimer);
   }
 
-  Future<BtDevice?> _scanConnectDevice() async {
+  Future<BtDevice?> _scanConnectDevice(int operationGeneration) async {
+    if (!_isDeviceOperationCurrent(operationGeneration)) return null;
     var device = await _getConnectedDevice();
+    if (!_isDeviceOperationCurrent(operationGeneration)) return null;
     if (device != null) {
       return device;
     }
@@ -272,11 +321,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     if (pairedDeviceId.isNotEmpty) {
       try {
         Logger.debug('Attempting direct reconnection to paired device: $pairedDeviceId');
-        await ServiceManager.instance().device.ensureConnection(pairedDeviceId, force: true);
+        await _deviceService.ensureConnection(pairedDeviceId, force: true);
+        if (!_isDeviceOperationCurrent(operationGeneration)) return null;
 
         // Check if connection succeeded
         await Future.delayed(const Duration(seconds: 2));
+        if (!_isDeviceOperationCurrent(operationGeneration)) return null;
         device = await _getConnectedDevice();
+        if (!_isDeviceOperationCurrent(operationGeneration)) return null;
         if (device != null) {
           Logger.debug('Direct reconnection successful');
           return device;
@@ -286,25 +338,37 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
       }
     }
 
-    await ServiceManager.instance().device.discover(desirableDeviceId: pairedDeviceId);
+    await _deviceService.discover(desirableDeviceId: pairedDeviceId);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return null;
 
     // Waiting for the device connected (if any)
     await Future.delayed(const Duration(seconds: 2));
+    if (!_isDeviceOperationCurrent(operationGeneration)) return null;
     if (connectedDevice != null) {
       return connectedDevice;
     }
     return null;
   }
 
-  Future scanAndConnectToDevice() async {
+  Future scanAndConnectToDevice({int? operationGeneration}) async {
+    final generation = operationGeneration ?? _deviceOperationGeneration;
+    if (!_isDeviceOperationCurrent(generation)) return;
     updateConnectingStatus(true);
     if (isConnected) {
       if (connectedDevice == null) {
-        connectedDevice = await _getConnectedDevice();
-        SharedPreferencesUtil().deviceName = connectedDevice!.name;
+        final resolvedDevice = await _getConnectedDevice();
+        if (!_isDeviceOperationCurrent(generation)) return;
+        if (resolvedDevice == null) {
+          updateConnectingStatus(false);
+          return;
+        }
+        connectedDevice = resolvedDevice;
+        await SharedPreferencesUtil().saveString('deviceName', connectedDevice!.name);
+        if (!_isDeviceOperationCurrent(generation)) return;
         MixpanelManager().deviceConnected();
       }
 
+      if (!_isDeviceOperationCurrent(generation)) return;
       setIsConnected(true);
       updateConnectingStatus(false);
       notifyListeners();
@@ -312,19 +376,23 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     }
 
     // else
-    var device = await _scanConnectDevice();
+    var device = await (_scanConnector?.call() ?? _scanConnectDevice(generation));
+    if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('inside scanAndConnectToDevice $device in device_provider');
     if (device != null) {
-      var cDevice = await _getConnectedDevice();
-      if (cDevice != null) {
-        setConnectedDevice(cDevice);
-        setisDeviceStorageSupport();
-        SharedPreferencesUtil().deviceName = cDevice.name;
-        MixpanelManager().deviceConnected();
-        setIsConnected(true);
-      }
+      var cDevice = await _resolveConnectedDevice(device.id) ?? device;
+      if (!_isDeviceOperationCurrent(generation)) return;
+      await setConnectedDevice(cDevice, operationGeneration: generation);
+      if (!_isDeviceOperationCurrent(generation)) return;
+      await setisDeviceStorageSupport(operationGeneration: generation);
+      if (!_isDeviceOperationCurrent(generation)) return;
+      await SharedPreferencesUtil().saveString('deviceName', cDevice.name);
+      if (!_isDeviceOperationCurrent(generation)) return;
+      MixpanelManager().deviceConnected();
+      setIsConnected(true);
       Logger.debug('device is not null $cDevice');
     }
+    if (!_isDeviceOperationCurrent(generation)) return;
     updateConnectingStatus(false);
 
     notifyListeners();
@@ -349,15 +417,19 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _reconnectionTimer?.cancel();
     _disconnectDebouncer.cancel();
     _connectDebouncer.cancel();
-    ServiceManager.instance().device.unsubscribe(this);
+    _deviceService.unsubscribe(this);
     super.dispose();
   }
 
-  void onDeviceDisconnected() async {
+  Future<void> onDeviceDisconnected({int? operationGeneration}) async {
+    final generation = operationGeneration ?? _deviceOperationGeneration;
+    if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('onDisconnected inside: $connectedDevice');
     _havingNewFirmware = false;
-    setConnectedDevice(null);
-    setisDeviceStorageSupport();
+    await setConnectedDevice(null, operationGeneration: generation);
+    if (!_isDeviceOperationCurrent(generation)) return;
+    await setisDeviceStorageSupport(operationGeneration: generation);
+    if (!_isDeviceOperationCurrent(generation)) return;
     setIsConnected(false);
     updateConnectingStatus(false);
 
@@ -380,7 +452,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
     // Retired 1s to prevent the race condition made by standby power of ble device
     Future.delayed(const Duration(seconds: 1), () {
-      periodicConnect('coming from onDisconnect');
+      if (_isDeviceOperationCurrent(generation)) {
+        periodicConnect('coming from onDisconnect', operationGeneration: generation);
+      }
     });
   }
 
@@ -402,35 +476,48 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     return (message, hasUpdate, version, latestFirmwareDetails);
   }
 
-  void _onDeviceConnected(BtDevice device) async {
+  Future<void> _onDeviceConnected(BtDevice device, int operationGeneration) async {
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
     Logger.debug('_onConnected inside: $connectedDevice');
     _disconnectNotificationTimer?.cancel();
-    NotificationService.instance.clearNotification(1);
-    setConnectedDevice(device);
+    try {
+      NotificationService.instance.clearNotification(1);
+    } catch (error) {
+      Logger.debug('Could not clear the stale disconnect notification: $error');
+    }
+    await setConnectedDevice(device, operationGeneration: operationGeneration);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
     if (captureProvider != null) {
       captureProvider?.updateRecordingDevice(device);
     }
 
-    setisDeviceStorageSupport();
+    await setisDeviceStorageSupport(operationGeneration: operationGeneration);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
     setIsConnected(true);
 
     // Read initial battery level
     int currentLevel = await _retrieveBatteryLevel(device.id);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
     if (currentLevel != -1) {
       batteryLevel = currentLevel;
     }
 
     // Then set up listener for battery changes
-    await initiateBleBatteryListener();
+    await initiateBleBatteryListener(operationGeneration: operationGeneration);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
     if (batteryLevel != -1 && batteryLevel < 20) {
       _hasLowBatteryAlerted = false;
     }
     updateConnectingStatus(false);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
     await captureProvider?.streamDeviceRecording(device: device);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
-    await getDeviceInfo();
-    SharedPreferencesUtil().deviceName = device.name;
+    await getDeviceInfo(operationGeneration: operationGeneration);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    await SharedPreferencesUtil().saveString('deviceName', device.name);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
@@ -439,30 +526,32 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     notifyListeners();
 
     // Check firmware updates
-    _checkFirmwareUpdates();
+    _checkFirmwareUpdates(operationGeneration: operationGeneration);
 
     onDeviceConnected?.call(device);
   }
 
-  void _handleDeviceConnected(String deviceId) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null) {
-      return;
-    }
-    _onDeviceConnected(connection.device);
+  Future<void> _handleDeviceConnected(String deviceId, int operationGeneration) async {
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    final device = await _resolveConnectedDevice(deviceId);
+    if (device == null || !_isDeviceOperationCurrent(operationGeneration)) return;
+    await _onDeviceConnected(device, operationGeneration);
   }
 
-  void _checkFirmwareUpdates() async {
+  void _checkFirmwareUpdates({int? operationGeneration}) async {
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     if (_isFirmwareUpdateInProgress) {
       return;
     }
 
     await checkFirmwareUpdates();
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
 
     // Show firmware update dialog if needed
     if (_havingNewFirmware) {
       // Use a small delay to ensure the UI is ready
       Future.delayed(const Duration(milliseconds: 500), () {
+        if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
         final context = MyApp.navigatorKey.currentContext;
         if (context != null) {
           showFirmwareUpdateDialog(context);
@@ -571,13 +660,16 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     );
   }
 
-  Future setisDeviceStorageSupport() async {
+  Future setisDeviceStorageSupport({int? operationGeneration}) async {
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     if (connectedDevice == null) {
       isDeviceStorageSupport = false;
     } else {
       var storageFiles = await _getStorageList(connectedDevice!.id);
+      if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
       isDeviceStorageSupport = storageFiles.isNotEmpty;
     }
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     notifyListeners();
   }
 
@@ -587,14 +679,18 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     switch (state) {
       case DeviceConnectionState.connected:
         _disconnectDebouncer.cancel();
-        _connectDebouncer.run(() => _handleDeviceConnected(deviceId));
+        final generation = _deviceOperationGeneration;
+        if (!_isDeviceOperationCurrent(generation)) return;
+        _connectDebouncer.run(() => _handleDeviceConnected(deviceId, generation));
         break;
       case DeviceConnectionState.disconnected:
         _connectDebouncer.cancel();
         // Check if this is the paired device or currently connected device
         // Coz connectedDevice and pairedDevice are the same but connectedDevice becomes null after disconnect
         if (deviceId == connectedDevice?.id || deviceId == pairedDevice?.id) {
-          _disconnectDebouncer.run(onDeviceDisconnected);
+          final generation = _deviceOperationGeneration;
+          if (!_isDeviceOperationCurrent(generation)) return;
+          _disconnectDebouncer.run(() => onDeviceDisconnected(operationGeneration: generation));
         }
         break;
     }
@@ -607,7 +703,11 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   void onStatusChanged(DeviceServiceStatus status) {
     switch (status) {
       case DeviceServiceStatus.stop:
+        _deviceOperationGeneration++;
+        _deviceServiceReady = false;
         _reconnectionTimer?.cancel();
+        _disconnectDebouncer.cancel();
+        _connectDebouncer.cancel();
         _bleBatteryLevelListener?.cancel();
         _bleBatteryLevelListener = null;
         connectedDevice = null;
@@ -620,14 +720,22 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         notifyListeners();
         break;
       case DeviceServiceStatus.ready:
+        final generation = ++_deviceOperationGeneration;
+        _deviceServiceReady = true;
         final stored = SharedPreferencesUtil().btDevice;
         pairedDevice = stored.id.isEmpty ? null : stored;
         notifyListeners();
         if (pairedDevice != null) {
-          unawaited(periodicConnect('device service resumed', boundDeviceOnly: true));
+          unawaited(periodicConnect(
+            'device service resumed',
+            boundDeviceOnly: true,
+            operationGeneration: generation,
+          ));
         }
         break;
       case DeviceServiceStatus.init:
+        _deviceServiceReady = false;
+        break;
       case DeviceServiceStatus.scanning:
         break;
     }
