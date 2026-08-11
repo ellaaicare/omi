@@ -568,12 +568,21 @@ void main() {
       expect(authority, isNotNull);
 
       final events = <V2VEvent>[];
+      final audioRoutes = <String>[];
       var microphoneStarts = 0;
       final client = V2VClient(
         onEvent: events.add,
         onConnectionChanged: (_) {},
         microphoneStarter: () async {
           microphoneStarts++;
+          return true;
+        },
+        audibleOutputEnforcer: () async {
+          audioRoutes.add('interactive');
+          return true;
+        },
+        playbackOutputEnforcer: () async {
+          audioRoutes.add('playback');
           return true;
         },
         streamPlaybackStarter: () async => throw StateError('route unavailable'),
@@ -593,10 +602,59 @@ void main() {
       await client.waitForStreamFeedForTesting();
 
       expect(microphoneStarts, 2);
+      expect(audioRoutes, ['playback', 'interactive']);
       expect(client.micMutedForTesting, isFalse);
       expect(client.micSuspendedForPlaybackForTesting, isFalse);
       expect(events.where((event) => event.type == 'error'), hasLength(1));
       expect(events.where((event) => event.type == 'playback_complete'), hasLength(1));
+      await client.disconnect();
+    });
+
+    test('successful stream playback uses playback route then restores interactive route', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final audioRoutes = <String>[];
+      var microphoneStarts = 0;
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+        audibleOutputEnforcer: () async {
+          audioRoutes.add('interactive');
+          return true;
+        },
+        playbackOutputEnforcer: () async {
+          audioRoutes.add('playback');
+          return true;
+        },
+        streamPlaybackStarter: () async {},
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.streamAudioChunkForTesting(Uint8List.fromList([1, 2, 3]));
+      await client.waitForStreamFeedForTesting();
+      await client.finishPlaybackForTesting();
+
+      expect(audioRoutes, ['playback', 'interactive']);
+      expect(microphoneStarts, 2);
+      expect(client.micMutedForTesting, isFalse);
       await client.disconnect();
     });
 
@@ -621,6 +679,7 @@ void main() {
           microphoneStarts++;
           return true;
         },
+        playbackOutputEnforcer: () async => true,
         streamPlaybackStarter: () async {
           playbackStarts++;
           if (playbackStarts == 1) {
@@ -683,6 +742,7 @@ void main() {
         onEvent: (_) {},
         onConnectionChanged: (_) {},
         microphoneStarter: () async => true,
+        playbackOutputEnforcer: () async => true,
         streamPlaybackStarter: () async {
           playbackStarts++;
           if (playbackStarts > 1) fail('stale queued PCM restarted playback after disconnect');

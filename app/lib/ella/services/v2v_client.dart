@@ -310,7 +310,8 @@ class V2VClient {
   final Future<void> Function(V2VProtectedEgressBoundary boundary)? _beforeProtectedEgress;
   final void Function(V2VProtectedEgressBoundary boundary)? _onProtectedEgress;
   final Future<bool> Function()? _microphoneStarter;
-  final Future<bool> Function() _audibleOutputEnforcer;
+  final Future<bool> Function() _interactiveOutputEnforcer;
+  final Future<bool> Function() _playbackOutputEnforcer;
   final Future<void> Function()? _streamPlaybackStarter;
   final bool Function()? _liveChannelForTesting;
   final Duration _playbackMicCooldown;
@@ -322,13 +323,18 @@ class V2VClient {
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
     @visibleForTesting Future<bool> Function()? microphoneStarter,
     @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
+    @visibleForTesting Future<bool> Function()? playbackOutputEnforcer,
     @visibleForTesting Future<void> Function()? streamPlaybackStarter,
     @visibleForTesting bool Function()? liveChannelForTesting,
     @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
         _microphoneStarter = microphoneStarter,
-        _audibleOutputEnforcer = audibleOutputEnforcer ?? EllaVoiceAudioRoute.ensureAudibleOutput,
+        _interactiveOutputEnforcer = audibleOutputEnforcer ??
+            (() => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.interactive)),
+        _playbackOutputEnforcer = playbackOutputEnforcer ??
+            audibleOutputEnforcer ??
+            (() => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback)),
         _streamPlaybackStarter = streamPlaybackStarter,
         _liveChannelForTesting = liveChannelForTesting,
         _playbackMicCooldown = playbackMicCooldown;
@@ -355,6 +361,9 @@ class V2VClient {
 
   @visibleForTesting
   Future<void> waitForStreamFeedForTesting() => _streamFeedFuture;
+
+  @visibleForTesting
+  Future<void> finishPlaybackForTesting() => _finishPlayback(reason: 'test');
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
@@ -917,7 +926,7 @@ class V2VClient {
       ),
     );
     await session.setActive(true);
-    if (!await _audibleOutputEnforcer()) {
+    if (!await _interactiveOutputEnforcer()) {
       throw StateError('Ella voice output route could not be made audible');
     }
     Logger.debug('[V2V] Audio session: playAndRecord + defaultToSpeaker + BT + AirPlay');
@@ -1339,6 +1348,11 @@ class V2VClient {
       await _handleRuntimeAuthorityLoss();
       return;
     }
+    if (!await _interactiveOutputEnforcer()) {
+      Logger.error('[V2V] Interactive audio route could not be restored after playback');
+      await disconnect();
+      return;
+    }
     final resumed = await _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
     if (!resumed) await disconnect();
   }
@@ -1391,6 +1405,12 @@ class V2VClient {
   }
 
   Future<void> _ensureStreamingPlaybackStarted() async {
+    if (_streamPlaybackStarted) return;
+
+    if (!await _playbackOutputEnforcer()) {
+      throw StateError('Ella voice playback route could not be made audible');
+    }
+
     final injectedStarter = _streamPlaybackStarter;
     if (injectedStarter != null) {
       await injectedStarter();
@@ -1400,12 +1420,6 @@ class V2VClient {
     if (!_streamPlayerOpen) {
       await _streamPlayer.openPlayer();
       _streamPlayerOpen = true;
-    }
-
-    if (_streamPlaybackStarted) return;
-
-    if (!await _audibleOutputEnforcer()) {
-      throw StateError('Ella voice output route could not be made audible');
     }
 
     await _streamPlayer.setVolume(1.0);

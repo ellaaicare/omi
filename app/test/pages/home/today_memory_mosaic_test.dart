@@ -12,6 +12,7 @@ import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
@@ -25,6 +26,7 @@ import 'package:omi/providers/home_provider.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
+import 'package:omi/widgets/transcript.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -179,6 +181,54 @@ void main() {
 
     expect(find.byKey(const Key('today-confirmed-recording-status')), findsOneWidget);
     expect(find.text('Records on this iPhone · Listening… tap to finish'), findsOneWidget);
+  });
+
+  testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    harness.capture.segments = [
+      TranscriptSegment(
+        id: 'live-segment',
+        text: 'This transcript is visible while recording.',
+        speaker: 'SPEAKER_00',
+        isUser: false,
+        personId: null,
+        start: 0,
+        end: 1,
+        translations: const [],
+      ),
+    ];
+    harness.capture.notifyListeners();
+    await tester.pump();
+
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final transcript = tester.widget<TranscriptWidget>(find.byType(TranscriptWidget));
+    expect(transcript.segments.single.text, 'This transcript is visible while recording.');
+    expect(find.text('Process Now'), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.finishes, 1);
+    expect(harness.capture.deviceStops, 0, reason: 'processing must preserve the continuous necklace stream');
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
   });
 
   testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {

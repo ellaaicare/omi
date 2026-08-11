@@ -164,6 +164,75 @@ void main() {
     expect(provider.recordingState, RecordingState.stop);
   });
 
+  test('phone capture waits briefly for verified account authority after consent refresh', () async {
+    final authority = _CaptureAuthority('uid-a');
+    ActiveWalAuthority? activeAuthority;
+    var transportStarts = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () async => true,
+      activeWalAuthority: () => activeAuthority,
+      phoneCaptureStarter: () async {
+        transportStarts++;
+        return PhoneCaptureStartResult.started;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+      captureAuthorityWaitTimeout: const Duration(milliseconds: 100),
+      captureAuthorityPollInterval: const Duration(milliseconds: 1),
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue(times: 1);
+    expect(transportStarts, 0);
+
+    activeAuthority = _activeCaptureAuthority(authority);
+    expect(await start, PhoneCaptureStartResult.started);
+    expect(transportStarts, 1);
+    expect(provider.recordingState, RecordingState.record);
+  });
+
+  test('phone capture reports account readiness when exact authority never appears', () async {
+    var transportStarts = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () async => true,
+      activeWalAuthority: () => null,
+      phoneCaptureStarter: () async {
+        transportStarts++;
+        return PhoneCaptureStartResult.started;
+      },
+      captureAuthorityWaitTimeout: Duration.zero,
+      captureAuthorityPollInterval: Duration.zero,
+    );
+    addTearDown(provider.dispose);
+
+    expect(await provider.streamRecording(), PhoneCaptureStartResult.accountNotReady);
+    expect(transportStarts, 0);
+    expect(provider.recordingState, RecordingState.stop);
+  });
+
+  test('account transition cancels phone capture while authority is pending', () async {
+    var transportStarts = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () async => true,
+      activeWalAuthority: () => null,
+      phoneCaptureStarter: () async {
+        transportStarts++;
+        return PhoneCaptureStartResult.started;
+      },
+      captureAuthorityWaitTimeout: const Duration(milliseconds: 100),
+      captureAuthorityPollInterval: const Duration(milliseconds: 1),
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue(times: 1);
+    provider.reset();
+
+    expect(await start, PhoneCaptureStartResult.cancelled);
+    expect(transportStarts, 0);
+    expect(provider.recordingState, RecordingState.stop);
+  });
+
   test('blank transcript placeholders are not capturable content', () {
     final provider = CaptureProvider();
     provider.segments = [_segment('blank', '   \n  ')];

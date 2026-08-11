@@ -25,10 +25,12 @@ import 'package:omi/ella/ella_theme.dart';
 
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
+  final Future<bool> Function()? onProcessNow;
 
   const ConversationCapturingPage({
     super.key,
     this.topConversationId,
+    this.onProcessNow,
   });
 
   @override
@@ -46,6 +48,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
         PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.accountNotReady ||
         PhoneCaptureStartResult.consentUnavailable ||
         PhoneCaptureStartResult.recorderUnavailable ||
         PhoneCaptureStartResult.cancelled =>
@@ -146,7 +149,9 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   Future<void> _stopConversation(CaptureProvider provider) async {
     if (provider.segments.isNotEmpty || provider.photos.isNotEmpty) {
       // Helper function to stop recording and process conversation
-      Future<void> stopRecordingAndProcess() async {
+      Future<bool> stopRecordingAndProcess() async {
+        final processNow = widget.onProcessNow;
+        if (processNow != null) return processNow();
         // Stop any active recording (phone mic or system audio)
         if (provider.recordingState == RecordingState.record) {
           await provider.stopStreamRecording();
@@ -154,12 +159,12 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
           await provider.stopSystemAudioRecording();
         }
         // Then process the conversation
-        provider.forceProcessingCurrentConversation();
+        return provider.forceProcessingCurrentConversation();
       }
 
       if (!showSummarizeConfirmation) {
-        await stopRecordingAndProcess();
-        Navigator.of(context).pop();
+        final processed = await stopRecordingAndProcess();
+        if (processed && mounted) Navigator.of(context).pop();
         return;
       }
       showDialog(
@@ -191,9 +196,10 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 },
                 onConfirm: () async {
                   SharedPreferencesUtil().showSummarizeConfirmation = showSummarizeConfirmation;
-                  await stopRecordingAndProcess();
+                  final processed = await stopRecordingAndProcess();
+                  if (!context.mounted) return;
                   Navigator.of(context).pop();
-                  Navigator.of(context).pop();
+                  if (processed && mounted) Navigator.of(this.context).pop();
                 },
               );
             },

@@ -28,6 +28,7 @@ import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -459,6 +460,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
         PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.accountNotReady ||
         PhoneCaptureStartResult.consentUnavailable ||
         PhoneCaptureStartResult.recorderUnavailable ||
         PhoneCaptureStartResult.cancelled =>
@@ -466,10 +468,59 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
-  Future<void> _finalizeHomeMoment(CaptureProvider capture) async {
-    if (await capture.finalizeCurrentConversation()) return;
-    if (!mounted) return;
+  Future<bool> _finalizeHomeMoment(CaptureProvider capture) async {
+    if (await capture.finalizeCurrentConversation()) return true;
+    if (!mounted) return false;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+    return false;
+  }
+
+  Future<bool> _finishHomeCapture(CaptureProvider capture) async {
+    switch (_homeCaptureSource) {
+      case _HomeCaptureSource.phone:
+        await capture.stopStreamRecording();
+        break;
+      case _HomeCaptureSource.necklaceOwned:
+        await capture.stopStreamDeviceRecording();
+        if (capture.recordingState == RecordingState.deviceRecord) {
+          throw StateError('Home-owned necklace stream did not stop');
+        }
+        break;
+      case _HomeCaptureSource.necklaceContinuous:
+        break;
+      case null:
+        if (capture.recordingState == RecordingState.record) {
+          await capture.stopStreamRecording();
+        }
+        break;
+    }
+    if (mounted) {
+      setState(() {
+        _homeCaptureActive = false;
+        _homeCaptureSource = null;
+      });
+    }
+    return _finalizeHomeMoment(capture);
+  }
+
+  Future<void> _openLiveTranscript(CaptureProvider capture) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ConversationCapturingPage(
+          onProcessNow: () async {
+            if (_homeCaptureActive) return _finishHomeCapture(capture);
+            if (capture.recordingState == RecordingState.deviceRecord) {
+              return _finalizeHomeMoment(capture);
+            }
+            if (capture.recordingState == RecordingState.record) {
+              await capture.stopStreamRecording();
+              return _finalizeHomeMoment(capture);
+            }
+            return false;
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _toggleHomeCapture({
@@ -482,43 +533,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     setState(() => _homeCaptureStarting = true);
     try {
       if (isActive) {
-        switch (_homeCaptureSource) {
-          case _HomeCaptureSource.phone:
-            await capture.stopStreamRecording();
-            if (mounted) {
-              setState(() {
-                _homeCaptureActive = false;
-                _homeCaptureSource = null;
-              });
-            }
-            await _finalizeHomeMoment(capture);
-            break;
-          case _HomeCaptureSource.necklaceOwned:
-            await capture.stopStreamDeviceRecording();
-            if (capture.recordingState == RecordingState.deviceRecord) {
-              throw StateError('Home-owned necklace stream did not stop');
-            }
-            if (mounted) {
-              setState(() {
-                _homeCaptureActive = false;
-                _homeCaptureSource = null;
-              });
-            }
-            await _finalizeHomeMoment(capture);
-            break;
-          case _HomeCaptureSource.necklaceContinuous:
-            await _finalizeHomeMoment(capture);
-            if (mounted) {
-              setState(() {
-                _homeCaptureActive = false;
-                _homeCaptureSource = null;
-              });
-            }
-            break;
-          case null:
-            if (mounted) setState(() => _homeCaptureActive = false);
-            break;
-        }
+        await _finishHomeCapture(capture);
         return;
       }
 
@@ -675,6 +690,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               recordingState: capture.recordingState,
               necklaceContinuouslyRecording:
                   deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureActive,
+              onViewTranscript: () => _openLiveTranscript(capture),
               onTap: () => _toggleHomeCapture(
                 capture: capture,
                 isActive: homeCaptureActive,
@@ -859,6 +875,7 @@ class _RecordMomentControl extends StatelessWidget {
     required this.necklaceConnected,
     required this.recordingState,
     required this.necklaceContinuouslyRecording,
+    required this.onViewTranscript,
     required this.onTap,
   });
 
@@ -867,6 +884,7 @@ class _RecordMomentControl extends StatelessWidget {
   final bool necklaceConnected;
   final RecordingState recordingState;
   final bool necklaceContinuouslyRecording;
+  final VoidCallback onViewTranscript;
   final VoidCallback onTap;
 
   @override
@@ -969,6 +987,15 @@ class _RecordMomentControl extends StatelessWidget {
                   ),
                 ],
               ),
+            ),
+          ],
+          if (confirmedPhoneRecording || confirmedNecklaceRecording) ...[
+            const SizedBox(height: 4),
+            TextButton.icon(
+              key: const Key('today-view-live-transcript'),
+              onPressed: onViewTranscript,
+              icon: const Icon(Icons.subject_rounded, size: 18),
+              label: Text(context.l10n.viewTranscript),
             ),
           ],
           if (captureFailed) ...[

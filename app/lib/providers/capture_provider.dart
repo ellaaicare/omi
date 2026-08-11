@@ -64,6 +64,7 @@ import 'package:omi/backend/schema/message_event.dart'
 enum PhoneCaptureStartResult {
   started,
   consentUnavailable,
+  accountNotReady,
   microphonePermissionDenied,
   transcriptionUnavailable,
   recorderUnavailable,
@@ -273,6 +274,8 @@ class CaptureProvider extends ChangeNotifier
   final CaptureConsentAuthorityEnsurer? _captureConsentAuthorityEnsurer;
   final DeviceCaptureStarter? _deviceCaptureStarter;
   final PhoneCaptureStarter? _phoneCaptureStarter;
+  final Duration _captureAuthorityWaitTimeout;
+  final Duration _captureAuthorityPollInterval;
   final InProgressConversationFetchCall _inProgressConversationFetch;
   final InProgressConversationProcessCall _inProgressConversationProcess;
 
@@ -332,6 +335,8 @@ class CaptureProvider extends ChangeNotifier
     CaptureConsentAuthorityEnsurer? captureConsentAuthorityEnsurer,
     DeviceCaptureStarter? deviceCaptureStarter,
     PhoneCaptureStarter? phoneCaptureStarter,
+    @visibleForTesting Duration captureAuthorityWaitTimeout = const Duration(seconds: 3),
+    @visibleForTesting Duration captureAuthorityPollInterval = const Duration(milliseconds: 100),
     InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
     InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
   })  : _activeAccountAuthority = activeAccountAuthority,
@@ -340,6 +345,8 @@ class CaptureProvider extends ChangeNotifier
         _captureConsentAuthorityEnsurer = captureConsentAuthorityEnsurer,
         _deviceCaptureStarter = deviceCaptureStarter,
         _phoneCaptureStarter = phoneCaptureStarter,
+        _captureAuthorityWaitTimeout = captureAuthorityWaitTimeout,
+        _captureAuthorityPollInterval = captureAuthorityPollInterval,
         _inProgressConversationFetch = inProgressConversationFetch,
         _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
@@ -1335,10 +1342,9 @@ class CaptureProvider extends ChangeNotifier
     final generation = _captureGeneration;
     final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
     if (!consentCurrent || generation != _captureGeneration) return PhoneCaptureStartResult.consentUnavailable;
-    final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
-      return PhoneCaptureStartResult.cancelled;
-    }
+    final captureAuthority = await _waitForCaptureAuthority(generation);
+    if (generation != _captureGeneration) return PhoneCaptureStartResult.cancelled;
+    if (captureAuthority == null) return PhoneCaptureStartResult.accountNotReady;
     final phoneCaptureStarter = _phoneCaptureStarter;
     if (phoneCaptureStarter != null) {
       final result = await phoneCaptureStarter();
@@ -1439,6 +1445,17 @@ class CaptureProvider extends ChangeNotifier
     // Capture has actually started; do not send location for failed attempts.
     unawaited(_queueCaptureGeolocation(generation, captureAuthority));
     return PhoneCaptureStartResult.started;
+  }
+
+  Future<ActiveWalAuthority?> _waitForCaptureAuthority(int generation) async {
+    final deadline = DateTime.now().add(_captureAuthorityWaitTimeout);
+    while (generation == _captureGeneration) {
+      final authority = _activeWalAuthority();
+      if (authority != null && _isCaptureCurrent(generation, authority)) return authority;
+      if (!DateTime.now().isBefore(deadline)) return null;
+      await Future<void>.delayed(_captureAuthorityPollInterval);
+    }
+    return null;
   }
 
   stopStreamRecording() async {
