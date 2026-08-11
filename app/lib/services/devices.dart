@@ -75,6 +75,7 @@ class DeviceService implements IDeviceService {
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   DeviceConnection? _connection;
+  int _operationGeneration = 0;
   List<BtDevice> get devices => _devices;
 
   DeviceServiceStatus get status => _status;
@@ -91,6 +92,9 @@ class DeviceService implements IDeviceService {
       logCommonErrorMessage("Device service is not ready, may busying or stop");
       return;
     }
+    final operationGeneration = _operationGeneration;
+
+    bool isCurrentDiscovery() => operationGeneration == _operationGeneration && _status != DeviceServiceStatus.stop;
 
     _status = DeviceServiceStatus.scanning;
 
@@ -101,6 +105,7 @@ class DeviceService implements IDeviceService {
       final discoveryFutures = supportedDiscoverers.map((d) async {
         try {
           final result = await d.discover(timeout: timeout);
+          if (!isCurrentDiscovery()) return <BtDevice>[];
           return result.devices;
         } catch (e, st) {
           Logger.debug('Discovery failed for ${d.name}: $e');
@@ -111,21 +116,25 @@ class DeviceService implements IDeviceService {
 
       // Wait for all discoveries to complete
       final results = await Future.wait(discoveryFutures);
+      if (!isCurrentDiscovery()) return;
 
       // Combine all discovered devices
-      if (_status == DeviceServiceStatus.stop) return;
       for (final devices in results) {
         discoveredDevices.addAll(devices);
       }
 
+      if (!isCurrentDiscovery()) return;
       _devices = discoveredDevices;
+      if (!isCurrentDiscovery()) return;
       onDevices(devices);
 
       if (desirableDeviceId != null && desirableDeviceId.isNotEmpty) {
+        if (!isCurrentDiscovery()) return;
         await ensureConnection(desirableDeviceId, force: true);
+        if (!isCurrentDiscovery()) return;
       }
     } finally {
-      if (_status != DeviceServiceStatus.stop) _status = DeviceServiceStatus.ready;
+      if (isCurrentDiscovery()) _status = DeviceServiceStatus.ready;
     }
   }
 
@@ -180,13 +189,16 @@ class DeviceService implements IDeviceService {
 
   @override
   void start() {
+    _operationGeneration++;
     _status = DeviceServiceStatus.ready;
+    onStatusChanged(_status);
 
     // TODO: Start watchdog to discover automatically, re-connect automatically
   }
 
   @override
   Future<void> stop() async {
+    _operationGeneration++;
     _status = DeviceServiceStatus.stop;
     onStatusChanged(_status);
 
@@ -195,7 +207,6 @@ class DeviceService implements IDeviceService {
 
     await disconnectDevice();
 
-    _subscriptions.clear();
     _devices.clear();
   }
 
@@ -226,8 +237,10 @@ class DeviceService implements IDeviceService {
   final Mutex _mutex = Mutex();
   @override
   Future<DeviceConnection?> ensureConnection(String deviceId, {bool force = false}) async {
+    final operationGeneration = _operationGeneration;
     await _mutex.acquire();
     try {
+      if (_status == DeviceServiceStatus.stop || operationGeneration != _operationGeneration) return null;
       Logger.debug("ensureConnection ${_connection?.device.id} ${_connection?.status} $force");
 
       // Not force
@@ -250,6 +263,12 @@ class DeviceService implements IDeviceService {
         await _connectToDevice(deviceId);
       } on DeviceConnectionException catch (e) {
         Logger.debug(e.cause);
+        return null;
+      }
+
+      if (_status == DeviceServiceStatus.stop || operationGeneration != _operationGeneration) {
+        await _connection?.disconnect();
+        _connection = null;
         return null;
       }
 

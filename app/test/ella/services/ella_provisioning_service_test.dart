@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -143,6 +145,7 @@ void main() {
   });
 
   test('account switch clears legacy authority, consent, demo state, settings, and receipts', () async {
+    final priorDevice = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
     SharedPreferences.setMockInitialValues({
       'ellaProvisioningAccountUid': 'uid-a',
       'ellaProvisioningReceipt:uid-a': '{"state":"ready"}',
@@ -159,6 +162,10 @@ void main() {
       'demoMode': true,
       'publicMode': true,
       'cachedMessages': ['{"id":"old-user-message"}'],
+      'btDevice': jsonEncode(priorDevice.toJson()),
+      'deviceName': 'Ella A',
+      'hasOmiDevice': true,
+      'deviceIsV2': true,
     });
     await SharedPreferencesUtil.init();
     final preferences = SharedPreferencesUtil();
@@ -179,11 +186,16 @@ void main() {
     expect(preferences.demoMode, isFalse);
     expect(preferences.publicMode, isFalse);
     expect(preferences.getStringList('cachedMessages'), isEmpty);
+    expect(preferences.btDevice.id, isEmpty);
+    expect(preferences.deviceName, isEmpty);
+    expect(preferences.hasOmiDevice, isNot(true));
+    expect(preferences.deviceIsV2, isFalse);
   });
 
   test(
     'same retained account preserves current consent and legacy preferences without making them authority',
     () async {
+      final retainedDevice = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
       SharedPreferences.setMockInitialValues({
         'ellaProvisioningAccountUid': 'uid-a',
         'ellaGatewayUrl': 'https://gateway.invalid',
@@ -199,6 +211,7 @@ void main() {
         'aiConsentScopeHash': SharedPreferencesUtil.currentAiConsentScopeHash,
         'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
         'uid': 'uid-a',
+        'btDevice': jsonEncode(retainedDevice.toJson()),
       });
       await SharedPreferencesUtil.init();
       final preferences = SharedPreferencesUtil();
@@ -219,6 +232,7 @@ void main() {
       expect(preferences.ellaKey, 'legacy-key');
       expect(preferences.aiConsentAccepted, isTrue);
       expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
+      expect(preferences.btDevice.id, 'necklace-a');
     },
   );
 

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
+import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -14,17 +15,51 @@ import 'package:omi/models/user_usage.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 
-Future<bool> updateUserGeolocation({required Geolocation geolocation}) async {
+typedef UserGeolocationTransport = Future<http.Response?> Function({
+  required String body,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+});
+
+Future<http.Response?> _defaultUserGeolocationTransport({
+  required String body,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) =>
+    makeApiCall(
+      url: '${Env.apiBaseUrl}v1/users/geolocation',
+      headers: const {},
+      method: 'PATCH',
+      body: body,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<bool> updateUserGeolocation({
+  required Geolocation geolocation,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  UserGeolocationTransport? transport,
+}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) return false;
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/users/geolocation',
-    headers: {},
-    method: 'PATCH',
-    body: jsonEncode(geolocation.toJson()),
-  );
-  if (response == null) return false;
-  if (response.statusCode == 200) return true;
-  return false;
+  if (exactAuthority != null &&
+      (expectedAuthenticatedUid == null ||
+          expectedAuthenticatedUid.isEmpty ||
+          exactAuthority.uid != expectedAuthenticatedUid ||
+          !exactAuthority.isExactCurrent())) {
+    return false;
+  }
+  try {
+    final response = await (transport ?? _defaultUserGeolocationTransport)(
+      body: jsonEncode(geolocation.toJson()),
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    if (exactAuthority != null && !exactAuthority.isExactCurrent()) return false;
+    return response?.statusCode == 200;
+  } on ExactAccountAuthorityChangedException {
+    return false;
+  }
 }
 
 Future<bool> setUserWebhookUrl({required String type, required String url}) async {

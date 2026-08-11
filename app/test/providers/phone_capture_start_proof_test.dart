@@ -22,10 +22,27 @@ void main() {
     await proof.waitForAudio(timeout: const Duration(milliseconds: 50));
   });
 
+  test('BLE listener installation cannot prove necklace capture without transmitted audio', () async {
+    final proof = DeviceCaptureStartProof();
+
+    expect(proof.acceptTransmittedFrame(const []), isFalse);
+    await expectLater(
+      proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
+  });
+
+  test('first non-empty frame sent to transcription proves necklace capture started', () async {
+    final proof = DeviceCaptureStartProof();
+
+    expect(proof.acceptTransmittedFrame(const [1, 2, 3]), isTrue);
+    await proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 50));
+  });
+
   test('current consent starts without a server refresh', () async {
     var refreshCalls = 0;
 
-    final accepted = await ensurePhoneCaptureConsentAuthority(
+    final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => true,
       authenticatedUid: () => 'owner',
       persistedConsentReceiptId: () => '',
@@ -39,11 +56,11 @@ void main() {
     expect(refreshCalls, 0);
   });
 
-  test('expired consent refreshes before phone capture', () async {
+  test('expired consent refreshes before capture', () async {
     var consentCurrent = false;
     var refreshCalls = 0;
 
-    final accepted = await ensurePhoneCaptureConsentAuthority(
+    final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => consentCurrent,
       authenticatedUid: () => ' owner ',
       persistedConsentReceiptId: () => 'aicr-local-receipt',
@@ -62,7 +79,7 @@ void main() {
   test('phone capture stays closed without an authenticated owner', () async {
     var refreshCalls = 0;
 
-    final accepted = await ensurePhoneCaptureConsentAuthority(
+    final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => false,
       authenticatedUid: () => '   ',
       persistedConsentReceiptId: () => 'aicr-local-receipt',
@@ -79,7 +96,7 @@ void main() {
   test('phone capture cannot reconstruct consent without a local receipt', () async {
     var refreshCalls = 0;
 
-    final accepted = await ensurePhoneCaptureConsentAuthority(
+    final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => false,
       authenticatedUid: () => 'owner',
       persistedConsentReceiptId: () => '',
@@ -94,7 +111,7 @@ void main() {
   });
 
   test('refresh receipt must make local consent authority current', () async {
-    final accepted = await ensurePhoneCaptureConsentAuthority(
+    final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => false,
       authenticatedUid: () => 'owner',
       persistedConsentReceiptId: () => 'aicr-local-receipt',
@@ -108,7 +125,7 @@ void main() {
     var consentCurrent = false;
     var receiptId = 'aicr-local-receipt';
 
-    final accepted = await ensurePhoneCaptureConsentAuthority(
+    final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => consentCurrent,
       authenticatedUid: () => 'owner',
       persistedConsentReceiptId: () => receiptId,
