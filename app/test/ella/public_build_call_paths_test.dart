@@ -543,7 +543,7 @@ void main() {
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       await openHomeControls();
       expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);
-      expect(find.textContaining('Whispers are off'), findsOneWidget);
+      expect(find.text('Whispers are off'), findsOneWidget);
       expect(guardianNativeStarts, 0);
 
       await tester.tap(
@@ -556,7 +556,7 @@ void main() {
       expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
       expect(guardianNativeStarts, 1);
       await openHomeControls();
-      expect(find.textContaining('Whispers are on'), findsOneWidget);
+      expect(find.text('Whispers are on'), findsOneWidget);
 
       // A failed disable must read back server authority. The server remains
       // ON here, so the control must return to ON and native capture must be
@@ -574,7 +574,7 @@ void main() {
       expect(guardianNativeStops, greaterThanOrEqualTo(1));
       expect(guardianNativeStarts, 2);
       await openHomeControls();
-      expect(find.textContaining('Whispers are on'), findsOneWidget);
+      expect(find.text('Whispers are on'), findsOneWidget);
       expect(
         tester
             .widget<Switch>(

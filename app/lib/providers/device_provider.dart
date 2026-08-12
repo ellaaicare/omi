@@ -92,10 +92,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   final Debouncer _connectDebouncer = Debouncer(delay: const Duration(milliseconds: 100));
   int _deviceOperationGeneration = 0;
   bool _deviceServiceReady = false;
+  Future<void>? _deviceDisconnectTeardown;
 
   void Function(BtDevice device)? onDeviceConnected;
 
-  bool _isDeviceOperationCurrent(int generation) => _deviceServiceReady && generation == _deviceOperationGeneration;
+  bool _isDeviceGenerationCurrent(int generation) => _deviceServiceReady && generation == _deviceOperationGeneration;
+
+  bool _isDeviceOperationCurrent(int generation) =>
+      _isDeviceGenerationCurrent(generation) && _deviceDisconnectTeardown == null;
 
   Future<BtDevice?> _resolveConnectedDevice(String deviceId) async {
     final resolver = _connectionResolver;
@@ -422,18 +426,46 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   Future<void> onDeviceDisconnected({int? operationGeneration}) async {
-    final generation = operationGeneration ?? _deviceOperationGeneration;
-    if (!_isDeviceOperationCurrent(generation)) return;
+    final acceptedGeneration = operationGeneration ?? _deviceOperationGeneration;
+    if (!_isDeviceOperationCurrent(acceptedGeneration)) return;
     Logger.debug('onDisconnected inside: $connectedDevice');
-    _havingNewFirmware = false;
-    await setConnectedDevice(null, operationGeneration: generation);
-    if (!_isDeviceOperationCurrent(generation)) return;
-    await setisDeviceStorageSupport(operationGeneration: generation);
-    if (!_isDeviceOperationCurrent(generation)) return;
-    setIsConnected(false);
-    updateConnectingStatus(false);
+    final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id;
+    _connectDebouncer.cancel();
+    _disconnectDebouncer.cancel();
+    _reconnectionTimer?.cancel();
+    final teardownGeneration = ++_deviceOperationGeneration;
+    final teardownCompleter = Completer<void>();
+    final teardownBarrier = teardownCompleter.future;
+    _deviceDisconnectTeardown = teardownBarrier;
 
-    captureProvider?.updateRecordingDevice(null);
+    _havingNewFirmware = false;
+    connectedDevice = null;
+    isDeviceStorageSupport = false;
+    isConnected = false;
+    isConnecting = false;
+    notifyListeners();
+
+    try {
+      if (disconnectedDeviceId != null) {
+        await captureProvider?.handleRecordingDeviceDisconnected(disconnectedDeviceId);
+      }
+    } finally {
+      if (identical(_deviceDisconnectTeardown, teardownBarrier)) {
+        _deviceDisconnectTeardown = null;
+      }
+      if (!teardownCompleter.isCompleted) teardownCompleter.complete();
+    }
+    if (!_isDeviceGenerationCurrent(teardownGeneration)) return;
+
+    // A reconnect belongs to a generation that begins only after the exact
+    // prior capture teardown has settled. Connected callbacks received while
+    // the barrier was active were rejected and cannot be revived here.
+    final reconnectGeneration = ++_deviceOperationGeneration;
+    Future.delayed(const Duration(seconds: 1), () {
+      if (_isDeviceOperationCurrent(reconnectGeneration)) {
+        periodicConnect('coming from onDisconnect', operationGeneration: reconnectGeneration);
+      }
+    });
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);
@@ -449,13 +481,6 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
       );
     });
     MixpanelManager().deviceDisconnected();
-
-    // Retired 1s to prevent the race condition made by standby power of ble device
-    Future.delayed(const Duration(seconds: 1), () {
-      if (_isDeviceOperationCurrent(generation)) {
-        periodicConnect('coming from onDisconnect', operationGeneration: generation);
-      }
-    });
   }
 
   Future<(String, bool, String, Map)> shouldUpdateFirmware() async {
@@ -725,7 +750,23 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         final stored = SharedPreferencesUtil().btDevice;
         pairedDevice = stored.id.isEmpty ? null : stored;
         notifyListeners();
-        if (pairedDevice != null) {
+        final teardownBarrier = _deviceDisconnectTeardown;
+        if (teardownBarrier != null) {
+          unawaited(teardownBarrier.whenComplete(() {
+            if (!_isDeviceGenerationCurrent(generation)) return;
+            final reconnectGeneration = ++_deviceOperationGeneration;
+            final currentStored = SharedPreferencesUtil().btDevice;
+            pairedDevice = currentStored.id.isEmpty ? null : currentStored;
+            notifyListeners();
+            if (pairedDevice != null) {
+              unawaited(periodicConnect(
+                'device service resumed after disconnect teardown',
+                boundDeviceOnly: true,
+                operationGeneration: reconnectGeneration,
+              ));
+            }
+          }));
+        } else if (pairedDevice != null) {
           unawaited(periodicConnect(
             'device service resumed',
             boundDeviceOnly: true,

@@ -337,6 +337,7 @@ class CaptureProvider extends ChangeNotifier
     PhoneCaptureStarter? phoneCaptureStarter,
     @visibleForTesting Duration captureAuthorityWaitTimeout = const Duration(seconds: 3),
     @visibleForTesting Duration captureAuthorityPollInterval = const Duration(milliseconds: 100),
+    @visibleForTesting Duration deviceAudioFrameTimeout = const Duration(seconds: 5),
     InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
     InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
   })  : _activeAccountAuthority = activeAccountAuthority,
@@ -347,6 +348,7 @@ class CaptureProvider extends ChangeNotifier
         _phoneCaptureStarter = phoneCaptureStarter,
         _captureAuthorityWaitTimeout = captureAuthorityWaitTimeout,
         _captureAuthorityPollInterval = captureAuthorityPollInterval,
+        _deviceAudioFrameTimeout = deviceAudioFrameTimeout,
         _inProgressConversationFetch = inProgressConversationFetch,
         _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
@@ -477,6 +479,8 @@ class CaptureProvider extends ChangeNotifier
 
   StreamSubscription? _bleBytesStream;
   StreamSubscription? _blePhotoStream;
+  final Duration _deviceAudioFrameTimeout;
+  Timer? _deviceAudioFrameWatchdog;
 
   get bleBytesStream => _bleBytesStream;
 
@@ -554,6 +558,55 @@ class CaptureProvider extends ChangeNotifier
 
   void updateRecordingDevice(BtDevice? device) {
     _updateRecordingDevice(device);
+  }
+
+  /// Fails the active necklace capture closed when its physical BLE transport
+  /// disconnects. Merely clearing [_recordingDevice] leaves the transcription
+  /// socket and `deviceRecord` presentation alive, which can create empty
+  /// conversations indefinitely after the necklace is powered off.
+  Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
+    if (_recordingDevice?.id != deviceId) return false;
+
+    _captureGeneration++;
+    _deviceAudioFrameWatchdog?.cancel();
+    _deviceAudioFrameWatchdog = null;
+    _keepAliveTimer?.cancel();
+    _keepAliveTimer = null;
+
+    final state = recordingState;
+    final wasBoundCapture = state == RecordingState.initialising ||
+        state == RecordingState.deviceRecord ||
+        state == RecordingState.pause ||
+        _isPaused;
+    _isPaused = false;
+    _updateRecordingDevice(null);
+    if (wasBoundCapture) {
+      updateRecordingState(RecordingState.error);
+    }
+
+    await _closeBleStream(stopCamera: false);
+    await _socket?.stop(reason: 'necklace transport disconnected');
+    return true;
+  }
+
+  void _armDeviceAudioFrameWatchdog(String deviceId, int generation) {
+    _deviceAudioFrameWatchdog?.cancel();
+    _deviceAudioFrameWatchdog = Timer(_deviceAudioFrameTimeout, () {
+      if (generation != _captureGeneration ||
+          _recordingDevice?.id != deviceId ||
+          recordingState != RecordingState.deviceRecord) {
+        return;
+      }
+      Logger.error('Necklace capture stopped because BLE audio frames ceased');
+      unawaited(handleRecordingDeviceDisconnected(deviceId));
+    });
+  }
+
+  @visibleForTesting
+  void armDeviceAudioFrameWatchdogForTesting() {
+    final deviceId = _recordingDevice?.id;
+    if (deviceId == null) return;
+    _armDeviceAudioFrameWatchdog(deviceId, _captureGeneration);
   }
 
   Future _resetStateVariables() async {
@@ -899,6 +952,7 @@ class CaptureProvider extends ChangeNotifier
         final trimmedValue = paddingLeft > 0 ? value.sublist(paddingLeft) : value;
         _socket?.send(trimmedValue);
         startProof?.acceptTransmittedFrame(trimmedValue);
+        _armDeviceAudioFrameWatchdog(deviceId, generation);
 
         // Track bytes sent to websocket
         _wsSocketBytesSent += trimmedValue.length;
@@ -1180,6 +1234,8 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> _closeBleStream({bool stopCamera = true}) async {
+    _deviceAudioFrameWatchdog?.cancel();
+    _deviceAudioFrameWatchdog = null;
     final bytesStream = _bleBytesStream;
     final photoStream = _blePhotoStream;
     final buttonStream = _bleButtonStream;
@@ -1210,6 +1266,7 @@ class CaptureProvider extends ChangeNotifier
     _connectionStateListener?.cancel();
     _recordingTimer?.cancel();
     _metricsTimer?.cancel();
+    _deviceAudioFrameWatchdog?.cancel();
     _peopleRefreshFuture = null; // Clear in-flight tracker
 
     // Remove lifecycle observer
