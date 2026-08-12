@@ -127,6 +127,18 @@ async def deliver_next_pusher_transcript_batch(
     return True
 
 
+async def deliver_all_pusher_transcript_batches(
+    queue: MutableSequence[PusherTranscriptBatch],
+    sender: Callable[[dict[str, Any]], Awaitable[None]],
+) -> int:
+    """Drain the ordered queue, retaining the failed item and everything after it."""
+
+    delivered = 0
+    while await deliver_next_pusher_transcript_batch(queue, sender):
+        delivered += 1
+    return delivered
+
+
 def acknowledge_capture_persistence_batch(
     segment_buffer: MutableSequence[Any],
     photo_buffer: MutableSequence[Any],

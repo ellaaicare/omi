@@ -2895,6 +2895,11 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
         "update_conversation",
         lambda uid, cid, update: updates.append(update),
     )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected_version, update: updates.append(update) or expected_version == "enriched-v2",
+    )
 
     def canonical_writer(uid, record, **kwargs):
         canonical_calls.append((uid, record, kwargs))
@@ -3071,6 +3076,11 @@ def test_strict_summary_writeback_keeps_retryable_state_when_canonical_fails(mon
         "update_conversation",
         lambda uid, cid, update: updates.append(update),
     )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected_version, update: updates.append(update) or expected_version == "enriched-v2",
+    )
 
     with pytest.raises(RuntimeError, match="canonical_write_unconfirmed"):
         asyncio.run(
@@ -3236,6 +3246,11 @@ def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_e
         summary_writeback.conversations_db,
         "update_conversation",
         lambda uid, cid, update: updates.append(update),
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected_version, update: updates.append(update) or expected_version == "summary-v2",
     )
 
     def canonical_writer(uid, record, **_kwargs):

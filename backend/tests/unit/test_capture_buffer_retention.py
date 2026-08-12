@@ -22,6 +22,7 @@ _CONVERSATIONS_SPEC.loader.exec_module(conversations_db)
 from utils.capture_buffer import (
     acknowledge_capture_persistence_batch,
     capture_buffer_contains_conversation,
+    deliver_all_pusher_transcript_batches,
     deliver_next_pusher_transcript_batch,
     prepare_capture_persistence_batch,
     prepare_conversation_bound_capture_batch,
@@ -152,6 +153,32 @@ def test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arr
     assert pusher_queue == []
     assert sent_payloads[-1]["memory_id"] == "conversation-a"
 
+    queue = []
+    for suffix in ("a", "b", "c"):
+        queue_pusher_transcript_batch(
+            queue,
+            [{"id": f"segment-{suffix}"}],
+            f"conversation-{suffix}",
+        )
+    sent = []
+
+    async def fail_second(payload):
+        sent.append(payload["memory_id"])
+        if payload["memory_id"] == "conversation-b":
+            raise ConnectionError("synthetic ordered failure")
+
+    with pytest.raises(ConnectionError, match="synthetic ordered failure"):
+        asyncio.run(deliver_all_pusher_transcript_batches(queue, fail_second))
+    assert sent == ["conversation-a", "conversation-b"]
+    assert [batch.conversation_id for batch in queue] == ["conversation-b", "conversation-c"]
+
+    async def succeed(payload):
+        sent.append(payload["memory_id"])
+
+    assert asyncio.run(deliver_all_pusher_transcript_batches(queue, succeed)) == 2
+    assert sent == ["conversation-a", "conversation-b", "conversation-b", "conversation-c"]
+    assert queue == []
+
 
 def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_content():
     source = (Path(__file__).parents[2] / "routers" / "transcribe.py").read_text()
@@ -170,6 +197,38 @@ def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_
     assert "first_text=" not in source
     assert "except Exception:" in stream_source[persistence_index:acknowledge_index]
     assert "capture_persistence_retry" in stream_source[persistence_index:acknowledge_index]
+
+    assert "for recovery_conversation_id in tuple(capture_recovery_conversation_ids):" in stream_source
+    assert "capture_recovery_conversation_ids.add(batch_conversation_id)" in stream_source
+    assert "capture_recovery_conversation_ids.discard(recovery_conversation_id)" in stream_source
+    assert (
+        "list_capture_persistence_batches(\n                        uid,\n                        current_conversation_id"
+        not in stream_source
+    )
+    fence_source = source.split("def _capture_buffers_contain_conversation", maxsplit=1)[1].split(
+        "async def _wait_for_capture_buffers_to_drain", maxsplit=1
+    )[0]
+    image_source = source.split("async def handle_image_chunk", maxsplit=1)[1].split(
+        "# Initialize decoders", maxsplit=1
+    )[0]
+    receive_finally = source.split("async def receive_data", maxsplit=1)[1].split("# Start", maxsplit=1)[0]
+
+    assert "for upload in image_chunks.values()" in fence_source
+    assert "for bound_conversation_id, task in photo_processing_tasks.values()" in fence_source
+    assert "and not task.done()" in fence_source
+    assert "photo_processing_tasks[temp_id] = (bound_conversation_id, task)" in image_source
+    assert "task.add_done_callback(photo_processing_done)" in image_source
+    assert "image_chunks.clear()" in receive_finally
+    assert "capture_buffers_changed.set()" in receive_finally
+    photo_block = stream_source.split("if photos_to_process:", maxsplit=1)[1].split("if removed_ids:", maxsplit=1)[0]
+
+    assert "except Exception:" in photo_block
+    assert "continue" not in photo_block
+    assert "else:" in photo_block
+    assert "segments=True" in stream_source.split("if photos_to_process:", maxsplit=1)[0]
+    assert stream_source.index("if transcript_segments:", stream_source.index("if removed_ids:")) > stream_source.index(
+        "if photos_to_process:"
+    )
 
 
 def test_photo_only_capture_does_not_require_audio_timestamp():
@@ -317,7 +376,7 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "processed = await _process_conversation(current_conversation_id)" in lifecycle_source
     assert "if processed:" in lifecycle_source
     assert "queue_pusher_transcript_batch(" in pusher_source
-    assert "deliver_next_pusher_transcript_batch(" in pusher_source
+    assert "deliver_all_pusher_transcript_batches(" in pusher_source
     assert "batch_conversation_id," in stream_source
 
     class Snapshot:

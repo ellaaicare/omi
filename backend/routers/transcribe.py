@@ -75,7 +75,7 @@ from utils.capture_buffer import (
     PusherTranscriptBatch,
     acknowledge_capture_persistence_batch,
     capture_buffer_contains_conversation,
-    deliver_next_pusher_transcript_batch,
+    deliver_all_pusher_transcript_batches,
     prepare_conversation_bound_capture_batch,
     queue_pusher_transcript_batch,
 )
@@ -438,6 +438,8 @@ async def _stream_handler(
     # Initialize segment buffers early (before onboarding handler needs them)
     realtime_segment_buffers = []
     realtime_photo_buffers: list[dict] = []
+    image_chunks: dict[str, dict] = {}
+    photo_processing_tasks: dict[str, tuple[str, asyncio.Task]] = {}
     capture_buffers_changed = asyncio.Event()
 
     def bind_capture_conversation(item: dict) -> dict:
@@ -799,11 +801,22 @@ async def _stream_handler(
         print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
 
     def _capture_buffers_contain_conversation(conversation_id: str) -> bool:
-        return capture_buffer_contains_conversation(
+        exact_conversation_id = str(conversation_id or "").strip()
+        if capture_buffer_contains_conversation(
             realtime_segment_buffers,
             realtime_photo_buffers,
             conversation_key=CAPTURE_CONVERSATION_ID_KEY,
-            conversation_id=conversation_id,
+            conversation_id=exact_conversation_id,
+        ):
+            return True
+        if any(
+            str(upload.get("conversation_id") or "").strip() == exact_conversation_id
+            for upload in image_chunks.values()
+        ):
+            return True
+        return any(
+            bound_conversation_id == exact_conversation_id and not task.done()
+            for bound_conversation_id, task in photo_processing_tasks.values()
         )
 
     async def _wait_for_capture_buffers_to_drain(
@@ -881,6 +894,9 @@ async def _stream_handler(
         MessageServiceStatusEvent(status="in_progress_conversations_processing", status_text="Processing Conversations")
     )
     timed_out_conversation_id = await _prepare_in_progess_conversations()
+    capture_recovery_conversation_ids = {
+        conversation_id for conversation_id in (current_conversation_id, timed_out_conversation_id) if conversation_id
+    }
 
     # STT
     # Validate websocket_active before initiating STT
@@ -1242,7 +1258,7 @@ async def _stream_handler(
                         data.extend(bytes(json.dumps(payload), "utf-8"))
                         await pusher_ws.send(data)
 
-                    await deliver_next_pusher_transcript_batch(
+                    await deliver_all_pusher_transcript_batches(
                         segment_buffers,
                         send_payload,
                     )
@@ -1799,28 +1815,34 @@ async def _stream_handler(
             await asyncio.sleep(0.6)
 
             pending_batch_count = 0
-            if current_conversation_id:
+            for recovery_conversation_id in tuple(capture_recovery_conversation_ids):
                 try:
                     pending_batch_ids = conversations_db.list_capture_persistence_batches(
                         uid,
-                        current_conversation_id,
+                        recovery_conversation_id,
                     )
-                    pending_batch_count = len(pending_batch_ids)
+                    pending_batch_count += len(pending_batch_ids)
                     for pending_batch_id in pending_batch_ids:
                         conversations_db.commit_capture_persistence_batch(
                             uid,
-                            current_conversation_id,
+                            recovery_conversation_id,
                             pending_batch_id,
                         )
                 except Exception:
+                    pending_batch_count += 1
                     _latency_log("capture_persistence_recovery_retry")
                     if not websocket_active and not realtime_segment_buffers and not realtime_photo_buffers:
                         continue
+                else:
+                    capture_recovery_conversation_ids.discard(recovery_conversation_id)
 
             if (
                 not websocket_active
                 and not realtime_segment_buffers
                 and not realtime_photo_buffers
+                and not image_chunks
+                and not photo_processing_tasks
+                and not capture_recovery_conversation_ids
                 and pending_batch_count == 0
             ):
                 break
@@ -1929,6 +1951,7 @@ async def _stream_handler(
                         pending_batch_id,
                     )
                 except Exception:
+                    capture_recovery_conversation_ids.add(batch_conversation_id)
                     _latency_log(
                         "capture_persistence_retry",
                         segment_count=len(segments_to_process),
@@ -1962,15 +1985,15 @@ async def _stream_handler(
                         segment_count=0,
                         photo_count=len(photos_to_process),
                     )
-                    continue
-                acknowledge_capture_persistence_batch(
-                    realtime_segment_buffers,
-                    realtime_photo_buffers,
-                    persistence_batch,
-                    segments=False,
-                    photos=True,
-                )
-                capture_buffers_changed.set()
+                else:
+                    acknowledge_capture_persistence_batch(
+                        realtime_segment_buffers,
+                        realtime_photo_buffers,
+                        persistence_batch,
+                        segments=False,
+                        photos=True,
+                    )
+                    capture_buffers_changed.set()
 
             if removed_ids:
                 _send_message_event(SegmentsDeletedEvent(segment_ids=removed_ids))
@@ -2108,8 +2131,6 @@ async def _stream_handler(
                         segment_person_assignment_map[segment.id] = person_id
                         suggested_segments.add(segment.id)
 
-    image_chunks: dict[str, dict] = {}  # A temporary in-memory cache for image chunks
-
     async def process_photo(
         uid: str,
         image_b64: str,
@@ -2175,7 +2196,7 @@ async def _stream_handler(
             b64_image_data = "".join(chunks)
             bound_conversation_id = str(image_upload["conversation_id"])
             del image_chunks_cache[temp_id]
-            safe_create_task(
+            task = safe_create_task(
                 process_photo(
                     uid,
                     b64_image_data,
@@ -2185,6 +2206,13 @@ async def _stream_handler(
                     bound_conversation_id,
                 )
             )
+            photo_processing_tasks[temp_id] = (bound_conversation_id, task)
+
+            def photo_processing_done(_task: asyncio.Task) -> None:
+                photo_processing_tasks.pop(temp_id, None)
+                capture_buffers_changed.set()
+
+            task.add_done_callback(photo_processing_done)
 
     # Initialize decoders based on codec
     opus_decoder = None
@@ -2496,6 +2524,8 @@ async def _stream_handler(
             if not use_custom_stt:
                 await flush_stt_buffer(force=True)
             websocket_active = False
+            image_chunks.clear()
+            capture_buffers_changed.set()
 
     # Start
     #

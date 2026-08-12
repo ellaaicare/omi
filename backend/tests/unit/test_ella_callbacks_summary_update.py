@@ -678,6 +678,20 @@ def _configure_parallel_grounding_write(monkeypatch):
         "update_conversation",
         lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
     )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, conversation_id, expected_version, update_data: captured.setdefault(
+            "terminal_cas",
+            {
+                "uid": uid,
+                "conversation_id": conversation_id,
+                "expected_version": expected_version,
+                "update_data": update_data,
+            },
+        )
+        or True,
+    )
 
     def write_canonical(uid, conversation, **kwargs):
         captured["canonical_conversation"] = conversation
@@ -717,6 +731,8 @@ def test_parallel_enrichment_binds_independent_grounding_to_canonical_version(mo
     assert "supporting_quotes" not in receipt
     canonical_receipt = captured["canonical_conversation"]["enrichment_state"]["today_card_grounding"]
     assert canonical_receipt == receipt
+    assert captured["terminal_cas"]["expected_version"] == "parallel-v2"
+    assert captured["terminal_cas"]["update_data"]["enrichment_state"]["canonical_status"] == "completed"
 
 
 @pytest.mark.parametrize(
@@ -794,6 +810,55 @@ def test_parallel_grounding_transcript_compare_and_set_loses_race_without_public
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail == "transcript_changed"
     assert "canonical_conversation" not in captured
+
+    for canonical_succeeds in (True, False):
+        _configure_parallel_grounding_write(monkeypatch)
+        if canonical_succeeds:
+            monkeypatch.setattr(
+                callbacks,
+                "write_omi_canonical_event",
+                lambda *args, **kwargs: {"ok": True},
+            )
+        else:
+
+            def fail_canonical(*args, **kwargs):
+                raise ConnectionError("synthetic canonical failure")
+
+            monkeypatch.setattr(callbacks, "write_omi_canonical_event", fail_canonical)
+        terminal_updates = []
+
+        def reject_stale_terminal_state(uid, conversation_id, expected_version, update_data):
+            terminal_updates.append((uid, conversation_id, expected_version, update_data))
+            return False
+
+        monkeypatch.setattr(
+            callbacks.conversations_db,
+            "update_conversation_if_active_summary_version",
+            reject_stale_terminal_state,
+        )
+
+        with pytest.raises(HTTPException) as post_await_error:
+            asyncio.run(
+                callbacks.update_conversation_summary(
+                    "cafe-123",
+                    callbacks.ConversationSummaryUpdate(
+                        title="Cafe Coffee and Waffle Stop",
+                        overview="[Ella] You ordered a waffle with oat milk after your morning walk.",
+                        summary_source="hermes_parallel",
+                        summary_kind="hermes_enriched",
+                        trace_id="parallel-grounding:cafe-123:post-await-race",
+                        require_canonical=True,
+                        today_card_grounding_evidence=_parallel_grounding_evidence(),
+                    ),
+                    uid="user-123",
+                    service=_service_authority("user-123"),
+                )
+            )
+
+        assert post_await_error.value.status_code == 409
+        assert post_await_error.value.detail == "summary_result_version_changed"
+        assert len(terminal_updates) == 1
+        assert terminal_updates[0][:3] == ("user-123", "cafe-123", "parallel-v2")
 
 
 def test_parallel_pending_canonical_replay_rejects_transcript_drift_without_publication(monkeypatch):

@@ -531,6 +531,11 @@ components:
           type: boolean
         require_canonical:
           type: boolean
+        expected_transcript_hash:
+          type: [string, "null"]
+          pattern: '^sha256:[0-9a-f]{64}$'
+        require_source_match:
+          type: boolean
         ella_tags:
           type: array
           items:

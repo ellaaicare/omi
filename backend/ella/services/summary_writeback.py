@@ -465,6 +465,7 @@ async def write_conversation_summary(
         )
 
     if require_canonical:
+        result_summary_version_id = version_update['active_summary_version_id']
         if canonical_error is not None:
             failed_state = {
                 **update_data['enrichment_state'],
@@ -472,9 +473,21 @@ async def write_conversation_summary(
                 'error': 'canonical_write_unconfirmed',
                 'updated_at': datetime.now(timezone.utc),
             }
-            conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': failed_state})
+            if not conversations_db.update_conversation_if_active_summary_version(
+                uid,
+                conversation_id,
+                result_summary_version_id,
+                {'enrichment_state': failed_state},
+            ):
+                raise ConcurrentConversationSummaryChangeError('summary_result_version_changed') from canonical_error
             raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from canonical_error
-        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+        if not conversations_db.update_conversation_if_active_summary_version(
+            uid,
+            conversation_id,
+            result_summary_version_id,
+            {'enrichment_state': confirmed_state},
+        ):
+            raise ConcurrentConversationSummaryChangeError('summary_result_version_changed')
 
     if correction_id and correction_audit_updater:
         try:

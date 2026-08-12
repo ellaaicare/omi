@@ -99,6 +99,11 @@ def test_openapi_documents_exact_parallel_grounding_callback_contract():
     summary_update = contract["components"]["schemas"]["ConversationSummaryUpdate"]
     assert summary_update["properties"]["based_on_version_id"]["type"] == ["string", "null"]
     assert summary_update["properties"]["require_based_on_match"]["type"] == "boolean"
+    assert summary_update["properties"]["expected_transcript_hash"] == {
+        "type": ["string", "null"],
+        "pattern": "^sha256:[0-9a-f]{64}$",
+    }
+    assert summary_update["properties"]["require_source_match"]["type"] == "boolean"
     replay_fields = {
         "active_summary_version_id",
         "active_summary_source",
