@@ -15,11 +15,27 @@ void main() {
     );
   });
 
-  test('first non-empty frame proves phone capture started', () async {
+  test('native recorder receipt proves physical phone capture started', () async {
     final proof = PhoneCaptureStartProof();
 
+    proof.acceptNativeRecorderStart();
+    await proof.waitForNativeRecorder(timeout: const Duration(milliseconds: 50));
+  });
+
+  test('phone physical capture and transcription delivery remain separate facts', () async {
+    final proof = PhoneCaptureStartProof();
+
+    proof.acceptNativeRecorderStart();
     expect(proof.acceptFrame(const [1, 2, 3]), isTrue);
+    await proof.waitForNativeRecorder(timeout: const Duration(milliseconds: 50));
     await proof.waitForAudio(timeout: const Duration(milliseconds: 50));
+    await expectLater(
+      proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
+
+    expect(proof.acceptTransmittedFrame(const [1, 2, 3]), isTrue);
+    await proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 50));
   });
 
   test('BLE listener installation cannot prove necklace capture without transmitted audio', () async {
@@ -32,8 +48,15 @@ void main() {
     );
   });
 
-  test('first non-empty frame sent to transcription proves necklace capture started', () async {
+  test('physical BLE audio proves necklace capture independently of transcription', () async {
     final proof = DeviceCaptureStartProof();
+
+    expect(proof.acceptPhysicalFrame(const [1, 2, 3]), isTrue);
+    await proof.waitForPhysicalAudio(timeout: const Duration(milliseconds: 50));
+    await expectLater(
+      proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
 
     expect(proof.acceptTransmittedFrame(const [1, 2, 3]), isTrue);
     await proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 50));

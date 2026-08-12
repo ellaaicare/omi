@@ -77,6 +77,46 @@ class _CaptureAuthority implements AccountCommitAuthority {
   bool isExactCurrent() => current;
 }
 
+class _FakeMicRecorder implements IMicRecorderService {
+  Function(Uint8List bytes)? _onByteReceived;
+  Function()? _onRecording;
+  Function()? _onStop;
+  Function()? _onInitializing;
+  int starts = 0;
+  int stops = 0;
+
+  @override
+  Future<void> start({
+    required Function(Uint8List bytes) onByteReceived,
+    Function()? onRecording,
+    Function()? onStop,
+    Function()? onInitializing,
+  }) async {
+    starts++;
+    _onByteReceived = onByteReceived;
+    _onRecording = onRecording;
+    _onStop = onStop;
+    _onInitializing = onInitializing;
+    _onInitializing?.call();
+  }
+
+  void confirmRecording() => _onRecording?.call();
+
+  void emit(List<int> bytes) => _onByteReceived?.call(Uint8List.fromList(bytes));
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    _onStop?.call();
+  }
+
+  @override
+  Future<void> stopForAccountTransition() => stop();
+
+  @override
+  void resumeAfterAccountTransition() {}
+}
+
 ActiveWalAuthority _activeCaptureAuthority(_CaptureAuthority authority) => ActiveWalAuthority(
       owner: WalOwner(
         uid: authority.uid,
@@ -114,6 +154,62 @@ ServerConversation _conversation(String id, String transcript,
 }
 
 void main() {
+  test('production phone path reports native capture without waiting on websocket frames', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    var transmittedFrames = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (bytes) {
+        transmittedFrames++;
+        return false;
+      },
+      captureStartProofTimeout: const Duration(milliseconds: 100),
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    expect(provider.recordingState, RecordingState.initialising);
+
+    mic.confirmRecording();
+    expect(await start, PhoneCaptureStartResult.started);
+    expect(provider.recordingState, RecordingState.record);
+
+    mic.emit([1, 2, 3]);
+    expect(transmittedFrames, 1);
+    expect(provider.recordingState, RecordingState.record);
+  });
+
+  test('production phone path cancels a native start receipt after account drift', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      captureStartProofTimeout: const Duration(milliseconds: 10),
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    authority.current = false;
+    mic.confirmRecording();
+
+    expect(await start, PhoneCaptureStartResult.cancelled);
+    expect(mic.stops, 1);
+    expect(provider.recordingState, RecordingState.stop);
+  });
+
   test('rejected phone consent stops before capture authority or transport work', () async {
     var authorityReads = 0;
     var geolocationSends = 0;
@@ -526,6 +622,43 @@ void main() {
 
     expect(locationCalls, 1);
     expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('disconnect tears down only the exact active necklace session', () async {
+    final authority = _CaptureAuthority('uid-a');
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+
+    expect(await provider.handleRecordingDeviceDisconnected('other-necklace'), isFalse);
+    expect(provider.recordingState, RecordingState.deviceRecord);
+
+    expect(await provider.handleRecordingDeviceDisconnected('necklace-1'), isTrue);
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.error);
+  });
+
+  test('idle necklace disconnect cannot cancel active phone capture', () async {
+    final provider = CaptureProvider()
+      ..updateRecordingDevice(BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30))
+      ..updateRecordingState(RecordingState.record);
+    addTearDown(provider.dispose);
+
+    expect(await provider.handleRecordingDeviceDisconnected('necklace-1'), isFalse);
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.record);
   });
 
   test('failed necklace state retries through a fresh exact-authority start', () async {

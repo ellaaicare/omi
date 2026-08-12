@@ -67,15 +67,24 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate});
+  _RecordingCaptureProvider({this.startGate, this.disconnectGate});
 
   final Completer<void>? startGate;
+  final Completer<void>? disconnectGate;
   int deviceStarts = 0;
+  final List<String> disconnectedDeviceIds = [];
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
     await startGate?.future;
+  }
+
+  @override
+  Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
+    disconnectedDeviceIds.add(deviceId);
+    await disconnectGate?.future;
+    return true;
   }
 }
 
@@ -326,6 +335,41 @@ void main() {
     expect(provider.connectedDevice, isNull);
     expect(provider.pairedDevice, isNull);
     expect(provider.presentationIsConnected, isFalse);
+  });
+
+  test('device service restart waits for exact necklace capture teardown', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final disconnectGate = Completer<void>();
+    final capture = _RecordingCaptureProvider(disconnectGate: disconnectGate);
+    var reconnectScans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        reconnectScans++;
+        return null;
+      },
+    )
+      ..setProviders(capture)
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    service.publish(DeviceServiceStatus.stop);
+    await pumpEventQueue();
+    expect(capture.disconnectedDeviceIds, [necklace.id]);
+
+    service.publish(DeviceServiceStatus.ready);
+    await pumpEventQueue();
+    expect(reconnectScans, 0);
+
+    disconnectGate.complete();
+    await pumpEventQueue();
+    expect(reconnectScans, 1);
   });
 
   test('only a later ready generation reconnects the retained bound device', () async {
