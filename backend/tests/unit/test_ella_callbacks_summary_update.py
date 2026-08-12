@@ -518,6 +518,49 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
     ]
 
 
+def test_internal_assessment_omits_owner_authority_without_provision_credential(
+    monkeypatch,
+):
+    requests = []
+
+    async def fake_target(uid):
+        assert uid == "uid-unconfigured"
+        return "omi-unconfigured", "http://hermes-provision", ""
+
+    class FakeResponse:
+        status_code = 401
+
+        def json(self):
+            return {}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 5.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, headers=None):
+            requests.append((url, headers))
+            return FakeResponse()
+
+    monkeypatch.setattr(callbacks, "_resolve_workspace_target_for_uid", fake_target)
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(callbacks._fetch_internal_assessment("uid-unconfigured", "conv-123"))
+
+    assert result is None
+    assert requests == [
+        (
+            "http://hermes-provision/workspace/omi-unconfigured/metadata/conversations/conv-123",
+            {},
+        )
+    ]
+
+
 def test_cloud_internal_assessment_never_calls_mini_or_openclaw(monkeypatch):
     runtime = MagicMock(provider="hermes_cloud", agent_id="cloud-agent")
 

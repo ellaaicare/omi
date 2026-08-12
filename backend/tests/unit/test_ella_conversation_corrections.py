@@ -3143,6 +3143,8 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
             uid="user-1",
             conversation_id="conversation-1",
             summary_kind="recovered_enriched",
+            based_on_version_id="generic-v1",
+            require_based_on_match=True,
             trace_id="trace-3",
             canonical_writer=lambda *args, **kwargs: {"ok": True, "inserted": 0, "duplicates": 1},
             require_canonical=True,
@@ -3249,6 +3251,83 @@ def test_pending_canonical_replay_repairs_newer_active_summary_after_race(monkey
         )
 
     assert canonical_versions == ["enriched-v2", "correction-v3"]
+
+
+def test_canonical_repair_exhaustion_marks_latest_active_version_retryable(monkeypatch):
+    def conversation(version):
+        return {
+            "active_summary_version_id": version,
+            "summary_versions": [
+                {
+                    "id": version,
+                    "source": "observer",
+                    "kind": "recovered_enriched",
+                    "is_active": True,
+                }
+            ],
+            "structured": {
+                "title": version,
+                "overview": f"[Ella] {version}",
+                "emoji": "note",
+                "category": "other",
+            },
+            "enrichment_state": {
+                "status": "writeback_applied",
+                "pending": False,
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "trace_id": f"trace-{version}",
+                "canonical_status": "completed",
+            },
+        }
+
+    conversations = iter(
+        [
+            conversation("v2"),
+            conversation("v3"),
+            conversation("v3"),
+            conversation("v4"),
+            conversation("v4"),
+            conversation("v5"),
+            conversation("v5"),
+        ]
+    )
+    canonical_versions = []
+    cas_updates = []
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "get_conversation",
+        lambda uid, cid: next(conversations),
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: cas_updates.append((expected, update)) or True,
+    )
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_versions.append(record["active_summary_version_id"])
+        return {"ok": True}
+
+    with pytest.raises(
+        summary_writeback.ConcurrentConversationSummaryChangeError,
+        match="active_summary_version_changed_during_canonical_repair",
+    ):
+        asyncio.run(
+            summary_writeback._repair_canonical_to_latest_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                canonical_writer=canonical_writer,
+            )
+        )
+
+    assert canonical_versions == ["v2", "v3", "v4"]
+    assert cas_updates[0][0] == "v5"
+    retry_state = cas_updates[0][1]["enrichment_state"]
+    assert retry_state["status"] == "writeback_pending_canonical"
+    assert retry_state["pending"] is True
+    assert retry_state["canonical_status"] == "failed"
+    assert retry_state["error"] == "canonical_repair_raced"
 
 
 def _semantic_grounding_conversation():

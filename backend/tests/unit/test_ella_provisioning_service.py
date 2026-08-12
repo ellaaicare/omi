@@ -955,7 +955,14 @@ elif callsite == "callbacks-provision":
     module.runtime_authority_enabled = authority_enabled
     module._resolve_agent_id_for_uid = resolve_agent
     asyncio.run(module._fetch_internal_assessment("synthetic-user", "synthetic-conversation"))
-    expected_headers = {"Authorization": f"Bearer {expected}"} if expected else {}
+    expected_headers = (
+        {
+            "Authorization": f"Bearer {expected}",
+            "X-Ella-Owner-Uid": "synthetic-user",
+        }
+        if expected
+        else {}
+    )
     assert captured.get("headers") == expected_headers, "outbound header mismatch"
 elif callsite == "resolve-provision":
     assert module.PROVISION_API_KEY == expected, "authority selection mismatch"

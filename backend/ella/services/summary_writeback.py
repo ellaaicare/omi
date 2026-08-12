@@ -79,7 +79,46 @@ async def _repair_canonical_to_latest_summary(
             and str(refreshed.get('active_summary_version_id') or '').strip() == expected_version_id
         ):
             return
+    await _mark_latest_summary_pending_canonical(
+        uid=uid,
+        conversation_id=conversation_id,
+        error='canonical_repair_raced',
+    )
     raise ConcurrentConversationSummaryChangeError('active_summary_version_changed_during_canonical_repair')
+
+
+async def _mark_latest_summary_pending_canonical(
+    *,
+    uid: str,
+    conversation_id: str,
+    error: str,
+    max_attempts: int = 3,
+) -> None:
+    """Persist a retryable receipt on the exact active version after repair races."""
+    for _attempt in range(max_attempts):
+        latest = conversations_db.get_conversation(uid, conversation_id)
+        if latest is None:
+            raise ConversationSummaryNotFoundError(conversation_id)
+        expected_version_id = str(latest.get('active_summary_version_id') or '').strip()
+        if not expected_version_id:
+            raise ConcurrentConversationSummaryChangeError('active_summary_version_missing')
+        enrichment_state = latest.get('enrichment_state') or {}
+        pending_state = {
+            **enrichment_state,
+            'status': 'writeback_pending_canonical',
+            'pending': True,
+            'canonical_status': 'failed',
+            'error': error,
+            'updated_at': datetime.now(timezone.utc),
+        }
+        if conversations_db.update_conversation_if_active_summary_version(
+            uid,
+            conversation_id,
+            expected_version_id,
+            {'enrichment_state': pending_state},
+        ):
+            return
+    raise ConcurrentConversationSummaryChangeError('active_summary_version_changed_while_marking_canonical_retry')
 
 
 async def _confirm_canonical_if_result_is_active(
@@ -212,8 +251,6 @@ async def write_conversation_summary(
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
         raise ConversationSummaryNotFoundError(conversation_id)
-    if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
-        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     enrichment_state = conversation.get('enrichment_state') or {}
     same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
@@ -291,6 +328,9 @@ async def write_conversation_summary(
             'idempotent_replay': True,
             'canonical_confirmed': True,
         }
+
+    if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
+        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
     update_data: dict[str, Any] = {}
