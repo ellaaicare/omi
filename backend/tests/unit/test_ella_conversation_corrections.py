@@ -3104,6 +3104,7 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
             "kind": "recovered_enriched",
             "trace_id": "trace-3",
             "canonical_status": "failed",
+            "result_summary_version_id": "enriched-v2",
         },
     }
     updates = []
@@ -3115,8 +3116,8 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: (updates.append((expected, update)) or True),
     )
 
     result = asyncio.run(
@@ -3133,17 +3134,45 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
     assert result["idempotent_replay"] is True
     assert result["canonical_confirmed"] is True
     assert updates == [
-        {
-            "enrichment_state": {
-                **conversation["enrichment_state"],
-                "status": "writeback_applied",
-                "pending": False,
-                "canonical_status": "completed",
-                "error": None,
-                "updated_at": updates[0]["enrichment_state"]["updated_at"],
-            }
-        }
+        (
+            "enriched-v2",
+            {
+                "enrichment_state": {
+                    **conversation["enrichment_state"],
+                    "status": "writeback_applied",
+                    "pending": False,
+                    "canonical_status": "completed",
+                    "error": None,
+                    "updated_at": updates[0][1]["enrichment_state"]["updated_at"],
+                }
+            },
+        )
     ]
+    canonical_calls = []
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with pytest.raises(
+        summary_writeback.ConcurrentConversationSummaryChangeError,
+        match="summary_result_version_changed",
+    ):
+        asyncio.run(
+            summary_writeback.write_conversation_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                summary_kind="recovered_enriched",
+                trace_id="trace-3",
+                canonical_writer=lambda *args, **kwargs: (
+                    canonical_calls.append((args, kwargs)) or {"ok": True, "inserted": 1}
+                ),
+                require_canonical=True,
+            )
+        )
+
+    assert len(canonical_calls) == 1
 
 
 def _semantic_grounding_conversation():

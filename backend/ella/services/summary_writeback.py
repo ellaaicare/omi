@@ -226,7 +226,13 @@ async def write_conversation_summary(
                 extra={'uid': uid, 'conversation_id': conversation_id, 'trace_id': trace_id},
             )
             raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from error
-        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+        if not conversations_db.update_conversation_if_active_summary_version(
+            uid,
+            conversation_id,
+            result_summary_version_id,
+            {'enrichment_state': confirmed_state},
+        ):
+            raise ConcurrentConversationSummaryChangeError('summary_result_version_changed')
         return {
             'status': 'ok',
             'conversation_id': conversation_id,

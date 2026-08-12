@@ -1,3 +1,4 @@
+import importlib.util
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
@@ -10,8 +11,18 @@ sys.modules.setdefault("database.users", MagicMock())
 sys.modules.setdefault("database.redis_db", MagicMock())
 sys.modules.setdefault("utils.encryption", MagicMock())
 sys.modules.setdefault("utils.other.storage", MagicMock())
-import database.conversations as conversations_db
-from utils.capture_buffer import acknowledge_capture_persistence_batch, prepare_capture_persistence_batch
+_CONVERSATIONS_SPEC = importlib.util.spec_from_file_location(
+    "database.capture_buffer_real_conversations",
+    Path(__file__).parents[2] / "database" / "conversations.py",
+)
+assert _CONVERSATIONS_SPEC and _CONVERSATIONS_SPEC.loader
+conversations_db = importlib.util.module_from_spec(_CONVERSATIONS_SPEC)
+_CONVERSATIONS_SPEC.loader.exec_module(conversations_db)
+from utils.capture_buffer import (
+    acknowledge_capture_persistence_batch,
+    prepare_capture_persistence_batch,
+    prepare_conversation_bound_capture_batch,
+)
 
 
 def test_capture_batch_waits_for_all_persistence_guards_without_clearing_buffers():
@@ -67,6 +78,35 @@ def test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arr
     with pytest.raises(RuntimeError, match="capture_buffer_changed_before_persistence_ack"):
         acknowledge_capture_persistence_batch(segments, photos, batch)
 
+    bound_segments = [
+        {"id": "segment-a", "_capture_conversation_id": "conversation-a"},
+        {"id": "segment-b", "_capture_conversation_id": "conversation-b"},
+    ]
+    bound_photos = [
+        {
+            "_capture_conversation_id": "conversation-a",
+            "photo": {"id": "photo-a"},
+        },
+        {
+            "_capture_conversation_id": "conversation-b",
+            "photo": {"id": "photo-b"},
+        },
+    ]
+    bound_batch = prepare_conversation_bound_capture_batch(
+        bound_segments,
+        bound_photos,
+        conversation_key="_capture_conversation_id",
+        timestamp_ready=True,
+    )
+
+    assert bound_batch is not None
+    assert bound_batch.conversation_id == "conversation-a"
+    assert [item["id"] for item in bound_batch.segments] == ["segment-a"]
+    assert [item["photo"]["id"] for item in bound_batch.photos] == ["photo-a"]
+    acknowledge_capture_persistence_batch(bound_segments, bound_photos, bound_batch)
+    assert [item["id"] for item in bound_segments] == ["segment-b"]
+    assert [item["photo"]["id"] for item in bound_photos] == ["photo-b"]
+
 
 def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_content():
     source = (Path(__file__).parents[2] / "routers" / "transcribe.py").read_text()
@@ -88,13 +128,20 @@ def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_
 
 
 def test_photo_only_capture_does_not_require_audio_timestamp():
-    source = (Path(__file__).parents[2] / "routers" / "transcribe.py").read_text()
-    stream_source = source.split("async def stream_transcript_process():", maxsplit=1)[1].split(
-        "async def conversation_timeout_task():", maxsplit=1
-    )[0]
+    photo = {
+        "_capture_conversation_id": "conversation-a",
+        "photo": {"id": "photo-a"},
+    }
+    batch = prepare_conversation_bound_capture_batch(
+        [],
+        [photo],
+        conversation_key="_capture_conversation_id",
+        timestamp_ready=False,
+    )
 
-    assert "if realtime_segment_buffers and first_audio_byte_timestamp is None:" in stream_source
-    assert "not realtime_segment_buffers" in stream_source
+    assert batch is not None
+    assert batch.conversation_id == "conversation-a"
+    assert batch.photos == (photo,)
 
 
 def test_capture_batch_can_acknowledge_segments_without_dropping_photos():
@@ -203,6 +250,20 @@ def test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch(mon
 
 
 def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
+    source = (Path(__file__).parents[2] / "routers" / "transcribe.py").read_text()
+    stream_source = source.split("async def stream_transcript_process():", maxsplit=1)[1].split(
+        "async def conversation_timeout_task():", maxsplit=1
+    )[0]
+    process_source = source.split("async def _process_conversation", maxsplit=1)[1].split(
+        "async def _prepare_in_progess_conversations", maxsplit=1
+    )[0]
+
+    assert "bind_capture_conversation(segment)" in source
+    assert "CAPTURE_CONVERSATION_ID_KEY: conversation_id" in source
+    assert "prepare_conversation_bound_capture_batch(" in stream_source
+    assert "conversation_id=batch_conversation_id" in stream_source
+    assert "drain_capture_persistence_batches(uid, conversation_id)" in process_source
+
     class Snapshot:
         exists = True
 
