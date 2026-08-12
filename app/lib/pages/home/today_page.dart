@@ -779,10 +779,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       hasMemories: visibleConversations.isNotEmpty,
     );
     final showGuardianSurfaces = _guardianAvailable;
-    final captureIsActive = capture.recordingState == RecordingState.deviceRecord ||
-        capture.recordingState == RecordingState.record ||
-        capture.recordingState == RecordingState.initialising;
-    final homeCaptureActive = _homeCaptureActive && captureIsActive;
+    final homeCaptureOwned =
+        _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
+    final homeCaptureUsesNecklace = _homeCaptureSource == _HomeCaptureSource.necklaceOwned ||
+        _homeCaptureSource == _HomeCaptureSource.necklaceContinuous;
 
     return SafeArea(
       bottom: false,
@@ -821,17 +821,19 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               onTalk: _todayCardController.state.card == null ? null : _openTodayCardTalk,
             ),
             const SizedBox(height: 20),
-            _RecordMomentControl(
-              active: homeCaptureActive,
+            TodayRecordMomentControl(
+              homeCaptureOwned: homeCaptureOwned,
+              homeCaptureUsesNecklace: homeCaptureUsesNecklace,
               starting: _homeCaptureStarting,
               necklaceConnected: deviceConnected,
+              necklaceConnecting: device.isConnecting,
               recordingState: capture.recordingState,
               necklaceContinuouslyRecording:
-                  deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureActive,
+                  deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureOwned,
               onViewTranscript: () => _openLiveTranscript(capture),
               onTap: () => _toggleHomeCapture(
                 capture: capture,
-                isActive: homeCaptureActive,
+                isActive: homeCaptureOwned,
                 necklaceConnected: deviceConnected,
                 connectedDevice: device.presentationConnectedDevice,
               ),
@@ -1006,20 +1008,25 @@ class _TodayHeader extends StatelessWidget {
   }
 }
 
-class _RecordMomentControl extends StatelessWidget {
-  const _RecordMomentControl({
-    required this.active,
+class TodayRecordMomentControl extends StatelessWidget {
+  const TodayRecordMomentControl({
+    super.key,
+    required this.homeCaptureOwned,
+    required this.homeCaptureUsesNecklace,
     required this.starting,
     required this.necklaceConnected,
+    required this.necklaceConnecting,
     required this.recordingState,
     required this.necklaceContinuouslyRecording,
     required this.onViewTranscript,
     required this.onTap,
   });
 
-  final bool active;
+  final bool homeCaptureOwned;
+  final bool homeCaptureUsesNecklace;
   final bool starting;
   final bool necklaceConnected;
+  final bool necklaceConnecting;
   final RecordingState recordingState;
   final bool necklaceContinuouslyRecording;
   final VoidCallback onViewTranscript;
@@ -1028,27 +1035,48 @@ class _RecordMomentControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final label = starting
-        ? context.l10n.todayRecordStarting
-        : active
-            ? context.l10n.todayRecordListening
-            : context.l10n.todayRecordMoment;
-    final source = necklaceConnected ? context.l10n.todayRecordWithNecklace : context.l10n.todayRecordOnPhone;
+    final initialising = starting || recordingState == RecordingState.initialising;
     final confirmedPhoneRecording = recordingState == RecordingState.record;
     final confirmedNecklaceRecording = recordingState == RecordingState.deviceRecord;
+    final primaryOpensLiveTranscript = !homeCaptureOwned &&
+        (confirmedPhoneRecording || (confirmedNecklaceRecording && !necklaceContinuouslyRecording));
+    final homeCaptureTransportActive = homeCaptureOwned && (confirmedPhoneRecording || confirmedNecklaceRecording);
+    final label = homeCaptureTransportActive
+        ? context.l10n.todayRecordListening
+        : homeCaptureOwned
+            ? context.l10n.stopRecording
+            : primaryOpensLiveTranscript
+                ? context.l10n.liveTranscript
+                : initialising
+                    ? context.l10n.initialisingRecorder
+                    : necklaceConnecting
+                        ? context.l10n.todayStripReconnecting
+                        : context.l10n.startRecording;
+    final source = necklaceConnected || homeCaptureUsesNecklace
+        ? context.l10n.todayRecordWithNecklace
+        : context.l10n.todayRecordOnPhone;
+    final showLiveTranscript = confirmedPhoneRecording || confirmedNecklaceRecording || homeCaptureOwned;
     final captureFailed = recordingState == RecordingState.error;
+    final primaryEnabled = homeCaptureOwned || (!initialising && !necklaceConnecting);
     return Semantics(
       button: true,
-      label: '$label. $source',
+      label: '${context.l10n.todayRecordMoment}. $label. $source',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          Text(
+            context.l10n.todayRecordMoment,
+            key: const Key('today-record-moment-heading'),
+            textAlign: TextAlign.center,
+            style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.tealDeep),
+          ),
+          const SizedBox(height: 8),
           AnimatedContainer(
             duration: reduceMotion ? Duration.zero : const Duration(milliseconds: 240),
             curve: Curves.easeOut,
             height: 72,
             decoration: BoxDecoration(
-              color: active ? EllaColors.tealDeep : const Color(0xFFD0E4DE),
+              color: homeCaptureOwned ? EllaColors.tealDeep : const Color(0xFFD0E4DE),
               borderRadius: BorderRadius.circular(36),
             ),
             child: Material(
@@ -1057,7 +1085,7 @@ class _RecordMomentControl extends StatelessWidget {
               clipBehavior: Clip.antiAlias,
               child: InkWell(
                 key: const Key('today-record-moment'),
-                onTap: starting ? null : onTap,
+                onTap: primaryEnabled ? (primaryOpensLiveTranscript ? onViewTranscript : onTap) : null,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -1066,15 +1094,17 @@ class _RecordMomentControl extends StatelessWidget {
                       height: 52,
                       alignment: Alignment.center,
                       decoration: const BoxDecoration(color: EllaColors.paper, shape: BoxShape.circle),
-                      child: starting
+                      child: initialising && !homeCaptureOwned
                           ? const SizedBox(
                               width: 22,
                               height: 22,
                               child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
                             )
-                          : active
+                          : homeCaptureTransportActive
                               ? const EllaBreathingDot(active: true, live: true, size: 14)
-                              : const Icon(Icons.mic_none_rounded, size: 30, color: EllaColors.tealDeep),
+                              : homeCaptureOwned
+                                  ? const Icon(Icons.stop_circle_outlined, size: 30, color: EllaColors.tealDeep)
+                                  : const Icon(Icons.mic_none_rounded, size: 30, color: EllaColors.tealDeep),
                     ),
                     const SizedBox(width: 16),
                     Flexible(
@@ -1082,7 +1112,7 @@ class _RecordMomentControl extends StatelessWidget {
                         label,
                         style: EllaTextStyles.noteBody.copyWith(
                           fontSize: 21,
-                          color: active ? EllaColors.paper : EllaColors.tealDeep,
+                          color: homeCaptureOwned ? EllaColors.paper : EllaColors.tealDeep,
                         ),
                       ),
                     ),
@@ -1098,24 +1128,20 @@ class _RecordMomentControl extends StatelessWidget {
             textAlign: TextAlign.center,
             style: EllaTextStyles.caption.copyWith(fontSize: 14),
           ),
-          if (confirmedPhoneRecording || (confirmedNecklaceRecording && !necklaceContinuouslyRecording)) ...[
+          if (confirmedPhoneRecording || (confirmedNecklaceRecording && homeCaptureOwned)) ...[
             const SizedBox(height: 8),
             Semantics(
               liveRegion: true,
-              label: confirmedPhoneRecording
-                  ? '${context.l10n.todayRecordOnPhone}. ${context.l10n.todayRecordListening}'
-                  : context.l10n.todayNecklaceRecordingContinuously,
+              label: '$source. ${context.l10n.todayRecordListening}',
               child: Row(
                 key: const Key('today-confirmed-recording-status'),
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const EllaBreathingDot(active: true, live: true, size: 10),
+                  const Icon(Icons.sync_rounded, size: 18, color: EllaColors.tealDeep),
                   const SizedBox(width: 8),
                   Flexible(
                     child: Text(
-                      confirmedPhoneRecording
-                          ? '${context.l10n.todayRecordOnPhone} · ${context.l10n.todayRecordListening}'
-                          : context.l10n.todayNecklaceRecordingContinuously,
+                      '$source · ${context.l10n.todayRecordListening}',
                       textAlign: TextAlign.center,
                       style: EllaTextStyles.caption.copyWith(
                         color: EllaColors.tealDeep,
@@ -1127,13 +1153,38 @@ class _RecordMomentControl extends StatelessWidget {
               ),
             ),
           ],
-          if (confirmedPhoneRecording || confirmedNecklaceRecording) ...[
+          if (showLiveTranscript && !primaryOpensLiveTranscript) ...[
             const SizedBox(height: 4),
             TextButton.icon(
               key: const Key('today-view-live-transcript'),
               onPressed: onViewTranscript,
               icon: const Icon(Icons.subject_rounded, size: 18),
-              label: Text(context.l10n.viewTranscript),
+              label: Text(context.l10n.liveTranscript),
+            ),
+          ],
+          if (homeCaptureOwned && necklaceConnecting) ...[
+            const SizedBox(height: 4),
+            Semantics(
+              liveRegion: true,
+              label: context.l10n.todayStripReconnecting,
+              child: Row(
+                key: const Key('today-recording-reconnecting-status'),
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const EllaBreathingDot(active: true, live: true, size: 10),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      context.l10n.todayStripReconnecting,
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: EllaColors.tealDeep,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
           if (captureFailed) ...[

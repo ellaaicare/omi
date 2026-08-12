@@ -546,7 +546,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     }
     updateConnectingStatus(false);
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    await captureProvider?.streamDeviceRecording(device: device);
+    if (captureProvider?.phoneCaptureOwnsMobileAudio != true) {
+      await captureProvider?.streamDeviceRecording(device: device);
+    }
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
     await getDeviceInfo(operationGeneration: operationGeneration);

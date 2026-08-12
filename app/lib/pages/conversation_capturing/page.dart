@@ -24,6 +24,22 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 import 'package:omi/widgets/photo_viewer_page.dart';
 import 'package:omi/ella/ella_theme.dart';
 
+enum _CaptureStopTarget { none, phone, necklace, systemAudio }
+
+_CaptureStopTarget _captureStopTarget(CaptureProvider provider) {
+  if (provider.phoneCaptureOwnsMobileAudio) return _CaptureStopTarget.phone;
+  return switch (provider.recordingState) {
+    RecordingState.record => _CaptureStopTarget.phone,
+    RecordingState.deviceRecord => _CaptureStopTarget.necklace,
+    RecordingState.systemAudioRecord => _CaptureStopTarget.systemAudio,
+    RecordingState.initialising =>
+      provider.havingRecordingDevice ? _CaptureStopTarget.necklace : _CaptureStopTarget.systemAudio,
+    RecordingState.pause =>
+      provider.havingRecordingDevice ? _CaptureStopTarget.necklace : _CaptureStopTarget.systemAudio,
+    RecordingState.stop || RecordingState.error => _CaptureStopTarget.none,
+  };
+}
+
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
   final Future<bool> Function()? onProcessNow;
@@ -149,18 +165,36 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     return '${twoDigits(hours)}:${twoDigits(minutes)}:${twoDigits(remainingSeconds)}';
   }
 
-  Future<bool> _runProcessNow(CaptureProvider provider) {
+  Future<void> _stopCaptureTransport(CaptureProvider provider, _CaptureStopTarget target) async {
+    switch (target) {
+      case _CaptureStopTarget.phone:
+        await provider.stopStreamRecording();
+        return;
+      case _CaptureStopTarget.necklace:
+        await provider.stopStreamDeviceRecording();
+        return;
+      case _CaptureStopTarget.systemAudio:
+        await provider.stopSystemAudioRecording();
+        return;
+      case _CaptureStopTarget.none:
+        return;
+    }
+  }
+
+  Future<bool> _runProcessNow(CaptureProvider provider, {bool processConversation = true}) {
     final existing = _processNowInFlight;
     if (existing != null) return existing;
 
     final processNow = widget.onProcessNow;
+    final stopTarget = _captureStopTarget(provider);
     final operation = Future<bool>.sync(() async {
-      if (processNow != null) return processNow();
-      if (provider.recordingState == RecordingState.record) {
-        await provider.stopStreamRecording();
-      } else if (provider.recordingState == RecordingState.systemAudioRecord) {
-        await provider.stopSystemAudioRecording();
+      if (!processConversation) {
+        await _stopCaptureTransport(provider, stopTarget);
+        if (processNow != null) return processNow();
+        return false;
       }
+      if (processNow != null) return processNow();
+      await _stopCaptureTransport(provider, stopTarget);
       return provider.forceProcessingCurrentConversation();
     });
     _processNowInFlight = operation;
@@ -182,7 +216,16 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
 
   Future<void> _stopConversation(CaptureProvider provider) async {
     if (_processNowInFlight != null || _isProcessDialogOpen) return;
-    if (provider.segments.isNotEmpty || provider.photos.isNotEmpty) {
+    final hasContent = provider.segments.isNotEmpty || provider.photos.isNotEmpty;
+    if (!hasContent) {
+      try {
+        await _runProcessNow(provider, processConversation: false);
+      } finally {
+        if (mounted) Navigator.of(context).pop();
+      }
+      return;
+    }
+    if (hasContent) {
       if (!showSummarizeConfirmation) {
         final processed = await _runProcessNow(provider);
         if (processed && mounted) Navigator.of(context).pop();
@@ -240,6 +283,25 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     }
   }
 
+  String _captureStatusLabel(CaptureProvider provider) {
+    if (provider.recordingState == RecordingState.error) return context.l10n.error;
+    if (provider.recordingState == RecordingState.initialising ||
+        (provider.recordingState == RecordingState.stop && provider.phoneCaptureOwnsMobileAudio)) {
+      return context.l10n.initializing;
+    }
+    if (provider.recordingState == RecordingState.pause) return context.l10n.recordingPaused;
+    if (_isMuted) return context.l10n.muted;
+
+    final hasPhysicalCapture = provider.recordingState == RecordingState.record ||
+        provider.recordingState == RecordingState.deviceRecord ||
+        provider.recordingState == RecordingState.systemAudioRecord;
+    if (hasPhysicalCapture && !provider.transcriptServiceReady) {
+      return '${context.l10n.recordingActive} · ${context.l10n.reconnecting}';
+    }
+    if (hasPhysicalCapture) return context.l10n.recordingActive;
+    return context.l10n.liveTranscript;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer2<CaptureProvider, DeviceProvider>(
@@ -268,9 +330,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                   Text(provider.photos.isNotEmpty ? "📸" : (_isMuted ? "🔇" : "🎙️")),
                   const SizedBox(width: 4),
                   Expanded(
-                      child: Text(provider.photos.isNotEmpty
-                          ? 'Capturing'
-                          : (_isMuted ? context.l10n.muted : context.l10n.listening))),
+                    child: Text(
+                      _captureStatusLabel(provider),
+                      key: const Key('conversation-capture-status'),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -357,7 +421,10 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
               ],
             ),
             floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-            floatingActionButton: (provider.segments.isNotEmpty || provider.photos.isNotEmpty)
+            floatingActionButton: (provider.segments.isNotEmpty ||
+                    provider.photos.isNotEmpty ||
+                    _captureStopTarget(provider) != _CaptureStopTarget.none ||
+                    _processNowInFlight != null)
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -403,7 +470,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                                 ),
                               const SizedBox(width: 10),
                               Text(
-                                _processNowInFlight == null ? context.l10n.processNow : context.l10n.processing,
+                                _processNowInFlight != null
+                                    ? context.l10n.processing
+                                    : provider.segments.isEmpty && provider.photos.isEmpty
+                                        ? context.l10n.stopRecording
+                                        : context.l10n.processNow,
                                 style: const TextStyle(
                                   color: Colors.black,
                                   fontSize: 16,

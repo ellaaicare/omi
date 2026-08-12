@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -11,6 +12,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/utils/enums.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
   @override
@@ -91,6 +93,10 @@ class _RecordingCaptureProvider extends CaptureProvider {
 void main() {
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      (_) async => null,
+    );
     SharedPreferences.setMockInitialValues({});
     ConnectivityPlatform.instance = _TestConnectivityPlatform();
     try {
@@ -98,6 +104,13 @@ void main() {
     } catch (_) {
       // Ignore if already initialized by another test.
     }
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      null,
+    );
   });
 
   group('battery throttling', () {
@@ -281,6 +294,26 @@ void main() {
     expect(resolverCalls, 0);
     expect(capture.deviceStarts, 0);
     expect(provider.presentationIsConnected, isFalse);
+  });
+
+  test('device connection cannot start necklace capture while phone owns audio', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 0);
+    expect(capture.recordingState, RecordingState.record);
+    expect(provider.connectedDevice?.id, necklace.id);
   });
 
   test('in-flight connected resolution cannot repopulate after stop', () async {

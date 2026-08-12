@@ -16,6 +16,8 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/sockets/pure_socket.dart';
+import 'package:omi/services/sockets/transcription_service.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/utils/enums.dart';
@@ -116,6 +118,71 @@ class _FakeMicRecorder implements IMicRecorderService {
   @override
   void resumeAfterAccountTransition() {}
 }
+
+class _FakePureSocket implements IPureSocket {
+  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected}) : _status = status;
+
+  PureSocketStatus _status;
+  IPureSocketListener? listener;
+  final List<dynamic> sent = [];
+  int stops = 0;
+
+  @override
+  PureSocketStatus get status => _status;
+
+  @override
+  Future<bool> connect() async {
+    _status = PureSocketStatus.connected;
+    listener?.onConnected();
+    return true;
+  }
+
+  @override
+  Future<void> disconnect() async {
+    _status = PureSocketStatus.disconnected;
+    listener?.onClosed();
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    await disconnect();
+  }
+
+  @override
+  void send(dynamic message) => sent.add(message);
+
+  @override
+  void setListener(IPureSocketListener listener) => this.listener = listener;
+
+  @override
+  void onClosed() => listener?.onClosed();
+
+  @override
+  void onConnected() => listener?.onConnected();
+
+  @override
+  void onError(Object err, StackTrace trace) => listener?.onError(err, trace);
+
+  @override
+  void onMessage(dynamic message) => listener?.onMessage(message);
+}
+
+class _FakeTranscriptSocket {
+  _FakeTranscriptSocket({PureSocketStatus status = PureSocketStatus.connected})
+      : pure = _FakePureSocket(status: status) {
+    service = TranscriptSegmentSocketService.withSocket(16000, BleAudioCodec.opus, 'en', pure);
+  }
+
+  final _FakePureSocket pure;
+  late final TranscriptSegmentSocketService service;
+}
+
+Future<TranscriptSegmentSocketService?> _connectedDeviceSocket(
+  BtDevice device, {
+  required bool force,
+}) async =>
+    _FakeTranscriptSocket().service;
 
 ActiveWalAuthority _activeCaptureAuthority(_CaptureAuthority authority) => ActiveWalAuthority(
       owner: WalOwner(
@@ -525,6 +592,258 @@ void main() {
     await pumpEventQueue();
   });
 
+  test('necklace cannot become active with a null or disconnected transcription socket', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final disconnected = _FakeTranscriptSocket(status: PureSocketStatus.disconnected);
+    for (final prepared in <TranscriptSegmentSocketService?>[null, disconnected.service]) {
+      var transportStarts = 0;
+      final provider = CaptureProvider(
+        activeWalAuthority: () => _activeCaptureAuthority(authority),
+        captureConsentAuthorityEnsurer: () async => true,
+        deviceTranscriptionSocketPreparer: (_, {required force}) async => prepared,
+        deviceCaptureStarter: () async {
+          transportStarts++;
+          return true;
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.streamDeviceRecording(
+        device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+      );
+
+      expect(transportStarts, 0);
+      expect(provider.recordingState, RecordingState.error);
+      expect(provider.deviceCaptureSocketForTesting, isNull);
+    }
+  });
+
+  test('intentional necklace socket replacement rebinds the active session', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final first = _FakeTranscriptSocket();
+    final replacement = _FakeTranscriptSocket();
+    var prepares = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async =>
+          prepares++ == 0 ? first.service : replacement.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    expect(provider.deviceCaptureSocketForTesting, same(first.service));
+
+    await provider.onTranscriptionSettingsChanged();
+
+    expect(first.pure.stops, 1);
+    expect(provider.deviceCaptureSocketForTesting, same(replacement.service));
+    expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('necklace socket reconnect rebinds the exact active session', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final first = _FakeTranscriptSocket();
+    final reconnected = _FakeTranscriptSocket();
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => first.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.reconnectDeviceCaptureSocketForTesting(reconnected.service);
+
+    expect(provider.deviceCaptureSocketForTesting, same(reconnected.service));
+    expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('active necklace socket closure fails capture durably', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final socket = _FakeTranscriptSocket();
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => socket.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.onClosed();
+    await pumpEventQueue();
+
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.deviceCaptureSocketForTesting, isNull);
+    expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
+  });
+
+  test('failed necklace socket replacement becomes a durable capture error', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final first = _FakeTranscriptSocket();
+    var prepares = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => prepares++ == 0 ? first.service : null,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    await provider.onTranscriptionSettingsChanged();
+
+    expect(provider.deviceCaptureSocketForTesting, isNull);
+    expect(provider.recordingState, RecordingState.error);
+  });
+
+  test('replacement necklace start is serialized and stale completion cannot fail or stop it', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final firstSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final firstStartGate = Completer<bool>();
+    var prepares = 0;
+    var transportStarts = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async =>
+          prepares++ == 0 ? firstSocket.service : replacementSocket.service,
+      deviceCaptureStarter: () {
+        transportStarts++;
+        if (transportStarts == 1) return firstStartGate.future;
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return Future.value(true);
+      },
+    );
+    addTearDown(provider.dispose);
+    final device = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    final firstStart = provider.streamDeviceRecording(device: device);
+    await pumpEventQueue();
+    expect(transportStarts, 1);
+    final replacementStart = provider.streamDeviceRecording(device: device);
+    await pumpEventQueue();
+    expect(transportStarts, 1);
+
+    firstStartGate.complete(false);
+    await Future.wait([firstStart, replacementStart]);
+
+    expect(transportStarts, 2);
+    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(provider.deviceCaptureSocketForTesting, same(replacementSocket.service));
+    expect(replacementSocket.pure.stops, 0);
+  });
+
+  test('disconnect invalidates a necklace start before session creation', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final preparerEntered = Completer<void>();
+    final socketGate = Completer<TranscriptSegmentSocketService?>();
+    final abandonedSocket = _FakeTranscriptSocket();
+    var transportStarts = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) {
+        preparerEntered.complete();
+        return socketGate.future;
+      },
+      deviceCaptureStarter: () async {
+        transportStarts++;
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    await preparerEntered.future;
+    final disconnect = provider.handleRecordingDeviceDisconnected('necklace-1');
+    await pumpEventQueue();
+    socketGate.complete(abandonedSocket.service);
+
+    expect(await disconnect, isTrue);
+    await start;
+    expect(transportStarts, 0);
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.error);
+    expect(abandonedSocket.pure.stops, 1);
+  });
+
+  test('phone and necklace capture owners cannot overlap', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var phoneStarts = 0;
+    var necklaceStarts = 0;
+    late CaptureProvider necklaceOwner;
+    necklaceOwner = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
+      deviceCaptureStarter: () async {
+        necklaceStarts++;
+        necklaceOwner.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      phoneCaptureStarter: () async {
+        phoneStarts++;
+        return PhoneCaptureStartResult.started;
+      },
+    );
+    addTearDown(necklaceOwner.dispose);
+    final device = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    await necklaceOwner.streamDeviceRecording(device: device);
+    expect(await necklaceOwner.streamRecording(), PhoneCaptureStartResult.cancelled);
+    expect(phoneStarts, 0);
+    expect(necklaceOwner.recordingState, RecordingState.deviceRecord);
+
+    final phoneOwner = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneCaptureStarter: () async => PhoneCaptureStartResult.started,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
+      deviceCaptureStarter: () async {
+        necklaceStarts++;
+        return true;
+      },
+    );
+    addTearDown(phoneOwner.dispose);
+
+    expect(await phoneOwner.streamRecording(), PhoneCaptureStartResult.started);
+    await phoneOwner.streamDeviceRecording(device: device);
+    expect(necklaceStarts, 1);
+    expect(phoneOwner.recordingState, RecordingState.record);
+  });
+
   test('rejected necklace start performs no location work', () async {
     final authority = _CaptureAuthority('uid-a');
     var locationCalls = 0;
@@ -532,6 +851,7 @@ void main() {
     final provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => false,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () async {
         transportStarts++;
         return true;
@@ -558,6 +878,7 @@ void main() {
     final provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () async => false,
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         locationCalls++;
@@ -581,6 +902,7 @@ void main() {
     final provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () => transport.future,
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         locationCalls++;
@@ -607,6 +929,7 @@ void main() {
     provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () async {
         expect(locationCalls, 0);
         provider.updateRecordingState(RecordingState.deviceRecord);
@@ -634,6 +957,7 @@ void main() {
     provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () async {
         provider.updateRecordingState(RecordingState.deviceRecord);
         return true;
@@ -672,6 +996,7 @@ void main() {
     provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () async {
         transportStarts++;
         provider.updateRecordingState(RecordingState.deviceRecord);
@@ -736,6 +1061,7 @@ void main() {
     provider = CaptureProvider(
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
       deviceCaptureStarter: () async {
         provider.updateRecordingState(RecordingState.deviceRecord);
         return true;
