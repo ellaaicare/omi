@@ -124,11 +124,12 @@ class CaptureProvider extends ChangeNotifier
 
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
-  Future<void>? _micStartFuture;
+  Future<bool>? _micStartFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
+  String? _activeDeviceCaptureId;
 
   bool _isCaptureCurrent(int generation, ActiveWalAuthority authority) =>
       generation == _captureGeneration && authority.isCurrent();
@@ -352,7 +353,14 @@ class CaptureProvider extends ChangeNotifier
   bool get recordingDeviceServiceReady =>
       _recordingDevice != null ||
       recordingState == RecordingState.record ||
+      recordingState == RecordingState.initialising ||
       recordingState == RecordingState.systemAudioRecord;
+
+  bool get hasLiveAudioTransport =>
+      recordingState == RecordingState.record || recordingState == RecordingState.deviceRecord;
+
+  bool get hasLiveTranscriptionTransport =>
+      hasLiveAudioTransport && transcriptServiceReady && _socket?.state == SocketServiceState.connected;
 
   bool get havingRecordingDevice => _recordingDevice != null;
 
@@ -377,6 +385,32 @@ class CaptureProvider extends ChangeNotifier
 
   void updateRecordingDevice(BtDevice? device) {
     _updateRecordingDevice(device);
+  }
+
+  Future<void> handleRecordingDeviceDisconnected(String deviceId) async {
+    if (deviceId.isEmpty || _recordingDevice?.id != deviceId) return;
+
+    final ownsCapture = _activeDeviceCaptureId == deviceId ||
+        (_activeDeviceCaptureId == null && recordingState == RecordingState.deviceRecord);
+    if (_activeDeviceCaptureId == deviceId) _activeDeviceCaptureId = null;
+
+    final disconnectedSocket = ownsCapture ? _socket : null;
+    if (ownsCapture) {
+      disconnectedSocket?.unsubscribe(this);
+      _socket = null;
+      _transcriptServiceReady = false;
+      updateRecordingState(RecordingState.stop);
+    }
+    _updateRecordingDevice(null);
+
+    // Detach the BLE listeners synchronously before awaiting cancellation so
+    // late frames cannot claim a replacement phone or necklace session.
+    await _closeBleStream(stopCamera: false);
+    try {
+      await disconnectedSocket?.stop(reason: 'recording device disconnected');
+    } catch (error, stackTrace) {
+      Logger.handle(error, stackTrace, message: 'Unable to stop disconnected recording device socket');
+    }
   }
 
   Future _resetStateVariables() async {
@@ -550,7 +584,9 @@ class CaptureProvider extends ChangeNotifier
     Logger.debug('streamButton in capture_provider');
     await _bleButtonStream?.cancel();
     final subscription = await _getBleButtonListener(deviceId, onButtonReceived: (List<int> value) {
-      if (generation != _captureGeneration) return;
+      if (generation != _captureGeneration || _activeDeviceCaptureId != deviceId || _recordingDevice?.id != deviceId) {
+        return;
+      }
       final snapshot = List<int>.from(value);
       if (snapshot.isEmpty || snapshot.length < 4) return;
       var buttonState = ByteData.view(Uint8List.fromList(snapshot.sublist(0, 4).reversed.toList()).buffer).getUint32(0);
@@ -649,24 +685,24 @@ class CaptureProvider extends ChangeNotifier
         _endVoiceCommandSession(deviceId);
       }
     });
-    if (generation != _captureGeneration) {
+    if (generation != _captureGeneration || _activeDeviceCaptureId != deviceId || _recordingDevice?.id != deviceId) {
       await subscription?.cancel();
       return;
     }
     _bleButtonStream = subscription;
   }
 
-  Future streamAudioToWs(String deviceId, BleAudioCodec codec) async {
+  Future<bool> streamAudioToWs(String deviceId, BleAudioCodec codec) async {
     if (!SharedPreferencesUtil().aiConsentAccepted) {
       await _bleBytesStream?.cancel();
       _bleBytesStream = null;
-      return;
+      return false;
     }
     final generation = _captureGeneration;
     final captureAuthority = WalOwnerAuthority.active();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
       _bleBytesStream = null;
-      return;
+      return false;
     }
     Logger.debug('streamAudioToWs in capture_provider');
     await _bleBytesStream?.cancel();
@@ -681,6 +717,7 @@ class CaptureProvider extends ChangeNotifier
         _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
         return;
       }
+      if (_activeDeviceCaptureId != deviceId || _recordingDevice?.id != deviceId) return;
 
       // Track bytes received from BLE
       _blesBytesReceived += snapshot.length;
@@ -705,12 +742,16 @@ class CaptureProvider extends ChangeNotifier
         _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
       }
 
+      final paddingLeft =
+          (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) ? 3 : 0;
+      final trimmedValue = paddingLeft > 0 ? value.sublist(paddingLeft) : value;
+      if (trimmedValue.isNotEmpty && recordingState != RecordingState.deviceRecord) {
+        updateRecordingState(RecordingState.deviceRecord);
+      }
+
       // Send WS
       if (_socket?.state == SocketServiceState.connected) {
         if (!SharedPreferencesUtil().aiConsentAccepted) return;
-        final paddingLeft =
-            (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) ? 3 : 0;
-        final trimmedValue = paddingLeft > 0 ? value.sublist(paddingLeft) : value;
         _socket?.send(trimmedValue);
 
         // Track bytes sent to websocket
@@ -722,12 +763,15 @@ class CaptureProvider extends ChangeNotifier
         }
       }
     });
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isCaptureCurrent(generation, captureAuthority) ||
+        _activeDeviceCaptureId != deviceId ||
+        _recordingDevice?.id != deviceId) {
       await subscription?.cancel();
-      return;
+      return false;
     }
     _bleBytesStream = subscription;
     notifyListeners();
+    return subscription != null;
   }
 
   Future<void> _resetState() async {
@@ -829,11 +873,10 @@ class CaptureProvider extends ChangeNotifier
     final deviceModel = pd.modelNumber.isNotEmpty ? pd.modelNumber : "Omi";
     _wal.getSyncs().phone.setDeviceInfo(deviceId, deviceModel);
 
+    updateRecordingState(RecordingState.initialising);
     await streamButton(deviceId);
-    await streamAudioToWs(deviceId, codec);
-
-    // Update state
-    updateRecordingState(RecordingState.deviceRecord);
+    final listening = await streamAudioToWs(deviceId, codec);
+    if (!listening) updateRecordingState(RecordingState.stop);
     notifyListeners();
   }
 
@@ -844,13 +887,27 @@ class CaptureProvider extends ChangeNotifier
     final captureAuthority = WalOwnerAuthority.active();
     if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
     final deviceId = _recordingDevice!.id;
+    if (_activeDeviceCaptureId != deviceId) return;
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null || !_isCaptureCurrent(generation, captureAuthority)) return;
+    if (connection == null ||
+        !_isCaptureCurrent(generation, captureAuthority) ||
+        _activeDeviceCaptureId != deviceId ||
+        _recordingDevice?.id != deviceId) {
+      return;
+    }
 
     await connection.performCameraStartPhotoController();
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
+    if (!_isCaptureCurrent(generation, captureAuthority) ||
+        _activeDeviceCaptureId != deviceId ||
+        _recordingDevice?.id != deviceId) {
+      return;
+    }
     final subscription = await connection.performGetImageListener(onImageReceived: (orientedImage) async {
-      if (!_isCaptureCurrent(generation, captureAuthority)) return;
+      if (!_isCaptureCurrent(generation, captureAuthority) ||
+          _activeDeviceCaptureId != deviceId ||
+          _recordingDevice?.id != deviceId) {
+        return;
+      }
       final rotatedImageBytes = rotateImage(orientedImage);
       final String tempId = 'temp_img_${DateTime.now().millisecondsSinceEpoch}';
       final String base64Image = base64Encode(rotatedImageBytes);
@@ -865,7 +922,11 @@ class CaptureProvider extends ChangeNotifier
       final totalChunks = (base64Image.length / chunkSize).ceil();
 
       for (int i = 0; i < totalChunks; i++) {
-        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        if (!_isCaptureCurrent(generation, captureAuthority) ||
+            _activeDeviceCaptureId != deviceId ||
+            _recordingDevice?.id != deviceId) {
+          return;
+        }
         final start = i * chunkSize;
         final end = (start + chunkSize > base64Image.length) ? base64Image.length : start + chunkSize;
         final chunk = base64Image.substring(start, end);
@@ -884,7 +945,9 @@ class CaptureProvider extends ChangeNotifier
         await Future.delayed(const Duration(milliseconds: 20)); // Small delay to prevent flooding
       }
     });
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isCaptureCurrent(generation, captureAuthority) ||
+        _activeDeviceCaptureId != deviceId ||
+        _recordingDevice?.id != deviceId) {
       await subscription?.cancel();
       return;
     }
@@ -963,14 +1026,22 @@ class CaptureProvider extends ChangeNotifier
     _bleBytesStream = null;
     _blePhotoStream = null;
     _bleButtonStream = null;
-    await bytesStream?.cancel();
-    await photoStream?.cancel();
-    await buttonStream?.cancel();
+    for (final subscription in <StreamSubscription?>[bytesStream, photoStream, buttonStream]) {
+      try {
+        await subscription?.cancel();
+      } catch (error, stackTrace) {
+        Logger.handle(error, stackTrace, message: 'Unable to cancel a detached BLE recording stream');
+      }
+    }
     _stopMetricsTracking();
     if (stopCamera && _recordingDevice != null) {
-      var connection = await ServiceManager.instance().device.ensureConnection(_recordingDevice!.id);
-      if (connection != null && await connection.hasPhotoStreamingCharacteristic()) {
-        await connection.performCameraStopPhotoController();
+      try {
+        var connection = await ServiceManager.instance().device.ensureConnection(_recordingDevice!.id);
+        if (connection != null && await connection.hasPhotoStreamingCharacteristic()) {
+          await connection.performCameraStopPhotoController();
+        }
+      } catch (error, stackTrace) {
+        Logger.handle(error, stackTrace, message: 'Unable to stop the detached BLE camera stream');
       }
     }
     notifyListeners();
@@ -1031,11 +1102,11 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  Future<void> streamRecording() {
+  Future<bool> streamRecording() {
     final activeStart = _micStartFuture;
     if (activeStart != null) return activeStart;
 
-    late final Future<void> trackedStart;
+    late final Future<bool> trackedStart;
     trackedStart = _streamRecording().whenComplete(() {
       if (identical(_micStartFuture, trackedStart)) _micStartFuture = null;
     });
@@ -1043,34 +1114,64 @@ class CaptureProvider extends ChangeNotifier
     return trackedStart;
   }
 
-  Future<void> _streamRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  Future<bool> _streamRecording() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return false;
     final generation = _captureGeneration;
     final captureAuthority = WalOwnerAuthority.active();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
+    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return false;
+    _activeDeviceCaptureId = null;
     updateRecordingState(RecordingState.initialising);
-    await Permission.microphone.request();
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
+    TranscriptSegmentSocketService? phoneSocket;
 
-    // Send current location when conversation starts
-    _sendCurrentGeolocation();
-
-    // prepare
-    await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
-
-    // record
-    await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
-      if (_isCaptureCurrent(generation, captureAuthority) && _socket?.state == SocketServiceState.connected) {
-        _socket?.send(bytes);
+    try {
+      final microphonePermission = await Permission.microphone.request();
+      if (!microphonePermission.isGranted || !_isCaptureCurrent(generation, captureAuthority)) {
+        updateRecordingState(RecordingState.stop);
+        return false;
       }
-    }, onRecording: () {
-      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.record);
-    }, onStop: () {
+
+      // Send current location when conversation starts.
+      unawaited(_sendCurrentGeolocation());
+      await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
+      phoneSocket = _socket;
+      if (!_isCaptureCurrent(generation, captureAuthority) ||
+          phoneSocket?.state != SocketServiceState.connected ||
+          !identical(_socket, phoneSocket)) {
+        updateRecordingState(RecordingState.stop);
+        await phoneSocket?.stop(reason: 'phone transcription socket unavailable');
+        if (identical(_socket, phoneSocket)) _socket = null;
+        return false;
+      }
+
+      await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
+        if (bytes.isEmpty ||
+            !_isCaptureCurrent(generation, captureAuthority) ||
+            !identical(_socket, phoneSocket) ||
+            phoneSocket?.state != SocketServiceState.connected) {
+          return;
+        }
+        phoneSocket?.send(bytes);
+        if (recordingState != RecordingState.record) updateRecordingState(RecordingState.record);
+      }, onRecording: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
+      }, onStop: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
+      }, onInitializing: () {
+        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
+      });
+      return _isCaptureCurrent(generation, captureAuthority) && identical(_socket, phoneSocket);
+    } catch (error, stackTrace) {
+      Logger.handle(error, stackTrace, message: 'Phone microphone start failed');
       if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
-    }, onInitializing: () {
-      if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
-    });
+      await ServiceManager.instance().mic.stop();
+      try {
+        await phoneSocket?.stop(reason: 'phone microphone start failed');
+      } catch (cleanupError, cleanupStackTrace) {
+        Logger.handle(cleanupError, cleanupStackTrace, message: 'Unable to stop failed phone recording socket');
+      }
+      if (identical(_socket, phoneSocket)) _socket = null;
+      return false;
+    }
   }
 
   stopStreamRecording() async {
@@ -1082,6 +1183,7 @@ class CaptureProvider extends ChangeNotifier
 
   Future<void> stopForAccountTransition() async {
     _captureGeneration++;
+    _activeDeviceCaptureId = null;
     final micStart = _micStartFuture;
     final systemAudioStart = _systemAudioStartFuture;
     _voiceCommandTimeoutTimer?.cancel();
@@ -1119,6 +1221,7 @@ class CaptureProvider extends ChangeNotifier
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     Logger.debug("streamDeviceRecording $device");
     if (device != null) _updateRecordingDevice(device);
+    _activeDeviceCaptureId = _recordingDevice?.id;
 
     bool wasPaused = _isPaused;
 
@@ -1134,6 +1237,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future stopStreamDeviceRecording({bool cleanDevice = false}) async {
+    _activeDeviceCaptureId = null;
     await _cleanupCurrentState();
     if (cleanDevice) {
       _updateRecordingDevice(null);
@@ -1170,6 +1274,7 @@ class CaptureProvider extends ChangeNotifier
 
     // User wants to record - enable auto-resume after wake
     _shouldAutoResumeAfterWake = true;
+    _activeDeviceCaptureId = null;
 
     updateRecordingState(RecordingState.initialising);
 
@@ -2033,16 +2138,6 @@ class CaptureProvider extends ChangeNotifier
   Future<void> resumeDeviceRecording() async {
     if (_recordingDevice == null) return;
     _isPaused = false;
-    // Resume streaming from the device
     await _initiateDeviceAudioStreaming();
-
-    final deviceId = _recordingDevice!.id;
-    BleAudioCodec codec = await _getAudioCodec(deviceId);
-    await _wal.getSyncs().phone.onAudioCodecChanged(codec);
-
-    await streamAudioToWs(deviceId, codec);
-
-    updateRecordingState(RecordingState.deviceRecord);
-    notifyListeners();
   }
 }

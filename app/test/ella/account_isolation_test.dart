@@ -588,6 +588,28 @@ void main() {
     await expectLater(service.stopForAccountTransition(), throwsA(isA<TimeoutException>()));
   });
 
+  test('foreground mic reports recording only after native start is acknowledged', () async {
+    final fixture = _ProductionRecorderFixture(
+      stopTimeout: const Duration(seconds: 1),
+      holdNativeStart: true,
+    );
+    addTearDown(fixture.dispose);
+    final service = MicRecorderService();
+    var reportedRecording = false;
+
+    final start = service.start(
+      onByteReceived: (_) {},
+      onRecording: () => reportedRecording = true,
+    );
+    await fixture.native.startEntered.future;
+    expect(reportedRecording, isFalse);
+
+    fixture.native.releaseStart();
+    await start;
+    expect(reportedRecording, isTrue);
+    await service.stop();
+  });
+
   test('production isolate bridge awaits physical stop and fences late producers before transition mutation', () async {
     final fixture = _ProductionRecorderFixture(stopTimeout: const Duration(seconds: 1), holdNativeStop: true);
     addTearDown(fixture.dispose);
@@ -1157,8 +1179,16 @@ EllaAccountIsolationService _accountBarrier() => EllaAccountIsolationService(
     );
 
 class _ProductionRecorderFixture {
-  _ProductionRecorderFixture({required Duration stopTimeout, bool holdNativeStop = false, Object? nativeStopError})
-      : native = _ControlledFlutterSoundRecorderPlatform(holdStop: holdNativeStop, stopError: nativeStopError),
+  _ProductionRecorderFixture({
+    required Duration stopTimeout,
+    bool holdNativeStart = false,
+    bool holdNativeStop = false,
+    Object? nativeStopError,
+  })  : native = _ControlledFlutterSoundRecorderPlatform(
+          holdStart: holdNativeStart,
+          holdStop: holdNativeStop,
+          stopError: nativeStopError,
+        ),
         background = _FakeBackgroundServicePlatform() {
     _originalRecorderPlatform = FlutterSoundRecorderPlatform.instance;
     FlutterSoundRecorderPlatform.instance = native;
@@ -1172,6 +1202,7 @@ class _ProductionRecorderFixture {
   late final MicRecorderBackgroundService mic;
 
   Future<void> dispose() async {
+    native.releaseStart();
     native.releaseStop();
     background.shutdown();
     await Future<void>.delayed(Duration.zero);
@@ -1254,9 +1285,11 @@ class _FakeServiceInstance implements ServiceInstance {
 }
 
 class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatform {
-  _ControlledFlutterSoundRecorderPlatform({required bool holdStop, this.stopError})
-      : _stopRelease = holdStop ? Completer<void>() : null;
+  _ControlledFlutterSoundRecorderPlatform({required bool holdStart, required bool holdStop, this.stopError})
+      : _startRelease = holdStart ? Completer<void>() : null,
+        _stopRelease = holdStop ? Completer<void>() : null;
 
+  final Completer<void>? _startRelease;
   final Completer<void>? _stopRelease;
   final Object? stopError;
   final Completer<void> startEntered = Completer<void>();
@@ -1298,6 +1331,7 @@ class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatfo
     _callback = callback;
     startCalls++;
     if (!startEntered.isCompleted) startEntered.complete();
+    await _startRelease?.future;
     callback.startRecorderCompleted(RecorderState.isRecording.index, true);
   }
 
@@ -1315,6 +1349,11 @@ class _ControlledFlutterSoundRecorderPlatform extends FlutterSoundRecorderPlatfo
   }
 
   void emit(Uint8List bytes) => _callback?.interleavedRecording(data: bytes);
+
+  void releaseStart() {
+    final startRelease = _startRelease;
+    if (startRelease != null && !startRelease.isCompleted) startRelease.complete();
+  }
 
   void releaseStop() {
     final stopRelease = _stopRelease;

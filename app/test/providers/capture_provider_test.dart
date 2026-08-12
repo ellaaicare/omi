@@ -1,15 +1,18 @@
 import 'dart:async';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/utils/enums.dart';
 
 /// Mock PeopleProvider that tracks setPeople calls
 class MockPeopleProvider extends PeopleProvider {
@@ -57,6 +60,10 @@ TranscriptSegment _segment(String id, String text) {
 void main() {
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      (_) async => null,
+    );
     SharedPreferences.setMockInitialValues({});
     ConnectivityPlatform.instance = _TestConnectivityPlatform();
     try {
@@ -64,6 +71,44 @@ void main() {
     } catch (_) {
       // Ignore if already initialized by another test.
     }
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      null,
+    );
+  });
+
+  group('recording device disconnect ownership', () {
+    BtDevice device(String id) => BtDevice(name: 'Ella', id: id, type: DeviceType.omi, rssi: 0);
+
+    test('stops only the matching active necklace capture', () async {
+      final provider = CaptureProvider();
+      final necklace = device('necklace-1');
+      provider.updateRecordingDevice(necklace);
+      provider.updateRecordingState(RecordingState.deviceRecord);
+
+      await provider.handleRecordingDeviceDisconnected('another-device');
+      expect(provider.recordingDevice?.id, necklace.id);
+      expect(provider.recordingState, RecordingState.deviceRecord);
+
+      await provider.handleRecordingDeviceDisconnected(necklace.id);
+      expect(provider.recordingDevice, isNull);
+      expect(provider.recordingState, RecordingState.stop);
+    });
+
+    test('does not stop an unrelated phone capture', () async {
+      final provider = CaptureProvider();
+      final necklace = device('necklace-2');
+      provider.updateRecordingDevice(necklace);
+      provider.updateRecordingState(RecordingState.record);
+
+      await provider.handleRecordingDeviceDisconnected(necklace.id);
+
+      expect(provider.recordingDevice, isNull);
+      expect(provider.recordingState, RecordingState.record);
+    });
   });
 
   test('removes segments and related state on deletion event', () {

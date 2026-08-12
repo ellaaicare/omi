@@ -32,6 +32,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 
 typedef DailySummaryLoader = Future<List<DailySummary>> Function();
 typedef TodayNowProvider = DateTime Function();
@@ -93,6 +94,7 @@ class TodayPageState extends State<TodayPage> {
   bool _whispersOn = false;
   bool _whispersVerified = false;
   bool _updatingWhispers = false;
+  bool _startingRecording = false;
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
@@ -244,6 +246,52 @@ class TodayPageState extends State<TodayPage> {
     ).push(MaterialPageRoute(builder: (_) => ConversationCapturingPage(topConversationId: topConversationId)));
   }
 
+  Future<void> _startOrOpenRecording(
+    CaptureProvider capture,
+    DeviceProvider device,
+    ConversationProvider conversations,
+  ) async {
+    if (_startingRecording) return;
+    if (capture.recordingState != RecordingState.stop) {
+      _openLiveView(capture, conversations);
+      return;
+    }
+
+    setState(() => _startingRecording = true);
+    var started = false;
+    var startingNecklace = false;
+    try {
+      final connectedNecklace = device.presentationConnectedDevice;
+      if (device.presentationIsConnected && connectedNecklace != null) {
+        startingNecklace = true;
+        await capture.streamDeviceRecording(device: connectedNecklace);
+        started = capture.recordingState != RecordingState.stop;
+      } else {
+        started = await capture.streamRecording();
+      }
+    } catch (error, stackTrace) {
+      Logger.handle(error, stackTrace, message: 'Unable to start recording from Today');
+      try {
+        if (startingNecklace) {
+          await capture.stopStreamDeviceRecording();
+        } else {
+          await capture.stopStreamRecording();
+        }
+      } catch (cleanupError, cleanupStackTrace) {
+        Logger.handle(cleanupError, cleanupStackTrace, message: 'Unable to clean up failed Today recording start');
+      }
+    } finally {
+      if (mounted) setState(() => _startingRecording = false);
+    }
+
+    if (!mounted) return;
+    if (started) {
+      _openLiveView(capture, conversations);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final now = SharedPreferencesUtil.isTodayDesignPreviewEnabled
@@ -257,6 +305,7 @@ class TodayPageState extends State<TodayPage> {
         device.presentationConnectedDevice?.type ?? device.presentationPairedDevice?.type ?? DeviceType.omi;
     final audioRoute = context.watch<AudioRouteProvider>();
     final capture = context.watch<CaptureProvider>();
+    final transportReconnecting = capture.hasLiveAudioTransport && !capture.hasLiveTranscriptionTransport;
     final conversations = context.watch<ConversationProvider>();
     final visibleConversations = conversations.visibleConversations;
     final memoriesLoading = shouldShowMemoriesLoading(
@@ -302,6 +351,37 @@ class TodayPageState extends State<TodayPage> {
               headsetConnected: audioRoute.presentationHasHeadset,
               audioOutputName: audioRoute.presentationOutputName,
               onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage())),
+            ),
+            const SizedBox(height: EllaSizes.cardGap),
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: FilledButton.icon(
+                key: const Key('record-moment-button'),
+                onPressed: _startingRecording ? null : () => _startOrOpenRecording(capture, device, conversations),
+                style: FilledButton.styleFrom(
+                  backgroundColor: EllaColors.tealDeep,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                icon:
+                    _startingRecording || capture.recordingState == RecordingState.initialising || transportReconnecting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : Icon(capture.hasLiveTranscriptionTransport ? Icons.graphic_eq_rounded : Icons.mic_rounded),
+                label: Text(
+                  _startingRecording || capture.recordingState == RecordingState.initialising
+                      ? context.l10n.initializing
+                      : transportReconnecting
+                          ? context.l10n.reconnecting
+                          : capture.hasLiveTranscriptionTransport
+                              ? context.l10n.liveTranscript
+                              : context.l10n.startRecording,
+                ),
+              ),
             ),
             if ((hasNecklace && !deviceConnected) || audioRoute.presentationUsesPhoneSpeaker) ...[
               const SizedBox(height: EllaSizes.cardGap),

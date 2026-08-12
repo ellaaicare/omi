@@ -353,15 +353,16 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     super.dispose();
   }
 
-  void onDeviceDisconnected() async {
+  void onDeviceDisconnected([String? deviceId]) async {
     Logger.debug('onDisconnected inside: $connectedDevice');
+    final disconnectedDeviceId = deviceId ?? connectedDevice?.id ?? pairedDevice?.id ?? '';
     _havingNewFirmware = false;
     setConnectedDevice(null);
     setisDeviceStorageSupport();
     setIsConnected(false);
     updateConnectingStatus(false);
 
-    captureProvider?.updateRecordingDevice(null);
+    await captureProvider?.handleRecordingDeviceDisconnected(disconnectedDeviceId);
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);
@@ -594,7 +595,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         // Check if this is the paired device or currently connected device
         // Coz connectedDevice and pairedDevice are the same but connectedDevice becomes null after disconnect
         if (deviceId == connectedDevice?.id || deviceId == pairedDevice?.id) {
-          _disconnectDebouncer.run(onDeviceDisconnected);
+          _disconnectDebouncer.run(() => onDeviceDisconnected(deviceId));
         }
         break;
     }

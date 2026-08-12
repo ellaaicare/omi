@@ -26,9 +26,15 @@ class ServiceManager {
 
   static ServiceManager _create() {
     ServiceManager sm = ServiceManager();
-    sm._mic = MicRecorderBackgroundService(
-      runner: BackgroundService(),
-    );
+    // iOS manual capture is a foreground interaction. Keeping it in the main
+    // isolate avoids depending on flutter_background_service to deliver the
+    // first frame while the capture screen is visible. Necklace BLE capture is
+    // independent of this recorder.
+    sm._mic = Platform.isIOS
+        ? MicRecorderService()
+        : MicRecorderBackgroundService(
+            runner: BackgroundService(),
+          );
     sm._device = DeviceService();
     sm._socket = SocketServicePool();
     sm._wal = WalService();
@@ -551,9 +557,6 @@ class MicRecorderService implements IMicRecorderService {
     _onByteReceived = onByteReceived;
     _onStop = onStop;
     _onRecording = onRecording;
-    if (_onRecording != null) {
-      _onRecording!();
-    }
 
     // new record
     await _recorder.openRecorder(isBGService: _isInBG);
@@ -574,6 +577,7 @@ class MicRecorderService implements IMicRecorderService {
       await _stopNative();
       return;
     }
+    _onRecording?.call();
     _audioSubscription = _controller!.stream.listen((buffer) {
       Uint8List audioBytes = buffer;
       if (!_transitionQuiesced && generation == _generation && _onByteReceived != null) {

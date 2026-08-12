@@ -23,6 +23,25 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 import 'package:omi/widgets/photo_viewer_page.dart';
 import 'package:omi/ella/ella_theme.dart';
 
+enum EmptyCaptureStopTarget { none, phone, necklace }
+
+@visibleForTesting
+bool shouldShowCaptureControls({
+  required bool hasSegments,
+  required bool hasPhotos,
+  required RecordingState recordingState,
+}) =>
+    hasSegments || hasPhotos || recordingState != RecordingState.stop;
+
+@visibleForTesting
+EmptyCaptureStopTarget emptyCaptureStopTarget({
+  required bool havingRecordingDevice,
+  required RecordingState recordingState,
+}) {
+  if (recordingState == RecordingState.stop) return EmptyCaptureStopTarget.none;
+  return havingRecordingDevice ? EmptyCaptureStopTarget.necklace : EmptyCaptureStopTarget.phone;
+}
+
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
 
@@ -123,6 +142,23 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   }
 
   Future<void> _stopConversation(CaptureProvider provider) async {
+    if (provider.segments.isEmpty && provider.photos.isEmpty) {
+      switch (emptyCaptureStopTarget(
+        havingRecordingDevice: provider.havingRecordingDevice,
+        recordingState: provider.recordingState,
+      )) {
+        case EmptyCaptureStopTarget.phone:
+          await provider.stopStreamRecording();
+          break;
+        case EmptyCaptureStopTarget.necklace:
+          await provider.stopStreamDeviceRecording();
+          break;
+        case EmptyCaptureStopTarget.none:
+          break;
+      }
+      if (mounted) Navigator.of(context).pop();
+      return;
+    }
     if (provider.segments.isNotEmpty || provider.photos.isNotEmpty) {
       // Helper function to stop recording and process conversation
       Future<void> stopRecordingAndProcess() async {
@@ -210,9 +246,20 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                   Text(provider.photos.isNotEmpty ? "📸" : (_isMuted ? "🔇" : "🎙️")),
                   const SizedBox(width: 4),
                   Expanded(
-                      child: Text(provider.photos.isNotEmpty
+                    child: Text(
+                      provider.photos.isNotEmpty
                           ? 'Capturing'
-                          : (_isMuted ? context.l10n.muted : context.l10n.listening))),
+                          : _isMuted
+                              ? context.l10n.muted
+                              : provider.recordingState == RecordingState.initialising
+                                  ? context.l10n.initializing
+                                  : provider.hasLiveAudioTransport && !provider.hasLiveTranscriptionTransport
+                                      ? context.l10n.reconnecting
+                                      : provider.hasLiveTranscriptionTransport
+                                          ? context.l10n.recording
+                                          : context.l10n.startRecording,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -299,13 +346,18 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
               ],
             ),
             floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-            floatingActionButton: (provider.segments.isNotEmpty || provider.photos.isNotEmpty)
+            floatingActionButton: shouldShowCaptureControls(
+              hasSegments: provider.segments.isNotEmpty,
+              hasPhotos: provider.photos.isNotEmpty,
+              recordingState: provider.recordingState,
+            )
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       // Process Now button
                       GestureDetector(
+                        key: const Key('conversation-process-now'),
                         onTap: () => _stopConversation(provider),
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
