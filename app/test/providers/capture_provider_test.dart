@@ -439,6 +439,34 @@ void main() {
     expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
   });
 
+  test('physical necklace disconnect turns paused capture into retryable error', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final provider = CaptureProvider()
+      ..updateRecordingDevice(necklace)
+      ..updateRecordingState(RecordingState.pause);
+    addTearDown(provider.dispose);
+
+    expect(await provider.handleRecordingDeviceDisconnected(necklace.id), isTrue);
+
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.isPaused, isFalse);
+  });
+
+  test('physical necklace disconnect turns initializing capture into retryable error', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final provider = CaptureProvider()
+      ..updateRecordingDevice(necklace)
+      ..updateRecordingState(RecordingState.initialising);
+    addTearDown(provider.dispose);
+
+    expect(await provider.handleRecordingDeviceDisconnected(necklace.id), isTrue);
+
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.isPaused, isFalse);
+  });
+
   test('missing BLE audio frames fail a confirmed necklace capture closed', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final provider = CaptureProvider(deviceAudioFrameTimeout: const Duration(milliseconds: 20))

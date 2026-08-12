@@ -574,8 +574,13 @@ class CaptureProvider extends ChangeNotifier
     _keepAliveTimer = null;
 
     final state = recordingState;
+    final wasBoundCapture = state == RecordingState.initialising ||
+        state == RecordingState.deviceRecord ||
+        state == RecordingState.pause ||
+        _isPaused;
+    _isPaused = false;
     _updateRecordingDevice(null);
-    if (state == RecordingState.initialising || state == RecordingState.deviceRecord) {
+    if (wasBoundCapture) {
       updateRecordingState(RecordingState.error);
     }
 

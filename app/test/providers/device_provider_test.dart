@@ -67,9 +67,11 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate});
+  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.disconnectEntered});
 
   final Completer<void>? startGate;
+  final Completer<void>? disconnectGate;
+  final Completer<void>? disconnectEntered;
   int deviceStarts = 0;
   int deviceDisconnects = 0;
   String? disconnectedDeviceId;
@@ -84,6 +86,8 @@ class _RecordingCaptureProvider extends CaptureProvider {
   Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
     deviceDisconnects++;
     disconnectedDeviceId = deviceId;
+    if (disconnectEntered?.isCompleted == false) disconnectEntered?.complete();
+    await disconnectGate?.future;
     return true;
   }
 }
@@ -283,6 +287,45 @@ void main() {
     expect(capture.disconnectedDeviceId, necklace.id);
     expect(provider.presentationIsConnected, isFalse);
     expect(provider.connectedDevice, isNull);
+  });
+
+  test('reconnect waits for physical-disconnect capture teardown and a later generation', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final disconnectGate = Completer<void>();
+    final disconnectEntered = Completer<void>();
+    final capture = _RecordingCaptureProvider(
+      disconnectGate: disconnectGate,
+      disconnectEntered: disconnectEntered,
+    );
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+    )
+      ..setProviders(capture)
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    final disconnect = provider.onDeviceDisconnected();
+    await disconnectEntered.future;
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(capture.deviceStarts, 0);
+    expect(provider.presentationIsConnected, isFalse);
+
+    disconnectGate.complete();
+    try {
+      await disconnect;
+    } catch (_) {}
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(capture.deviceStarts, 1);
+    expect(provider.connectedDevice?.id, necklace.id);
   });
 
   test('queued connected callback is cancelled by device-service stop', () async {
