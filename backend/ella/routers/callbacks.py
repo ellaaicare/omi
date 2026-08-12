@@ -581,6 +581,7 @@ async def get_conversation_data(
             structured["category"] = structured["category"].value
 
     active_summary_version = _active_summary_version(conversation) or {}
+    enrichment_state = _conversation_field(conversation, "enrichment_state", {}) or {}
     return {
         "conversation_id": conversation_id,
         "uid": uid,
@@ -592,6 +593,9 @@ async def get_conversation_data(
         "active_summary_version_id": _conversation_field(conversation, "active_summary_version_id"),
         "active_summary_source": active_summary_version.get("source"),
         "active_summary_kind": active_summary_version.get("kind"),
+        "enrichment_status": enrichment_state.get("status"),
+        "enrichment_canonical_status": enrichment_state.get("canonical_status"),
+        "enrichment_trace_id": enrichment_state.get("trace_id"),
         "started_at": str(_conversation_field(conversation, "started_at", "")),
         "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }

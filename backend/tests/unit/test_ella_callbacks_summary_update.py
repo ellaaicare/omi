@@ -218,6 +218,11 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
             },
             "active_summary_version_id": "omi-v1",
             "summary_versions": [{"id": "omi-v1", "source": "omi", "kind": "generated"}],
+            "enrichment_state": {
+                "status": "writeback_applied",
+                "canonical_status": "completed",
+                "trace_id": "parallel-grounding:v2:synthetic",
+            },
             "started_at": "2026-04-10T10:00:00Z",
             "finished_at": "2026-04-10T10:05:00Z",
         },
@@ -267,6 +272,9 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
     assert result["active_summary_version_id"] == "omi-v1"
     assert result["active_summary_source"] == "omi"
     assert result["active_summary_kind"] == "generated"
+    assert result["enrichment_status"] == "writeback_applied"
+    assert result["enrichment_canonical_status"] == "completed"
+    assert result["enrichment_trace_id"] == "parallel-grounding:v2:synthetic"
     assert result["started_at"] == "2026-04-10T10:00:00Z"
     assert result["finished_at"] == "2026-04-10T10:05:00Z"
 
