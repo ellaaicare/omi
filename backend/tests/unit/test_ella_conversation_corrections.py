@@ -10,19 +10,40 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
-sys.modules.setdefault("database.conversations", MagicMock())
-sys.modules.setdefault("httpx", MagicMock())
-sys.modules.setdefault("utils.other.endpoints", MagicMock())
-sys.modules.setdefault(
-    "utils.conversations.vector",
-    MagicMock(refresh_structured_summary_vector=MagicMock()),
+_MISSING_MODULE = object()
+_STUBBED_IMPORT_MODULES = {
+    "database._client": MagicMock(db=MagicMock()),
+    "database.conversations": MagicMock(),
+    "httpx": MagicMock(),
+    "utils.other.endpoints": MagicMock(),
+    "utils.conversations.vector": MagicMock(refresh_structured_summary_vector=MagicMock()),
+    "utils.conversations.generic_summary": MagicMock(generate_stock_conversation_summary=MagicMock()),
+}
+_RELOADED_IMPORT_MODULES = (
+    "ella.config",
+    "ella.services.provisioning",
+    "ella.services.runtime_resolver",
+    "ella.services.summary_recovery",
+    "ella.services.summary_writeback",
 )
-sys.modules.setdefault(
-    "utils.conversations.generic_summary",
-    MagicMock(generate_stock_conversation_summary=MagicMock()),
-)
-sys.modules.pop("ella.config", None)
+_ISOLATED_IMPORT_MODULES = (*_STUBBED_IMPORT_MODULES, *_RELOADED_IMPORT_MODULES)
+_ORIGINAL_MODULES = {name: sys.modules.get(name, _MISSING_MODULE) for name in _ISOLATED_IMPORT_MODULES}
+for _module_name, _stub_module in _STUBBED_IMPORT_MODULES.items():
+    sys.modules[_module_name] = _stub_module
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if _parent_module is not None:
+        setattr(_parent_module, _attribute_name, _stub_module)
+for _module_name in _RELOADED_IMPORT_MODULES:
+    _removed_module = sys.modules.pop(_module_name, None)
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if (
+        _parent_module is not None
+        and hasattr(_parent_module, _attribute_name)
+        and getattr(_parent_module, _attribute_name) is _removed_module
+    ):
+        delattr(_parent_module, _attribute_name)
 
 _backend_path = Path(__file__).resolve().parents[2]
 if str(_backend_path) not in sys.path:
@@ -43,6 +64,22 @@ from utils.ella.canonical_omi import (
     summary_grounding_hash,
     transcript_grounding_hash,
 )
+
+for _module_name, _original_module in _ORIGINAL_MODULES.items():
+    _loaded_module = sys.modules.get(_module_name)
+    if _original_module is _MISSING_MODULE:
+        sys.modules.pop(_module_name, None)
+    else:
+        sys.modules[_module_name] = _original_module
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if _parent_module is None:
+        continue
+    if _original_module is _MISSING_MODULE:
+        if getattr(_parent_module, _attribute_name, None) is _loaded_module:
+            delattr(_parent_module, _attribute_name)
+    else:
+        setattr(_parent_module, _attribute_name, _original_module)
 
 
 @pytest.fixture(autouse=True)
@@ -2798,6 +2835,125 @@ def test_summary_recovery_retries_pending_canonical_write_without_second_model_c
     ]
 
 
+def test_summary_recovery_reruns_hermes_for_legacy_pending_state_without_fingerprint(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    structured = {
+        "title": "Legacy recovered title",
+        "overview": "[Ella] Legacy pending summary without a verifiable request receipt.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    pending = {
+        **_retry_conversation(status="completed", request_id=request_id),
+        "structured": structured,
+        "processing_retry_mode": "enrichment_only",
+        "active_summary_version_id": "enriched-v2",
+        "processing_retry_summary_version_id": "generic-v1",
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "based_on_version_id": "generic-v1",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "enrichment_state": {
+            "status": "writeback_pending_canonical",
+            "pending": True,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "legacy-unbound-trace",
+            "canonical_status": "failed",
+        },
+    }
+    confirmed = {
+        **pending,
+        "active_summary_version_id": "enriched-v3",
+        "summary_versions": [
+            {
+                "id": "enriched-v3",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "based_on_version_id": "generic-v1",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "enrichment_state": {
+            **pending["enrichment_state"],
+            "status": "writeback_applied",
+            "pending": False,
+            "trace_id": "fresh-hermes-trace",
+            "canonical_status": "completed",
+            "request_fingerprint": "sha256:" + ("a" * 64),
+            "request_fingerprint_input": {"fresh": True},
+        },
+    }
+    reads = [pending, pending, pending, confirmed, confirmed]
+    events = []
+    monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+    monkeypatch.setattr(
+        summary_recovery,
+        "generate_stock_conversation_summary",
+        lambda *args: pytest.fail("generic provider must not run for enrichment-only recovery"),
+    )
+    monkeypatch.setattr(
+        summary_recovery,
+        "apply_summary_update",
+        lambda **kwargs: pytest.fail("legacy pending state must not replay an unbound write"),
+    )
+
+    async def fake_provider_config(uid, config):
+        return SimpleNamespace()
+
+    async def fake_invoke(**kwargs):
+        events.append(("hermes_rerun", kwargs["request_id"]))
+        return {"active_summary_version_id": "enriched-v3", "canonical_confirmed": True}
+
+    monkeypatch.setattr(summary_recovery, "summary_provider_config_for_uid", fake_provider_config)
+    monkeypatch.setattr(summary_recovery, "invoke_hermes_recovery", fake_invoke)
+    monkeypatch.setattr(
+        summary_recovery,
+        "_ensure_conversation_vector",
+        lambda uid, conv: _async_event(events, f"vector:{conv['active_summary_version_id']}"),
+    )
+    monkeypatch.setattr(
+        summary_recovery,
+        "_write_and_confirm_enriched_vector",
+        lambda uid, conv, version_id: _async_event_result(events, "vector:enriched-v3", "e" * 64),
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_generic_vector",
+        lambda *args, **kwargs: events.append(("generic_vector", args[3])) or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_enrichment",
+        lambda *args, **kwargs: events.append(("enrichment", args[3], kwargs["summary_version_id"])) or True,
+    )
+
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            request_id=request_id,
+        )
+    )
+
+    assert outcome == "completed"
+    assert events == [
+        "vector:enriched-v2",
+        ("generic_vector", "completed"),
+        ("hermes_rerun", request_id),
+        ("enrichment", "canonical_completed", "enriched-v3"),
+        "vector:enriched-v3",
+        ("enrichment", "completed", "enriched-v3"),
+    ]
+
+
 def test_summary_recovery_vector_failure_remains_retryable_without_raw_error(monkeypatch):
     request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
     conversation = {
@@ -2940,8 +3096,9 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: cas_updates.append((expected, update)) or True,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: cas_updates.append((expected, expected_state, update))
+        or True,
     )
 
     def canonical_writer(uid, record, **kwargs):
@@ -2968,8 +3125,9 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
     assert "apps_results" not in updates[0]
     assert "plugins_results" not in updates[0]
     assert cas_updates[0][0] == "enriched-v2"
-    assert cas_updates[0][1]["enrichment_state"]["status"] == "writeback_applied"
-    assert cas_updates[0][1]["enrichment_state"]["canonical_status"] == "completed"
+    assert cas_updates[0][1] == updates[0]["enrichment_state"]
+    assert cas_updates[0][2]["enrichment_state"]["status"] == "writeback_applied"
+    assert cas_updates[0][2]["enrichment_state"]["canonical_status"] == "completed"
     assert canonical_calls[0][1]["enrichment_state"]["canonical_status"] == "completed"
 
 
@@ -3023,8 +3181,11 @@ def test_strict_summary_writeback_uses_atomic_active_version_compare_and_set(mon
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: cas_calls.append((uid, cid, expected, update)) or True,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: cas_calls.append(
+            (uid, cid, expected, expected_state, update)
+        )
+        or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
@@ -3048,7 +3209,8 @@ def test_strict_summary_writeback_uses_atomic_active_version_compare_and_set(mon
 
     assert result["active_summary_version_id"] == "undo-v2"
     assert cas_calls[0][0:3] == ("user-1", "conversation-1", "generic-v1")
-    assert cas_calls[0][3]["active_summary_version_id"] == "undo-v2"
+    assert cas_calls[0][3] == {}
+    assert cas_calls[0][4]["active_summary_version_id"] == "undo-v2"
 
 
 def test_strict_summary_writeback_fails_when_atomic_compare_and_set_loses_race(monkeypatch):
@@ -3071,8 +3233,8 @@ def test_strict_summary_writeback_fails_when_atomic_compare_and_set_loses_race(m
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: False,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: False,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
@@ -3123,8 +3285,9 @@ def test_strict_summary_writeback_keeps_retryable_state_when_canonical_fails(mon
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: cas_updates.append((expected, update)) or True,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: cas_updates.append((expected, expected_state, update))
+        or True,
     )
 
     with pytest.raises(RuntimeError, match="canonical_write_unconfirmed"):
@@ -3143,10 +3306,11 @@ def test_strict_summary_writeback_keeps_retryable_state_when_canonical_fails(mon
         )
 
     assert cas_updates[0][0] == "enriched-v2"
-    assert cas_updates[0][1]["enrichment_state"]["status"] == "writeback_pending_canonical"
-    assert cas_updates[0][1]["enrichment_state"]["canonical_status"] == "failed"
-    assert cas_updates[0][1]["enrichment_state"]["pending"] is True
-    assert cas_updates[0][1]["enrichment_state"]["request_fingerprint"].startswith("sha256:")
+    assert cas_updates[0][1] == updates[0]["enrichment_state"]
+    assert cas_updates[0][2]["enrichment_state"]["status"] == "writeback_pending_canonical"
+    assert cas_updates[0][2]["enrichment_state"]["canonical_status"] == "failed"
+    assert cas_updates[0][2]["enrichment_state"]["pending"] is True
+    assert cas_updates[0][2]["enrichment_state"]["request_fingerprint"].startswith("sha256:")
 
 
 def test_strict_summary_writeback_retries_only_canonical_after_transport_uncertainty(monkeypatch):
@@ -3208,8 +3372,8 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: (updates.append((expected, update)) or True),
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: updates.append((expected, update)) or True,
     )
 
     result = asyncio.run(
@@ -3249,7 +3413,7 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
     canonical_calls = []
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
+        "update_conversation_if_summary_authority",
         lambda *_args, **_kwargs: False,
     )
 
@@ -3384,6 +3548,83 @@ def _assert_same_trace_replay_rejects_changed_payload_and_stale_base(monkeypatch
             )
 
 
+def test_same_trace_replay_distinguishes_omitted_inputs_from_explicit_stored_values(monkeypatch):
+    structured = {
+        "title": "Stored title",
+        "overview": "[Ella] Stored canonical summary with enough detail.",
+        "emoji": "note",
+        "category": "other",
+    }
+    tags = ["omi"]
+    signal = {"priority": "normal"}
+    request_input = summary_writeback._summary_request_fingerprint_input(
+        structured=structured,
+        summary_source="observer",
+        summary_kind="recovered_enriched",
+        correction_id=None,
+        based_on_version_id="generic-v1",
+        set_active=True,
+        require_canonical=True,
+        require_based_on_match=True,
+        preserve_generated_results=True,
+        ella_tags=tags,
+        ella_signal=signal,
+        today_card_grounding=None,
+        today_card_grounding_evidence=None,
+        submitted_structured=structured,
+        submitted_ella_tags=tags,
+        submitted_ella_signal=signal,
+    )
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "enriched-v2",
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "based_on_version_id": "generic-v1",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "structured": structured,
+        "ella_tags": tags,
+        "ella_signal": signal,
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-explicit",
+            "canonical_status": "completed",
+            "request_fingerprint": summary_writeback._summary_request_fingerprint(request_input),
+            "request_fingerprint_input": request_input,
+        },
+    }
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
+
+    with pytest.raises(
+        summary_writeback.ConcurrentConversationSummaryChangeError,
+        match="idempotency_payload_changed",
+    ):
+        asyncio.run(
+            summary_writeback.write_conversation_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                summary_kind="recovered_enriched",
+                based_on_version_id="generic-v1",
+                require_based_on_match=True,
+                preserve_generated_results=True,
+                trace_id="trace-explicit",
+                canonical_writer=lambda *args, **kwargs: pytest.fail(
+                    "omitted same-trace inputs must not reuse an explicit-input receipt"
+                ),
+                require_canonical=True,
+            )
+        )
+
+
 def _assert_strict_completed_same_trace_revalidates_canonical_before_success(monkeypatch):
     structured = {
         "title": "Stored title",
@@ -3405,6 +3646,9 @@ def _assert_strict_completed_same_trace_revalidates_canonical_before_success(mon
         ella_signal=None,
         today_card_grounding=None,
         today_card_grounding_evidence=None,
+        submitted_structured=structured,
+        submitted_ella_tags=None,
+        submitted_ella_signal=None,
     )
     conversation = {
         **_retry_conversation(status="completed", request_id=None),
@@ -3491,14 +3735,37 @@ def _assert_strict_completed_same_trace_revalidates_canonical_before_success(mon
 
 
 def _assert_pending_canonical_replay_repairs_newer_active_summary_after_race(monkeypatch):
+    structured = {
+        "title": "Recovered title",
+        "overview": "[Ella] Recovered summary awaiting canonical confirmation.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    request_input = summary_writeback._summary_request_fingerprint_input(
+        structured=structured,
+        summary_source="observer",
+        summary_kind="recovered_enriched",
+        correction_id=None,
+        based_on_version_id=None,
+        set_active=True,
+        require_canonical=True,
+        require_based_on_match=False,
+        preserve_generated_results=False,
+        ella_tags=[],
+        ella_signal=None,
+        today_card_grounding=None,
+        today_card_grounding_evidence=None,
+    )
     pending = {
         **_retry_conversation(status="completed", request_id=None),
+        "structured": structured,
         "active_summary_version_id": "enriched-v2",
         "summary_versions": [
             {
                 "id": "enriched-v2",
                 "source": "observer",
                 "kind": "recovered_enriched",
+                **structured,
                 "is_active": True,
             }
         ],
@@ -3509,6 +3776,8 @@ def _assert_pending_canonical_replay_repairs_newer_active_summary_after_race(mon
             "kind": "recovered_enriched",
             "trace_id": "trace-race",
             "canonical_status": "pending",
+            "request_fingerprint": summary_writeback._summary_request_fingerprint(request_input),
+            "request_fingerprint_input": request_input,
         },
     }
     correction = {
@@ -3519,6 +3788,11 @@ def _assert_pending_canonical_replay_repairs_newer_active_summary_after_race(mon
                 "id": "correction-v3",
                 "source": "ios_correction",
                 "kind": "corrected_enriched",
+                **{
+                    **structured,
+                    "title": "Corrected title",
+                    "overview": "[Ella] Corrected summary wins the canonical race.",
+                },
                 "is_active": True,
             }
         ],
@@ -3534,6 +3808,7 @@ def _assert_pending_canonical_replay_repairs_newer_active_summary_after_race(mon
             "kind": "corrected_enriched",
             "trace_id": "correction-race",
             "canonical_status": "completed",
+            "request_fingerprint": "sha256:" + ("f" * 64),
         },
     }
     conversations = iter([pending, correction, correction])
@@ -3550,7 +3825,7 @@ def _assert_pending_canonical_replay_repairs_newer_active_summary_after_race(mon
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
+        "update_conversation_if_summary_authority",
         lambda *args, **kwargs: False,
     )
 
@@ -3568,12 +3843,224 @@ def _assert_pending_canonical_replay_repairs_newer_active_summary_after_race(mon
                 conversation_id="conversation-1",
                 summary_kind="recovered_enriched",
                 trace_id="trace-race",
+                replay_request_fingerprint_input=request_input,
                 canonical_writer=canonical_writer,
                 require_canonical=True,
             )
         )
 
     assert canonical_versions == ["enriched-v2", "correction-v3"]
+
+
+def test_canonical_repair_projects_structured_fields_from_active_version(monkeypatch):
+    active_structured = {
+        "title": "Active title",
+        "overview": "[Ella] The active summary must be the canonical source.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    conversation = {
+        "active_summary_version_id": "active-v2",
+        "summary_versions": [
+            {
+                "id": "active-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                **active_structured,
+                "is_active": True,
+            }
+        ],
+        "structured": {
+            "title": "Stale root title",
+            "overview": "[Ella] This stale root content must never be republished.",
+            "emoji": "warning",
+            "category": "other",
+        },
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-active",
+            "canonical_status": "completed",
+            "request_fingerprint": "sha256:" + ("a" * 64),
+        },
+    }
+    reads = [conversation, conversation]
+    canonical_records = []
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_records.append(record)
+        return {"ok": True}
+
+    asyncio.run(
+        summary_writeback._repair_canonical_to_latest_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            canonical_writer=canonical_writer,
+        )
+    )
+
+    assert canonical_records[0]["structured"] == active_structured
+    assert canonical_records[0]["structured"] != conversation["structured"]
+
+
+@pytest.mark.parametrize(
+    ("field", "racing_value"),
+    [
+        ("trace_id", "trace-racing"),
+        ("request_fingerprint", "sha256:" + ("b" * 64)),
+        ("status", "writeback_pending_canonical"),
+        ("canonical_status", "pending"),
+        ("source", "ios_correction"),
+        ("kind", "corrected_enriched"),
+    ],
+)
+def test_canonical_repair_rejects_each_post_write_enrichment_authority_race(
+    monkeypatch,
+    field,
+    racing_value,
+):
+    structured = {
+        "title": "Active title",
+        "overview": "[Ella] The active summary remains stable while enrichment authority races.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    conversation = {
+        "active_summary_version_id": "active-v2",
+        "summary_versions": [
+            {
+                "id": "active-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "structured": structured,
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-active",
+            "canonical_status": "completed",
+            "request_fingerprint": "sha256:" + ("a" * 64),
+        },
+    }
+    raced = {
+        **conversation,
+        "enrichment_state": {
+            **conversation["enrichment_state"],
+            field: racing_value,
+        },
+    }
+    reads = iter([conversation, raced])
+    canonical_calls = []
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "get_conversation",
+        lambda uid, cid: next(reads),
+    )
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_calls.append((uid, record, kwargs))
+        return {"ok": True}
+
+    async def mark_pending(**kwargs):
+        return None
+
+    monkeypatch.setattr(summary_writeback, "_mark_latest_summary_pending_canonical", mark_pending)
+
+    with pytest.raises(
+        summary_writeback.CanonicalSummaryRepairExhaustedError,
+        match="active_summary_version_changed_during_canonical_repair",
+    ):
+        asyncio.run(
+            summary_writeback._repair_canonical_to_latest_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                canonical_writer=canonical_writer,
+                max_attempts=1,
+            )
+        )
+
+    assert len(canonical_calls) == 1
+
+
+def test_canonical_confirmation_does_not_overwrite_same_version_authority_race(monkeypatch):
+    structured = {
+        "title": "Racing title",
+        "overview": "[Ella] A same-version writer changed the enrichment authority.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    expected_state = {
+        "status": "writeback_pending_canonical",
+        "pending": True,
+        "source": "observer",
+        "kind": "recovered_enriched",
+        "trace_id": "trace-expected",
+        "canonical_status": "pending",
+        "request_fingerprint": "sha256:" + ("a" * 64),
+    }
+    racing_state = {
+        **expected_state,
+        "trace_id": "trace-racing",
+        "request_fingerprint": "sha256:" + ("b" * 64),
+    }
+    racing_conversation = {
+        "active_summary_version_id": "active-v2",
+        "summary_versions": [
+            {
+                "id": "active-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "structured": structured,
+        "enrichment_state": racing_state,
+    }
+    reads = [racing_conversation, racing_conversation]
+    cas_calls = []
+    canonical_traces = []
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, state, update: cas_calls.append((expected, state, update)) or False,
+    )
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_traces.append(kwargs["trace_id"])
+        return {"ok": True}
+
+    with pytest.raises(
+        summary_writeback.ConcurrentConversationSummaryChangeError,
+        match="active_summary_version_changed",
+    ):
+        asyncio.run(
+            summary_writeback._confirm_canonical_if_result_is_active(
+                uid="user-1",
+                conversation_id="conversation-1",
+                expected_result_version_id="active-v2",
+                expected_state=expected_state,
+                confirmed_state={
+                    **expected_state,
+                    "status": "writeback_applied",
+                    "pending": False,
+                    "canonical_status": "completed",
+                },
+                canonical_writer=canonical_writer,
+            )
+        )
+
+    assert cas_calls[0][0:2] == ("active-v2", expected_state)
+    assert canonical_traces == ["trace-racing"]
 
 
 def _assert_canonical_repair_exhaustion_uses_durable_retry_receipt_when_all_marker_cas_race(monkeypatch):
@@ -3627,8 +4114,9 @@ def _assert_canonical_repair_exhaustion_uses_durable_retry_receipt_when_all_mark
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: cas_updates.append((expected, update)) or False,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: cas_updates.append((expected, expected_state, update))
+        or False,
     )
     monkeypatch.setattr(
         summary_recovery.conversations_db,
@@ -3659,7 +4147,7 @@ def _assert_canonical_repair_exhaustion_uses_durable_retry_receipt_when_all_mark
         )
 
     assert canonical_versions == ["v2", "v3", "v4"]
-    assert [expected for expected, _update in cas_updates] == ["v5", "v6", "v7"]
+    assert [expected for expected, _state, _update in cas_updates] == ["v5", "v6", "v7"]
     assert len(durable_receipts) == 1
     args, kwargs = durable_receipts[0]
     assert args == ("user-1", "conversation-1", "request-1", "canonical_failed")
@@ -3731,8 +4219,9 @@ def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_e
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, cid, expected, update: cas_updates.append((expected, update)) or True,
+        "update_conversation_if_summary_authority",
+        lambda uid, cid, expected, expected_state, update: cas_updates.append((expected, expected_state, update))
+        or True,
     )
 
     def canonical_writer(uid, record, **_kwargs):
@@ -3761,6 +4250,7 @@ def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_e
     assert cas_updates == [
         (
             "summary-v2",
+            updates[0]["enrichment_state"],
             {
                 "enrichment_state": {
                     **updates[0]["enrichment_state"],

@@ -15,10 +15,12 @@ def _load_conversations_module(monkeypatch):
     import utils
     import utils.other
 
+    encryption = MagicMock()
     monkeypatch.setitem(sys.modules, "database._client", MagicMock(db=MagicMock()))
     monkeypatch.setitem(sys.modules, "database.users", MagicMock())
     monkeypatch.setitem(sys.modules, "database.redis_db", MagicMock())
-    monkeypatch.setitem(sys.modules, "utils.encryption", MagicMock())
+    monkeypatch.setitem(sys.modules, "utils.encryption", encryption)
+    monkeypatch.setattr(utils, "encryption", encryption, raising=False)
     monkeypatch.setitem(sys.modules, "utils.other.hume", MagicMock())
     monkeypatch.setitem(sys.modules, "utils.other.storage", MagicMock(list_audio_chunks=MagicMock()))
 
@@ -80,6 +82,112 @@ def test_active_summary_version_compare_and_set_is_atomic_and_fail_closed(monkey
         is False
     )
     assert stale_transaction.updates == []
+
+
+@pytest.mark.parametrize(
+    ("field", "racing_value"),
+    [
+        ("trace_id", "trace-racing"),
+        ("request_fingerprint", "sha256:" + ("f" * 64)),
+        ("status", "writeback_applied"),
+        ("canonical_status", "completed"),
+        ("source", "ios_correction"),
+        ("kind", "corrected_enriched"),
+    ],
+)
+def test_summary_authority_compare_and_set_rejects_same_version_enrichment_race(
+    monkeypatch,
+    field,
+    racing_value,
+):
+    conversations = _load_conversations_module(monkeypatch)
+    expected_state = {
+        "trace_id": "trace-expected",
+        "request_fingerprint": "sha256:" + ("a" * 64),
+        "status": "writeback_pending_canonical",
+        "canonical_status": "pending",
+        "source": "observer",
+        "kind": "recovered_enriched",
+    }
+    racing_state = {**expected_state, field: racing_value}
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "active_summary_version_id": "summary-v2",
+                    "data_protection_level": "standard",
+                    "enrichment_state": racing_state,
+                },
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    transaction = Transaction()
+    assert (
+        conversations._update_conversation_if_summary_authority_transaction(
+            transaction,
+            ConversationRef(),
+            "uid-1",
+            "summary-v2",
+            expected_state,
+            {"enrichment_state": {**expected_state, "canonical_status": "completed"}},
+        )
+        is False
+    )
+    assert transaction.updates == []
+
+
+def test_summary_authority_compare_and_set_updates_only_exact_authority(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    expected_state = {
+        "trace_id": "trace-expected",
+        "request_fingerprint": "sha256:" + ("a" * 64),
+        "status": "writeback_pending_canonical",
+        "canonical_status": "pending",
+        "source": "observer",
+        "kind": "recovered_enriched",
+    }
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "active_summary_version_id": "summary-v2",
+                    "data_protection_level": "standard",
+                    "enrichment_state": expected_state,
+                },
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    conversation_ref = ConversationRef()
+    transaction = Transaction()
+    update = {"enrichment_state": {**expected_state, "canonical_status": "completed"}}
+    assert (
+        conversations._update_conversation_if_summary_authority_transaction(
+            transaction,
+            conversation_ref,
+            "uid-1",
+            "summary-v2",
+            expected_state,
+            update,
+        )
+        is True
+    )
+    assert transaction.updates == [(conversation_ref, update)]
 
 
 @pytest.mark.parametrize(
@@ -229,6 +337,55 @@ def test_transcript_hash_compare_and_set_can_require_no_active_source_version(
         match_active_summary_version=True,
     )
     assert raced_transaction.updates == []
+
+
+def test_transcript_hash_compare_and_set_rejects_same_version_enrichment_race(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    observed_segments = [
+        {"id": "one", "text": "The exact supported statement.", "start": 0.0, "end": 2.0},
+    ]
+    expected_state = {
+        "trace_id": "trace-expected",
+        "request_fingerprint": "sha256:" + ("a" * 64),
+        "status": "writeback_applied",
+        "canonical_status": "completed",
+        "source": "observer",
+        "kind": "generic_recovered",
+    }
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "active_summary_version_id": "source-v1",
+                    "data_protection_level": "standard",
+                    "transcript_segments": observed_segments,
+                    "enrichment_state": {**expected_state, "trace_id": "trace-racing"},
+                },
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    transaction = Transaction()
+    assert (
+        conversations._update_conversation_if_transcript_hash_transaction(
+            transaction,
+            ConversationRef(),
+            "uid-1",
+            transcript_grounding_hash(observed_segments),
+            {"active_summary_version_id": "summary-v2"},
+            expected_active_summary_version_id="source-v1",
+            expected_enrichment_state=expected_state,
+        )
+        is False
+    )
+    assert transaction.updates == []
 
 
 @pytest.mark.parametrize("protection_level", ["standard", "enhanced"])

@@ -902,6 +902,8 @@ async def recover_failed_conversation_summary(
             pending_state.get('status') == 'writeback_pending_canonical'
             and pending_state.get('kind') == 'recovered_enriched'
             and pending_state.get('trace_id')
+            and str(pending_state.get('request_fingerprint') or '').strip()
+            and isinstance(pending_state.get('request_fingerprint_input'), dict)
             and latest.get('active_summary_version_id')
         ):
             stored_request_input = pending_state.get('request_fingerprint_input')
@@ -913,9 +915,7 @@ async def recover_failed_conversation_summary(
                 summary={},
                 summary_kind='recovered_enriched',
                 require_canonical=True,
-                replay_request_fingerprint_input=(
-                    stored_request_input if isinstance(stored_request_input, dict) else None
-                ),
+                replay_request_fingerprint_input=stored_request_input,
                 canonical_retry_recorder=_processing_retry_canonical_recorder(
                     uid=uid,
                     conversation_id=conversation_id,

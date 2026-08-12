@@ -946,11 +946,11 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 29
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 30
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 11
+          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 19
           pytest tests/unit/test_conversation_summary_cas.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
+          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 83
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
           pytest tests/unit/test_ella_guardian_delivery.py -v
