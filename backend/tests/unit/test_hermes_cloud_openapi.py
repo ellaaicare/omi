@@ -96,6 +96,19 @@ def test_openapi_documents_exact_parallel_grounding_callback_contract():
     conversation_data = contract["components"]["schemas"]["ConversationData"]
     assert "transcript_hash" in conversation_data["required"]
     assert conversation_data["properties"]["transcript_hash"]["pattern"] == "^sha256:[0-9a-f]{64}$"
+    summary_update = contract["components"]["schemas"]["ConversationSummaryUpdate"]
+    assert summary_update["properties"]["based_on_version_id"]["type"] == ["string", "null"]
+    assert summary_update["properties"]["require_based_on_match"]["type"] == "boolean"
+    replay_fields = {
+        "active_summary_version_id",
+        "active_summary_source",
+        "active_summary_kind",
+        "enrichment_status",
+        "enrichment_canonical_status",
+        "enrichment_trace_id",
+    }
+    assert replay_fields <= set(conversation_data["required"])
+    assert replay_fields <= set(conversation_data["properties"])
 
 
 def test_openapi_processor_disclosure_uses_only_exact_v8_processor_ids():

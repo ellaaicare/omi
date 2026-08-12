@@ -523,6 +523,10 @@ components:
           type: string
         trace_id:
           type: string
+        based_on_version_id:
+          type: [string, "null"]
+        require_based_on_match:
+          type: boolean
         set_active:
           type: boolean
         require_canonical:
@@ -537,7 +541,20 @@ components:
           $ref: "#/components/schemas/ParallelTodayCardGroundingEvidence"
     ConversationData:
       type: object
-      required: [conversation_id, uid, transcript, transcript_segments, transcript_hash, segment_count, structured]
+      required:
+        - conversation_id
+        - uid
+        - transcript
+        - transcript_segments
+        - transcript_hash
+        - segment_count
+        - structured
+        - active_summary_version_id
+        - active_summary_source
+        - active_summary_kind
+        - enrichment_status
+        - enrichment_canonical_status
+        - enrichment_trace_id
       properties:
         conversation_id:
           type: string
@@ -578,6 +595,18 @@ components:
           minimum: 0
         structured:
           type: object
+        active_summary_version_id:
+          type: [string, "null"]
+        active_summary_source:
+          type: [string, "null"]
+        active_summary_kind:
+          type: [string, "null"]
+        enrichment_status:
+          type: [string, "null"]
+        enrichment_canonical_status:
+          type: [string, "null"]
+        enrichment_trace_id:
+          type: [string, "null"]
     AiConsentPolicy:
       type: object
       required:
