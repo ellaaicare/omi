@@ -3104,13 +3104,22 @@ def test_strict_summary_writeback_keeps_retryable_state_when_canonical_fails(mon
     assert cas_updates[0][1]["enrichment_state"]["status"] == "writeback_pending_canonical"
     assert cas_updates[0][1]["enrichment_state"]["canonical_status"] == "failed"
     assert cas_updates[0][1]["enrichment_state"]["pending"] is True
+    assert cas_updates[0][1]["enrichment_state"]["request_fingerprint"].startswith("sha256:")
 
 
 def test_strict_summary_writeback_retries_only_canonical_after_transport_uncertainty(monkeypatch):
     conversation = {
         **_retry_conversation(status="completed", request_id=None),
         "active_summary_version_id": "enriched-v2",
-        "summary_versions": [{"id": "enriched-v2", "kind": "recovered_enriched", "is_active": True}],
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "based_on_version_id": "generic-v1",
+                "is_active": True,
+            }
+        ],
         "enrichment_state": {
             "status": "writeback_pending_canonical",
             "pending": True,
@@ -3165,6 +3174,136 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
             }
         }
     ]
+
+
+def test_same_trace_replay_rejects_changed_payload_and_stale_base(monkeypatch):
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "enriched-v2",
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "title": "Stored title",
+                "overview": "[Ella] Stored canonical summary with enough detail.",
+                "emoji": "note",
+                "category": "other",
+                "based_on_version_id": "generic-v1",
+                "is_active": True,
+            }
+        ],
+        "structured": {
+            "title": "Stored title",
+            "overview": "[Ella] Stored canonical summary with enough detail.",
+            "emoji": "note",
+            "category": "other",
+        },
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-exact",
+            "canonical_status": "completed",
+        },
+    }
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "get_conversation",
+        lambda uid, cid: conversation,
+    )
+
+    with pytest.raises(
+        summary_writeback.ConcurrentConversationSummaryChangeError,
+        match="idempotency_payload_changed",
+    ):
+        asyncio.run(
+            summary_writeback.write_conversation_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                title="Different title",
+                overview="[Ella] A different replay payload must not reuse the stored trace.",
+                emoji="alert",
+                category="other",
+                summary_source="hermes_parallel",
+                summary_kind="hermes_enriched",
+                based_on_version_id="stale-v0",
+                require_based_on_match=True,
+                trace_id="trace-exact",
+                canonical_writer=lambda *args, **kwargs: pytest.fail(
+                    "changed same-trace payload must not publish canonically"
+                ),
+                require_canonical=True,
+            )
+        )
+
+
+def test_strict_completed_same_trace_revalidates_canonical_before_success(monkeypatch):
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "enriched-v2",
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "title": "Stored title",
+                "overview": "[Ella] Stored canonical summary with enough detail.",
+                "emoji": "note",
+                "category": "other",
+                "based_on_version_id": "generic-v1",
+                "is_active": True,
+            }
+        ],
+        "structured": {
+            "title": "Stored title",
+            "overview": "[Ella] Stored canonical summary with enough detail.",
+            "emoji": "note",
+            "category": "other",
+        },
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-revalidate",
+            "canonical_status": "completed",
+        },
+    }
+    get_calls = []
+    canonical_versions = []
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "get_conversation",
+        lambda uid, cid: get_calls.append((uid, cid)) or conversation,
+    )
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_versions.append(record["active_summary_version_id"])
+        return {"ok": True}
+
+    result = asyncio.run(
+        summary_writeback.write_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            title="Stored title",
+            overview="[Ella] Stored canonical summary with enough detail.",
+            emoji="note",
+            category="other",
+            summary_kind="recovered_enriched",
+            based_on_version_id="generic-v1",
+            require_based_on_match=True,
+            trace_id="trace-revalidate",
+            canonical_writer=canonical_writer,
+            require_canonical=True,
+        )
+    )
+
+    assert result["idempotent_replay"] is True
+    assert result["canonical_confirmed"] is True
+    assert canonical_versions == ["enriched-v2"]
+    assert len(get_calls) == 4
 
 
 def test_pending_canonical_replay_repairs_newer_active_summary_after_race(monkeypatch):

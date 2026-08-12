@@ -1025,8 +1025,27 @@ def test_update_conversation_summary_same_trace_is_idempotent(monkeypatch):
         lambda uid, conversation_id: {
             "id": conversation_id,
             "active_summary_version_id": "recovered-v1",
+            "structured": {
+                "title": "Recovered",
+                "overview": "[Ella] Recovered summary with enough detail.",
+                "emoji": "brain",
+                "category": "other",
+            },
+            "summary_versions": [
+                {
+                    "id": "recovered-v1",
+                    "source": "observer",
+                    "kind": "recovered_enriched",
+                    "title": "Recovered",
+                    "overview": "[Ella] Recovered summary with enough detail.",
+                    "emoji": "brain",
+                    "category": "other",
+                    "is_active": True,
+                }
+            ],
             "enrichment_state": {
                 "status": "writeback_applied",
+                "source": "observer",
                 "kind": "recovered_enriched",
                 "trace_id": "summary-retry:conversation-1:request-1",
             },

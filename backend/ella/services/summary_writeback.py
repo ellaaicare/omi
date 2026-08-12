@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -44,6 +45,102 @@ def _active_summary_version(conversation: dict[str, Any]) -> dict[str, Any]:
         if isinstance(version, dict) and str(version.get('id') or '').strip() == active_id:
             return version
     return {}
+
+
+def _normalized_tags(raw_tags: Optional[list[str]], existing: Any = None) -> list[str]:
+    if raw_tags is None:
+        return list(existing) if isinstance(existing, list) else []
+    tags: list[str] = []
+    for tag in raw_tags:
+        clean = str(tag).strip().lower().replace(' ', '_')
+        if clean and len(clean) <= 64 and clean not in tags:
+            tags.append(clean)
+    return tags[:12]
+
+
+def _summary_request_fingerprint(
+    *,
+    structured: dict[str, Any],
+    summary_source: str,
+    summary_kind: str,
+    correction_id: Optional[str],
+    based_on_version_id: Optional[str],
+    set_active: bool,
+    require_canonical: bool,
+    require_based_on_match: bool,
+    preserve_generated_results: bool,
+    ella_tags: list[str],
+    ella_signal: Any,
+    today_card_grounding: Any,
+) -> str:
+    payload = {
+        'structured': {key: structured.get(key) for key in ('title', 'overview', 'emoji', 'category')},
+        'summary_source': summary_source,
+        'summary_kind': summary_kind,
+        'correction_id': correction_id,
+        'based_on_version_id': based_on_version_id,
+        'set_active': bool(set_active),
+        'require_canonical': bool(require_canonical),
+        'require_based_on_match': bool(require_based_on_match),
+        'preserve_generated_results': bool(preserve_generated_results),
+        'ella_tags': ella_tags,
+        'ella_signal': ella_signal,
+        'today_card_grounding': today_card_grounding,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    ).encode('utf-8')
+    return 'sha256:' + hashlib.sha256(encoded).hexdigest()
+
+
+def _candidate_replay_structured(
+    conversation: dict[str, Any],
+    active_version: dict[str, Any],
+    *,
+    sanitized: Any,
+) -> dict[str, Any]:
+    structured = {
+        key: active_version.get(key, (conversation.get('structured') or {}).get(key))
+        for key in ('title', 'overview', 'emoji', 'category')
+    }
+    for key in ('title', 'overview', 'emoji', 'category'):
+        value = getattr(sanitized, key)
+        if value is not None:
+            structured[key] = value
+    return structured
+
+
+def _assert_legacy_same_trace_payload_matches(
+    *,
+    conversation: dict[str, Any],
+    active_version: dict[str, Any],
+    enrichment_state: dict[str, Any],
+    candidate_structured: dict[str, Any],
+    summary_source: str,
+    summary_kind: str,
+    correction_id: Optional[str],
+    based_on_version_id: Optional[str],
+    set_active: bool,
+) -> None:
+    if not active_version or not set_active:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
+    if (
+        str(active_version.get('source') or enrichment_state.get('source') or '') != summary_source
+        or str(active_version.get('kind') or enrichment_state.get('kind') or '') != summary_kind
+    ):
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+    if correction_id is not None and active_version.get('correction_id') != correction_id:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+    if based_on_version_id is not None and active_version.get('based_on_version_id') != based_on_version_id:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+    for key in ('title', 'overview', 'emoji', 'category'):
+        expected = active_version.get(key, (conversation.get('structured') or {}).get(key))
+        if candidate_structured.get(key) != expected:
+            raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
 
 
 async def _repair_canonical_to_latest_summary(
@@ -254,6 +351,40 @@ async def write_conversation_summary(
 
     enrichment_state = conversation.get('enrichment_state') or {}
     same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
+    if (
+        not same_trace
+        and require_based_on_match
+        and conversation.get('active_summary_version_id') != based_on_version_id
+    ):
+        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
+    active_version = _active_summary_version(conversation)
+    sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
+    candidate_structured = _candidate_replay_structured(
+        conversation,
+        active_version,
+        sanitized=sanitized,
+    )
+    requested_tags = _normalized_tags(ella_tags)
+    effective_tags = requested_tags if requested_tags else _normalized_tags(None, conversation.get('ella_tags'))
+    effective_signal = ella_signal if ella_signal is not None else conversation.get('ella_signal')
+    replay_based_on_version_id = (
+        based_on_version_id if based_on_version_id is not None else active_version.get('based_on_version_id')
+    )
+    replay_correction_id = correction_id if correction_id is not None else active_version.get('correction_id')
+    request_fingerprint = _summary_request_fingerprint(
+        structured=candidate_structured,
+        summary_source=summary_source,
+        summary_kind=summary_kind,
+        correction_id=replay_correction_id,
+        based_on_version_id=replay_based_on_version_id,
+        set_active=set_active,
+        require_canonical=require_canonical,
+        require_based_on_match=require_based_on_match,
+        preserve_generated_results=preserve_generated_results,
+        ella_tags=effective_tags,
+        ella_signal=effective_signal,
+        today_card_grounding=enrichment_state.get('today_card_grounding'),
+    )
     existing_grounding = enrichment_state.get('today_card_grounding')
     if (
         same_trace
@@ -263,11 +394,38 @@ async def write_conversation_summary(
         != transcript_grounding_hash(_conversation_transcript_segments(conversation))
     ):
         raise ConcurrentConversationSummaryChangeError('transcript_changed')
+    if same_trace:
+        stored_fingerprint = str(enrichment_state.get('request_fingerprint') or '').strip()
+        if stored_fingerprint:
+            if stored_fingerprint != request_fingerprint:
+                raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+        else:
+            _assert_legacy_same_trace_payload_matches(
+                conversation=conversation,
+                active_version=active_version,
+                enrichment_state=enrichment_state,
+                candidate_structured=candidate_structured,
+                summary_source=summary_source,
+                summary_kind=summary_kind,
+                correction_id=correction_id,
+                based_on_version_id=based_on_version_id,
+                set_active=set_active,
+            )
     if (
         same_trace
         and enrichment_state.get('status') == 'writeback_applied'
         and (not require_canonical or enrichment_state.get('canonical_status') == 'completed')
     ):
+        if require_canonical:
+            await _repair_canonical_to_latest_summary(
+                uid=uid,
+                conversation_id=conversation_id,
+                canonical_writer=canonical_writer,
+            )
+            refreshed = conversations_db.get_conversation(uid, conversation_id)
+            if refreshed is None:
+                raise ConversationSummaryNotFoundError(conversation_id)
+            conversation = refreshed
         return {
             'status': 'ok',
             'conversation_id': conversation_id,
@@ -300,8 +458,8 @@ async def write_conversation_summary(
                 canonical_writer,
                 uid,
                 canonical_conversation,
-                summary_source=summary_source,
-                summary_kind=summary_kind,
+                summary_source=str(enrichment_state.get('source') or active_version.get('source') or ''),
+                summary_kind=str(enrichment_state.get('kind') or active_version.get('kind') or ''),
                 trace_id=trace_id,
             )
             if not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True:
@@ -332,7 +490,6 @@ async def write_conversation_summary(
     if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
         raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
-    sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
     update_data: dict[str, Any] = {}
     if sanitized.title is not None:
         update_data['structured.title'] = sanitized.title
@@ -431,6 +588,23 @@ async def write_conversation_summary(
             **today_card_grounding,
             'source_version_id': version_update['new_summary_version_id'],
         }
+    normalized_tags = _normalized_tags(ella_tags)
+    written_tags = normalized_tags if normalized_tags else _normalized_tags(None, conversation.get('ella_tags'))
+    written_signal = ella_signal if ella_signal is not None else conversation.get('ella_signal')
+    request_fingerprint = _summary_request_fingerprint(
+        structured=structured,
+        summary_source=summary_source,
+        summary_kind=summary_kind,
+        correction_id=correction_id,
+        based_on_version_id=based_on_version_id or version_update['summary_versions'][-1].get('based_on_version_id'),
+        set_active=set_active,
+        require_canonical=require_canonical,
+        require_based_on_match=require_based_on_match,
+        preserve_generated_results=preserve_generated_results,
+        ella_tags=written_tags,
+        ella_signal=written_signal,
+        today_card_grounding=bound_today_card_grounding,
+    )
     state_updated_at = datetime.now(timezone.utc)
     update_data['summary_versions'] = version_update['summary_versions']
     update_data['active_summary_version_id'] = version_update['active_summary_version_id']
@@ -444,6 +618,7 @@ async def write_conversation_summary(
         'error': None,
         'canonical_status': 'pending' if require_canonical else 'unconfirmed',
         'today_card_grounding': bound_today_card_grounding,
+        'request_fingerprint': request_fingerprint,
     }
 
     if internal_assessment_fetcher:
@@ -451,11 +626,6 @@ async def write_conversation_summary(
         if internal_assessment:
             update_data['internal_assessment'] = internal_assessment
 
-    normalized_tags = []
-    for tag in ella_tags or []:
-        clean = str(tag).strip().lower().replace(' ', '_')
-        if clean and len(clean) <= 64 and clean not in normalized_tags:
-            normalized_tags.append(clean)
     if normalized_tags:
         update_data['ella_tags'] = normalized_tags[:12]
     if ella_signal is not None:
