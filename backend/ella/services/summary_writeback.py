@@ -190,6 +190,12 @@ async def write_conversation_summary(
         }
 
     if same_trace and require_canonical and enrichment_state.get('status') == 'writeback_pending_canonical':
+        result_summary_version_id = str(enrichment_state.get('result_summary_version_id') or '').strip()
+        if (
+            not result_summary_version_id
+            or str(conversation.get('active_summary_version_id') or '').strip() != result_summary_version_id
+        ):
+            raise ConcurrentConversationSummaryChangeError('summary_result_version_changed')
         confirmed_state = {
             **enrichment_state,
             'status': 'writeback_applied',
@@ -339,6 +345,7 @@ async def write_conversation_summary(
         'source': summary_source,
         'kind': summary_kind,
         'trace_id': trace_id,
+        'result_summary_version_id': version_update['active_summary_version_id'],
         **(
             {
                 'source_transcript_hash': expected_transcript_hash,

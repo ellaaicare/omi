@@ -1058,3 +1058,56 @@ def test_parallel_summary_source_match_replay_is_idempotent(monkeypatch):
     assert result["status"] == "ok"
     assert result["idempotent_replay"] is True
     assert result["active_summary_version_id"] == "summary-v2"
+
+
+def test_pending_canonical_replay_rejects_result_version_drift(monkeypatch):
+    segments = [{"is_user": True, "text": "A synthetic transcript."}]
+    transcript_hash = transcript_grounding_hash(segments)
+    canonical_writer = MagicMock(return_value={"ok": True})
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "id": conversation_id,
+            "active_summary_version_id": "summary-v3",
+            "summary_versions": [
+                {"id": "summary-v2", "is_active": False},
+                {"id": "summary-v3", "is_active": True},
+            ],
+            "structured": {
+                "title": "Corrected later summary",
+                "overview": "A later correction must not publish under an older trace.",
+            },
+            "transcript_segments": segments,
+            "enrichment_state": {
+                "status": "writeback_pending_canonical",
+                "canonical_status": "pending",
+                "trace_id": "hermes-parallel:conversation-1:source-receipt",
+                "source_transcript_hash": transcript_hash,
+                "source_active_summary_version_id": "summary-v1",
+                "result_summary_version_id": "summary-v2",
+            },
+        },
+    )
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", canonical_writer)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-1",
+                callbacks.ConversationSummaryUpdate(
+                    title="Older generated summary",
+                    based_on_version_id="summary-v1",
+                    trace_id="hermes-parallel:conversation-1:source-receipt",
+                    require_canonical=True,
+                    expected_transcript_hash=transcript_hash,
+                    require_source_match=True,
+                ),
+                uid="user-1",
+                service=_service_authority("user-1"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "summary_result_version_changed"
+    canonical_writer.assert_not_called()

@@ -35,13 +35,20 @@ def acknowledge_capture_persistence_batch(
     segment_buffer: MutableSequence[Any],
     photo_buffer: MutableSequence[Any],
     batch: CapturePersistenceBatch,
+    *,
+    segments: bool = True,
+    photos: bool = True,
 ) -> None:
     segment_count = len(batch.segment_object_ids)
     photo_count = len(batch.photo_object_ids)
     current_segment_ids = tuple(id(item) for item in segment_buffer[:segment_count])
     current_photo_ids = tuple(id(item) for item in photo_buffer[:photo_count])
-    if current_segment_ids != batch.segment_object_ids or current_photo_ids != batch.photo_object_ids:
+    if (segments and current_segment_ids != batch.segment_object_ids) or (
+        photos and current_photo_ids != batch.photo_object_ids
+    ):
         raise RuntimeError("capture_buffer_changed_before_persistence_ack")
 
-    del segment_buffer[:segment_count]
-    del photo_buffer[:photo_count]
+    if segments:
+        del segment_buffer[:segment_count]
+    if photos:
+        del photo_buffer[:photo_count]
