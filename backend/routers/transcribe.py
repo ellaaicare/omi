@@ -71,6 +71,7 @@ from utils.conversations.process_conversation import (
     process_conversation,
     retrieve_in_progress_conversation,
 )
+from utils.capture_buffer import acknowledge_capture_persistence_batch, prepare_capture_persistence_batch
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -1763,35 +1764,6 @@ async def _stream_handler(
             if not realtime_segment_buffers and not realtime_photo_buffers:
                 continue
 
-            segments_to_process = realtime_segment_buffers.copy()
-
-            # DEBUG: Log received transcript segments
-            if segments_to_process:
-                if first_transcript_buffered_at is None:
-                    first_transcript_buffered_at = time.time()
-                    _latency_log(
-                        "transcript_buffered",
-                        buffered_segment_count=len(segments_to_process),
-                        since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_buffered_at),
-                    )
-                print(
-                    f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id}  conv={current_conversation_id}"
-                )
-                if len(segments_to_process) > 0:
-                    first_text = (
-                        segments_to_process[0].get("text", "")[:80]
-                        if isinstance(segments_to_process[0], dict)
-                        else str(segments_to_process[0])[:80]
-                    )
-                    print(f"[TRANSCRIPT-RECV] First segment: {first_text}")
-
-            realtime_segment_buffers = []
-
-            photos_to_process = realtime_photo_buffers.copy()
-            realtime_photo_buffers = []
-
-            finished_at = datetime.now(timezone.utc)
-
             # Get conversation
             conversation_data = conversations_db.get_conversation(uid, current_conversation_id)
             if not conversation_data:
@@ -1803,9 +1775,34 @@ async def _stream_handler(
                 continue
 
             # Guard first_audio_byte_timestamp must be set
-            if not first_audio_byte_timestamp:
+            if first_audio_byte_timestamp is None:
                 print(f"Warning: first_audio_byte_timestamp not set, skipping segment processing", uid, session_id)
                 continue
+
+            persistence_batch = prepare_capture_persistence_batch(
+                realtime_segment_buffers,
+                realtime_photo_buffers,
+                conversation_ready=True,
+                timestamp_ready=True,
+            )
+            if persistence_batch is None:
+                continue
+            segments_to_process = list(persistence_batch.segments)
+            photos_to_process = list(persistence_batch.photos)
+
+            if segments_to_process:
+                if first_transcript_buffered_at is None:
+                    first_transcript_buffered_at = time.time()
+                    _latency_log(
+                        "transcript_buffered",
+                        buffered_segment_count=len(segments_to_process),
+                        since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_buffered_at),
+                    )
+                print(
+                    f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id} conv={current_conversation_id}"
+                )
+
+            finished_at = datetime.now(timezone.utc)
 
             transcript_segments = []
             if segments_to_process:
@@ -1851,6 +1848,11 @@ async def _stream_handler(
             if not result or not result[0]:
                 continue
             conversation, updated_segments, removed_ids = result
+            acknowledge_capture_persistence_batch(
+                realtime_segment_buffers,
+                realtime_photo_buffers,
+                persistence_batch,
+            )
 
             if removed_ids:
                 _send_message_event(SegmentsDeletedEvent(segment_ids=removed_ids))
