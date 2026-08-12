@@ -74,6 +74,7 @@ from utils.task_sync import auto_sync_action_items_batch
 from utils.other.storage import precache_conversation_audio
 from utils.conversations.failure_state import (
     CONVERSATION_PROCESSING_FAILED,
+    CONVERSATION_SUMMARY_FAILED,
     apply_conversation_processing_failed,
     clear_conversation_processing_error,
 )
@@ -594,6 +595,19 @@ def process_conversation(
 
     conversation = _get_conversation_obj(uid, structured, conversation, discarded)
     clear_conversation_processing_error(conversation)
+
+    if not discarded:
+        summary_version_update = conversations_db.generated_summary_versioning_update(conversation.dict())
+        if summary_version_update:
+            conversation.summary_versions = [
+                SummaryVersion(**version) for version in summary_version_update.get('summary_versions', [])
+            ] or conversation.summary_versions
+            conversation.active_summary_version_id = summary_version_update.get(
+                'active_summary_version_id', conversation.active_summary_version_id
+            )
+        if not str(conversation.active_summary_version_id or '').strip():
+            mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_SUMMARY_FAILED)
+            raise RuntimeError('conversation summary version unavailable')
 
     # AI-based folder assignment
     assigned_folder_id = None

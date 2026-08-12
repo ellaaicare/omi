@@ -333,6 +333,56 @@ def build_summary_version_update(
     }
 
 
+def generated_summary_versioning_update(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure a stock-generated summary has one durable active CAS version."""
+    if not conversation_data:
+        return {}
+
+    versions = copy.deepcopy(conversation_data.get('summary_versions') or [])
+    active_version = _active_summary_version(conversation_data)
+    if active_version:
+        active_id = str(active_version.get('id') or '').strip()
+        if not active_id or str(conversation_data.get('active_summary_version_id') or '').strip() == active_id:
+            return {}
+        return {'active_summary_version_id': active_id}
+
+    if versions:
+        latest = next(
+            (
+                version
+                for version in reversed(versions)
+                if isinstance(version, dict) and str(version.get('id') or '').strip()
+            ),
+            None,
+        )
+        if not latest:
+            return {}
+        active_id = str(latest['id'])
+        for version in versions:
+            if isinstance(version, dict):
+                version['is_active'] = str(version.get('id') or '') == active_id
+        return {
+            'summary_versions': versions,
+            'active_summary_version_id': active_id,
+        }
+
+    structured = conversation_data.get('structured') or {}
+    if not _has_summary_content(structured):
+        return {}
+    created_at = conversation_data.get('created_at') or datetime.now(timezone.utc)
+    version = _build_summary_version_payload(
+        structured=structured,
+        created_at=_ensure_timezone_aware(created_at),
+        source='omi',
+        kind='generated',
+        is_active=True,
+    )
+    return {
+        'summary_versions': [version],
+        'active_summary_version_id': version['id'],
+    }
+
+
 # *********************************
 # ******* ENCRYPTION HELPERS ******
 # *********************************
