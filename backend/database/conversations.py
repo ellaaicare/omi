@@ -647,6 +647,91 @@ def update_conversation_if_active_summary_version(
     )
 
 
+_SUMMARY_ENRICHMENT_AUTHORITY_FIELDS = (
+    'trace_id',
+    'request_fingerprint',
+    'status',
+    'canonical_status',
+    'source',
+    'kind',
+)
+
+
+def _summary_enrichment_authority_matches(
+    conversation: dict,
+    expected_enrichment_state: dict,
+) -> bool:
+    current_state = conversation.get('enrichment_state') or {}
+    return all(
+        current_state.get(field) == expected_enrichment_state.get(field)
+        for field in _SUMMARY_ENRICHMENT_AUTHORITY_FIELDS
+    )
+
+
+def _update_conversation_if_summary_authority_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
+        return False
+    if not _summary_enrichment_authority_matches(
+        conversation,
+        expected_enrichment_state,
+    ):
+        return False
+    doc_level = conversation.get('data_protection_level', 'standard')
+    prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    return True
+
+
+@transactional
+def _update_conversation_if_summary_authority(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    return _update_conversation_if_summary_authority_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        expected_enrichment_state,
+        update_data,
+    )
+
+
+def update_conversation_if_summary_authority(
+    uid: str,
+    conversation_id: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_if_summary_authority(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        expected_enrichment_state,
+        update_data,
+    )
+
+
 def _update_conversation_if_transcript_hash_transaction(
     transaction,
     conversation_ref,
@@ -655,6 +740,7 @@ def _update_conversation_if_transcript_hash_transaction(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
     from utils.ella.canonical_omi import transcript_grounding_hash
 
@@ -671,6 +757,11 @@ def _update_conversation_if_transcript_hash_transaction(
         conversation.get('active_summary_version_id') or ''
     ) != str(expected_active_summary_version_id or ''):
         return False
+    if expected_enrichment_state is not None and not _summary_enrichment_authority_matches(
+        conversation,
+        expected_enrichment_state,
+    ):
+        return False
     doc_level = conversation.get('data_protection_level', 'standard')
     prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
     transaction.update(conversation_ref, prepared_data)
@@ -686,6 +777,7 @@ def _update_conversation_if_transcript_hash(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
     return _update_conversation_if_transcript_hash_transaction(
         transaction,
@@ -694,6 +786,7 @@ def _update_conversation_if_transcript_hash(
         expected_transcript_hash,
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
+        expected_enrichment_state=expected_enrichment_state,
     )
 
 
@@ -704,6 +797,7 @@ def update_conversation_if_transcript_hash(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -715,6 +809,7 @@ def update_conversation_if_transcript_hash(
         expected_transcript_hash,
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
+        expected_enrichment_state=expected_enrichment_state,
     )
 
 

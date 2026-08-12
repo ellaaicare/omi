@@ -9,18 +9,44 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from utils.ella.canonical_omi import transcript_grounding_hash
 
-sys.modules.setdefault("database._client", MagicMock())
-sys.modules.setdefault("database.conversations", MagicMock())
-sys.modules.setdefault("database.memories", MagicMock())
-sys.modules.setdefault("database.users", MagicMock())
-sys.modules.setdefault("httpx", MagicMock())
-sys.modules.setdefault("asyncpg", MagicMock())
-sys.modules.setdefault("firebase_admin", MagicMock())
-sys.modules.setdefault("utils.other.endpoints", MagicMock())
-sys.modules.setdefault("utils.notifications", MagicMock())
-sys.modules.setdefault("utils.other.storage", MagicMock())
-sys.modules.pop("ella.config", None)
-sys.modules.setdefault("database.ella_contacts", MagicMock())
+_MISSING_MODULE = object()
+_STUBBED_IMPORT_MODULES = {
+    "database._client": MagicMock(),
+    "database.conversations": MagicMock(),
+    "database.memories": MagicMock(),
+    "database.users": MagicMock(),
+    "httpx": MagicMock(),
+    "asyncpg": MagicMock(),
+    "firebase_admin": MagicMock(),
+    "utils.other.endpoints": MagicMock(),
+    "utils.notifications": MagicMock(),
+    "utils.other.storage": MagicMock(),
+    "database.ella_contacts": MagicMock(),
+}
+_RELOADED_IMPORT_MODULES = (
+    "ella.config",
+    "ella.services.provisioning",
+    "ella.services.runtime_resolver",
+    "ella.services.summary_writeback",
+)
+_ISOLATED_IMPORT_MODULES = (*_STUBBED_IMPORT_MODULES, *_RELOADED_IMPORT_MODULES)
+_ORIGINAL_MODULES = {name: sys.modules.get(name, _MISSING_MODULE) for name in _ISOLATED_IMPORT_MODULES}
+for _module_name, _stub_module in _STUBBED_IMPORT_MODULES.items():
+    sys.modules[_module_name] = _stub_module
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if _parent_module is not None:
+        setattr(_parent_module, _attribute_name, _stub_module)
+for _module_name in _RELOADED_IMPORT_MODULES:
+    _removed_module = sys.modules.pop(_module_name, None)
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if (
+        _parent_module is not None
+        and hasattr(_parent_module, _attribute_name)
+        and getattr(_parent_module, _attribute_name) is _removed_module
+    ):
+        delattr(_parent_module, _attribute_name)
 
 _backend_path = Path(__file__).resolve().parents[2]
 if str(_backend_path) not in sys.path:
@@ -31,6 +57,22 @@ _callbacks_spec = importlib.util.spec_from_file_location("ella_callbacks_test_mo
 callbacks = importlib.util.module_from_spec(_callbacks_spec)
 assert _callbacks_spec is not None and _callbacks_spec.loader is not None
 _callbacks_spec.loader.exec_module(callbacks)
+
+for _module_name, _original_module in _ORIGINAL_MODULES.items():
+    _loaded_module = sys.modules.get(_module_name)
+    if _original_module is _MISSING_MODULE:
+        sys.modules.pop(_module_name, None)
+    else:
+        sys.modules[_module_name] = _original_module
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if _parent_module is None:
+        continue
+    if _original_module is _MISSING_MODULE:
+        if getattr(_parent_module, _attribute_name, None) is _loaded_module:
+            delattr(_parent_module, _attribute_name)
+    else:
+        setattr(_parent_module, _attribute_name, _original_module)
 
 
 def _service_authority(uid: str):
@@ -726,9 +768,10 @@ def _configure_parallel_grounding_write(monkeypatch):
     )
     monkeypatch.setattr(
         callbacks.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, conversation_id, expected, update_data: (
+        "update_conversation_if_summary_authority",
+        lambda uid, conversation_id, expected, expected_state, update_data: (
             captured.setdefault("confirmation_expected_version", expected),
+            captured.setdefault("confirmation_expected_state", expected_state),
             captured.setdefault("confirmed_state", update_data),
             True,
         )[-1],
@@ -824,7 +867,7 @@ def test_parallel_canonical_confirmation_repairs_latest_summary_after_race(monke
     monkeypatch.setattr(callbacks.conversations_db, "get_conversation", get_conversation)
     monkeypatch.setattr(
         callbacks.conversations_db,
-        "update_conversation_if_active_summary_version",
+        "update_conversation_if_summary_authority",
         lambda *args, **kwargs: False,
     )
 
