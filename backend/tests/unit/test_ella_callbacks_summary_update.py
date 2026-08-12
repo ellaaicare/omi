@@ -510,7 +510,10 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
     assert requests == [
         (
             "http://hermes-provision/workspace/omi-isolated/metadata/conversations/conv-123",
-            {"Authorization": "Bearer hermes-token"},
+            {
+                "Authorization": "Bearer hermes-token",
+                "X-Ella-Owner-Uid": "uid-isolated",
+            },
         )
     ]
 
@@ -678,6 +681,15 @@ def _configure_parallel_grounding_write(monkeypatch):
         "update_conversation",
         lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
     )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, conversation_id, expected, update_data: (
+            captured.setdefault("confirmation_expected_version", expected),
+            captured.setdefault("confirmed_state", update_data),
+            True,
+        )[-1],
+    )
 
     def write_canonical(uid, conversation, **kwargs):
         captured["canonical_conversation"] = conversation
@@ -717,6 +729,89 @@ def test_parallel_enrichment_binds_independent_grounding_to_canonical_version(mo
     assert "supporting_quotes" not in receipt
     canonical_receipt = captured["canonical_conversation"]["enrichment_state"]["today_card_grounding"]
     assert canonical_receipt == receipt
+
+
+def test_parallel_canonical_confirmation_repairs_latest_summary_after_race(monkeypatch):
+    captured = _configure_parallel_grounding_write(monkeypatch)
+    correction = {
+        "id": "cafe-123",
+        "active_summary_version_id": "correction-v3",
+        "summary_versions": [
+            {
+                "id": "correction-v3",
+                "source": "ios_correction",
+                "kind": "corrected_enriched",
+                "is_active": True,
+            }
+        ],
+        "structured": {
+            "title": "Corrected cafe title",
+            "overview": "[Ella] Corrected cafe overview with enough detail.",
+            "emoji": "☕",
+            "category": callbacks.CategoryEnum.other,
+        },
+        "transcript_segments": [{"is_user": True, "text": "I ordered a waffle with oat milk after our morning walk."}],
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "source": "ios_correction",
+            "kind": "corrected_enriched",
+            "trace_id": "correction:cafe-123",
+            "canonical_status": "completed",
+        },
+    }
+    get_calls = 0
+
+    def get_conversation(uid, conversation_id):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            return {
+                "id": conversation_id,
+                "structured": {
+                    "title": "Original cafe title",
+                    "overview": "[Ella] Original cafe overview with enough detail.",
+                    "emoji": "☕",
+                    "category": callbacks.CategoryEnum.other,
+                },
+                "transcript_segments": correction["transcript_segments"],
+            }
+        return correction
+
+    canonical_versions = []
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversation", get_conversation)
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda *args, **kwargs: False,
+    )
+
+    def write_canonical(uid, conversation, **kwargs):
+        canonical_versions.append(conversation["active_summary_version_id"])
+        return {"ok": True}
+
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", write_canonical)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "cafe-123",
+                callbacks.ConversationSummaryUpdate(
+                    title="Cafe Coffee and Waffle Stop",
+                    overview="[Ella] You ordered a waffle with oat milk after your morning walk.",
+                    summary_source="hermes_parallel",
+                    summary_kind="hermes_enriched",
+                    trace_id="parallel-grounding:cafe-123",
+                    require_canonical=True,
+                    today_card_grounding_evidence=_parallel_grounding_evidence(),
+                ),
+                uid="user-123",
+                service=_service_authority("user-123"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "active_summary_version_changed"
+    assert canonical_versions == ["parallel-v2", "correction-v3"]
 
 
 @pytest.mark.parametrize(
