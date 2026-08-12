@@ -24,6 +24,14 @@ from utils.ella.canonical_omi import (
 logger = logging.getLogger(__name__)
 
 _REQUEST_VALUE_UNSET = object()
+_SUMMARY_ENRICHMENT_AUTHORITY_FIELDS = (
+    'trace_id',
+    'request_fingerprint',
+    'status',
+    'canonical_status',
+    'source',
+    'kind',
+)
 
 
 class ConversationSummaryNotFoundError(Exception):
@@ -145,6 +153,11 @@ def _active_summary_authority(conversation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summary_enrichment_authority(conversation: dict[str, Any]) -> dict[str, Any]:
+    enrichment_state = conversation.get('enrichment_state') or {}
+    return {field: enrichment_state.get(field) for field in _SUMMARY_ENRICHMENT_AUTHORITY_FIELDS}
+
+
 def _conversation_projected_to_active_summary(conversation: dict[str, Any]) -> dict[str, Any]:
     authority = _active_summary_authority(conversation)
     if not authority['active_summary_version_id'] or not _active_summary_version(conversation):
@@ -189,14 +202,11 @@ def _assert_replay_authority_unchanged(
     *,
     conversation: dict[str, Any],
     expected_active_authority: dict[str, Any],
-    expected_trace_id: str,
-    expected_fingerprint: str,
+    expected_enrichment_authority: dict[str, Any],
 ) -> None:
-    enrichment_state = conversation.get('enrichment_state') or {}
     if (
         _active_summary_authority(conversation) != expected_active_authority
-        or str(enrichment_state.get('trace_id') or '') != expected_trace_id
-        or str(enrichment_state.get('request_fingerprint') or '') != expected_fingerprint
+        or _summary_enrichment_authority(conversation) != expected_enrichment_authority
     ):
         raise ConcurrentConversationSummaryChangeError('idempotency_authority_changed')
 
@@ -268,6 +278,7 @@ async def _repair_canonical_to_latest_summary(
             raise ConcurrentConversationSummaryChangeError('active_summary_version_missing')
         active_version = _active_summary_version(latest)
         enrichment_state = latest.get('enrichment_state') or {}
+        expected_enrichment_authority = _summary_enrichment_authority(latest)
         canonical_conversation = _conversation_projected_to_active_summary({**latest, 'id': conversation_id})
         canonical_result = await asyncio.to_thread(
             canonical_writer,
@@ -286,8 +297,7 @@ async def _repair_canonical_to_latest_summary(
             _assert_replay_authority_unchanged(
                 conversation=refreshed,
                 expected_active_authority=expected_active_authority,
-                expected_trace_id=str(enrichment_state.get('trace_id') or ''),
-                expected_fingerprint=str(enrichment_state.get('request_fingerprint') or ''),
+                expected_enrichment_authority=expected_enrichment_authority,
             )
         except ConcurrentConversationSummaryChangeError:
             continue
@@ -576,8 +586,7 @@ async def write_conversation_summary(
         and (not require_canonical or enrichment_state.get('canonical_status') == 'completed')
     ):
         expected_active_authority = _active_summary_authority(conversation)
-        expected_trace_id = str(enrichment_state.get('trace_id') or '')
-        expected_fingerprint = str(enrichment_state.get('request_fingerprint') or '')
+        expected_enrichment_authority = _summary_enrichment_authority(conversation)
         if require_canonical:
             await _repair_canonical_to_latest_summary(
                 uid=uid,
@@ -591,8 +600,7 @@ async def write_conversation_summary(
             _assert_replay_authority_unchanged(
                 conversation=refreshed,
                 expected_active_authority=expected_active_authority,
-                expected_trace_id=expected_trace_id,
-                expected_fingerprint=expected_fingerprint,
+                expected_enrichment_authority=expected_enrichment_authority,
             )
             conversation = refreshed
             enrichment_state = conversation.get('enrichment_state') or {}

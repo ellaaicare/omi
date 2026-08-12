@@ -3867,6 +3867,90 @@ def test_canonical_repair_projects_structured_fields_from_active_version(monkeyp
     assert canonical_records[0]["structured"] != conversation["structured"]
 
 
+@pytest.mark.parametrize(
+    ("field", "racing_value"),
+    [
+        ("trace_id", "trace-racing"),
+        ("request_fingerprint", "sha256:" + ("b" * 64)),
+        ("status", "writeback_pending_canonical"),
+        ("canonical_status", "pending"),
+        ("source", "ios_correction"),
+        ("kind", "corrected_enriched"),
+    ],
+)
+def test_canonical_repair_rejects_each_post_write_enrichment_authority_race(
+    monkeypatch,
+    field,
+    racing_value,
+):
+    structured = {
+        "title": "Active title",
+        "overview": "[Ella] The active summary remains stable while enrichment authority races.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    conversation = {
+        "active_summary_version_id": "active-v2",
+        "summary_versions": [
+            {
+                "id": "active-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "structured": structured,
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-active",
+            "canonical_status": "completed",
+            "request_fingerprint": "sha256:" + ("a" * 64),
+        },
+    }
+    raced = {
+        **conversation,
+        "enrichment_state": {
+            **conversation["enrichment_state"],
+            field: racing_value,
+        },
+    }
+    reads = iter([conversation, raced])
+    canonical_calls = []
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "get_conversation",
+        lambda uid, cid: next(reads),
+    )
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_calls.append((uid, record, kwargs))
+        return {"ok": True}
+
+    async def mark_pending(**kwargs):
+        return None
+
+    monkeypatch.setattr(summary_writeback, "_mark_latest_summary_pending_canonical", mark_pending)
+
+    with pytest.raises(
+        summary_writeback.CanonicalSummaryRepairExhaustedError,
+        match="active_summary_version_changed_during_canonical_repair",
+    ):
+        asyncio.run(
+            summary_writeback._repair_canonical_to_latest_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                canonical_writer=canonical_writer,
+                max_attempts=1,
+            )
+        )
+
+    assert len(canonical_calls) == 1
+
+
 def test_canonical_confirmation_does_not_overwrite_same_version_authority_race(monkeypatch):
     structured = {
         "title": "Racing title",
