@@ -241,6 +241,11 @@ class ConversationSummaryUpdate(BaseModel):
     set_active: bool = True
     trace_id: Optional[str] = None
     require_canonical: bool = False
+    expected_transcript_hash: Optional[str] = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    require_source_match: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
     today_card_grounding_evidence: Optional[ParallelTodayCardGroundingEvidence] = None
@@ -433,6 +438,8 @@ async def update_conversation_summary(
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
             require_canonical=update.require_canonical,
+            expected_transcript_hash=update.expected_transcript_hash,
+            require_source_match=update.require_source_match,
             today_card_grounding_evidence=(
                 update.today_card_grounding_evidence.model_dump()
                 if update.today_card_grounding_evidence is not None

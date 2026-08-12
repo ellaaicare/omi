@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import uuid
 import zlib
@@ -25,6 +26,7 @@ from utils.other.storage import list_audio_chunks
 
 conversations_collection = 'conversations'
 conversation_processing_retries_collection = 'processing_retries'
+capture_persistence_batches_collection = 'capture_persistence_batches'
 conversation_summary_retryable_errors = {
     'conversation_summary_failed',
     'conversation_summary_recovery_failed',
@@ -655,6 +657,7 @@ def _update_conversation_if_transcript_hash_transaction(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
 ) -> bool:
     from utils.ella.canonical_omi import transcript_grounding_hash
 
@@ -667,7 +670,7 @@ def _update_conversation_if_transcript_hash_transaction(
         return False
     if transcript_grounding_hash(readable_conversation.get('transcript_segments') or []) != expected_transcript_hash:
         return False
-    if expected_active_summary_version_id is not None and str(
+    if (match_active_summary_version or expected_active_summary_version_id is not None) and str(
         conversation.get('active_summary_version_id') or ''
     ) != str(expected_active_summary_version_id or ''):
         return False
@@ -686,6 +689,7 @@ def _update_conversation_if_transcript_hash(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
 ) -> bool:
     return _update_conversation_if_transcript_hash_transaction(
         transaction,
@@ -694,6 +698,7 @@ def _update_conversation_if_transcript_hash(
         expected_transcript_hash,
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
+        match_active_summary_version=match_active_summary_version,
     )
 
 
@@ -704,6 +709,7 @@ def update_conversation_if_transcript_hash(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
 ) -> bool:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -715,6 +721,7 @@ def update_conversation_if_transcript_hash(
         expected_transcript_hash,
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
+        match_active_summary_version=match_active_summary_version,
     )
 
 
@@ -2185,6 +2192,157 @@ def update_conversation_segments(uid: str, conversation_id: str, segments: List[
         update_payload['finished_at'] = finished_at
     prepared_payload = _prepare_conversation_for_write(update_payload, uid, doc_level)
     doc_ref.update(prepared_payload)
+
+
+def _capture_batch_id(conversation_id: str, segment_ids: list[str]) -> str:
+    framed = json.dumps(
+        {"conversation_id": str(conversation_id), "segment_ids": segment_ids},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(framed.encode("utf-8")).hexdigest()
+
+
+def persist_capture_persistence_batch(
+    uid: str,
+    conversation_id: str,
+    segments: List[dict],
+    finished_at: datetime,
+) -> str:
+    segment_ids = [str(segment.get("id") or "").strip() for segment in segments]
+    if not segment_ids or any(not segment_id for segment_id in segment_ids):
+        raise ValueError("capture_persistence_segment_id_required")
+    batch_id = _capture_batch_id(conversation_id, segment_ids)
+    payload = {
+        "conversation_id": str(conversation_id),
+        "segments": segments,
+        "finished_at": finished_at.astimezone(timezone.utc).isoformat(),
+    }
+    encrypted_payload = encryption.encrypt(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        uid,
+    )
+    batch_ref = (
+        db.collection('users')
+        .document(uid)
+        .collection(conversations_collection)
+        .document(conversation_id)
+        .collection(capture_persistence_batches_collection)
+        .document(batch_id)
+    )
+    batch_ref.set(
+        {
+            "batch_id": batch_id,
+            "payload": encrypted_payload,
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+    return batch_id
+
+
+def list_capture_persistence_batches(uid: str, conversation_id: str) -> list[str]:
+    batches_ref = (
+        db.collection('users')
+        .document(uid)
+        .collection(conversations_collection)
+        .document(conversation_id)
+        .collection(capture_persistence_batches_collection)
+    )
+    return sorted(str(snapshot.id) for snapshot in batches_ref.stream() if str(snapshot.id or "").strip())
+
+
+def _decode_capture_persistence_batch(uid: str, data: dict) -> dict:
+    encrypted_payload = data.get("payload")
+    if not isinstance(encrypted_payload, str) or not encrypted_payload:
+        raise ValueError("capture_persistence_payload_invalid")
+    payload = json.loads(encryption.decrypt_strict(encrypted_payload, uid))
+    if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
+        raise ValueError("capture_persistence_payload_invalid")
+    return payload
+
+
+def _commit_capture_persistence_batch_transaction(
+    transaction,
+    conversation_ref,
+    batch_ref,
+    uid: str,
+    conversation_id: str,
+) -> dict:
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    batch_snapshot = batch_ref.get(transaction=transaction)
+    if not batch_snapshot.exists:
+        return {"status": "already_committed", "updated_segments": [], "removed_ids": []}
+    if not conversation_snapshot.exists:
+        raise ValueError("capture_persistence_conversation_missing")
+    batch_data = batch_snapshot.to_dict() or {}
+    batch_id = str(batch_data.get("batch_id") or getattr(batch_ref, "id", "")).strip()
+    if not batch_id:
+        raise ValueError("capture_persistence_batch_id_missing")
+    payload = _decode_capture_persistence_batch(uid, batch_data)
+    if str(payload.get("conversation_id") or "") != str(conversation_id):
+        raise ValueError("capture_persistence_conversation_mismatch")
+
+    conversation_data = _prepare_conversation_for_read(conversation_snapshot.to_dict() or {}, uid)
+    if conversation_data is None:
+        raise ValueError("capture_persistence_conversation_invalid")
+    applied_batch_ids = [
+        str(value)
+        for value in conversation_data.get("capture_persistence_applied_batch_ids") or []
+        if str(value).strip()
+    ]
+    if batch_id in applied_batch_ids:
+        transaction.delete(batch_ref)
+        return {"status": "already_committed", "updated_segments": [], "removed_ids": []}
+    existing_segments = [TranscriptSegment(**segment) for segment in conversation_data.get("transcript_segments") or []]
+    incoming_segments = [TranscriptSegment(**segment) for segment in payload["segments"]]
+    existing_ids = {str(segment.id) for segment in existing_segments if segment.id}
+    incoming_segments = [segment for segment in incoming_segments if str(segment.id) not in existing_ids]
+    combined_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
+        existing_segments,
+        incoming_segments,
+    )
+    doc_level = conversation_data.get('data_protection_level', 'standard')
+    update_payload = _prepare_conversation_for_write(
+        {
+            "transcript_segments": [segment.dict() for segment in combined_segments],
+            "finished_at": datetime.fromisoformat(payload["finished_at"]),
+            "capture_persistence_applied_batch_ids": (applied_batch_ids + [batch_id])[-128:],
+        },
+        uid,
+        doc_level,
+    )
+    transaction.update(conversation_ref, update_payload)
+    transaction.delete(batch_ref)
+    return {
+        "status": "committed",
+        "updated_segments": [segment.dict() for segment in updated_segments],
+        "removed_ids": removed_ids,
+    }
+
+
+@transactional
+def _commit_capture_persistence_batch(transaction, conversation_ref, batch_ref, uid: str, conversation_id: str):
+    return _commit_capture_persistence_batch_transaction(
+        transaction,
+        conversation_ref,
+        batch_ref,
+        uid,
+        conversation_id,
+    )
+
+
+def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: str) -> dict:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    batch_ref = conversation_ref.collection(capture_persistence_batches_collection).document(batch_id)
+    return _commit_capture_persistence_batch(
+        db.transaction(),
+        conversation_ref,
+        batch_ref,
+        uid,
+        conversation_id,
+    )
 
 
 # ***********************************
