@@ -114,6 +114,33 @@ ServerConversation _conversation(String id, String transcript,
 }
 
 void main() {
+  test('physical necklace disconnect synchronously clears active device capture', () async {
+    final provider = CaptureProvider();
+    addTearDown(provider.dispose);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    provider.updateRecordingDevice(necklace);
+    provider.updateRecordingState(RecordingState.deviceRecord);
+
+    final stop = provider.handleRecordingDeviceDisconnected(necklace.id);
+
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.stop);
+    await stop;
+  });
+
+  test('necklace disconnect does not stop an unrelated phone capture', () async {
+    final provider = CaptureProvider();
+    addTearDown(provider.dispose);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    provider.updateRecordingDevice(necklace);
+    provider.updateRecordingState(RecordingState.record);
+
+    await provider.handleRecordingDeviceDisconnected(necklace.id);
+
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.record);
+  });
+
   test('rejected phone consent stops before capture authority or transport work', () async {
     var authorityReads = 0;
     var geolocationSends = 0;

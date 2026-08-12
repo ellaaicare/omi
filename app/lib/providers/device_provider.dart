@@ -426,14 +426,17 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('onDisconnected inside: $connectedDevice');
     _havingNewFirmware = false;
+    final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id;
+    if (disconnectedDeviceId != null) {
+      await captureProvider?.handleRecordingDeviceDisconnected(disconnectedDeviceId);
+      if (!_isDeviceOperationCurrent(generation)) return;
+    }
     await setConnectedDevice(null, operationGeneration: generation);
     if (!_isDeviceOperationCurrent(generation)) return;
     await setisDeviceStorageSupport(operationGeneration: generation);
     if (!_isDeviceOperationCurrent(generation)) return;
     setIsConnected(false);
     updateConnectingStatus(false);
-
-    captureProvider?.updateRecordingDevice(null);
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);
@@ -704,6 +707,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     switch (status) {
       case DeviceServiceStatus.stop:
         _deviceOperationGeneration++;
+        final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id;
+        if (disconnectedDeviceId != null) {
+          unawaited(captureProvider?.handleRecordingDeviceDisconnected(disconnectedDeviceId));
+        }
         _deviceServiceReady = false;
         _reconnectionTimer?.cancel();
         _disconnectDebouncer.cancel();
@@ -716,7 +723,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         isConnecting = false;
         isDeviceStorageSupport = false;
         batteryLevel = -1;
-        captureProvider?.updateRecordingDevice(null);
+        if (disconnectedDeviceId == null) {
+          captureProvider?.updateRecordingDevice(null);
+        }
         notifyListeners();
         break;
       case DeviceServiceStatus.ready:

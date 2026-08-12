@@ -71,11 +71,19 @@ class _RecordingCaptureProvider extends CaptureProvider {
 
   final Completer<void>? startGate;
   int deviceStarts = 0;
+  int deviceDisconnects = 0;
+  String? lastDisconnectedDeviceId;
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
     await startGate?.future;
+  }
+
+  @override
+  Future<void> handleRecordingDeviceDisconnected(String deviceId) async {
+    deviceDisconnects++;
+    lastDisconnectedDeviceId = deviceId;
   }
 }
 
@@ -249,6 +257,32 @@ void main() {
     expect(provider.connectedDevice, isNull);
     expect(provider.pairedDevice, isNull);
     expect(provider.isConnecting, isFalse);
+  });
+
+  test('physical disconnect tears down capture before clearing device presentation', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(deviceService: service)..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    provider
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+
+    try {
+      await provider.onDeviceDisconnected();
+    } catch (error) {
+      // Production logs the completed disconnect to Crashlytics. This unit
+      // test intentionally has no Firebase app, so only that report may fail.
+      expect(error.toString(), contains('[core/no-app]'));
+    }
+
+    expect(capture.deviceDisconnects, 1);
+    expect(capture.lastDisconnectedDeviceId, necklace.id);
+    expect(provider.connectedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
   });
 
   test('queued connected callback is cancelled by device-service stop', () async {

@@ -556,6 +556,39 @@ class CaptureProvider extends ChangeNotifier
     _updateRecordingDevice(device);
   }
 
+  /// Ends only the capture owned by the necklace that physically disconnected.
+  /// Phone capture may continue even when a paired necklace drops its BLE link.
+  Future<void> handleRecordingDeviceDisconnected(String deviceId) async {
+    final device = _recordingDevice;
+    if (device == null || device.id != deviceId) return;
+
+    final deviceCaptureActive = recordingState == RecordingState.deviceRecord ||
+        (recordingState == RecordingState.initialising && _micStartFuture == null);
+    if (deviceCaptureActive) {
+      _captureGeneration++;
+      _keepAliveTimer?.cancel();
+      _keepAliveTimer = null;
+      _transcriptServiceReady = false;
+      updateRecordingState(RecordingState.stop);
+    }
+    _updateRecordingDevice(null);
+
+    // Reject trailing BLE bytes while cancellation completes. Device state is
+    // already fail-closed even if a platform subscription refuses to cancel.
+    try {
+      await _closeBleStream(stopCamera: false);
+    } catch (error) {
+      Logger.error('Could not finish disconnected necklace stream cleanup: $error');
+    }
+    if (deviceCaptureActive) {
+      try {
+        await _socket?.stop(reason: 'recording device disconnected');
+      } catch (error) {
+        Logger.error('Could not finish disconnected necklace socket cleanup: $error');
+      }
+    }
+  }
+
   Future _resetStateVariables() async {
     segments = [];
     photos = [];
