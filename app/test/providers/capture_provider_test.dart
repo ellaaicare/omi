@@ -154,7 +154,7 @@ ServerConversation _conversation(String id, String transcript,
 }
 
 void main() {
-  test('production phone path reports native capture without waiting on websocket frames', () async {
+  test('production phone path waits for native capture and a physical frame, not websocket delivery', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();
     var transmittedFrames = 0;
@@ -177,11 +177,15 @@ void main() {
     await pumpEventQueue();
     expect(provider.recordingState, RecordingState.initialising);
 
+    var completed = false;
+    start.whenComplete(() => completed = true);
     mic.confirmRecording();
-    expect(await start, PhoneCaptureStartResult.started);
-    expect(provider.recordingState, RecordingState.record);
+    await pumpEventQueue();
+    expect(completed, isFalse);
+    expect(provider.recordingState, RecordingState.initialising);
 
     mic.emit([1, 2, 3]);
+    expect(await start, PhoneCaptureStartResult.started);
     expect(transmittedFrames, 1);
     expect(provider.recordingState, RecordingState.record);
   });

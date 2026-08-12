@@ -15,11 +15,15 @@ void main() {
     );
   });
 
-  test('native recorder receipt proves physical phone capture started', () async {
+  test('native recorder receipt does not replace physical phone audio proof', () async {
     final proof = PhoneCaptureStartProof();
 
     proof.acceptNativeRecorderStart();
     await proof.waitForNativeRecorder(timeout: const Duration(milliseconds: 50));
+    await expectLater(
+      proof.waitForAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
   });
 
   test('phone physical capture and transcription delivery remain separate facts', () async {

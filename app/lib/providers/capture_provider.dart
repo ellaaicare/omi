@@ -1549,9 +1549,9 @@ class CaptureProvider extends ChangeNotifier
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
 
-    // The native start receipt is the physical microphone boundary. Audio and
-    // transcription delivery are tracked separately so network delay cannot
-    // make a running recorder appear stopped.
+    // Native start plus a nonempty microphone frame prove physical capture.
+    // Transcription delivery remains separate so network delay cannot make a
+    // running recorder appear stopped.
     final startProof = PhoneCaptureStartProof();
     final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
     try {
@@ -1571,9 +1571,12 @@ class CaptureProvider extends ChangeNotifier
       }, onInitializing: () {
         if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
       });
-      await startProof.waitForNativeRecorder(timeout: _captureStartProofTimeout);
+      await Future.wait([
+        startProof.waitForNativeRecorder(timeout: _captureStartProofTimeout),
+        startProof.waitForAudio(timeout: _captureStartProofTimeout),
+      ]);
     } catch (error) {
-      Logger.error('Phone microphone did not confirm native recorder start: $error');
+      Logger.error('Phone microphone did not confirm physical audio start: $error');
       updateRecordingState(RecordingState.stop);
       try {
         await mic.stop();
