@@ -137,6 +137,8 @@ async def write_conversation_summary(
     canonical_writer: Callable[..., dict] = write_omi_canonical_event,
     require_canonical: bool = False,
     require_based_on_match: bool = False,
+    expected_transcript_hash: Optional[str] = None,
+    require_source_match: bool = False,
     preserve_generated_results: bool = False,
     today_card_grounding: Optional[dict[str, Any]] = None,
     today_card_grounding_evidence: Optional[dict[str, Any]] = None,
@@ -144,11 +146,25 @@ async def write_conversation_summary(
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
         raise ConversationSummaryNotFoundError(conversation_id)
+    if require_source_match:
+        if not trace_id or not expected_transcript_hash:
+            raise ValueError('summary_source_match_fields_required')
+        observed_transcript_hash = transcript_grounding_hash(_conversation_transcript_segments(conversation))
+        if observed_transcript_hash != expected_transcript_hash:
+            raise ConcurrentConversationSummaryChangeError('transcript_changed')
     if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
         raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     enrichment_state = conversation.get('enrichment_state') or {}
     same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
+    if require_source_match and same_trace:
+        if (
+            enrichment_state.get('source_transcript_hash') != expected_transcript_hash
+            or enrichment_state.get('source_active_summary_version_id') != based_on_version_id
+        ):
+            raise ConcurrentConversationSummaryChangeError('summary_source_changed')
+    elif require_source_match and conversation.get('active_summary_version_id') != based_on_version_id:
+        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
     existing_grounding = enrichment_state.get('today_card_grounding')
     if (
         same_trace
@@ -323,6 +339,14 @@ async def write_conversation_summary(
         'source': summary_source,
         'kind': summary_kind,
         'trace_id': trace_id,
+        **(
+            {
+                'source_transcript_hash': expected_transcript_hash,
+                'source_active_summary_version_id': based_on_version_id,
+            }
+            if require_source_match
+            else {}
+        ),
         'updated_at': state_updated_at,
         'error': None,
         'canonical_status': 'pending' if require_canonical else 'unconfirmed',
@@ -355,7 +379,18 @@ async def write_conversation_summary(
             'active_summary_version_id': version_update['active_summary_version_id'],
         }
 
-    if grounding_bound_from_evidence:
+    if require_source_match:
+        updated = conversations_db.update_conversation_if_transcript_hash(
+            uid,
+            conversation_id,
+            expected_transcript_hash,
+            update_data,
+            expected_active_summary_version_id=based_on_version_id,
+            match_active_summary_version=True,
+        )
+        if not updated:
+            raise ConcurrentConversationSummaryChangeError('summary_source_changed')
+    elif grounding_bound_from_evidence:
         updated = conversations_db.update_conversation_if_transcript_hash(
             uid,
             conversation_id,

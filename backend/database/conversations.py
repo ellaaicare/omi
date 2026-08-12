@@ -655,6 +655,7 @@ def _update_conversation_if_transcript_hash_transaction(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
 ) -> bool:
     from utils.ella.canonical_omi import transcript_grounding_hash
 
@@ -667,7 +668,7 @@ def _update_conversation_if_transcript_hash_transaction(
         return False
     if transcript_grounding_hash(readable_conversation.get('transcript_segments') or []) != expected_transcript_hash:
         return False
-    if expected_active_summary_version_id is not None and str(
+    if (match_active_summary_version or expected_active_summary_version_id is not None) and str(
         conversation.get('active_summary_version_id') or ''
     ) != str(expected_active_summary_version_id or ''):
         return False
@@ -686,6 +687,7 @@ def _update_conversation_if_transcript_hash(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
 ) -> bool:
     return _update_conversation_if_transcript_hash_transaction(
         transaction,
@@ -694,6 +696,7 @@ def _update_conversation_if_transcript_hash(
         expected_transcript_hash,
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
+        match_active_summary_version=match_active_summary_version,
     )
 
 
@@ -704,6 +707,7 @@ def update_conversation_if_transcript_hash(
     update_data: dict,
     *,
     expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
 ) -> bool:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -715,6 +719,7 @@ def update_conversation_if_transcript_hash(
         expected_transcript_hash,
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
+        match_active_summary_version=match_active_summary_version,
     )
 
 

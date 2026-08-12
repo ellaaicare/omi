@@ -942,9 +942,9 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 24
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 27
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 10
+          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 11
           pytest tests/unit/test_conversation_summary_cas.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
           pytest tests/unit/test_ella_conversation_corrections.py -v
