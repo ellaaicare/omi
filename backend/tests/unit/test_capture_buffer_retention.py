@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
@@ -20,8 +21,11 @@ conversations_db = importlib.util.module_from_spec(_CONVERSATIONS_SPEC)
 _CONVERSATIONS_SPEC.loader.exec_module(conversations_db)
 from utils.capture_buffer import (
     acknowledge_capture_persistence_batch,
+    capture_buffer_contains_conversation,
+    deliver_next_pusher_transcript_batch,
     prepare_capture_persistence_batch,
     prepare_conversation_bound_capture_batch,
+    queue_pusher_transcript_batch,
 )
 
 
@@ -106,6 +110,47 @@ def test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arr
     acknowledge_capture_persistence_batch(bound_segments, bound_photos, bound_batch)
     assert [item["id"] for item in bound_segments] == ["segment-b"]
     assert [item["photo"]["id"] for item in bound_photos] == ["photo-b"]
+    assert not capture_buffer_contains_conversation(
+        bound_segments,
+        bound_photos,
+        conversation_key="_capture_conversation_id",
+        conversation_id="conversation-a",
+    )
+    assert capture_buffer_contains_conversation(
+        bound_segments,
+        bound_photos,
+        conversation_key="_capture_conversation_id",
+        conversation_id="conversation-b",
+    )
+
+    pusher_queue = []
+    queue_pusher_transcript_batch(
+        pusher_queue,
+        [{"id": "segment-a"}],
+        "conversation-a",
+    )
+    sent_payloads = []
+
+    async def fail_send(payload):
+        sent_payloads.append(payload)
+        raise ConnectionError("synthetic pusher failure")
+
+    with pytest.raises(ConnectionError, match="synthetic pusher failure"):
+        asyncio.run(deliver_next_pusher_transcript_batch(pusher_queue, fail_send))
+    assert len(pusher_queue) == 1
+    assert sent_payloads == [
+        {
+            "segments": [{"id": "segment-a"}],
+            "memory_id": "conversation-a",
+        }
+    ]
+
+    async def succeed_send(payload):
+        sent_payloads.append(payload)
+
+    assert asyncio.run(deliver_next_pusher_transcript_batch(pusher_queue, succeed_send))
+    assert pusher_queue == []
+    assert sent_payloads[-1]["memory_id"] == "conversation-a"
 
 
 def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_content():
@@ -257,12 +302,23 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     process_source = source.split("async def _process_conversation", maxsplit=1)[1].split(
         "async def _prepare_in_progess_conversations", maxsplit=1
     )[0]
+    lifecycle_source = source.split("async def conversation_lifecycle_manager", maxsplit=1)[1].split(
+        "async def speaker_identification_task", maxsplit=1
+    )[0]
+    pusher_source = source.split("def create_pusher_task_handler", maxsplit=1)[1].split("# Translate", maxsplit=1)[0]
 
     assert "bind_capture_conversation(segment)" in source
     assert "CAPTURE_CONVERSATION_ID_KEY: conversation_id" in source
     assert "prepare_conversation_bound_capture_batch(" in stream_source
     assert "conversation_id=batch_conversation_id" in stream_source
     assert "drain_capture_persistence_batches(uid, conversation_id)" in process_source
+    assert "if not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
+    assert "return False" in process_source
+    assert "processed = await _process_conversation(current_conversation_id)" in lifecycle_source
+    assert "if processed:" in lifecycle_source
+    assert "queue_pusher_transcript_batch(" in pusher_source
+    assert "deliver_next_pusher_transcript_batch(" in pusher_source
+    assert "batch_conversation_id," in stream_source
 
     class Snapshot:
         exists = True
