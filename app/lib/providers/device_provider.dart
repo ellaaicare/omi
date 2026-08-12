@@ -425,6 +425,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('onDisconnected inside: $connectedDevice');
+    final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id;
     _havingNewFirmware = false;
     await setConnectedDevice(null, operationGeneration: generation);
     if (!_isDeviceOperationCurrent(generation)) return;
@@ -433,7 +434,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     setIsConnected(false);
     updateConnectingStatus(false);
 
-    captureProvider?.updateRecordingDevice(null);
+    if (disconnectedDeviceId != null) {
+      await captureProvider?.handleRecordingDeviceDisconnected(disconnectedDeviceId);
+      if (!_isDeviceOperationCurrent(generation)) return;
+    }
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);

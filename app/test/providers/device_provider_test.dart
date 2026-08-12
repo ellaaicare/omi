@@ -71,11 +71,20 @@ class _RecordingCaptureProvider extends CaptureProvider {
 
   final Completer<void>? startGate;
   int deviceStarts = 0;
+  int deviceDisconnects = 0;
+  String? disconnectedDeviceId;
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
     await startGate?.future;
+  }
+
+  @override
+  Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
+    deviceDisconnects++;
+    disconnectedDeviceId = deviceId;
+    return true;
   }
 }
 
@@ -249,6 +258,31 @@ void main() {
     expect(provider.connectedDevice, isNull);
     expect(provider.pairedDevice, isNull);
     expect(provider.isConnecting, isFalse);
+  });
+
+  test('physical necklace disconnect tears down capture and clears presentation', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider();
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final provider = DeviceProvider(deviceService: service)
+      ..setProviders(capture)
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    // The production connection callback reaches this method after its
+    // debounce. This test environment has no Firebase Crashlytics app, so
+    // allow the unrelated post-teardown analytics call to fail afterward.
+    try {
+      await provider.onDeviceDisconnected();
+    } catch (_) {}
+
+    expect(capture.deviceDisconnects, 1);
+    expect(capture.disconnectedDeviceId, necklace.id);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.connectedDevice, isNull);
   });
 
   test('queued connected callback is cancelled by device-service stop', () async {

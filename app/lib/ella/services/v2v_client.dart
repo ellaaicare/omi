@@ -1414,6 +1414,9 @@ class V2VClient {
     final injectedStarter = _streamPlaybackStarter;
     if (injectedStarter != null) {
       await injectedStarter();
+      if (!await _playbackOutputEnforcer()) {
+        throw StateError('Ella voice playback route was lost after player start');
+      }
       return;
     }
 
@@ -1429,6 +1432,14 @@ class V2VClient {
       numChannels: _pcmChannels,
       bufferSize: 4096,
     );
+    // FlutterSound may reconfigure AVAudioSession while opening its native
+    // player. Reassert and verify the private/headset-or-speaker route after
+    // the player exists so a successful preflight cannot still yield silent
+    // PCM on connected headphones.
+    if (!await _playbackOutputEnforcer()) {
+      await _streamPlayer.stopPlayer();
+      throw StateError('Ella voice playback route was lost after player start');
+    }
     _isPlaying = true;
     _streamPlaybackStarted = true;
     _streamPlaybackStartedAt = DateTime.now();

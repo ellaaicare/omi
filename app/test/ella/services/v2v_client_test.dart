@@ -652,8 +652,50 @@ void main() {
       await client.waitForStreamFeedForTesting();
       await client.finishPlaybackForTesting();
 
-      expect(audioRoutes, ['playback', 'interactive']);
+      expect(audioRoutes, ['playback', 'playback', 'interactive']);
       expect(microphoneStarts, 2);
+      expect(client.micMutedForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('route lost after native player start fails closed and restores listening', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      var routeChecks = 0;
+      var microphoneStarts = 0;
+      var playbackStarts = 0;
+      final events = <V2VEvent>[];
+      final client = V2VClient(
+        onEvent: events.add,
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+        audibleOutputEnforcer: () async => true,
+        playbackOutputEnforcer: () async => ++routeChecks == 1,
+        streamPlaybackStarter: () async => playbackStarts++,
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.streamAudioChunkForTesting(Uint8List.fromList([1, 2, 3]));
+      await client.waitForStreamFeedForTesting();
+
+      expect(routeChecks, 2);
+      expect(playbackStarts, 1);
+      expect(microphoneStarts, 2);
+      expect(events.where((event) => event.type == 'error'), hasLength(1));
       expect(client.micMutedForTesting, isFalse);
       await client.disconnect();
     });

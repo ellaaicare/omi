@@ -425,6 +425,35 @@ void main() {
     await pumpEventQueue();
   });
 
+  test('physical necklace disconnect stops the active capture presentation', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final provider = CaptureProvider()
+      ..updateRecordingDevice(necklace)
+      ..updateRecordingState(RecordingState.deviceRecord);
+    addTearDown(provider.dispose);
+
+    expect(await provider.handleRecordingDeviceDisconnected(necklace.id), isTrue);
+
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
+  });
+
+  test('missing BLE audio frames fail a confirmed necklace capture closed', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final provider = CaptureProvider(deviceAudioFrameTimeout: const Duration(milliseconds: 20))
+      ..updateRecordingDevice(necklace)
+      ..updateRecordingState(RecordingState.deviceRecord)
+      ..armDeviceAudioFrameWatchdogForTesting();
+    addTearDown(provider.dispose);
+
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    await pumpEventQueue();
+
+    expect(provider.recordingDevice, isNull);
+    expect(provider.recordingState, RecordingState.error);
+  });
+
   test('rejected necklace start performs no location work', () async {
     final authority = _CaptureAuthority('uid-a');
     var locationCalls = 0;
