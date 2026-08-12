@@ -216,6 +216,8 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
                 "emoji": "🧠",
                 "category": callbacks.CategoryEnum.technology,
             },
+            "active_summary_version_id": "omi-v1",
+            "summary_versions": [{"id": "omi-v1", "source": "omi", "kind": "generated"}],
             "started_at": "2026-04-10T10:00:00Z",
             "finished_at": "2026-04-10T10:05:00Z",
         },
@@ -262,6 +264,9 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
     assert result["structured"]["overview"] == "Original overview"
     assert result["structured"]["emoji"] == "🧠"
     assert result["structured"]["category"] == "technology"
+    assert result["active_summary_version_id"] == "omi-v1"
+    assert result["active_summary_source"] == "omi"
+    assert result["active_summary_kind"] == "generated"
     assert result["started_at"] == "2026-04-10T10:00:00Z"
     assert result["finished_at"] == "2026-04-10T10:05:00Z"
 
@@ -272,6 +277,33 @@ def test_get_conversation_data_requires_uid():
 
     assert excinfo.value.status_code == 400
     assert "uid query parameter required" in excinfo.value.detail
+
+
+def test_summary_route_forwards_required_active_version_match(monkeypatch):
+    captured = {}
+
+    async def fake_write_conversation_summary(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(callbacks, "write_conversation_summary", fake_write_conversation_summary)
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-123",
+            callbacks.ConversationSummaryUpdate(
+                title="Grounded",
+                based_on_version_id="omi-v1",
+                require_based_on_match=True,
+            ),
+            uid="user-123",
+            service=_service_authority("user-123"),
+        )
+    )
+
+    assert result == {"status": "ok"}
+    assert captured["based_on_version_id"] == "omi-v1"
+    assert captured["require_based_on_match"] is True
 
 
 def test_get_conversation_data_404s_when_missing(monkeypatch):

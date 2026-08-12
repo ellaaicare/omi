@@ -237,6 +237,7 @@ class ConversationSummaryUpdate(BaseModel):
     summary_kind: str = "observer_enriched"
     correction_id: Optional[str] = None
     based_on_version_id: Optional[str] = None
+    require_based_on_match: bool = False
     set_active: bool = True
     trace_id: Optional[str] = None
     require_canonical: bool = False
@@ -423,6 +424,7 @@ async def update_conversation_summary(
             summary_kind=update.summary_kind,
             correction_id=update.correction_id,
             based_on_version_id=update.based_on_version_id,
+            require_based_on_match=update.require_based_on_match,
             set_active=update.set_active,
             trace_id=update.trace_id,
             ella_tags=update.ella_tags,
@@ -578,6 +580,7 @@ async def get_conversation_data(
         if structured.get("category") and hasattr(structured["category"], "value"):
             structured["category"] = structured["category"].value
 
+    active_summary_version = _active_summary_version(conversation) or {}
     return {
         "conversation_id": conversation_id,
         "uid": uid,
@@ -586,6 +589,9 @@ async def get_conversation_data(
         "transcript_hash": transcript_grounding_hash(transcript_segments),
         "segment_count": len(segments),
         "structured": structured,
+        "active_summary_version_id": _conversation_field(conversation, "active_summary_version_id"),
+        "active_summary_source": active_summary_version.get("source"),
+        "active_summary_kind": active_summary_version.get("kind"),
         "started_at": str(_conversation_field(conversation, "started_at", "")),
         "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }
