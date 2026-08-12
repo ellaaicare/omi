@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Mapping, MutableSequence, Sequence
+from typing import Any, Awaitable, Callable, Mapping, MutableSequence, Sequence
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,12 @@ class CapturePersistenceBatch:
     photos: tuple[Any, ...]
     segment_object_ids: tuple[int, ...]
     photo_object_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PusherTranscriptBatch:
+    conversation_id: str
+    segments: tuple[dict[str, Any], ...]
 
 
 def prepare_capture_persistence_batch(
@@ -68,6 +74,57 @@ def prepare_conversation_bound_capture_batch(
         timestamp_ready=(not segment_prefix or timestamp_ready),
         conversation_id=conversation_id,
     )
+
+
+def capture_buffer_contains_conversation(
+    segment_buffer: Sequence[Any],
+    photo_buffer: Sequence[Any],
+    *,
+    conversation_key: str,
+    conversation_id: str,
+) -> bool:
+    """Return whether either in-memory buffer still owns data for a conversation."""
+
+    expected = str(conversation_id or "").strip()
+    if not expected:
+        raise ValueError("capture_conversation_missing")
+    return any(
+        isinstance(item, Mapping) and str(item.get(conversation_key) or "").strip() == expected
+        for item in (*segment_buffer, *photo_buffer)
+    )
+
+
+def queue_pusher_transcript_batch(
+    queue: MutableSequence[PusherTranscriptBatch],
+    segments: Sequence[dict[str, Any]],
+    conversation_id: str,
+) -> None:
+    exact_conversation_id = str(conversation_id or "").strip()
+    if not exact_conversation_id:
+        raise ValueError("pusher_transcript_conversation_missing")
+    queue.append(
+        PusherTranscriptBatch(
+            conversation_id=exact_conversation_id,
+            segments=tuple(deepcopy(segments)),
+        )
+    )
+
+
+async def deliver_next_pusher_transcript_batch(
+    queue: MutableSequence[PusherTranscriptBatch],
+    sender: Callable[[dict[str, Any]], Awaitable[None]],
+) -> bool:
+    if not queue:
+        return False
+    batch = queue[0]
+    await sender(
+        {
+            "segments": list(batch.segments),
+            "memory_id": batch.conversation_id,
+        }
+    )
+    del queue[0]
+    return True
 
 
 def acknowledge_capture_persistence_batch(
