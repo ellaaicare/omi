@@ -293,6 +293,146 @@ def test_process_conversation_intentional_discard_stays_completed_discarded(monk
     assert writes[-1][1].get("processing_error") is None
 
 
+def test_generated_summary_version_is_idempotent_and_uses_stock_provenance():
+    conversation = _long_conversation().dict()
+    conversation["structured"] = {
+        "title": "Synthetic capture",
+        "overview": "A content-free summary used to verify the stock pipeline.",
+        "emoji": "brain",
+        "category": "other",
+    }
+
+    first = conversation_processor.conversations_db.generated_summary_versioning_update(conversation)
+    persisted = {**conversation, **first}
+    second = conversation_processor.conversations_db.generated_summary_versioning_update(persisted)
+
+    assert first["active_summary_version_id"] == first["summary_versions"][0]["id"]
+    assert first["summary_versions"][0]["source"] == "omi"
+    assert first["summary_versions"][0]["kind"] == "generated"
+    assert first["summary_versions"][0]["is_active"] is True
+    assert second == {}
+
+
+def test_process_persists_generated_summary_version_before_postprocess_webhook(monkeypatch):
+    conversation = _long_conversation()
+    writes = []
+    webhook_payloads = []
+    downstream_versions = []
+
+    monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda _uid: None)
+    monkeypatch.setattr(
+        conversation_processor,
+        "_get_structured",
+        lambda *args, **kwargs: (
+            Structured(
+                title="Synthetic capture",
+                overview="A content-free summary used to verify the stock pipeline.",
+            ),
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "_trigger_apps",
+        lambda uid, payload, **kwargs: downstream_versions.append(payload.active_summary_version_id),
+    )
+    monkeypatch.setattr(conversation_processor, "record_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(conversation_processor.folders_db, "get_folders", lambda _uid: [])
+    monkeypatch.setattr(conversation_processor.folders_db, "initialize_system_folders", lambda _uid: [])
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "upsert_conversation",
+        lambda uid, payload: writes.append((uid, payload)),
+    )
+
+    def postprocess_webhook(uid, payload):
+        webhook_payloads.append((uid, payload.dict()))
+
+    monkeypatch.setattr(conversation_processor, "fire_postprocess_webhook", postprocess_webhook)
+
+    class _PostprocessOnlyThread:
+        def __init__(self, target=None, args=(), **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            if self.target is postprocess_webhook:
+                self.target(*self.args)
+
+    monkeypatch.setattr(conversation_processor.threading, "Thread", _PostprocessOnlyThread)
+
+    result = conversation_processor.process_conversation("uid-1", "en", conversation, is_reprocess=True)
+
+    assert len(writes) == 1
+    assert len(webhook_payloads) == 1
+    assert len(downstream_versions) == 1
+    persisted = writes[0][1]
+    notified = webhook_payloads[0][1]
+    assert persisted["active_summary_version_id"]
+    assert notified["active_summary_version_id"] == persisted["active_summary_version_id"]
+    assert downstream_versions == [persisted["active_summary_version_id"]]
+    assert result.active_summary_version_id == persisted["active_summary_version_id"]
+    assert len(persisted["summary_versions"]) == 1
+    assert persisted["summary_versions"][0]["source"] == "omi"
+    assert persisted["summary_versions"][0]["kind"] == "generated"
+
+
+def test_process_refuses_postprocess_when_summary_version_cannot_be_established(monkeypatch):
+    conversation = _long_conversation()
+    conversation.summary_versions = []
+    writes = []
+    webhook_calls = []
+    downstream_calls = []
+
+    monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda _uid: None)
+    monkeypatch.setattr(
+        conversation_processor,
+        "_get_structured",
+        lambda *args, **kwargs: (Structured(title="Synthetic capture", overview="Summary authority"), False),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "_trigger_apps",
+        lambda *args, **kwargs: downstream_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(conversation_processor, "record_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(conversation_processor.folders_db, "get_folders", lambda _uid: [])
+    monkeypatch.setattr(conversation_processor.folders_db, "initialize_system_folders", lambda _uid: [])
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "generated_summary_versioning_update",
+        lambda _payload: {},
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "upsert_conversation",
+        lambda uid, payload: writes.append((uid, payload)),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "fire_postprocess_webhook",
+        lambda *args, **kwargs: webhook_calls.append((args, kwargs)),
+    )
+
+    class _NoopThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(conversation_processor.threading, "Thread", _NoopThread)
+
+    with pytest.raises(RuntimeError, match="summary version unavailable"):
+        conversation_processor.process_conversation("uid-1", "en", conversation, is_reprocess=True)
+
+    assert len(writes) == 1
+    assert writes[0][1]["status"] == ConversationStatus.failed
+    assert writes[0][1]["processing_error"] == CONVERSATION_SUMMARY_FAILED
+    assert downstream_calls == []
+    assert webhook_calls == []
+
+
 class _FakeSnapshot:
     def __init__(self, data=None):
         self._data = data
