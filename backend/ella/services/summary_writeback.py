@@ -32,6 +32,17 @@ _SUMMARY_ENRICHMENT_AUTHORITY_FIELDS = (
     'source',
     'kind',
 )
+_CURRENT_REQUEST_FINGERPRINT_KEYS = frozenset(
+    {
+        'submitted_structured',
+        'result_structured',
+        'submitted_ella_tags',
+        'result_ella_tags',
+        'submitted_ella_signal',
+        'result_ella_signal',
+    }
+)
+_LEGACY_REQUEST_FINGERPRINT_KEYS = frozenset({'structured', 'ella_tags', 'ella_signal'})
 
 
 class ConversationSummaryNotFoundError(Exception):
@@ -142,6 +153,56 @@ def _summary_request_fingerprint_input(
     }
 
 
+def _legacy_summary_request_fingerprint_input(
+    *,
+    structured: dict[str, Any],
+    summary_source: str,
+    summary_kind: str,
+    correction_id: Optional[str],
+    based_on_version_id: Optional[str],
+    set_active: bool,
+    require_canonical: bool,
+    require_based_on_match: bool,
+    preserve_generated_results: bool,
+    ella_tags: list[str],
+    ella_signal: Any,
+    today_card_grounding: Any,
+    today_card_grounding_evidence: Any,
+    expected_transcript_hash: Optional[str] = None,
+    require_source_match: bool = False,
+) -> dict[str, Any]:
+    """Reconstruct the pre-migration receipt only for validating existing records."""
+    return {
+        'structured': {key: structured.get(key) for key in ('title', 'overview', 'emoji', 'category')},
+        'summary_source': summary_source,
+        'summary_kind': summary_kind,
+        'correction_id': correction_id,
+        'based_on_version_id': based_on_version_id,
+        'set_active': bool(set_active),
+        'require_canonical': bool(require_canonical),
+        'require_based_on_match': bool(require_based_on_match),
+        'preserve_generated_results': bool(preserve_generated_results),
+        'ella_tags': ella_tags,
+        'ella_signal': ella_signal,
+        'today_card_grounding_sha256': _optional_json_fingerprint(today_card_grounding),
+        'today_card_grounding_evidence_sha256': _optional_json_fingerprint(today_card_grounding_evidence),
+        'expected_transcript_hash': expected_transcript_hash,
+        'require_source_match': bool(require_source_match),
+    }
+
+
+def is_current_summary_request_fingerprint_input(value: Any) -> bool:
+    return isinstance(value, dict) and _CURRENT_REQUEST_FINGERPRINT_KEYS.issubset(value)
+
+
+def _is_legacy_summary_request_fingerprint_input(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and _LEGACY_REQUEST_FINGERPRINT_KEYS.issubset(value)
+        and not _CURRENT_REQUEST_FINGERPRINT_KEYS.intersection(value)
+    )
+
+
 def _summary_request_fingerprint(request_input: dict[str, Any]) -> str:
     return _json_fingerprint(request_input)
 
@@ -180,7 +241,16 @@ def _assert_replay_binding_matches_active(
 ) -> None:
     if not active_version:
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
-    bound_structured = request_input.get('result_structured')
+    if is_current_summary_request_fingerprint_input(request_input):
+        bound_structured = request_input.get('result_structured')
+        bound_tags = request_input.get('result_ella_tags')
+        bound_signal = request_input.get('result_ella_signal')
+    elif _is_legacy_summary_request_fingerprint_input(request_input):
+        bound_structured = request_input.get('structured')
+        bound_tags = request_input.get('ella_tags')
+        bound_signal = request_input.get('ella_signal')
+    else:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
     if not isinstance(bound_structured, dict):
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
     current_structured = {
@@ -189,9 +259,9 @@ def _assert_replay_binding_matches_active(
     }
     if bound_structured != current_structured:
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
-    if request_input.get('result_ella_tags') != _normalized_tags(None, conversation.get('ella_tags')):
+    if bound_tags != _normalized_tags(None, conversation.get('ella_tags')):
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
-    if request_input.get('result_ella_signal') != conversation.get('ella_signal'):
+    if bound_signal != conversation.get('ella_signal'):
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
     enrichment_state = conversation.get('enrichment_state') or {}
     if str(request_input.get('summary_source') or '') != str(
@@ -583,7 +653,7 @@ async def write_conversation_summary(
             if replay_request_fingerprint_input is not None:
                 if (
                     enrichment_state.get('status') != 'writeback_pending_canonical'
-                    or not isinstance(stored_request_input, dict)
+                    or not is_current_summary_request_fingerprint_input(stored_request_input)
                     or stored_request_input != request_input
                 ):
                     raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
@@ -592,6 +662,34 @@ async def write_conversation_summary(
                     active_version=active_version,
                     request_input=request_input,
                 )
+            elif _is_legacy_summary_request_fingerprint_input(stored_request_input):
+                legacy_request_input = _legacy_summary_request_fingerprint_input(
+                    structured=candidate_structured,
+                    summary_source=summary_source,
+                    summary_kind=summary_kind,
+                    correction_id=correction_id,
+                    based_on_version_id=based_on_version_id,
+                    set_active=set_active,
+                    require_canonical=require_canonical,
+                    require_based_on_match=require_based_on_match,
+                    preserve_generated_results=preserve_generated_results,
+                    ella_tags=effective_tags,
+                    ella_signal=effective_signal,
+                    today_card_grounding=submitted_today_card_grounding,
+                    today_card_grounding_evidence=submitted_today_card_grounding_evidence,
+                    expected_transcript_hash=expected_transcript_hash,
+                    require_source_match=require_source_match,
+                )
+                if stored_request_input != legacy_request_input:
+                    raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+                request_fingerprint = _summary_request_fingerprint(legacy_request_input)
+                _assert_replay_binding_matches_active(
+                    conversation=conversation,
+                    active_version=active_version,
+                    request_input=legacy_request_input,
+                )
+            elif not is_current_summary_request_fingerprint_input(stored_request_input):
+                raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
             if stored_fingerprint != request_fingerprint:
                 raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
         else:

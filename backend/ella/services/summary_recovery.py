@@ -24,6 +24,7 @@ from ella.services.summary_writeback import (
     CanonicalSummaryRepairExhaustedError,
     CanonicalSummaryRetryReceiptUnconfirmedError,
     CanonicalSummaryWriteUnconfirmedError,
+    is_current_summary_request_fingerprint_input,
     write_conversation_summary,
 )
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
@@ -903,7 +904,7 @@ async def recover_failed_conversation_summary(
             and pending_state.get('kind') == 'recovered_enriched'
             and pending_state.get('trace_id')
             and str(pending_state.get('request_fingerprint') or '').strip()
-            and isinstance(pending_state.get('request_fingerprint_input'), dict)
+            and is_current_summary_request_fingerprint_input(pending_state.get('request_fingerprint_input'))
             and latest.get('active_summary_version_id')
         ):
             stored_request_input = pending_state.get('request_fingerprint_input')

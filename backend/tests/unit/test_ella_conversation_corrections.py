@@ -2835,7 +2835,11 @@ def test_summary_recovery_retries_pending_canonical_write_without_second_model_c
     ]
 
 
-def test_summary_recovery_reruns_hermes_for_legacy_pending_state_without_fingerprint(monkeypatch):
+@pytest.mark.parametrize("with_legacy_fingerprint", [False, True])
+def test_summary_recovery_reruns_hermes_for_unverifiable_legacy_pending_state(
+    monkeypatch,
+    with_legacy_fingerprint,
+):
     request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
     structured = {
         "title": "Legacy recovered title",
@@ -2843,6 +2847,29 @@ def test_summary_recovery_reruns_hermes_for_legacy_pending_state_without_fingerp
         "emoji": "brain",
         "category": "other",
     }
+    legacy_request_input = summary_writeback._legacy_summary_request_fingerprint_input(
+        structured=structured,
+        summary_source="observer",
+        summary_kind="recovered_enriched",
+        correction_id=None,
+        based_on_version_id="generic-v1",
+        set_active=True,
+        require_canonical=True,
+        require_based_on_match=True,
+        preserve_generated_results=True,
+        ella_tags=["omi", "recovery"],
+        ella_signal={"source": "recovery"},
+        today_card_grounding=None,
+        today_card_grounding_evidence=None,
+    )
+    legacy_receipt = (
+        {
+            "request_fingerprint": summary_writeback._summary_request_fingerprint(legacy_request_input),
+            "request_fingerprint_input": legacy_request_input,
+        }
+        if with_legacy_fingerprint
+        else {}
+    )
     pending = {
         **_retry_conversation(status="completed", request_id=request_id),
         "structured": structured,
@@ -2866,6 +2893,7 @@ def test_summary_recovery_reruns_hermes_for_legacy_pending_state_without_fingerp
             "kind": "recovered_enriched",
             "trace_id": "legacy-unbound-trace",
             "canonical_status": "failed",
+            **legacy_receipt,
         },
     }
     confirmed = {
@@ -2902,7 +2930,7 @@ def test_summary_recovery_reruns_hermes_for_legacy_pending_state_without_fingerp
     monkeypatch.setattr(
         summary_recovery,
         "apply_summary_update",
-        lambda **kwargs: pytest.fail("legacy pending state must not replay an unbound write"),
+        lambda **kwargs: pytest.fail("legacy pending state must not replay an ambiguous receipt"),
     )
 
     async def fake_provider_config(uid, config):
@@ -3623,6 +3651,91 @@ def test_same_trace_replay_distinguishes_omitted_inputs_from_explicit_stored_val
                 require_canonical=True,
             )
         )
+
+
+def test_completed_same_trace_accepts_exact_legacy_fingerprint_and_repairs_canonical(monkeypatch):
+    structured = {
+        "title": "Stored title",
+        "overview": "[Ella] Stored canonical summary with enough detail.",
+        "emoji": "note",
+        "category": "other",
+    }
+    tags = ["omi", "recovery"]
+    signal = {"source": "recovery"}
+    legacy_request_input = summary_writeback._legacy_summary_request_fingerprint_input(
+        structured=structured,
+        summary_source="observer",
+        summary_kind="recovered_enriched",
+        correction_id=None,
+        based_on_version_id="generic-v1",
+        set_active=True,
+        require_canonical=True,
+        require_based_on_match=True,
+        preserve_generated_results=True,
+        ella_tags=tags,
+        ella_signal=signal,
+        today_card_grounding=None,
+        today_card_grounding_evidence=None,
+    )
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "enriched-v2",
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "based_on_version_id": "generic-v1",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "structured": structured,
+        "ella_tags": tags,
+        "ella_signal": signal,
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "pending": False,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "trace-legacy-receipt",
+            "canonical_status": "completed",
+            "request_fingerprint": summary_writeback._summary_request_fingerprint(legacy_request_input),
+            "request_fingerprint_input": legacy_request_input,
+        },
+    }
+    reads = [conversation, conversation, conversation, conversation]
+    canonical_versions = []
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "get_conversation",
+        lambda uid, cid: reads.pop(0),
+    )
+
+    def canonical_writer(uid, record, **kwargs):
+        canonical_versions.append(record["active_summary_version_id"])
+        return {"ok": True}
+
+    result = asyncio.run(
+        summary_writeback.write_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            **structured,
+            summary_kind="recovered_enriched",
+            based_on_version_id="generic-v1",
+            require_based_on_match=True,
+            preserve_generated_results=True,
+            trace_id="trace-legacy-receipt",
+            ella_tags=tags,
+            ella_signal=signal,
+            canonical_writer=canonical_writer,
+            require_canonical=True,
+        )
+    )
+
+    assert result["idempotent_replay"] is True
+    assert result["canonical_confirmed"] is True
+    assert canonical_versions == ["enriched-v2"]
 
 
 def _assert_strict_completed_same_trace_revalidates_canonical_before_success(monkeypatch):
