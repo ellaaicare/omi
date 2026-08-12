@@ -379,6 +379,7 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
         headers = {}
         if provision_api_key:
             headers["Authorization"] = f"Bearer {provision_api_key}"
+            headers["X-Ella-Owner-Uid"] = uid
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
