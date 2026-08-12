@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -20,7 +20,12 @@ from ella.services.runtime_resolver import (
     revalidate_cloud_runtime_authority,
     resolve_isolated_runtime,
 )
-from ella.services.summary_writeback import CanonicalSummaryWriteUnconfirmedError, write_conversation_summary
+from ella.services.summary_writeback import (
+    CanonicalSummaryRepairExhaustedError,
+    CanonicalSummaryRetryReceiptUnconfirmedError,
+    CanonicalSummaryWriteUnconfirmedError,
+    write_conversation_summary,
+)
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from utils.conversations.generic_summary import generate_stock_conversation_summary
 from utils.conversations.vector import refresh_structured_summary_vector
@@ -366,6 +371,8 @@ async def apply_summary_update(
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
     today_card_grounding: Optional[dict[str, Any]] = None,
+    replay_request_fingerprint_input: Optional[dict[str, Any]] = None,
+    canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -386,7 +393,31 @@ async def apply_summary_update(
         require_based_on_match=require_based_on_match,
         preserve_generated_results=preserve_generated_results,
         today_card_grounding=today_card_grounding,
+        replay_request_fingerprint_input=replay_request_fingerprint_input,
+        canonical_retry_recorder=canonical_retry_recorder,
     )
+
+
+def _processing_retry_canonical_recorder(
+    *,
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    attempt_count: Optional[int],
+) -> Callable[[str], Awaitable[bool]]:
+    async def record(_error: str) -> bool:
+        return bool(
+            await asyncio.to_thread(
+                conversations_db.record_conversation_processing_retry_enrichment,
+                uid,
+                conversation_id,
+                request_id,
+                'canonical_failed',
+                attempt_count=attempt_count,
+            )
+        )
+
+    return record
 
 
 def _structured_summary(conversation: dict[str, Any]) -> dict[str, Any]:
@@ -495,6 +526,12 @@ async def invoke_hermes_recovery(
         require_canonical=True,
         require_based_on_match=True,
         preserve_generated_results=True,
+        canonical_retry_recorder=_processing_retry_canonical_recorder(
+            uid=uid,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            attempt_count=attempt_count,
+        ),
     )
     version_id = apply_result.get('active_summary_version_id')
     if not version_id or apply_result.get('canonical_confirmed') is not True:
@@ -867,6 +904,7 @@ async def recover_failed_conversation_summary(
             and pending_state.get('trace_id')
             and latest.get('active_summary_version_id')
         ):
+            stored_request_input = pending_state.get('request_fingerprint_input')
             apply_result = await apply_summary_update(
                 uid=uid,
                 conversation_id=conversation_id,
@@ -875,6 +913,15 @@ async def recover_failed_conversation_summary(
                 summary={},
                 summary_kind='recovered_enriched',
                 require_canonical=True,
+                replay_request_fingerprint_input=(
+                    stored_request_input if isinstance(stored_request_input, dict) else None
+                ),
+                canonical_retry_recorder=_processing_retry_canonical_recorder(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                    attempt_count=attempt_count,
+                ),
             )
             enriched_version_id = apply_result.get('active_summary_version_id')
             if not enriched_version_id or apply_result.get('canonical_confirmed') is not True:
@@ -909,6 +956,11 @@ async def recover_failed_conversation_summary(
             enriched_version_id = _existing_recovered_version_id(after_error or {})
             if not _is_current_retry(after_error, request_id, attempt_count):
                 return 'superseded'
+            if isinstance(
+                error,
+                (CanonicalSummaryRepairExhaustedError, CanonicalSummaryRetryReceiptUnconfirmedError),
+            ):
+                return ConversationStatus.failed.value
             if not enriched_version_id:
                 after_error_state = (after_error or {}).get('enrichment_state') or {}
                 canonical_pending = bool(

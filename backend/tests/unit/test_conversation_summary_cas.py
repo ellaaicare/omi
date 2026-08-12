@@ -178,6 +178,59 @@ def test_transcript_hash_compare_and_set_publishes_once_for_exact_source(monkeyp
     assert transaction.updates == [(conversation_ref, {"active_summary_version_id": "summary-v2"})]
 
 
+def test_transcript_hash_compare_and_set_can_require_no_active_source_version(
+    monkeypatch,
+):
+    conversations = _load_conversations_module(monkeypatch)
+    observed_segments = [{"id": "one", "text": "Synthetic source."}]
+
+    class ConversationRef:
+        def __init__(self, active_version):
+            self.active_version = active_version
+
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "active_summary_version_id": self.active_version,
+                    "data_protection_level": "standard",
+                    "transcript_segments": observed_segments,
+                },
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    expected_hash = transcript_grounding_hash(observed_segments)
+    empty_transaction = Transaction()
+    assert conversations._update_conversation_if_transcript_hash_transaction(
+        empty_transaction,
+        ConversationRef(None),
+        "uid-1",
+        expected_hash,
+        {"active_summary_version_id": "summary-v1"},
+        expected_active_summary_version_id=None,
+        match_active_summary_version=True,
+    )
+    assert len(empty_transaction.updates) == 1
+
+    raced_transaction = Transaction()
+    assert not conversations._update_conversation_if_transcript_hash_transaction(
+        raced_transaction,
+        ConversationRef("raced-v1"),
+        "uid-1",
+        expected_hash,
+        {"active_summary_version_id": "summary-v1"},
+        expected_active_summary_version_id=None,
+        match_active_summary_version=True,
+    )
+    assert raced_transaction.updates == []
+
+
 @pytest.mark.parametrize("protection_level", ["standard", "enhanced"])
 def test_transcript_hash_compare_and_set_uses_decrypted_transaction_snapshot(monkeypatch, protection_level):
     conversations = _load_conversations_module(monkeypatch)

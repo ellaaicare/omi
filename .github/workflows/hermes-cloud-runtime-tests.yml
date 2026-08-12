@@ -24,6 +24,7 @@ on:
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/routers/transcribe.py"
+      - "backend/utils/capture_buffer.py"
       - "backend/routers/conversations.py"
       - "backend/routers/developer.py"
       - "backend/routers/users.py"
@@ -144,6 +145,7 @@ on:
       - "backend/tests/postgres/test_today_card_lifecycle_postgres.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
+      - "backend/tests/unit/test_capture_buffer_retention.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
@@ -169,6 +171,7 @@ on:
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/routers/transcribe.py"
+      - "backend/utils/capture_buffer.py"
       - "backend/routers/conversations.py"
       - "backend/routers/developer.py"
       - "backend/routers/users.py"
@@ -289,6 +292,7 @@ on:
       - "backend/tests/postgres/test_today_card_lifecycle_postgres.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
+      - "backend/tests/unit/test_capture_buffer_retention.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -362,6 +366,7 @@ jobs:
           routers/conversations.py
           routers/developer.py
           routers/users.py
+          utils/capture_buffer.py
           ella/__init__.py
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
@@ -428,6 +433,7 @@ jobs:
           utils/ella/scanner.py
           utils/ella/scanner_keyterms.py
           utils/other/endpoints.py
+          tests/unit/test_capture_buffer_retention.py
           tests/unit/test_ella_reviewed_route_integration.py
 
       - name: Validate formatting and OpenAPI contract
@@ -471,11 +477,13 @@ jobs:
           utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py
           utils/ella/scanner.py utils/ella/scanner_keyterms.py
           utils/other/endpoints.py
+          utils/capture_buffer.py
           scripts/voice_canary_admin.py
           scripts/ella_memory_e2e_smoke.py
           scripts/ella_observer_cron.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
+          tests/unit/test_capture_buffer_retention.py
           tests/unit/test_conversation_summary_cas.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
@@ -530,6 +538,26 @@ jobs:
           ella/routers/voice.py
           &&
           python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
+
+      - name: Run capture buffer persistence regression
+        run: |
+          set -euo pipefail
+          capture_ids="$(pytest --collect-only -q tests/unit/test_capture_buffer_retention.py | sed '/^$/d')"
+          required_capture_ids=(
+            "tests/unit/test_capture_buffer_retention.py::test_capture_batch_waits_for_all_persistence_guards_without_clearing_buffers"
+            "tests/unit/test_capture_buffer_retention.py::test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arrivals"
+            "tests/unit/test_capture_buffer_retention.py::test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_content"
+            "tests/unit/test_capture_buffer_retention.py::test_photo_only_capture_does_not_require_audio_timestamp"
+            "tests/unit/test_capture_buffer_retention.py::test_capture_batch_can_acknowledge_segments_without_dropping_photos"
+            "tests/unit/test_capture_buffer_retention.py::test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch"
+            "tests/unit/test_capture_buffer_retention.py::test_capture_commit_rejects_conversation_rotation_before_write"
+          )
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 7
+          for required_id in "${required_capture_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$capture_ids"
+          done
+          pytest tests/unit/test_capture_buffer_retention.py -v | tee /tmp/capture-buffer-retention-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |
@@ -918,9 +946,9 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 24
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 29
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 10
+          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 11
           pytest tests/unit/test_conversation_summary_cas.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
           pytest tests/unit/test_ella_conversation_corrections.py -v

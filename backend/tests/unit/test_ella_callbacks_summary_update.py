@@ -31,6 +31,7 @@ _callbacks_spec = importlib.util.spec_from_file_location("ella_callbacks_test_mo
 callbacks = importlib.util.module_from_spec(_callbacks_spec)
 assert _callbacks_spec is not None and _callbacks_spec.loader is not None
 _callbacks_spec.loader.exec_module(callbacks)
+from ella.services import summary_writeback
 
 
 def _service_authority(uid: str):
@@ -216,6 +217,13 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
                 "emoji": "🧠",
                 "category": callbacks.CategoryEnum.technology,
             },
+            "active_summary_version_id": "omi-v1",
+            "summary_versions": [{"id": "omi-v1", "source": "omi", "kind": "generated"}],
+            "enrichment_state": {
+                "status": "writeback_applied",
+                "canonical_status": "completed",
+                "trace_id": "parallel-grounding:v2:synthetic",
+            },
             "started_at": "2026-04-10T10:00:00Z",
             "finished_at": "2026-04-10T10:05:00Z",
         },
@@ -262,6 +270,12 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
     assert result["structured"]["overview"] == "Original overview"
     assert result["structured"]["emoji"] == "🧠"
     assert result["structured"]["category"] == "technology"
+    assert result["active_summary_version_id"] == "omi-v1"
+    assert result["active_summary_source"] == "omi"
+    assert result["active_summary_kind"] == "generated"
+    assert result["enrichment_status"] == "writeback_applied"
+    assert result["enrichment_canonical_status"] == "completed"
+    assert result["enrichment_trace_id"] == "parallel-grounding:v2:synthetic"
     assert result["started_at"] == "2026-04-10T10:00:00Z"
     assert result["finished_at"] == "2026-04-10T10:05:00Z"
 
@@ -272,6 +286,33 @@ def test_get_conversation_data_requires_uid():
 
     assert excinfo.value.status_code == 400
     assert "uid query parameter required" in excinfo.value.detail
+
+
+def test_summary_route_forwards_required_active_version_match(monkeypatch):
+    captured = {}
+
+    async def fake_write_conversation_summary(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(callbacks, "write_conversation_summary", fake_write_conversation_summary)
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-123",
+            callbacks.ConversationSummaryUpdate(
+                title="Grounded",
+                based_on_version_id="omi-v1",
+                require_based_on_match=True,
+            ),
+            uid="user-123",
+            service=_service_authority("user-123"),
+        )
+    )
+
+    assert result == {"status": "ok"}
+    assert captured["based_on_version_id"] == "omi-v1"
+    assert captured["require_based_on_match"] is True
 
 
 def test_get_conversation_data_404s_when_missing(monkeypatch):
@@ -470,7 +511,28 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
     assert requests == [
         (
             "http://hermes-provision/workspace/omi-isolated/metadata/conversations/conv-123",
-            {"Authorization": "Bearer hermes-token"},
+            {
+                "Authorization": "Bearer hermes-token",
+                "X-Ella-Owner-Uid": "uid-isolated",
+            },
+        )
+    ]
+
+    async def fake_target(uid):
+        assert uid == "uid-unconfigured"
+        return "omi-unconfigured", "http://hermes-provision", ""
+
+    requests.clear()
+    FakeResponse.status_code = 401
+    monkeypatch.setattr(callbacks, "_resolve_workspace_target_for_uid", fake_target)
+
+    result = asyncio.run(callbacks._fetch_internal_assessment("uid-unconfigured", "conv-123"))
+
+    assert result is None
+    assert requests == [
+        (
+            "http://hermes-provision/workspace/omi-unconfigured/metadata/conversations/conv-123",
+            {},
         )
     ]
 
@@ -596,6 +658,15 @@ def _configure_parallel_grounding_write(monkeypatch):
         "get_conversation",
         lambda uid, conversation_id: {
             "id": conversation_id,
+            "active_summary_version_id": "original-v1",
+            "summary_versions": [
+                {
+                    "id": "original-v1",
+                    "source": "observer",
+                    "kind": "observer_enriched",
+                    "is_active": True,
+                }
+            ],
             "structured": {
                 "title": "Original cafe title",
                 "overview": "[Ella] Original cafe overview with enough detail.",
@@ -638,6 +709,20 @@ def _configure_parallel_grounding_write(monkeypatch):
         "update_conversation",
         lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
     )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, conversation_id, expected_version, update_data: captured.setdefault(
+            "terminal_cas",
+            {
+                "uid": uid,
+                "conversation_id": conversation_id,
+                "expected_version": expected_version,
+                "update_data": update_data,
+            },
+        )
+        or True,
+    )
 
     def write_canonical(uid, conversation, **kwargs):
         captured["canonical_conversation"] = conversation
@@ -677,6 +762,8 @@ def test_parallel_enrichment_binds_independent_grounding_to_canonical_version(mo
     assert "supporting_quotes" not in receipt
     canonical_receipt = captured["canonical_conversation"]["enrichment_state"]["today_card_grounding"]
     assert canonical_receipt == receipt
+    assert captured["terminal_cas"]["expected_version"] == "parallel-v2"
+    assert captured["terminal_cas"]["update_data"]["enrichment_state"]["canonical_status"] == "completed"
 
 
 @pytest.mark.parametrize(
@@ -754,6 +841,116 @@ def test_parallel_grounding_transcript_compare_and_set_loses_race_without_public
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail == "transcript_changed"
     assert "canonical_conversation" not in captured
+
+    for canonical_succeeds in (True, False):
+        _configure_parallel_grounding_write(monkeypatch)
+        canonical_versions = []
+        if canonical_succeeds:
+            correction = {
+                "id": "cafe-123",
+                "active_summary_version_id": "correction-v3",
+                "summary_versions": [
+                    {
+                        "id": "correction-v3",
+                        "source": "ios_correction",
+                        "kind": "corrected_enriched",
+                        "is_active": True,
+                    }
+                ],
+                "structured": {
+                    "title": "Corrected cafe title",
+                    "overview": "[Ella] Corrected cafe overview with enough detail.",
+                    "emoji": "☕",
+                    "category": callbacks.CategoryEnum.other,
+                },
+                "transcript_segments": [
+                    {"is_user": True, "text": "I ordered a waffle with oat milk after our morning walk."}
+                ],
+                "enrichment_state": {
+                    "status": "writeback_applied",
+                    "source": "ios_correction",
+                    "kind": "corrected_enriched",
+                    "trace_id": "correction:cafe-123",
+                    "canonical_status": "completed",
+                },
+            }
+            get_calls = 0
+
+            def get_conversation(uid, conversation_id):
+                nonlocal get_calls
+                get_calls += 1
+                if get_calls == 1:
+                    return {
+                        "id": conversation_id,
+                        "active_summary_version_id": "original-v1",
+                        "summary_versions": [
+                            {
+                                "id": "original-v1",
+                                "source": "observer",
+                                "kind": "observer_enriched",
+                                "is_active": True,
+                            }
+                        ],
+                        "structured": {
+                            "title": "Original cafe title",
+                            "overview": "[Ella] Original cafe overview with enough detail.",
+                            "emoji": "☕",
+                            "category": callbacks.CategoryEnum.other,
+                        },
+                        "transcript_segments": correction["transcript_segments"],
+                    }
+                return correction
+
+            def write_canonical(uid, conversation, **kwargs):
+                canonical_versions.append(conversation["active_summary_version_id"])
+                return {"ok": True}
+
+            monkeypatch.setattr(callbacks.conversations_db, "get_conversation", get_conversation)
+            monkeypatch.setattr(callbacks, "write_omi_canonical_event", write_canonical)
+        else:
+
+            def fail_canonical(*args, **kwargs):
+                raise ConnectionError("synthetic canonical failure")
+
+            monkeypatch.setattr(callbacks, "write_omi_canonical_event", fail_canonical)
+        terminal_updates = []
+
+        def reject_stale_terminal_state(uid, conversation_id, expected_version, update_data):
+            terminal_updates.append((uid, conversation_id, expected_version, update_data))
+            return False
+
+        monkeypatch.setattr(
+            callbacks.conversations_db,
+            "update_conversation_if_active_summary_version",
+            reject_stale_terminal_state,
+        )
+
+        with pytest.raises(HTTPException) as post_await_error:
+            asyncio.run(
+                callbacks.update_conversation_summary(
+                    "cafe-123",
+                    callbacks.ConversationSummaryUpdate(
+                        title="Cafe Coffee and Waffle Stop",
+                        overview="[Ella] You ordered a waffle with oat milk after your morning walk.",
+                        summary_source="hermes_parallel",
+                        summary_kind="hermes_enriched",
+                        trace_id="parallel-grounding:cafe-123:post-await-race",
+                        require_canonical=True,
+                        today_card_grounding_evidence=_parallel_grounding_evidence(),
+                    ),
+                    uid="user-123",
+                    service=_service_authority("user-123"),
+                )
+            )
+
+        assert post_await_error.value.status_code == 409
+        assert post_await_error.value.detail == (
+            "active_summary_version_changed" if canonical_succeeds else "summary_result_version_changed"
+        )
+        assert len(terminal_updates) == 1
+        assert terminal_updates[0][:3] == ("user-123", "cafe-123", "parallel-v2")
+        if canonical_succeeds:
+            assert canonical_versions == ["parallel-v2", "correction-v3"]
 
 
 def test_parallel_pending_canonical_replay_rejects_transcript_drift_without_publication(monkeypatch):
@@ -847,8 +1044,27 @@ def test_update_conversation_summary_same_trace_is_idempotent(monkeypatch):
         lambda uid, conversation_id: {
             "id": conversation_id,
             "active_summary_version_id": "recovered-v1",
+            "structured": {
+                "title": "Recovered",
+                "overview": "[Ella] Recovered summary with enough detail.",
+                "emoji": "brain",
+                "category": "other",
+            },
+            "summary_versions": [
+                {
+                    "id": "recovered-v1",
+                    "source": "observer",
+                    "kind": "recovered_enriched",
+                    "title": "Recovered",
+                    "overview": "[Ella] Recovered summary with enough detail.",
+                    "emoji": "brain",
+                    "category": "other",
+                    "is_active": True,
+                }
+            ],
             "enrichment_state": {
                 "status": "writeback_applied",
+                "source": "observer",
                 "kind": "recovered_enriched",
                 "trace_id": "summary-retry:conversation-1:request-1",
             },
@@ -882,3 +1098,268 @@ def test_update_conversation_summary_same_trace_is_idempotent(monkeypatch):
     assert result["status"] == "ok"
     assert result["active_summary_version_id"] == "recovered-v1"
     assert result["idempotent_replay"] is True
+
+
+def test_parallel_summary_source_match_uses_transcript_and_version_cas(monkeypatch):
+    segments = [{"is_user": True, "text": "A synthetic owner-scoped transcript."}]
+    transcript_hash = transcript_grounding_hash(segments)
+    captured = {}
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "id": conversation_id,
+            "active_summary_version_id": "summary-v1",
+            "structured": {
+                "title": "Before",
+                "overview": "[Ella] Before with enough detail.",
+                "emoji": "note",
+                "category": callbacks.CategoryEnum.other,
+            },
+            "transcript_segments": segments,
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "build_summary_version_update",
+        lambda conversation, **kwargs: {
+            "summary_versions": [{"id": "summary-v2"}],
+            "active_summary_version_id": "summary-v2",
+            "new_summary_version_id": "summary-v2",
+        },
+    )
+
+    def compare_and_set(
+        uid,
+        conversation_id,
+        expected_hash,
+        update_data,
+        *,
+        expected_active_summary_version_id=None,
+        match_active_summary_version=False,
+    ):
+        captured.update(
+            {
+                "uid": uid,
+                "conversation_id": conversation_id,
+                "expected_hash": expected_hash,
+                "expected_version": expected_active_summary_version_id,
+                "match_version": match_active_summary_version,
+                "update_data": update_data,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_transcript_hash",
+        compare_and_set,
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation",
+        lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conversation-1",
+            callbacks.ConversationSummaryUpdate(
+                title="After",
+                overview="[Ella] After with enough owner-scoped detail.",
+                summary_source="hermes_parallel",
+                summary_kind="hermes_enriched",
+                based_on_version_id="summary-v1",
+                trace_id="hermes-parallel:conversation-1:source-receipt",
+                require_canonical=True,
+                expected_transcript_hash=transcript_hash,
+                require_source_match=True,
+            ),
+            uid="user-1",
+            service=_service_authority("user-1"),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["canonical_confirmed"] is True
+    assert captured["uid"] == "user-1"
+    assert captured["conversation_id"] == "conversation-1"
+    assert captured["expected_hash"] == transcript_hash
+    assert captured["expected_version"] == "summary-v1"
+    assert captured["match_version"] is True
+    state = captured["update_data"]["enrichment_state"]
+    assert state["source_transcript_hash"] == transcript_hash
+    assert state["source_active_summary_version_id"] == "summary-v1"
+
+
+def test_parallel_summary_source_match_rejects_stale_version_before_write(monkeypatch):
+    segments = [{"is_user": True, "text": "A synthetic transcript."}]
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "active_summary_version_id": "summary-newer",
+            "structured": {},
+            "transcript_segments": segments,
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_transcript_hash",
+        lambda *args, **kwargs: pytest.fail("stale source must fail before CAS"),
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-1",
+                callbacks.ConversationSummaryUpdate(
+                    title="Stale",
+                    based_on_version_id="summary-v1",
+                    trace_id="hermes-parallel:conversation-1:stale",
+                    expected_transcript_hash=transcript_grounding_hash(segments),
+                    require_source_match=True,
+                ),
+                uid="user-1",
+                service=_service_authority("user-1"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "active_summary_version_changed"
+
+
+def test_parallel_summary_source_match_replay_is_idempotent(monkeypatch):
+    segments = [{"is_user": True, "text": "A synthetic transcript."}]
+    transcript_hash = transcript_grounding_hash(segments)
+    structured = {
+        "title": "After",
+        "overview": None,
+        "emoji": None,
+        "category": None,
+    }
+    request_input = summary_writeback._summary_request_fingerprint_input(
+        structured=structured,
+        summary_source="observer",
+        summary_kind="observer_enriched",
+        correction_id=None,
+        based_on_version_id="summary-v1",
+        set_active=True,
+        require_canonical=True,
+        require_based_on_match=False,
+        preserve_generated_results=False,
+        ella_tags=[],
+        ella_signal=None,
+        today_card_grounding=None,
+        today_card_grounding_evidence=None,
+        expected_transcript_hash=transcript_hash,
+        require_source_match=True,
+    )
+    conversation = {
+        "active_summary_version_id": "summary-v2",
+        "summary_versions": [
+            {
+                "id": "summary-v2",
+                "source": "observer",
+                "kind": "observer_enriched",
+                "based_on_version_id": "summary-v1",
+                **structured,
+                "is_active": True,
+            }
+        ],
+        "structured": structured,
+        "transcript_segments": segments,
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "canonical_status": "completed",
+            "trace_id": "hermes-parallel:conversation-1:source-receipt",
+            "source_transcript_hash": transcript_hash,
+            "source_active_summary_version_id": "summary-v1",
+            "result_summary_version_id": "summary-v2",
+            "request_fingerprint": summary_writeback._summary_request_fingerprint(request_input),
+            "request_fingerprint_input": request_input,
+        },
+    }
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: conversation,
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_transcript_hash",
+        lambda *args, **kwargs: pytest.fail("idempotent replay must not write"),
+    )
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conversation-1",
+            callbacks.ConversationSummaryUpdate(
+                title="After",
+                based_on_version_id="summary-v1",
+                trace_id="hermes-parallel:conversation-1:source-receipt",
+                require_canonical=True,
+                expected_transcript_hash=transcript_hash,
+                require_source_match=True,
+            ),
+            uid="user-1",
+            service=_service_authority("user-1"),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["idempotent_replay"] is True
+    assert result["active_summary_version_id"] == "summary-v2"
+
+
+def test_pending_canonical_replay_rejects_result_version_drift(monkeypatch):
+    segments = [{"is_user": True, "text": "A synthetic transcript."}]
+    transcript_hash = transcript_grounding_hash(segments)
+    canonical_writer = MagicMock(return_value={"ok": True})
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "id": conversation_id,
+            "active_summary_version_id": "summary-v3",
+            "summary_versions": [
+                {"id": "summary-v2", "is_active": False},
+                {"id": "summary-v3", "is_active": True},
+            ],
+            "structured": {
+                "title": "Corrected later summary",
+                "overview": "A later correction must not publish under an older trace.",
+            },
+            "transcript_segments": segments,
+            "enrichment_state": {
+                "status": "writeback_pending_canonical",
+                "canonical_status": "pending",
+                "trace_id": "hermes-parallel:conversation-1:source-receipt",
+                "source_transcript_hash": transcript_hash,
+                "source_active_summary_version_id": "summary-v1",
+                "result_summary_version_id": "summary-v2",
+            },
+        },
+    )
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", canonical_writer)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-1",
+                callbacks.ConversationSummaryUpdate(
+                    title="Older generated summary",
+                    based_on_version_id="summary-v1",
+                    trace_id="hermes-parallel:conversation-1:source-receipt",
+                    require_canonical=True,
+                    expected_transcript_hash=transcript_hash,
+                    require_source_match=True,
+                ),
+                uid="user-1",
+                service=_service_authority("user-1"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "summary_result_version_changed"
+    canonical_writer.assert_not_called()

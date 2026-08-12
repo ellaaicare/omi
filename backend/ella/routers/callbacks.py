@@ -237,9 +237,15 @@ class ConversationSummaryUpdate(BaseModel):
     summary_kind: str = "observer_enriched"
     correction_id: Optional[str] = None
     based_on_version_id: Optional[str] = None
+    require_based_on_match: bool = False
     set_active: bool = True
     trace_id: Optional[str] = None
     require_canonical: bool = False
+    expected_transcript_hash: Optional[str] = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    require_source_match: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
     today_card_grounding_evidence: Optional[ParallelTodayCardGroundingEvidence] = None
@@ -373,6 +379,7 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
         headers = {}
         if provision_api_key:
             headers["Authorization"] = f"Bearer {provision_api_key}"
+            headers["X-Ella-Owner-Uid"] = uid
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
@@ -423,6 +430,7 @@ async def update_conversation_summary(
             summary_kind=update.summary_kind,
             correction_id=update.correction_id,
             based_on_version_id=update.based_on_version_id,
+            require_based_on_match=update.require_based_on_match,
             set_active=update.set_active,
             trace_id=update.trace_id,
             ella_tags=update.ella_tags,
@@ -431,6 +439,8 @@ async def update_conversation_summary(
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
             require_canonical=update.require_canonical,
+            expected_transcript_hash=update.expected_transcript_hash,
+            require_source_match=update.require_source_match,
             today_card_grounding_evidence=(
                 update.today_card_grounding_evidence.model_dump()
                 if update.today_card_grounding_evidence is not None
@@ -578,6 +588,8 @@ async def get_conversation_data(
         if structured.get("category") and hasattr(structured["category"], "value"):
             structured["category"] = structured["category"].value
 
+    active_summary_version = _active_summary_version(conversation) or {}
+    enrichment_state = _conversation_field(conversation, "enrichment_state", {}) or {}
     return {
         "conversation_id": conversation_id,
         "uid": uid,
@@ -586,6 +598,12 @@ async def get_conversation_data(
         "transcript_hash": transcript_grounding_hash(transcript_segments),
         "segment_count": len(segments),
         "structured": structured,
+        "active_summary_version_id": _conversation_field(conversation, "active_summary_version_id"),
+        "active_summary_source": active_summary_version.get("source"),
+        "active_summary_kind": active_summary_version.get("kind"),
+        "enrichment_status": enrichment_state.get("status"),
+        "enrichment_canonical_status": enrichment_state.get("canonical_status"),
+        "enrichment_trace_id": enrichment_state.get("trace_id"),
         "started_at": str(_conversation_field(conversation, "started_at", "")),
         "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }
