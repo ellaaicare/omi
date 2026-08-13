@@ -69,17 +69,23 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate, this.disconnectGate});
+  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.failuresBeforeStart = 0});
 
   final Completer<void>? startGate;
   final Completer<void>? disconnectGate;
+  final int failuresBeforeStart;
   int deviceStarts = 0;
   final List<String> disconnectedDeviceIds = [];
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
+    if (deviceStarts <= failuresBeforeStart) {
+      updateRecordingState(RecordingState.error);
+      throw StateError('synthetic necklace setup failure');
+    }
     await startGate?.future;
+    updateRecordingState(RecordingState.deviceRecord);
   }
 
   @override
@@ -528,6 +534,30 @@ void main() {
     expect(provider.presentationIsConnected, isTrue);
     expect(provider.automaticReconnectAttempts, 0);
     expect(provider.automaticReconnectExhausted, isFalse);
+  });
+
+  test('connected callback retries necklace capture and ignores optional setup failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final capture = _RecordingCaptureProvider(failuresBeforeStart: 1);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) => throw StateError('synthetic optional storage failure'),
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.isConnecting, isFalse);
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
   test('device service restart waits for exact necklace capture teardown', () async {

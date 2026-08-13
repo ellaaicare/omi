@@ -8,6 +8,7 @@ import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/providers/capture_provider.dart';
 
 void main() {
   test('Demo voice fixtures never initialize speech recognition', () {
@@ -23,7 +24,7 @@ void main() {
   for (final path in ['standard', 'v2v']) {
     test('$path voice waits for active phone capture stop/finalization before microphone takeover', () async {
       final coordinator = VoicePhoneCaptureTakeoverCoordinator();
-      final finalization = Completer<bool>();
+      final finalization = Completer<PhoneCaptureStopResult>();
       final events = <String>[];
 
       final takeover = path == 'standard'
@@ -47,7 +48,7 @@ void main() {
       await pumpEventQueue();
       expect(events, ['finalize-start']);
 
-      finalization.complete(true);
+      finalization.complete(PhoneCaptureStopResult.finalized);
       if (await takeover) events.add('microphone-start');
 
       expect(events, ['finalize-start', 'finalize-ack', 'microphone-start']);
@@ -63,7 +64,7 @@ void main() {
       phoneCaptureContentful: true,
       stopAndFinalizePhoneCapture: () async {
         events.add('finalize');
-        return false;
+        return PhoneCaptureStopResult.failed;
       },
     );
     if (acknowledged) events.add('microphone-start');
@@ -87,7 +88,7 @@ void main() {
 
   test('active empty phone capture may hand off after its transcript stop completes', () async {
     final coordinator = VoicePhoneCaptureTakeoverCoordinator();
-    final transcriptStop = Completer<bool>();
+    final transcriptStop = Completer<PhoneCaptureStopResult>();
     var microphoneStarted = false;
 
     final takeover = coordinator.prepareStandard(
@@ -98,7 +99,7 @@ void main() {
     await pumpEventQueue();
     expect(microphoneStarted, isFalse);
 
-    transcriptStop.complete(false);
+    transcriptStop.complete(PhoneCaptureStopResult.empty);
     if (await takeover) microphoneStarted = true;
 
     expect(microphoneStarted, isTrue);
@@ -106,7 +107,7 @@ void main() {
 
   test('concurrent standard and V2V takeover share one phone capture finalization', () async {
     final coordinator = VoicePhoneCaptureTakeoverCoordinator();
-    final finalization = Completer<bool>();
+    final finalization = Completer<PhoneCaptureStopResult>();
     var finalizationCalls = 0;
 
     final standard = coordinator.prepareStandard(
@@ -122,14 +123,14 @@ void main() {
       phoneCaptureContentful: true,
       stopAndFinalizePhoneCapture: () async {
         finalizationCalls++;
-        return false;
+        return PhoneCaptureStopResult.failed;
       },
     );
 
     await pumpEventQueue();
     expect(finalizationCalls, 1);
 
-    finalization.complete(true);
+    finalization.complete(PhoneCaptureStopResult.finalized);
     expect(await standard, isTrue);
     expect(await v2v, isTrue);
     expect(finalizationCalls, 1);
@@ -140,7 +141,7 @@ void main() {
         phoneCaptureContentful: false,
         stopAndFinalizePhoneCapture: () async {
           finalizationCalls++;
-          return false;
+          return PhoneCaptureStopResult.empty;
         },
       ),
       isTrue,
@@ -154,7 +155,7 @@ void main() {
     expect(RegExp(r'_preparePhoneCaptureForVoice\(v2v: false\)').allMatches(source), hasLength(1));
     expect(RegExp(r'_preparePhoneCaptureForVoice\(v2v: true\)').allMatches(source), hasLength(1));
     expect(
-      RegExp(r'stopAndFinalizePhoneCapture: captureProvider\.stopStreamRecordingAndFinalize').allMatches(source),
+      RegExp(r'stopAndFinalizePhoneCapture: captureProvider\.stopPhoneCaptureForVoiceTakeover').allMatches(source),
       hasLength(2),
     );
     expect(source, contains('captureDiagnostics.source == CaptureDiagnosticSource.phone'));

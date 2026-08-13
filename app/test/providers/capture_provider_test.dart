@@ -80,9 +80,15 @@ class _CaptureAuthority implements AccountCommitAuthority {
 }
 
 class _FakeMicRecorder implements IMicRecorderService {
-  _FakeMicRecorder({this.failuresBeforeStart = 0});
+  _FakeMicRecorder({
+    this.failuresBeforeStart = 0,
+    this.stopEntered,
+    this.stopGate,
+  });
 
   final int failuresBeforeStart;
+  final Completer<void>? stopEntered;
+  final Completer<void>? stopGate;
   Function(Uint8List bytes)? _onByteReceived;
   Function()? _onRecording;
   Function()? _onStop;
@@ -115,6 +121,8 @@ class _FakeMicRecorder implements IMicRecorderService {
   @override
   Future<void> stop() async {
     stops++;
+    if (stopEntered?.isCompleted == false) stopEntered?.complete();
+    await stopGate?.future;
     _onStop?.call();
   }
 
@@ -668,6 +676,26 @@ void main() {
     expect(transcriptSocket.pure.stops, 1);
     expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+  });
+
+  test('voice takeover observes transcript content that arrives while the recorder stops', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final stopEntered = Completer<void>();
+    final stopGate = Completer<void>();
+    final mic = _FakeMicRecorder(stopEntered: stopEntered, stopGate: stopGate);
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      phoneMicRecorder: mic,
+    )..updateRecordingState(RecordingState.record);
+    addTearDown(provider.dispose);
+
+    final stopping = provider.stopPhoneCaptureForVoiceTakeover();
+    await stopEntered.future;
+    provider.segments = [_segment('late-final', 'Words delivered during microphone shutdown')];
+    stopGate.complete();
+
+    expect(await stopping, PhoneCaptureStopResult.failed);
+    expect(provider.hasCapturableContent, isTrue);
   });
 
   setUpAll(() async {

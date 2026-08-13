@@ -16,6 +16,7 @@ import 'package:omi/services/notifications.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/device.dart';
+import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -33,12 +34,16 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     @visibleForTesting DeviceStorageListResolver? storageListResolver,
     @visibleForTesting Duration reconnectionInterval = const Duration(seconds: 15),
     @visibleForTesting int maxAutomaticReconnectAttempts = 3,
+    @visibleForTesting Duration deviceCaptureRetryDelay = const Duration(milliseconds: 500),
+    @visibleForTesting int maxDeviceCaptureStartAttempts = 3,
   })  : _deviceService = deviceService ?? ServiceManager.instance().device,
         _connectionResolver = connectionResolver,
         _scanConnector = scanConnector,
         _storageListResolver = storageListResolver,
         _reconnectionInterval = reconnectionInterval,
-        _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts {
+        _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts,
+        _deviceCaptureRetryDelay = deviceCaptureRetryDelay,
+        _maxDeviceCaptureStartAttempts = maxDeviceCaptureStartAttempts {
     _deviceService.subscribe(this, this);
   }
 
@@ -62,6 +67,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   DateTime? _reconnectAt;
   final Duration _reconnectionInterval;
   final int _maxAutomaticReconnectAttempts;
+  final Duration _deviceCaptureRetryDelay;
+  final int _maxDeviceCaptureStartAttempts;
   int _automaticReconnectAttempts = 0;
   bool _automaticReconnectExhausted = false;
 
@@ -572,40 +579,47 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     connectedDevice = device;
     pairedDevice = device;
     setIsConnected(true);
-    await getDeviceInfo(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    final capture = captureProvider;
+    capture?.updateRecordingDevice(device);
 
-    if (captureProvider != null) {
-      captureProvider?.updateRecordingDevice(device);
+    try {
+      // Capture is the critical post-connect path. Metadata, storage, and
+      // battery probes are useful but must never prevent necklace recording.
+      if (capture?.phoneCaptureOwnsMobileAudio != true) {
+        await _startDeviceCaptureWithRetry(device, operationGeneration);
+      }
+      if (!_isDeviceOperationCurrent(operationGeneration)) return;
+
+      await _runConnectedSetupStep(
+        'device info',
+        operationGeneration,
+        () => getDeviceInfo(operationGeneration: operationGeneration),
+      );
+      await _runConnectedSetupStep(
+        'storage support',
+        operationGeneration,
+        () => setisDeviceStorageSupport(operationGeneration: operationGeneration),
+      );
+      await _runConnectedSetupStep('initial battery', operationGeneration, () async {
+        final currentLevel = await _retrieveBatteryLevel(device.id);
+        if (!_isDeviceOperationCurrent(operationGeneration)) return;
+        if (currentLevel != -1) batteryLevel = currentLevel;
+      });
+      await _runConnectedSetupStep(
+        'battery listener',
+        operationGeneration,
+        () => initiateBleBatteryListener(operationGeneration: operationGeneration),
+      );
+      if (batteryLevel != -1 && batteryLevel < 20) _hasLowBatteryAlerted = false;
+      await _runConnectedSetupStep(
+        'device name persistence',
+        operationGeneration,
+        () => SharedPreferencesUtil().saveString('deviceName', device.name),
+      );
+      if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    } finally {
+      if (_isDeviceOperationCurrent(operationGeneration)) updateConnectingStatus(false);
     }
-
-    await setisDeviceStorageSupport(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-
-    // Read initial battery level
-    int currentLevel = await _retrieveBatteryLevel(device.id);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    if (currentLevel != -1) {
-      batteryLevel = currentLevel;
-    }
-
-    // Then set up listener for battery changes
-    await initiateBleBatteryListener(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    if (batteryLevel != -1 && batteryLevel < 20) {
-      _hasLowBatteryAlerted = false;
-    }
-    updateConnectingStatus(false);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    if (captureProvider?.phoneCaptureOwnsMobileAudio != true) {
-      await captureProvider?.streamDeviceRecording(device: device);
-    }
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-
-    await getDeviceInfo(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    await SharedPreferencesUtil().saveString('deviceName', device.name);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
@@ -617,6 +631,40 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _checkFirmwareUpdates(operationGeneration: operationGeneration);
 
     onDeviceConnected?.call(device);
+  }
+
+  Future<void> _runConnectedSetupStep(
+    String name,
+    int operationGeneration,
+    Future<void> Function() step,
+  ) async {
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    try {
+      await step();
+    } catch (error) {
+      Logger.debug('Connected device $name setup failed without suppressing capture: $error');
+    }
+  }
+
+  Future<bool> _startDeviceCaptureWithRetry(BtDevice device, int operationGeneration) async {
+    final capture = captureProvider;
+    if (capture == null) return false;
+    for (var attempt = 1; attempt <= _maxDeviceCaptureStartAttempts; attempt++) {
+      if (!_isDeviceOperationCurrent(operationGeneration)) return false;
+      try {
+        await capture.streamDeviceRecording(device: device);
+      } catch (error) {
+        Logger.debug('Necklace capture start attempt $attempt failed: $error');
+      }
+      if (!_isDeviceOperationCurrent(operationGeneration)) return false;
+      if (capture.recordingState == RecordingState.deviceRecord) return true;
+      if (attempt < _maxDeviceCaptureStartAttempts) {
+        await Future<void>.delayed(_deviceCaptureRetryDelay);
+      }
+    }
+    Logger.debug('Necklace transport is connected but capture did not become ready after '
+        '$_maxDeviceCaptureStartAttempts attempts');
+    return false;
   }
 
   Future<void> _handleDeviceConnected(String deviceId, int operationGeneration) async {

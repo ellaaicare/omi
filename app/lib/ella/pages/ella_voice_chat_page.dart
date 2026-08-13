@@ -52,7 +52,7 @@ class VoicePhoneCaptureTakeoverCoordinator {
   Future<bool> prepareStandard({
     required bool phoneCaptureActive,
     required bool phoneCaptureContentful,
-    required Future<bool> Function() stopAndFinalizePhoneCapture,
+    required Future<PhoneCaptureStopResult> Function() stopAndFinalizePhoneCapture,
   }) =>
       _prepare(
         phoneCaptureActive: phoneCaptureActive,
@@ -63,7 +63,7 @@ class VoicePhoneCaptureTakeoverCoordinator {
   Future<bool> prepareV2V({
     required bool phoneCaptureActive,
     required bool phoneCaptureContentful,
-    required Future<bool> Function() stopAndFinalizePhoneCapture,
+    required Future<PhoneCaptureStopResult> Function() stopAndFinalizePhoneCapture,
   }) =>
       _prepare(
         phoneCaptureActive: phoneCaptureActive,
@@ -74,7 +74,7 @@ class VoicePhoneCaptureTakeoverCoordinator {
   Future<bool> _prepare({
     required bool phoneCaptureActive,
     required bool phoneCaptureContentful,
-    required Future<bool> Function() stopAndFinalizePhoneCapture,
+    required Future<PhoneCaptureStopResult> Function() stopAndFinalizePhoneCapture,
   }) {
     final activeTakeover = _activeTakeover;
     if (activeTakeover != null) return activeTakeover;
@@ -83,8 +83,8 @@ class VoicePhoneCaptureTakeoverCoordinator {
     late final Future<bool> takeover;
     takeover = (() async {
       try {
-        final finalized = await stopAndFinalizePhoneCapture();
-        return finalized || !phoneCaptureContentful;
+        final result = await stopAndFinalizePhoneCapture();
+        return result != PhoneCaptureStopResult.failed;
       } catch (_) {
         return false;
       }
@@ -882,12 +882,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         ? _phoneCaptureTakeover.prepareV2V(
             phoneCaptureActive: phoneCaptureActive,
             phoneCaptureContentful: phoneCaptureContentful,
-            stopAndFinalizePhoneCapture: captureProvider.stopStreamRecordingAndFinalize,
+            stopAndFinalizePhoneCapture: captureProvider.stopPhoneCaptureForVoiceTakeover,
           )
         : _phoneCaptureTakeover.prepareStandard(
             phoneCaptureActive: phoneCaptureActive,
             phoneCaptureContentful: phoneCaptureContentful,
-            stopAndFinalizePhoneCapture: captureProvider.stopStreamRecordingAndFinalize,
+            stopAndFinalizePhoneCapture: captureProvider.stopPhoneCaptureForVoiceTakeover,
           ));
     if (acknowledged || !mounted) return acknowledged;
 

@@ -71,6 +71,8 @@ enum PhoneCaptureStartResult {
   cancelled,
 }
 
+enum PhoneCaptureStopResult { empty, finalized, failed }
+
 enum CaptureDiagnosticSource { none, phone, necklace }
 
 enum CaptureDiagnosticPhase {
@@ -2065,13 +2067,23 @@ class CaptureProvider extends ChangeNotifier
   /// race the server disconnect finalizer and make a successful memory look
   /// like an empty capture in the app.
   Future<bool> stopStreamRecordingAndFinalize() async {
+    return await _stopPhoneCaptureAndFinalize() == PhoneCaptureStopResult.finalized;
+  }
+
+  /// Returns an exact stop disposition for voice microphone takeover. Unlike
+  /// the legacy bool API, this distinguishes a genuinely empty capture from a
+  /// contentful capture whose finalization failed.
+  Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() => _stopPhoneCaptureAndFinalize();
+
+  Future<PhoneCaptureStopResult> _stopPhoneCaptureAndFinalize() async {
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
     await _cleanupCurrentState();
     await (_phoneMicRecorder ?? ServiceManager.instance().mic).stop();
     updateRecordingState(RecordingState.stop);
     final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
     try {
-      return shouldFinalize ? await finalizeCurrentConversation() : false;
+      if (!shouldFinalize) return PhoneCaptureStopResult.empty;
+      return await finalizeCurrentConversation() ? PhoneCaptureStopResult.finalized : PhoneCaptureStopResult.failed;
     } finally {
       await _socket?.stop(reason: 'phone capture finalized');
     }
