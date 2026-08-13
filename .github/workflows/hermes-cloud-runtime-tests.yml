@@ -15,6 +15,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
@@ -172,6 +173,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
@@ -374,6 +376,7 @@ jobs:
           python -m py_compile
           database/authority_advisory_lock.py
           database/conversations.py
+          database/redis_db.py
           database/ella_caregivers.py
           database/ella_provisioning.py
           database/ella_postgres.py

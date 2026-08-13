@@ -38,9 +38,33 @@ class InMemoryOwnershipRedis:
         self.ttls = {}
 
     def eval(self, script, key_count, *args):
+        if "redis.call('SET', KEYS[3], ARGV[2]" in script:
+            assert key_count == 3
+            active_key, owner_key, lease_key = args[:key_count]
+            conversation_id, owner_id, ttl = args[key_count:]
+            if (
+                self.values.get(active_key) != conversation_id
+                or self.values.get(owner_key) != owner_id
+                or lease_key in self.values
+            ):
+                return 0
+            self._set(lease_key, owner_id, ttl)
+            return 1
+
+        if "redis.call('DEL', KEYS[1])" in script:
+            assert key_count == 1
+            lease_key = args[0]
+            owner_id = args[1]
+            if self.values.get(lease_key) != owner_id:
+                return 0
+            self.delete(lease_key)
+            return 1
+
         assert key_count == 2
         active_key, owner_key = args[:key_count]
         argv = args[key_count:]
+        if "KEYS[1] .. ':capture_commit'" in script and active_key + ":capture_commit" in self.values:
+            return 0
 
         if "local active_id = redis.call('GET', KEYS[1])" in script:
             conversation_id, owner_id, ttl = argv
@@ -510,7 +534,8 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "CAPTURE_CONVERSATION_ID_KEY: conversation_id" in source
     assert "prepare_conversation_bound_capture_batch(" in stream_source
     assert "conversation_id=batch_conversation_id" in stream_source
-    assert "drain_capture_persistence_batches(uid, conversation_id)" in process_source
+    assert "drain_capture_persistence_batches(uid, conversation_id, session_id)" in disconnect_finalize_source
+    assert "drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)" in lifecycle_source
     assert "if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
     assert "return False" in process_source
     assert "requested = await request_conversation_processing(conversation_id)" in process_source
@@ -525,6 +550,9 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert lifecycle_source.index("expected_conversation_id=conversation_id_to_process") < lifecycle_source.index(
         "_schedule_conversation_processing_after_rotation(conversation_id_to_process)"
     )
+    assert lifecycle_source.index(
+        "drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)"
+    ) < lifecycle_source.index("expected_conversation_id=conversation_id_to_process")
     assert "await _process_conversation_after_rotation(conversation_id_to_process)" not in lifecycle_source
     assert "conversation_finalize_tasks.add(task)" in process_source
     assert "conversation_finalize_tasks.discard(completed)" in process_source
@@ -534,6 +562,9 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "expected_conversation_id=conversation_id" in disconnect_finalize_source
     assert "expected_owner_id=session_id" in disconnect_finalize_source
     assert 'reason="socket_ownership_lost"' in disconnect_finalize_source
+    assert disconnect_finalize_source.index(
+        "drain_capture_persistence_batches(uid, conversation_id, session_id)"
+    ) < disconnect_finalize_source.index("expected_conversation_id=conversation_id")
     assert disconnect_finalize_source.index(
         "expected_conversation_id=conversation_id"
     ) < disconnect_finalize_source.index("_process_conversation(conversation_id, wait_for_buffers=False)")
@@ -631,6 +662,23 @@ def test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired
     assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-recovered", "socket-recovered")
     assert not redis_db.claim_in_progress_conversation_id("uid-a", "conversation-stale", "socket-stale")
     assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-recovered"
+
+
+def test_capture_commit_lease_blocks_ownership_transfer_until_release():
+    redis_db = load_ownership_redis_db()
+    redis_db.set_in_progress_conversation_id("uid-a", "conversation-a", owner_id="socket-old")
+
+    assert redis_db.acquire_capture_commit_lease("uid-a", "conversation-a", "socket-old")
+    assert not redis_db.claim_in_progress_conversation_id("uid-a", "conversation-a", "socket-new")
+    assert not redis_db.rotate_in_progress_conversation_id(
+        "uid-a",
+        "conversation-a",
+        "socket-old",
+        "conversation-b",
+    )
+    assert redis_db.release_capture_commit_lease("uid-a", "socket-old")
+    assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-a", "socket-new")
+    assert not redis_db.acquire_capture_commit_lease("uid-a", "conversation-a", "socket-old")
 
 
 def test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas():

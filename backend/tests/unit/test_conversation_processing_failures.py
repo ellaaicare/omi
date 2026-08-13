@@ -683,6 +683,9 @@ def test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_e
             "expected_active_summary_version_id": None,
             "allow_create": False,
             "enqueue_hermes_cloud_enrichment": True,
+            "expected_transcript_hash": conversation_processor.transcript_grounding_hash(
+                conversation.transcript_segments
+            ),
         }
     ]
     assert legacy_webhook_calls == []

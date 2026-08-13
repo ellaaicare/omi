@@ -35,6 +35,7 @@ from models.conversation import (
 )
 from utils.notifications import send_important_conversation_message
 from models.conversation import CalendarMeetingContext
+from models.conversation_integrity import transcript_grounding_hash
 from models.other import Person
 from models.task import Task, TaskStatus, TaskAction, TaskActionProvider
 from models.trend import Trend
@@ -622,6 +623,9 @@ def process_conversation_with_outcome(
     expected_active_summary_version_id = (
         conversation.active_summary_version_id if isinstance(conversation, Conversation) else None
     )
+    expected_transcript_hash = (
+        transcript_grounding_hash(conversation.transcript_segments) if isinstance(conversation, Conversation) else None
+    )
 
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
     if hasattr(conversation, 'id') and conversation.id:
@@ -692,6 +696,7 @@ def process_conversation_with_outcome(
         expected_active_summary_version_id=expected_active_summary_version_id,
         allow_create=allow_create,
         enqueue_hermes_cloud_enrichment=uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS,
+        expected_transcript_hash=expected_transcript_hash,
     )
     commit_status = commit_result.get('status')
     if commit_status in {

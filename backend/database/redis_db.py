@@ -408,6 +408,9 @@ return 1
 """
 
 _CLAIM_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('EXISTS', KEYS[1] .. ':capture_commit') == 1 then
+    return 0
+end
 local active_id = redis.call('GET', KEYS[1])
 if active_id and active_id ~= ARGV[1] then
     return 0
@@ -418,6 +421,9 @@ return 1
 """
 
 _REPLACE_STALE_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('EXISTS', KEYS[1] .. ':capture_commit') == 1 then
+    return 0
+end
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
 end
@@ -436,6 +442,9 @@ return 1
 """
 
 _ROTATE_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('EXISTS', KEYS[1] .. ':capture_commit') == 1 then
+    return 0
+end
 if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] then
     return 0
 end
@@ -448,12 +457,35 @@ end
 return 1
 """
 
+_ACQUIRE_CAPTURE_COMMIT_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] then
+    return 0
+end
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    return 0
+end
+redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[3])
+return 1
+"""
+
+_RELEASE_CAPTURE_COMMIT_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
 
 def _in_progress_conversation_keys(uid: str) -> tuple[str, str]:
     return (
         f'users:{uid}:in_progress_memory_id',
         f'users:{uid}:in_progress_memory_owner',
     )
+
+
+def _capture_commit_lease_key(uid: str) -> str:
+    return f'users:{uid}:in_progress_memory_id:capture_commit'
 
 
 def set_in_progress_conversation_id(
@@ -564,8 +596,42 @@ def rotate_in_progress_conversation_id(
     )
 
 
+def acquire_capture_commit_lease(
+    uid: str,
+    conversation_id: str,
+    owner_id: str,
+    ttl: int = 120,
+) -> bool:
+    """Fence ownership transfer while one transcript batch commits durably."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    capture_commit_key = _capture_commit_lease_key(uid)
+    return bool(
+        r.eval(
+            _ACQUIRE_CAPTURE_COMMIT_LEASE_SCRIPT,
+            3,
+            active_key,
+            owner_key,
+            capture_commit_key,
+            conversation_id,
+            owner_id,
+            ttl,
+        )
+    )
+
+
+def release_capture_commit_lease(uid: str, owner_id: str) -> bool:
+    return bool(
+        r.eval(
+            _RELEASE_CAPTURE_COMMIT_LEASE_SCRIPT,
+            1,
+            _capture_commit_lease_key(uid),
+            owner_id,
+        )
+    )
+
+
 def remove_in_progress_conversation_id(uid: str):
-    r.delete(*_in_progress_conversation_keys(uid))
+    r.delete(*_in_progress_conversation_keys(uid), _capture_commit_lease_key(uid))
 
 
 def get_in_progress_conversation_id(uid: str) -> str:

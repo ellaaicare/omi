@@ -128,10 +128,12 @@ PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
 
 
-def drain_capture_persistence_batches(uid: str, conversation_id: str) -> int:
+def drain_capture_persistence_batches(uid: str, conversation_id: str, owner_id: str) -> int:
     batch_ids = conversations_db.list_capture_persistence_batches(uid, conversation_id)
     for batch_id in batch_ids:
-        conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id)
+        result = conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id, owner_id)
+        if result.get("status") == "ownership_lost":
+            raise RuntimeError("capture_persistence_ownership_lost")
     return len(batch_ids)
 
 
@@ -140,6 +142,7 @@ STT_LATENCY_CLIENT_EVENT_LIMIT = int(os.getenv('ELLA_STT_LATENCY_CLIENT_EVENT_LI
 # Server-side STT override: when set, all sessions use this provider regardless of client request.
 # Useful when a provider hallucinates on ambient noise (e.g. soniox/grok for wearable use).
 STT_FORCE_SERVICE = os.getenv('STT_FORCE_SERVICE', '').strip().lower() or None
+PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS = float(os.getenv('PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS', '120'))
 
 # Freemium: Send notification when credits threshold is reached
 FREEMIUM_THRESHOLD_SECONDS = 180  # 3 minutes remaining - notify user
@@ -700,7 +703,7 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            outcome = process_conversation_with_outcome(uid, language, conversation)
+            outcome = await asyncio.to_thread(process_conversation_with_outcome, uid, language, conversation)
             conversation = outcome.conversation
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
@@ -710,7 +713,7 @@ async def _stream_handler(
             messages = []
             if outcome.dispatched:
                 try:
-                    messages = trigger_external_integrations(uid, conversation)
+                    messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
                 except Exception as e:
                     print(f"External integrations failed after conversation processing: {e}", uid, session_id)
 
@@ -724,7 +727,9 @@ async def _stream_handler(
 
         for conversation in processing:
             if PUSHER_ENABLED:
-                await request_conversation_processing(conversation['id'])
+                requested = await request_conversation_processing(conversation['id'])
+                if not requested:
+                    await _create_conversation_fallback(conversation)
             else:
                 await _create_conversation_fallback(conversation)
 
@@ -896,7 +901,6 @@ async def _stream_handler(
                 conversation_id=conversation_id,
             )
             return False
-        drain_capture_persistence_batches(uid, conversation_id)
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if conversation:
             has_content = conversation.get('transcript_segments') or conversation.get('photos')
@@ -960,6 +964,8 @@ async def _stream_handler(
             )
             return
 
+        drain_capture_persistence_batches(uid, conversation_id, session_id)
+
         rotated = await _create_new_in_progress_conversation(
             expected_conversation_id=conversation_id,
             expected_owner_id=session_id,
@@ -1004,6 +1010,8 @@ async def _stream_handler(
                     await asyncio.sleep(0)
                     continue
 
+                drain_capture_persistence_batches(uid, candidate_id, session_id)
+
                 finished_at = datetime.fromisoformat(candidate['finished_at'].isoformat())
                 seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
                 if seconds_since_last_segment >= conversation_creation_timeout:
@@ -1021,6 +1029,7 @@ async def _stream_handler(
                     return candidate_id
 
                 current_conversation_id = candidate_id
+                capture_recovery_conversation_ids.add(candidate_id)
                 print(
                     f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
                     uid,
@@ -1360,8 +1369,13 @@ async def _stream_handler(
         last_synced_conversation_id = None
 
         # Conversation processing
-        pending_conversation_requests = set()
+        pending_conversation_requests: dict[str, asyncio.Future] = {}
         pending_request_event = asyncio.Event()
+
+        def fail_pending_conversation_requests() -> None:
+            for future in tuple(pending_conversation_requests.values()):
+                if not future.done():
+                    future.set_result(False)
 
         def transcript_send(segments, conversation_id: str):
             nonlocal segment_buffers
@@ -1377,19 +1391,32 @@ async def _stream_handler(
             if not pusher_connected or not pusher_ws:
                 print(f"Pusher not connected, falling back to local processing for {conversation_id}", uid, session_id)
                 return False
+            response = None
             try:
-                pending_conversation_requests.add(conversation_id)
+                existing = pending_conversation_requests.get(conversation_id)
+                if existing is not None and not existing.done():
+                    return bool(await asyncio.shield(existing))
+                response = asyncio.get_running_loop().create_future()
+                pending_conversation_requests[conversation_id] = response
                 pending_request_event.set()  # Signal the receiver
                 data = bytearray()
                 data.extend(struct.pack("I", 104))
                 data.extend(bytes(json.dumps({"conversation_id": conversation_id, "language": language}), "utf-8"))
                 await pusher_ws.send(data)
                 print(f"Sent process_conversation request to pusher: {conversation_id}", uid, session_id)
-                return True
+                deadline = asyncio.get_running_loop().time() + PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS
+                while websocket_active and asyncio.get_running_loop().time() < deadline:
+                    try:
+                        return bool(await asyncio.wait_for(asyncio.shield(response), timeout=0.25))
+                    except asyncio.TimeoutError:
+                        continue
+                return False
             except Exception as e:
                 print(f"Failed to send process_conversation request: {e}", uid, session_id)
-                pending_conversation_requests.discard(conversation_id)
                 return False
+            finally:
+                if response is not None and pending_conversation_requests.get(conversation_id) is response:
+                    pending_conversation_requests.pop(conversation_id, None)
 
         async def _transcript_flush(auto_reconnect: bool = True):
             nonlocal segment_buffers
@@ -1522,15 +1549,21 @@ async def _stream_handler(
                     if header_type == 201:
                         result = json.loads(msg[4:].decode("utf-8"))
                         conversation_id = result.get("conversation_id")
-                        pending_conversation_requests.discard(conversation_id)
+                        response = pending_conversation_requests.get(conversation_id)
 
                         if "error" in result:
                             print(f"Conversation processing failed: {result['error']}", uid, session_id)
+                            if response is not None and not response.done():
+                                response.set_result(False)
                             continue
 
                         if result.get("success"):
                             print(f"Conversation processed by pusher: {conversation_id}", uid, session_id)
+                            if response is not None and not response.done():
+                                response.set_result(True)
                             on_conversation_processed(conversation_id)
+                        elif response is not None and not response.done():
+                            response.set_result(False)
 
                 except asyncio.TimeoutError:
                     continue  # Check loop conditions again
@@ -1539,8 +1572,10 @@ async def _stream_handler(
                 except ConnectionClosed as e:
                     print(f"Pusher receive connection closed: {e}", uid, session_id)
                     pusher_connected = False
+                    fail_pending_conversation_requests()
                 except Exception as e:
                     print(f"Pusher receive error: {e}", uid, session_id)
+                    fail_pending_conversation_requests()
                     await asyncio.sleep(0.5)
 
                 # Reconnect outside try/except (same pattern as flush functions)
@@ -1585,6 +1620,7 @@ async def _stream_handler(
                 print(f"Exception in connect: {e}")
 
         async def close(code: int = 1000):
+            fail_pending_conversation_requests()
             await _flush()
             if pusher_ws:
                 await pusher_ws.close(code)
@@ -1799,6 +1835,16 @@ async def _stream_handler(
                     session_id,
                 )
                 conversation_id_to_process = current_conversation_id
+                if not await _wait_for_capture_buffers_to_drain(
+                    conversation_id_to_process,
+                    timeout_seconds=5.0,
+                ):
+                    _latency_log(
+                        "capture_rotation_deferred",
+                        conversation_id=conversation_id_to_process,
+                    )
+                    continue
+                drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)
                 if not await _create_new_in_progress_conversation(
                     expected_conversation_id=conversation_id_to_process,
                     expected_owner_id=session_id,
@@ -2003,6 +2049,7 @@ async def _stream_handler(
                             uid,
                             recovery_conversation_id,
                             pending_batch_id,
+                            session_id,
                         )
                 except Exception:
                     pending_batch_count += 1
@@ -2120,11 +2167,13 @@ async def _stream_handler(
                         batch_conversation_id,
                         [segment.dict() for segment in transcript_segments],
                         finished_at,
+                        session_id,
                     )
                     commit_result = conversations_db.commit_capture_persistence_batch(
                         uid,
                         batch_conversation_id,
                         pending_batch_id,
+                        session_id,
                     )
                 except Exception:
                     capture_recovery_conversation_ids.add(batch_conversation_id)
@@ -2133,6 +2182,10 @@ async def _stream_handler(
                         segment_count=len(segments_to_process),
                         photo_count=0,
                     )
+                    continue
+                if commit_result.get("status") == "ownership_lost":
+                    capture_recovery_conversation_ids.add(batch_conversation_id)
+                    _latency_log("capture_persistence_ownership_lost")
                     continue
                 updated_segments = [TranscriptSegment(**segment) for segment in commit_result["updated_segments"]]
                 removed_ids = commit_result["removed_ids"]
