@@ -589,8 +589,9 @@ jobs:
             "tests/unit/test_capture_buffer_retention.py::test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch"
             "tests/unit/test_capture_buffer_retention.py::test_capture_commit_rejects_conversation_rotation_before_write"
             "tests/unit/test_capture_buffer_retention.py::test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired_id"
+            "tests/unit/test_capture_buffer_retention.py::test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 8
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 9
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
