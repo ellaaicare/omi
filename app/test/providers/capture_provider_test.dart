@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -219,6 +221,27 @@ ActiveWalAuthority _activeCaptureAuthority(_CaptureAuthority authority) => Activ
       ),
       currentCheck: authority.isCurrent,
     );
+
+Future<void> _grantCaptureEgressAuthority(String uid) async {
+  SharedPreferences.setMockInitialValues({});
+  await SharedPreferencesUtil.init();
+  final preferences = SharedPreferencesUtil()..uid = uid;
+  preferences.acceptAiConsent(
+    receiptId: 'aicr_$uid',
+    uid: uid,
+    profileBindingId: 'profile-$uid',
+    serverDecidedAt: '2026-08-13T00:00:00Z',
+  );
+  preferences.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: 'aicr_$uid',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-$uid',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+}
 
 ServerConversation _conversation(String id, String transcript,
     {ConversationStatus status = ConversationStatus.in_progress}) {
@@ -1145,6 +1168,232 @@ void main() {
     expect(transportStarts, 1, reason: 'BLE capture must continue without a physical restart');
     expect(provider.recordingState, RecordingState.deviceRecord);
     expect(provider.segments, isEmpty, reason: 'the replacement socket starts a fresh local moment');
+  });
+
+  test('physical-only necklace boundary quarantines delayed pre-tap transcript and replays non-WAL frames once',
+      () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final replacementEntered = Completer<void>();
+    final replacementGate = Completer<TranscriptSegmentSocketService?>();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) {
+        socketPreparations++;
+        if (socketPreparations == 1) return Future.value(initialSocket.service);
+        if (!replacementEntered.isCompleted) replacementEntered.complete();
+        return replacementGate.future;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('pre-tap-necklace', 'Delayed words spoken before the tap')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'pre-tap-necklace');
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'completed-pre-tap-necklace',
+            'Delayed words spoken before the tap',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    await provider.streamDeviceRecording(device: necklace);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    initialSocket.pure.sent.clear();
+    expect(provider.segments, isEmpty);
+    expect(provider.hasActiveDeviceCaptureBoundaryEvidence, isTrue);
+
+    final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+    await replacementEntered.future;
+    initialSocket.pure.onMessage(jsonEncode([_segment('late-old', 'Late pre-tap transcript').toJson()]));
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 10], codec: BleAudioCodec.pcm8);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 11], codec: BleAudioCodec.pcm8);
+
+    expect(provider.segments, isEmpty, reason: 'the stopped pre-tap socket no longer owns the Home moment');
+    expect(initialSocket.pure.sent, isEmpty, reason: 'post-boundary BLE frames must not return to the old socket');
+    expect(replacementSocket.pure.sent, isEmpty, reason: 'frames remain fenced until replacement assignment');
+
+    replacementGate.complete(replacementSocket.service);
+    expect(await boundary, isTrue);
+
+    expect(processCalls, 1);
+    expect(replacementSocket.pure.sent, [
+      [10],
+      [11],
+    ]);
+    expect(provider.segments, isEmpty, reason: 'delayed pre-tap words must not appear in the new Home moment');
+    expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('continuous necklace replacement buffer overflow fails visibly exactly once', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final replacementEntered = Completer<void>();
+    final replacementGate = Completer<TranscriptSegmentSocketService?>();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceSocketReplacementBufferMaxFrames: 1,
+      deviceSocketReplacementBufferMaxBytes: 16,
+      deviceTranscriptionSocketPreparer: (_, {required force}) {
+        socketPreparations++;
+        if (socketPreparations == 1) return Future.value(initialSocket.service);
+        if (!replacementEntered.isCompleted) replacementEntered.complete();
+        return replacementGate.future;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('overflow-boundary', 'Words before overflow')];
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+    await replacementEntered.future;
+
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 20], codec: BleAudioCodec.pcm8);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 21], codec: BleAudioCodec.pcm8);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 22], codec: BleAudioCodec.pcm8);
+    await pumpEventQueue();
+
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 1);
+    expect(provider.deviceCaptureSocketForTesting, isNull);
+    expect(replacementSocket.pure.sent, isEmpty);
+
+    replacementGate.complete(replacementSocket.service);
+    expect(await boundary, isFalse);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 1);
+    expect(provider.recordingState, RecordingState.error);
+    expect(replacementSocket.pure.sent, isEmpty);
+  });
+
+  test('continuous necklace replacement failure never leaves an active-looking capture', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : null;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('failed-boundary', 'Words before replacement failure')];
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isFalse);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
+    expect(provider.deviceCaptureSocketForTesting, isNull);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 1);
+  });
+
+  test('continuous necklace boundary consumes physical evidence until a new frame arrives', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final sockets = [_FakeTranscriptSocket(), _FakeTranscriptSocket(), _FakeTranscriptSocket()];
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => sockets[socketPreparations++].service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('boundary-${processCalls + 1}', 'Prior moment')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation:
+              _conversation('completed-$conversationId', 'Prior moment', status: ConversationStatus.completed),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(provider.hasActiveDeviceCaptureBoundaryEvidence, isFalse);
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isFalse);
+    expect(socketPreparations, 2, reason: 'stale prior-boundary proof must not rotate a second socket');
+    expect(processCalls, 1);
+
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 2], codec: BleAudioCodec.pcm8);
+    expect(provider.hasActiveDeviceCaptureBoundaryEvidence, isTrue);
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(socketPreparations, 3);
+    expect(processCalls, 2);
   });
 
   test('necklace cannot become active with a null or disconnected transcription socket', () async {

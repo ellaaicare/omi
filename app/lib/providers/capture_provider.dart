@@ -321,6 +321,46 @@ class _DeviceCaptureSession {
   StreamSubscription? buttonStream;
   StreamSubscription? photoStream;
   Timer? physicalFrameWatchdog;
+  _DeviceSocketReplacementBuffer? socketReplacementBuffer;
+}
+
+class _BufferedDeviceCaptureFrame {
+  const _BufferedDeviceCaptureFrame({
+    required this.socketPayload,
+    required this.walFrame,
+    required this.persistedToWal,
+  });
+
+  final List<int> socketPayload;
+  final List<int> walFrame;
+  final bool persistedToWal;
+}
+
+class _DeviceSocketReplacementBuffer {
+  _DeviceSocketReplacementBuffer({required this.maxFrames, required this.maxBytes});
+
+  final int maxFrames;
+  final int maxBytes;
+  final List<_BufferedDeviceCaptureFrame> frames = <_BufferedDeviceCaptureFrame>[];
+  int bytes = 0;
+  bool overflowed = false;
+  bool failureSignalled = false;
+
+  bool add(_BufferedDeviceCaptureFrame frame) {
+    if (overflowed) return false;
+    if (frames.length >= maxFrames || bytes + frame.socketPayload.length > maxBytes) {
+      overflowed = true;
+      return false;
+    }
+    frames.add(frame);
+    bytes += frame.socketPayload.length;
+    return true;
+  }
+
+  void clear() {
+    frames.clear();
+    bytes = 0;
+  }
 }
 
 Future<List<ServerConversation>> _fetchInProgressConversation({
@@ -466,6 +506,7 @@ class CaptureProvider extends ChangeNotifier
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
   int _deviceCaptureGeneration = 0;
+  int _deviceCaptureFailureTransitions = 0;
   _DeviceCaptureAttempt? _deviceCaptureAttempt;
   Future<void>? _deviceCaptureStartFuture;
   _DeviceCaptureSession? _deviceCaptureSession;
@@ -485,6 +526,8 @@ class CaptureProvider extends ChangeNotifier
   final Duration _devicePhysicalFrameTimeout;
   final Duration _captureAuthorityWaitTimeout;
   final Duration _captureAuthorityPollInterval;
+  final int _deviceSocketReplacementBufferMaxFrames;
+  final int _deviceSocketReplacementBufferMaxBytes;
   final InProgressConversationFetchCall _inProgressConversationFetch;
   final InProgressConversationProcessCall _inProgressConversationProcess;
 
@@ -553,6 +596,8 @@ class CaptureProvider extends ChangeNotifier
     @visibleForTesting Duration devicePhysicalFrameTimeout = const Duration(seconds: 5),
     @visibleForTesting Duration captureAuthorityWaitTimeout = const Duration(seconds: 3),
     @visibleForTesting Duration captureAuthorityPollInterval = const Duration(milliseconds: 100),
+    @visibleForTesting int deviceSocketReplacementBufferMaxFrames = 2048,
+    @visibleForTesting int deviceSocketReplacementBufferMaxBytes = 1024 * 1024,
     InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
     InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
   })  : _activeAccountAuthority = activeAccountAuthority,
@@ -570,6 +615,8 @@ class CaptureProvider extends ChangeNotifier
         _devicePhysicalFrameTimeout = devicePhysicalFrameTimeout,
         _captureAuthorityWaitTimeout = captureAuthorityWaitTimeout,
         _captureAuthorityPollInterval = captureAuthorityPollInterval,
+        _deviceSocketReplacementBufferMaxFrames = deviceSocketReplacementBufferMaxFrames,
+        _deviceSocketReplacementBufferMaxBytes = deviceSocketReplacementBufferMaxBytes,
         _inProgressConversationFetch = inProgressConversationFetch,
         _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
@@ -906,6 +953,24 @@ class CaptureProvider extends ChangeNotifier
   @visibleForTesting
   TranscriptSegmentSocketService? get deviceCaptureSocketForTesting => _deviceCaptureSession?.socket;
 
+  bool get hasActiveDeviceCaptureBoundaryEvidence {
+    final session = _deviceCaptureSession;
+    return session != null &&
+        _isDeviceCaptureCurrent(session) &&
+        recordingState == RecordingState.deviceRecord &&
+        _captureDiagnostics.source == CaptureDiagnosticSource.necklace &&
+        _captureDiagnostics.hasPhysicalAudio;
+  }
+
+  @visibleForTesting
+  void ingestDeviceAudioFrameForTesting(
+    List<int> frame, {
+    BleAudioCodec codec = BleAudioCodec.pcm8,
+  }) {
+    final session = _deviceCaptureSession;
+    if (session != null) _handleDeviceAudioFrame(session, codec, frame);
+  }
+
   @visibleForTesting
   void reconnectDeviceCaptureSocketForTesting(TranscriptSegmentSocketService socket) {
     _socket = socket;
@@ -914,6 +979,9 @@ class CaptureProvider extends ChangeNotifier
 
   @visibleForTesting
   bool get hasPendingDeviceCaptureStartForTesting => _deviceCaptureStartFuture != null;
+
+  @visibleForTesting
+  int get deviceCaptureFailureTransitionsForTesting => _deviceCaptureFailureTransitions;
 
   Future<bool> _closeDeviceCaptureSession(
     _DeviceCaptureSession session, {
@@ -924,6 +992,8 @@ class CaptureProvider extends ChangeNotifier
     if (!session.cancelled.isCompleted) session.cancelled.complete();
     session.physicalFrameWatchdog?.cancel();
     session.physicalFrameWatchdog = null;
+    session.socketReplacementBuffer?.clear();
+    session.socketReplacementBuffer = null;
 
     if (wasCurrent) _deviceCaptureSession = null;
     if (identical(_bleBytesStream, session.bytesStream)) _bleBytesStream = null;
@@ -1029,6 +1099,7 @@ class CaptureProvider extends ChangeNotifier
 
   Future<void> _failDeviceCaptureSession(_DeviceCaptureSession session, String reason) async {
     if (!_isDeviceCaptureCurrent(session)) return;
+    _deviceCaptureFailureTransitions++;
     Logger.error(reason);
     _deviceCaptureGeneration++;
     _isPaused = false;
@@ -1334,7 +1405,6 @@ class CaptureProvider extends ChangeNotifier
       _bleBytesStream = null;
       return null;
     }
-    final captureAuthority = session.authority;
     if (!_isDeviceCaptureCurrent(session)) {
       _bleBytesStream = null;
       return null;
@@ -1343,60 +1413,7 @@ class CaptureProvider extends ChangeNotifier
     await _bleBytesStream?.cancel();
     _startMetricsTracking();
     final subscription = await _getBleAudioBytesListener(deviceId, onAudioBytesReceived: (List<int> value) {
-      final snapshot = List<int>.from(value);
-      if (snapshot.isEmpty || snapshot.length < 3) return;
-
-      // Keep late frames bound to the capture-start authority. Unknown/stale
-      // frames are retained for quarantine and never inherit the next account.
-      if (!_isDeviceCaptureCurrent(session)) {
-        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
-        return;
-      }
-
-      final physicalPayload = physicalDeviceAudioPayload(session.deviceType, snapshot);
-      if (physicalPayload.isNotEmpty) {
-        startProof?.acceptPhysicalFrame(physicalPayload);
-        _recordPhysicalCaptureFrame(physicalPayload);
-        _armDevicePhysicalFrameWatchdog(session);
-      }
-
-      // Track bytes received from BLE
-      _blesBytesReceived += snapshot.length;
-
-      // Command button triggered
-      final voiceCommandSupported = session.deviceType == DeviceType.omi || session.deviceType == DeviceType.openglass;
-      if (_voiceCommandSession != null && voiceCommandSupported) {
-        _commandBytes.add(snapshot.sublist(3));
-      }
-
-      // Local storage syncs
-      var checkWalSupported = (session.deviceType == DeviceType.omi || session.deviceType == DeviceType.openglass) &&
-          codec.isOpusSupported() &&
-          (session.socket.state != SocketServiceState.connected ||
-              SharedPreferencesUtil().unlimitedLocalStorageEnabled);
-      if (checkWalSupported != _isWalSupported) {
-        setIsWalSupported(checkWalSupported);
-      }
-      if (_isWalSupported) {
-        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
-      }
-
-      // Send WS
-      final socket = session.socket;
-      if (socket.state == SocketServiceState.connected && physicalPayload.isNotEmpty) {
-        if (!SharedPreferencesUtil().aiConsentAccepted) return;
-        socket.send(physicalPayload);
-        startProof?.acceptTransmittedFrame(physicalPayload);
-        _recordTransmittedCaptureFrame(physicalPayload);
-
-        // Track bytes sent to websocket
-        _wsSocketBytesSent += physicalPayload.length;
-
-        // Mark as synced
-        if (_isWalSupported) {
-          _wal.getSyncs().phone.onBytesSync(value);
-        }
-      }
+      _handleDeviceAudioFrame(session, codec, value, startProof: startProof);
     });
     if (!_isDeviceCaptureCurrent(session)) {
       await subscription?.cancel();
@@ -1406,6 +1423,123 @@ class CaptureProvider extends ChangeNotifier
     session.bytesStream = subscription;
     notifyListeners();
     return subscription;
+  }
+
+  void _handleDeviceAudioFrame(
+    _DeviceCaptureSession session,
+    BleAudioCodec codec,
+    List<int> value, {
+    DeviceCaptureStartProof? startProof,
+  }) {
+    final snapshot = List<int>.from(value);
+    if (snapshot.isEmpty || snapshot.length < 3) return;
+    final captureAuthority = session.authority;
+
+    // Keep late frames bound to the capture-start authority. Unknown/stale
+    // frames are retained for quarantine and never inherit the next account.
+    if (!_isDeviceCaptureCurrent(session)) {
+      _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
+      return;
+    }
+
+    final physicalPayload = physicalDeviceAudioPayload(session.deviceType, snapshot);
+    if (physicalPayload.isNotEmpty) {
+      startProof?.acceptPhysicalFrame(physicalPayload);
+      _recordPhysicalCaptureFrame(physicalPayload);
+      _armDevicePhysicalFrameWatchdog(session);
+    }
+
+    _blesBytesReceived += snapshot.length;
+
+    final voiceCommandSupported = session.deviceType == DeviceType.omi || session.deviceType == DeviceType.openglass;
+    if (_voiceCommandSession != null && voiceCommandSupported) {
+      _commandBytes.add(snapshot.sublist(3));
+    }
+
+    final walSupported = (session.deviceType == DeviceType.omi || session.deviceType == DeviceType.openglass) &&
+        codec.isOpusSupported() &&
+        (session.socket.state != SocketServiceState.connected || SharedPreferencesUtil().unlimitedLocalStorageEnabled);
+    if (walSupported != _isWalSupported) setIsWalSupported(walSupported);
+    if (walSupported) {
+      _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
+    }
+
+    if (physicalPayload.isEmpty) return;
+    final replacementBuffer = session.socketReplacementBuffer;
+    if (replacementBuffer != null) {
+      final accepted = replacementBuffer.add(
+        _BufferedDeviceCaptureFrame(
+          socketPayload: physicalPayload,
+          walFrame: snapshot,
+          persistedToWal: walSupported,
+        ),
+      );
+      if (!accepted && !replacementBuffer.failureSignalled) {
+        replacementBuffer.failureSignalled = true;
+        unawaited(
+          _failDeviceCaptureSession(session, 'Necklace transcription replacement buffer exceeded its safe bound'),
+        );
+      }
+      return;
+    }
+
+    if (session.socket.state == SocketServiceState.connected && SharedPreferencesUtil().aiConsentAccepted) {
+      _sendDeviceFrame(
+        session.socket,
+        _BufferedDeviceCaptureFrame(
+          socketPayload: physicalPayload,
+          walFrame: snapshot,
+          persistedToWal: walSupported,
+        ),
+        startProof: startProof,
+      );
+    }
+  }
+
+  bool _sendDeviceFrame(
+    TranscriptSegmentSocketService socket,
+    _BufferedDeviceCaptureFrame frame, {
+    DeviceCaptureStartProof? startProof,
+  }) {
+    if (socket.state != SocketServiceState.connected || !SharedPreferencesUtil().aiConsentAccepted) return false;
+    try {
+      socket.send(frame.socketPayload);
+      startProof?.acceptTransmittedFrame(frame.socketPayload);
+      _recordTransmittedCaptureFrame(frame.socketPayload);
+      _wsSocketBytesSent += frame.socketPayload.length;
+      if (frame.persistedToWal) _wal.getSyncs().phone.onBytesSync(frame.walFrame);
+      return true;
+    } catch (error) {
+      Logger.error('Could not send necklace audio frame: $error');
+      return false;
+    }
+  }
+
+  bool _replayDeviceSocketReplacementBuffer(
+    _DeviceCaptureSession session,
+    TranscriptSegmentSocketService replacement,
+    _DeviceSocketReplacementBuffer buffer,
+  ) {
+    if (buffer.overflowed || !_isDeviceCaptureCurrent(session)) return false;
+    for (final frame in buffer.frames) {
+      if (!_sendDeviceFrame(replacement, frame)) return false;
+    }
+    buffer.clear();
+    return true;
+  }
+
+  void _beginNextContinuousDeviceMoment(_DeviceSocketReplacementBuffer buffer) {
+    final now = DateTime.now();
+    _captureDiagnostics = CaptureDiagnostics(
+      source: CaptureDiagnosticSource.necklace,
+      phase: CaptureDiagnosticPhase.streaming,
+      physicalFrames: buffer.frames.length,
+      physicalBytes: buffer.frames.fold<int>(0, (total, frame) => total + frame.socketPayload.length),
+      startedAt: now,
+      updatedAt: now,
+    );
+    _lastCaptureDiagnosticsNotificationAt = now;
+    notifyListeners();
   }
 
   Future<void> _resetState() async {
@@ -1513,24 +1647,50 @@ class CaptureProvider extends ChangeNotifier
     }
 
     final oldSocket = session.socket;
-    await oldSocket.stop(reason: reason);
-    await afterOldSocketStopped?.call();
-    if (!_isDeviceCaptureCurrent(session)) return false;
-    final replacement = await _ensureDeviceSocketConnection(device, force: true);
-    if (!_isDeviceCaptureCurrent(session)) {
-      if (replacement != null && !identical(replacement, oldSocket)) {
-        await replacement.stop(reason: 'stale necklace transcription replacement');
+    if (session.socketReplacementBuffer != null) return false;
+    final replacementBuffer = _DeviceSocketReplacementBuffer(
+      maxFrames: _deviceSocketReplacementBufferMaxFrames,
+      maxBytes: _deviceSocketReplacementBufferMaxBytes,
+    );
+    session.socketReplacementBuffer = replacementBuffer;
+    try {
+      oldSocket.unsubscribe(this);
+      await oldSocket.stop(reason: reason);
+      await afterOldSocketStopped?.call();
+      if (!_isDeviceCaptureCurrent(session)) return false;
+      final replacement = await _ensureDeviceSocketConnection(device, force: true);
+      if (!_isDeviceCaptureCurrent(session)) {
+        if (replacement != null && !identical(replacement, oldSocket)) {
+          await replacement.stop(reason: 'stale necklace transcription replacement');
+        }
+        return false;
+      }
+      if (replacement == null || replacement.state != SocketServiceState.connected) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement failed');
+        return false;
+      }
+      session.socket = replacement;
+      final replayed = _replayDeviceSocketReplacementBuffer(session, replacement, replacementBuffer);
+      session.socketReplacementBuffer = null;
+      if (!replayed) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement could not replay buffered audio');
+        return false;
+      }
+      _transcriptServiceReady = true;
+      notifyListeners();
+      return true;
+    } catch (error) {
+      Logger.error('Could not replace necklace transcription socket: $error');
+      if (_isDeviceCaptureCurrent(session)) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement failed');
       }
       return false;
+    } finally {
+      if (identical(session.socketReplacementBuffer, replacementBuffer)) {
+        session.socketReplacementBuffer = null;
+      }
+      replacementBuffer.clear();
     }
-    if (replacement == null || replacement.state != SocketServiceState.connected) {
-      await _failDeviceCaptureSession(session, 'Necklace transcription replacement failed');
-      return false;
-    }
-    session.socket = replacement;
-    _transcriptServiceReady = true;
-    notifyListeners();
-    return true;
   }
 
   Future<bool> _startDeviceCaptureTransport(_DeviceCaptureSession session, BtDevice device) async {
@@ -2518,29 +2678,37 @@ class CaptureProvider extends ChangeNotifier
     final operation = _beginFinalizationOperation();
     if (operation == null) return false;
     try {
-      final hasContent = await _awaitFinalCapturableContent(
-        operation,
-        maxAttempts: 12,
-        retryDelay: const Duration(milliseconds: 500),
-      );
-      final conversationId = (_conversation?.id ?? '').trim();
-      if (!hasContent || conversationId.isEmpty || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) {
+      final hasBoundaryEvidence = hasCapturableContent || hasActiveDeviceCaptureBoundaryEvidence;
+      if (!hasBoundaryEvidence || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) {
         return false;
       }
 
+      String? conversationId;
       _replacingTranscriptionSocket = true;
       try {
         final replaced = await _replaceDeviceCaptureSocket(
           session,
           reason: 'continuous necklace moment boundary',
-          afterOldSocketStopped: _resetStateVariables,
+          afterOldSocketStopped: () async {
+            conversationId = await _awaitInProgressConversationId(
+              operation,
+              maxAttempts: 12,
+              retryDelay: const Duration(milliseconds: 500),
+            );
+            final boundaryBuffer = session.socketReplacementBuffer;
+            if (!_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return;
+            await _resetStateVariables();
+            _beginNextContinuousDeviceMoment(boundaryBuffer);
+          },
         );
         if (!replaced || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
       } finally {
         _replacingTranscriptionSocket = false;
       }
 
-      final finalized = await _forceProcessingConversationId(conversationId, operation);
+      final exactConversationId = (conversationId ?? '').trim();
+      if (exactConversationId.isEmpty) return false;
+      final finalized = await _forceProcessingConversationId(exactConversationId, operation);
       if (finalized && _isDeviceCaptureCurrent(session)) {
         _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
       }
@@ -2548,6 +2716,34 @@ class CaptureProvider extends ChangeNotifier
     } finally {
       operation.close();
     }
+  }
+
+  Future<String?> _awaitInProgressConversationId(
+    CaptureFinalizationOperation operation, {
+    required int maxAttempts,
+    required Duration retryDelay,
+  }) async {
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      if (!operation.isCurrent) return null;
+      _updateCaptureDiagnostics(
+        phase: CaptureDiagnosticPhase.finalizing,
+        finalizationAttempts: attempt + 1,
+      );
+      try {
+        if (!await _loadInProgressConversation(operation)) return null;
+      } on ExactAccountAuthorityChangedException {
+        return null;
+      } catch (_) {
+        // The socket is already fenced and BLE frames are buffered. Retry only
+        // within the same bounded finalization lease.
+      }
+      final conversationId = (_conversation?.id ?? '').trim();
+      if (conversationId.isNotEmpty) return conversationId;
+      if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
+        await Future<void>.delayed(retryDelay);
+      }
+    }
+    return null;
   }
 
   Future<bool> streamSystemAudioRecording() {

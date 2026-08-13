@@ -235,6 +235,34 @@ void main() {
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
   });
 
+  testWidgets('Home tap rotates a physical continuous necklace before local transcript delivery', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+      captureHasContent: false,
+      captureHasFinalContent: true,
+      captureHasDeviceBoundaryEvidence: true,
+    );
+    addTearDown(harness.dispose);
+
+    expect(harness.capture.segments, isEmpty);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceBoundaries, 1);
+    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.text('Listening… tap to finish'), findsOneWidget);
+  });
+
   testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {
     final harness = await _pumpHome(
       tester,
@@ -729,6 +757,7 @@ Future<_HomeHarness> _pumpHome(
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
   bool captureHasFinalContent = false,
+  bool captureHasDeviceBoundaryEvidence = false,
   List<bool> finalizationResults = const [],
   Completer<void>? finalizationGate,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
@@ -743,6 +772,7 @@ Future<_HomeHarness> _pumpHome(
     phoneStartResult: phoneStartResult,
     hasContent: captureHasContent,
     hasFinalContent: captureHasFinalContent,
+    hasDeviceBoundaryEvidence: captureHasDeviceBoundaryEvidence,
     finalizationResults: finalizationResults,
     finalizationGate: finalizationGate,
   );
@@ -861,6 +891,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.phoneStartResult,
     required this.hasContent,
     required this.hasFinalContent,
+    required this.hasDeviceBoundaryEvidence,
     required List<bool> finalizationResults,
     this.finalizationGate,
   }) : finalizationResults = List<bool>.of(finalizationResults) {
@@ -870,6 +901,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   final PhoneCaptureStartResult phoneStartResult;
   final bool hasContent;
   final bool hasFinalContent;
+  final bool hasDeviceBoundaryEvidence;
   final List<bool> finalizationResults;
   final Completer<void>? finalizationGate;
 
@@ -884,6 +916,9 @@ class _FakeCaptureProvider extends CaptureProvider {
 
   @override
   bool get hasCapturableContent => hasContent;
+
+  @override
+  bool get hasActiveDeviceCaptureBoundaryEvidence => hasDeviceBoundaryEvidence;
 
   @override
   Future<bool> awaitFinalCapturableContent({
