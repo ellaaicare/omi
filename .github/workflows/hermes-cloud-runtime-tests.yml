@@ -784,6 +784,9 @@ jobs:
             "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[memory]"
             "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[daily_card]"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_identity_is_scoped_to_active_summary_version"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_legacy_enrichment_identity_matches_deployed_v1_contract_exactly"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_accepts_queued_legacy_identity_and_preserves_its_idempotency_keys"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_rejects_identity_outside_current_and_legacy_contracts"
             "tests/unit/test_hermes_product_fit_canary.py::test_config_requires_safe_enrichment_summary_version_pin"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_ignores_self_attestation_and_requires_independent_verifier"
@@ -819,7 +822,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 20
-          test "$collected" -eq 561
+          test "$collected" -eq 564
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1014,7 +1017,8 @@ jobs:
               sed '/^$/d'
           )"
           required_conversation_summary_cas_ids=(
-            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_process_metadata"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_does_not_clear_durable_metadata_with_process_nulls"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_two_processors_from_empty_source_produce_one_winner"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_persisted_conversation_does_not_resurrect_without_create_authority"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_doc_parent_write_sanitizes_photos_and_audio_url"
@@ -1033,7 +1037,7 @@ jobs:
           for required_id in "${required_conversation_summary_cas_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
-          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 45
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 46
           pytest tests/unit/test_conversation_summary_cas.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v

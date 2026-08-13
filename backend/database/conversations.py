@@ -50,10 +50,16 @@ conversation_stock_summary_deleted = 'stock_summary_conversation_deleted'
 
 _STOCK_SUMMARY_RESULT_UPDATE_FIELDS = {
     'discarded',
+    'external_data',
+    'geolocation',
     'processing_error',
     'processing_error_at',
     'status',
     'structured',
+}
+_STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS = {
+    'external_data',
+    'geolocation',
 }
 
 
@@ -686,6 +692,7 @@ def _processing_result_update_data(conversation_data: Dict[str, Any]) -> Dict[st
         key: copy.deepcopy(value)
         for key, value in conversation_data.items()
         if key in _STOCK_SUMMARY_RESULT_UPDATE_FIELDS and key != 'photos'
+        if key not in _STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS or value is not None
     }
 
 
@@ -784,6 +791,15 @@ def _stock_summary_authority_update(
         }
 
     update_data = _processing_result_update_data(processing_conversation)
+    processing_external_data = update_data.get('external_data')
+    if isinstance(processing_external_data, dict):
+        durable_external_data = durable_conversation.get('external_data')
+        update_data['external_data'] = {
+            **(copy.deepcopy(durable_external_data) if isinstance(durable_external_data, dict) else {}),
+            **processing_external_data,
+        }
+    elif 'external_data' in update_data:
+        del update_data['external_data']
     if processing_conversation.get('discarded'):
         return {
             'status': 'committed',

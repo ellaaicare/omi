@@ -7,7 +7,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-HERMES_CLOUD_ENRICHMENT_POLICY_VERSION = "hermes-cloud-enrichment-v1"
+HERMES_CLOUD_ENRICHMENT_LEGACY_POLICY_VERSION = "hermes-cloud-enrichment-v1"
+HERMES_CLOUD_ENRICHMENT_POLICY_VERSION = "hermes-cloud-enrichment-v2"
+HERMES_CLOUD_ENRICHMENT_LEGACY_INSTRUCTIONS_SHA256 = "acb68ed9b263c62e8ed927c2e1461187cdff648bfb3a88e78ac401ed675d067d"
 
 ENRICHMENT_INSTRUCTIONS = """You are Ella's OMI conversation enrichment worker.
 
@@ -46,6 +48,7 @@ class HermesCloudEnrichmentIdentity:
     client_interaction_id: str
     trace_id: str
     transcript_sha256: str
+    policy_version: str
 
 
 def transcript_source(conversation: dict[str, Any]) -> tuple[str, str]:
@@ -65,14 +68,59 @@ def _interaction_identity(
     transcript_sha256: str,
     active_summary_version_id: str,
 ) -> tuple[str, str]:
-    policy_sha256 = hashlib.sha256(ENRICHMENT_INSTRUCTIONS.encode("utf-8")).hexdigest()
-    digest = hashlib.sha256(
-        (
-            f"{uid}|{conversation_id}|{transcript_sha256}|{active_summary_version_id}|"
-            f"{HERMES_CLOUD_ENRICHMENT_POLICY_VERSION}|{policy_sha256}"
-        ).encode("utf-8")
-    ).hexdigest()
+    return _interaction_identity_for_policy(
+        uid,
+        conversation_id,
+        transcript_sha256,
+        policy_version=HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+        active_summary_version_id=active_summary_version_id,
+    )
+
+
+def _interaction_identity_for_policy(
+    uid: str,
+    conversation_id: str,
+    transcript_sha256: str,
+    *,
+    policy_version: str,
+    active_summary_version_id: str | None,
+) -> tuple[str, str]:
+    policy_sha256 = (
+        HERMES_CLOUD_ENRICHMENT_LEGACY_INSTRUCTIONS_SHA256
+        if policy_version == HERMES_CLOUD_ENRICHMENT_LEGACY_POLICY_VERSION
+        else hashlib.sha256(ENRICHMENT_INSTRUCTIONS.encode("utf-8")).hexdigest()
+    )
+    identity_parts = [uid, conversation_id, transcript_sha256]
+    if active_summary_version_id is not None:
+        identity_parts.append(active_summary_version_id)
+    identity_parts.extend((policy_version, policy_sha256))
+    digest = hashlib.sha256("|".join(identity_parts).encode("utf-8")).hexdigest()
     return f"omi-enrichment:{digest}", f"omi-enrichment:{digest[:32]}"
+
+
+def _build_enrichment_identity(
+    *,
+    uid: str,
+    conversation_id: str,
+    conversation: dict[str, Any],
+    policy_version: str,
+    active_summary_version_id: str | None,
+) -> HermesCloudEnrichmentIdentity:
+    _, transcript_sha256 = transcript_source(conversation)
+    client_interaction_id, trace_id = _interaction_identity_for_policy(
+        uid,
+        conversation_id,
+        transcript_sha256,
+        policy_version=policy_version,
+        active_summary_version_id=active_summary_version_id,
+    )
+    return HermesCloudEnrichmentIdentity(
+        job_id=("hce_" + hashlib.sha256(client_interaction_id.encode("utf-8")).hexdigest()),
+        client_interaction_id=client_interaction_id,
+        trace_id=trace_id,
+        transcript_sha256=transcript_sha256,
+        policy_version=policy_version,
+    )
 
 
 def build_enrichment_identity(
@@ -81,17 +129,27 @@ def build_enrichment_identity(
     conversation_id: str,
     conversation: dict[str, Any],
 ) -> HermesCloudEnrichmentIdentity:
-    _, transcript_sha256 = transcript_source(conversation)
     active_summary_version_id = str(conversation.get("active_summary_version_id") or "unversioned")
-    client_interaction_id, trace_id = _interaction_identity(
-        uid,
-        conversation_id,
-        transcript_sha256,
-        active_summary_version_id,
+    return _build_enrichment_identity(
+        uid=uid,
+        conversation_id=conversation_id,
+        conversation=conversation,
+        policy_version=HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+        active_summary_version_id=active_summary_version_id,
     )
-    return HermesCloudEnrichmentIdentity(
-        job_id=("hce_" + hashlib.sha256(client_interaction_id.encode("utf-8")).hexdigest()),
-        client_interaction_id=client_interaction_id,
-        trace_id=trace_id,
-        transcript_sha256=transcript_sha256,
+
+
+def build_legacy_enrichment_identity(
+    *,
+    uid: str,
+    conversation_id: str,
+    conversation: dict[str, Any],
+) -> HermesCloudEnrichmentIdentity:
+    """Reproduce the deployed v1 identity for already-durable outbox jobs."""
+    return _build_enrichment_identity(
+        uid=uid,
+        conversation_id=conversation_id,
+        conversation=conversation,
+        policy_version=HERMES_CLOUD_ENRICHMENT_LEGACY_POLICY_VERSION,
+        active_summary_version_id=None,
     )

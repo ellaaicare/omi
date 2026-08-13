@@ -1,3 +1,4 @@
+import ast
 import asyncio
 from datetime import datetime, timedelta, timezone
 import os
@@ -724,6 +725,11 @@ def test_intentional_reprocess_and_destructive_merge_callers_require_explicit_ou
     assert "if not outcome.dispatched:" in postprocess_source
     assert "process_conversation_with_outcome(" in merge_source
     assert "if not processing_outcome.dispatched:" in merge_source
+    merge_tree = ast.parse(merge_source)
+    perform_merge = next(
+        node for node in merge_tree.body if isinstance(node, ast.FunctionDef) and node.name == "perform_merge_async"
+    )
+    assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) for node in ast.walk(perform_merge))
     failure_block = merge_source.split("except Exception as e:", 2)[1].split("else:", 1)[0]
     assert "_handle_merge_failure(uid, conversation_ids)" in failure_block
     assert "return" in failure_block
@@ -768,7 +774,7 @@ def test_merge_preserves_sources_when_new_conversation_processing_does_not_dispa
         lambda uid, conversation_ids: failures.append((uid, list(conversation_ids))),
     )
     monkeypatch.setattr(
-        conversation_processor,
+        merge_processor,
         "process_conversation_with_outcome",
         lambda *_args, **_kwargs: types.SimpleNamespace(
             conversation=_long_conversation(),
@@ -777,7 +783,7 @@ def test_merge_preserves_sources_when_new_conversation_processing_does_not_dispa
         ),
     )
     monkeypatch.setattr(
-        sys.modules["utils.notifications"],
+        merge_processor,
         "send_merge_completed_message",
         lambda *_args, **_kwargs: completions.append("completed"),
     )

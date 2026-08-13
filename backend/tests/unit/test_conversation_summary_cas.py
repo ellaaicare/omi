@@ -539,7 +539,7 @@ def _stock_processing_payload(active_summary_version_id=None):
     }
 
 
-def test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns(monkeypatch):
+def test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_process_metadata(monkeypatch):
     conversations = _load_conversations_module(monkeypatch)
     durable = {
         "id": "conversation-1",
@@ -556,7 +556,10 @@ def test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns(m
         "folder_id": "fresh-folder",
         "correction_state": {"status": "fresh-correction"},
         "enrichment_state": {"status": "fresh-enrichment"},
-        "external_data": {"fresh": True},
+        "external_data": {
+            "durable_only": True,
+            "shared": "durable",
+        },
         "geolocation": {"latitude": 1.0, "longitude": 2.0},
         "unknown_runtime_field": {"keep": True},
         "status": "processing",
@@ -571,7 +574,10 @@ def test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns(m
             "folder_id": "stale-folder",
             "correction_state": {"status": "stale-correction"},
             "enrichment_state": {"status": "stale-enrichment"},
-            "external_data": {"stale": True},
+            "external_data": {
+                "process_only": True,
+                "shared": "process",
+            },
             "geolocation": {"latitude": 9.0, "longitude": 9.0},
         }
     )
@@ -600,8 +606,14 @@ def test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns(m
     assert ref.data["folder_id"] == "fresh-folder"
     assert ref.data["correction_state"] == {"status": "fresh-correction"}
     assert ref.data["enrichment_state"] == {"status": "fresh-enrichment"}
-    assert ref.data["external_data"] == {"fresh": True}
-    assert ref.data["geolocation"] == {"latitude": 1.0, "longitude": 2.0}
+    assert updated_fields["external_data"] == {
+        "durable_only": True,
+        "process_only": True,
+        "shared": "process",
+    }
+    assert updated_fields["geolocation"] == {"latitude": 9.0, "longitude": 9.0}
+    assert ref.data["external_data"] == updated_fields["external_data"]
+    assert ref.data["geolocation"] == updated_fields["geolocation"]
     assert ref.data["unknown_runtime_field"] == {"keep": True}
     assert result["conversation"]["transcript_segments"] == durable["transcript_segments"]
     assert result["conversation"]["active_summary_version_id"] == result["active_summary_version_id"]
@@ -609,6 +621,40 @@ def test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns(m
     assert ref.data["summary_versions"][0]["source"] == "omi"
     assert ref.data["summary_versions"][0]["kind"] == "generated"
     assert ref.data["summary_versions"][0]["is_active"] is True
+
+
+def test_stock_summary_commit_does_not_clear_durable_metadata_with_process_nulls(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    durable = {
+        "id": "conversation-1",
+        "created_at": "2026-07-22T00:00:00+00:00",
+        "structured": {},
+        "summary_versions": [],
+        "active_summary_version_id": None,
+        "external_data": {"durable_only": True},
+        "geolocation": {"latitude": 1.0, "longitude": 2.0},
+        "status": "processing",
+        "discarded": False,
+    }
+    ref = _ConversationRef(dict(durable))
+    transaction = _Transaction()
+    processing_payload = _stock_processing_payload()
+    processing_payload.update({"external_data": None, "geolocation": None})
+
+    result = conversations._commit_stock_summary_processing_result_transaction(
+        transaction,
+        ref,
+        "uid-1",
+        processing_payload,
+        expected_active_summary_version_id=None,
+    )
+
+    assert result["status"] == "committed"
+    updated_fields = transaction.updates[0][1]
+    assert "external_data" not in updated_fields
+    assert "geolocation" not in updated_fields
+    assert ref.data["external_data"] == durable["external_data"]
+    assert ref.data["geolocation"] == durable["geolocation"]
 
 
 def test_stock_summary_missing_persisted_conversation_does_not_resurrect_without_create_authority(monkeypatch):

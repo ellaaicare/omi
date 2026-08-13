@@ -21,9 +21,9 @@ from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_run
 from models.conversation import CategoryEnum
 from models.hermes_cloud_enrichment_contract import (
     ENRICHMENT_INSTRUCTIONS,
-    HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
     HermesCloudEnrichmentIdentity,
     build_enrichment_identity,
+    build_legacy_enrichment_identity,
     transcript_source,
 )
 from utils.ella.canonical_omi import (
@@ -358,10 +358,17 @@ class HermesCloudEnrichmentService:
         )
         transcript_sha256 = identity.transcript_sha256
         if expected_client_interaction_id and expected_client_interaction_id != identity.client_interaction_id:
-            raise ProvisioningError(
-                "hermes_cloud_enrichment_interaction_changed",
-                retryable=False,
+            legacy_identity = build_legacy_enrichment_identity(
+                uid=uid,
+                conversation_id=conversation_id,
+                conversation=conversation,
             )
+            if expected_client_interaction_id != legacy_identity.client_interaction_id:
+                raise ProvisioningError(
+                    "hermes_cloud_enrichment_interaction_changed",
+                    retryable=False,
+                )
+            identity = legacy_identity
         if expected_transcript_sha256 and expected_transcript_sha256 != transcript_sha256:
             raise ProvisioningError(
                 "hermes_cloud_enrichment_transcript_changed",
@@ -379,7 +386,7 @@ class HermesCloudEnrichmentService:
             client_metadata={
                 "synthetic": uid.startswith(("synthetic-", "staging-synthetic-")),
                 "source": "omi_conversation_postprocess",
-                "policy_version": HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+                "policy_version": identity.policy_version,
                 "conversation_id_sha256": hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
                 "transcript_sha256": transcript_sha256,
             },
