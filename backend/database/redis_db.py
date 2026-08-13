@@ -417,6 +417,15 @@ redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 return 1
 """
 
+_REPLACE_STALE_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
+redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+return 1
+"""
+
 _REFRESH_IN_PROGRESS_CONVERSATION_SCRIPT = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] then
     return 0
@@ -481,6 +490,29 @@ def claim_in_progress_conversation_id(
             owner_key,
             conversation_id,
             owner_id,
+            ttl,
+        )
+    )
+
+
+def replace_stale_in_progress_conversation_id(
+    uid: str,
+    expected_conversation_id: str,
+    new_conversation_id: str,
+    new_owner_id: str,
+    ttl: int = 300,
+) -> bool:
+    """Replace an exact stale active ID after durable state proves it is not resumable."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _REPLACE_STALE_IN_PROGRESS_CONVERSATION_SCRIPT,
+            2,
+            active_key,
+            owner_key,
+            expected_conversation_id,
+            new_conversation_id,
+            new_owner_id,
             ttl,
         )
     )

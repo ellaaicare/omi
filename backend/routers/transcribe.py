@@ -747,6 +747,7 @@ async def _stream_handler(
         *,
         expected_conversation_id: Optional[str] = None,
         expected_owner_id: Optional[str] = None,
+        replace_stale_conversation_id: Optional[str] = None,
         new_owner_id: Optional[str] = session_id,
         adopt: bool = True,
     ) -> bool:
@@ -823,6 +824,13 @@ async def _stream_handler(
                 new_conversation_id,
                 new_owner_id,
             )
+        elif replace_stale_conversation_id is not None:
+            published = redis_db.replace_stale_in_progress_conversation_id(
+                uid,
+                replace_stale_conversation_id,
+                new_conversation_id,
+                new_owner_id or '',
+            )
         else:
             published = redis_db.claim_in_progress_conversation_id(
                 uid,
@@ -895,7 +903,9 @@ async def _stream_handler(
             if has_content:
                 if PUSHER_ENABLED:
                     on_conversation_processing_started(conversation_id)
-                    await request_conversation_processing(conversation_id)
+                    requested = await request_conversation_processing(conversation_id)
+                    if not requested:
+                        await _create_conversation_fallback(conversation)
                 else:
                     await _create_conversation_fallback(conversation)
             else:
@@ -926,6 +936,13 @@ async def _stream_handler(
                 )
 
         task.add_done_callback(processing_done)
+
+    async def _await_conversation_finalize_tasks() -> None:
+        while conversation_finalize_tasks:
+            await asyncio.gather(
+                *tuple(conversation_finalize_tasks),
+                return_exceptions=True,
+            )
 
     async def _finalize_current_conversation_on_disconnect() -> None:
         conversation_id = str(current_conversation_id or "").strip()
@@ -968,48 +985,56 @@ async def _stream_handler(
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
 
-        existing_conversation = None
         for _ in range(3):
+            active_conversation_id = redis_db.get_in_progress_conversation_id(uid)
             candidate = retrieve_in_progress_conversation(uid)
-            if not candidate:
-                break
-            candidate_id = str(candidate.get('id') or '').strip()
-            if candidate_id and redis_db.claim_in_progress_conversation_id(uid, candidate_id, session_id):
-                existing_conversation = candidate
-                break
-            await asyncio.sleep(0)
-        else:
-            raise RuntimeError("active conversation ownership changed during reconnect")
+            if candidate:
+                candidate_id = str(candidate.get('id') or '').strip()
+                claimed = bool(candidate_id) and redis_db.claim_in_progress_conversation_id(
+                    uid, candidate_id, session_id
+                )
+                if not claimed and candidate_id and active_conversation_id and active_conversation_id != candidate_id:
+                    claimed = redis_db.replace_stale_in_progress_conversation_id(
+                        uid,
+                        active_conversation_id,
+                        candidate_id,
+                        session_id,
+                    )
+                if not claimed:
+                    await asyncio.sleep(0)
+                    continue
 
-        if existing_conversation:
-            finished_at = datetime.fromisoformat(existing_conversation['finished_at'].isoformat())
-            seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
-            if seconds_since_last_segment >= conversation_creation_timeout:
+                finished_at = datetime.fromisoformat(candidate['finished_at'].isoformat())
+                seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
+                if seconds_since_last_segment >= conversation_creation_timeout:
+                    print(
+                        f'Processing existing conversation {candidate["id"]} (timed out: {seconds_since_last_segment:.1f}s)',
+                        uid,
+                        session_id,
+                    )
+                    if not await _create_new_in_progress_conversation(
+                        expected_conversation_id=candidate_id,
+                        expected_owner_id=session_id,
+                    ):
+                        await asyncio.sleep(0)
+                        continue
+                    return candidate_id
+
+                current_conversation_id = candidate_id
                 print(
-                    f'Processing existing conversation {existing_conversation["id"]} (timed out: {seconds_since_last_segment:.1f}s)',
+                    f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
                     uid,
                     session_id,
                 )
-                if not await _create_new_in_progress_conversation(
-                    expected_conversation_id=existing_conversation['id'],
-                    expected_owner_id=session_id,
-                ):
-                    raise RuntimeError("active conversation ownership changed during timeout rotation")
-                return existing_conversation["id"]
+                return None
 
-            # Continue with the existing conversation
-            current_conversation_id = existing_conversation['id']
-            print(
-                f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
-                uid,
-                session_id,
-            )
-            return None
+            if await _create_new_in_progress_conversation(
+                replace_stale_conversation_id=active_conversation_id or None,
+            ):
+                return None
+            await asyncio.sleep(0)
 
-        # else
-        if not await _create_new_in_progress_conversation():
-            raise RuntimeError("active conversation appeared during initial creation")
-        return None
+        raise RuntimeError("active conversation ownership changed during reconnect")
 
     _send_message_event(
         MessageServiceStatusEvent(status="in_progress_conversations_processing", status_text="Processing Conversations")
@@ -2770,6 +2795,8 @@ async def _stream_handler(
                 error=str(e)[:300],
             )
             print(f"Error finalizing conversation after disconnect: {e}", uid, session_id)
+
+        await _await_conversation_finalize_tasks()
 
         # STT sockets
         try:

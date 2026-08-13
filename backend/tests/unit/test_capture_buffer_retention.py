@@ -51,6 +51,14 @@ class InMemoryOwnershipRedis:
             self._set(owner_key, owner_id, ttl)
             return 1
 
+        if "redis.call('SET', KEYS[1], ARGV[2]" in script:
+            expected_id, new_id, new_owner, ttl = argv
+            if self.values.get(active_key) != expected_id:
+                return 0
+            self._set(active_key, new_id, ttl)
+            self._set(owner_key, new_owner, ttl)
+            return 1
+
         if "redis.call('SET', KEYS[1], ARGV[1]" in script:
             conversation_id, owner_id, ttl = argv
             self._set(active_key, conversation_id, ttl)
@@ -505,6 +513,9 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "drain_capture_persistence_batches(uid, conversation_id)" in process_source
     assert "if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
     assert "return False" in process_source
+    assert "requested = await request_conversation_processing(conversation_id)" in process_source
+    assert "if not requested:" in process_source
+    assert "await _create_conversation_fallback(conversation)" in process_source
     assert "conversation_id_to_process = current_conversation_id" in lifecycle_source
     assert "expected_conversation_id=conversation_id_to_process" in lifecycle_source
     assert "expected_owner_id=session_id" in lifecycle_source
@@ -517,6 +528,7 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "await _process_conversation_after_rotation(conversation_id_to_process)" not in lifecycle_source
     assert "conversation_finalize_tasks.add(task)" in process_source
     assert "conversation_finalize_tasks.discard(completed)" in process_source
+    assert "async def _await_conversation_finalize_tasks" in process_source
     assert "conversation.get('status') != ConversationStatus.in_progress" in disconnect_finalize_source
     assert "_wait_for_capture_buffers_to_drain(conversation_id, timeout_seconds=5.0)" in disconnect_finalize_source
     assert "expected_conversation_id=conversation_id" in disconnect_finalize_source
@@ -528,11 +540,21 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "_process_conversation(conversation_id, wait_for_buffers=False)" in disconnect_finalize_source
     assert '"capture_disconnect_finalize_deferred"' in disconnect_finalize_source
     assert '"capture_disconnect_finalized"' in disconnect_finalize_source
-    assert "claim_in_progress_conversation_id(uid, candidate_id, session_id)" in prepare_source
-    assert 'raise RuntimeError("active conversation appeared during initial creation")' in prepare_source
+    assert "claim_in_progress_conversation_id(" in prepare_source
+    assert "uid, candidate_id, session_id" in prepare_source
+    assert "active_conversation_id != candidate_id" in prepare_source
+    assert "replace_stale_in_progress_conversation_id(" in prepare_source
+    assert "active_conversation_id," in prepare_source
+    assert "candidate_id," in prepare_source
+    assert "replace_stale_conversation_id=active_conversation_id or None" in prepare_source
+    assert 'raise RuntimeError("active conversation ownership changed during reconnect")' in prepare_source
     assert "refresh_in_progress_conversation_id(" in heartbeat_source
     assert '"capture_socket_ownership_lost"' in heartbeat_source
     assert "await _finalize_current_conversation_on_disconnect()" in shutdown_source
+    assert "await _await_conversation_finalize_tasks()" in shutdown_source
+    assert shutdown_source.index("await _finalize_current_conversation_on_disconnect()") < shutdown_source.index(
+        "await _await_conversation_finalize_tasks()"
+    )
     assert '"capture_disconnect_finalize_error"' in shutdown_source
     assert "while True:" in process_source
     assert "while websocket_active:" not in process_source
@@ -609,3 +631,30 @@ def test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired
     assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-recovered", "socket-recovered")
     assert not redis_db.claim_in_progress_conversation_id("uid-a", "conversation-stale", "socket-stale")
     assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-recovered"
+
+
+def test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas():
+    redis_db = load_ownership_redis_db()
+    redis_db.set_in_progress_conversation_id("uid-a", "conversation-stale", owner_id="socket-old")
+
+    assert not redis_db.replace_stale_in_progress_conversation_id(
+        "uid-a",
+        "conversation-other",
+        "conversation-new",
+        "socket-new",
+    )
+    assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-stale"
+
+    assert redis_db.replace_stale_in_progress_conversation_id(
+        "uid-a",
+        "conversation-stale",
+        "conversation-new",
+        "socket-new",
+    )
+    assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-new"
+    assert not redis_db.replace_stale_in_progress_conversation_id(
+        "uid-a",
+        "conversation-stale",
+        "conversation-loser",
+        "socket-loser",
+    )
