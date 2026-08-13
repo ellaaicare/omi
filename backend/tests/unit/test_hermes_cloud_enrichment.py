@@ -332,7 +332,9 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
     assert writeback["require_canonical"] is True
     assert writeback["summary_source"] == "hermes_cloud"
     assert writeback["active_summary_version_id"] == "version-a"
-    assert writeback["expected_transcript_hash"] == identity.transcript_sha256
+    assert writeback["expected_transcript_hash"] == hermes_cloud_enrichment.transcript_grounding_hash(
+        conversation["transcript_segments"]
+    )
     assert writeback["require_source_match"] is True
     recovery_source = (Path(__file__).parents[2] / "ella" / "services" / "summary_recovery.py").read_text()
     recovery_module = ast.parse(recovery_source)

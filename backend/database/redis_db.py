@@ -397,13 +397,143 @@ def get_public_conversations() -> List[str]:
     return [x.decode() for x in val]
 
 
-def set_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300):
-    r.set(f'users:{uid}:in_progress_memory_id', conversation_id)
-    r.expire(f'users:{uid}:in_progress_memory_id', ttl)
+_SET_IN_PROGRESS_CONVERSATION_SCRIPT = """
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+if ARGV[2] == '' then
+    redis.call('DEL', KEYS[2])
+else
+    redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+end
+return 1
+"""
+
+_CLAIM_IN_PROGRESS_CONVERSATION_SCRIPT = """
+local active_id = redis.call('GET', KEYS[1])
+if active_id and active_id ~= ARGV[1] then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+return 1
+"""
+
+_REFRESH_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] then
+    return 0
+end
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+return 1
+"""
+
+_ROTATE_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[3], 'EX', ARGV[5])
+if ARGV[4] == '' then
+    redis.call('DEL', KEYS[2])
+else
+    redis.call('SET', KEYS[2], ARGV[4], 'EX', ARGV[5])
+end
+return 1
+"""
+
+
+def _in_progress_conversation_keys(uid: str) -> tuple[str, str]:
+    return (
+        f'users:{uid}:in_progress_memory_id',
+        f'users:{uid}:in_progress_memory_owner',
+    )
+
+
+def set_in_progress_conversation_id(
+    uid: str,
+    conversation_id: str,
+    ttl: int = 300,
+    owner_id: Optional[str] = None,
+):
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    r.eval(
+        _SET_IN_PROGRESS_CONVERSATION_SCRIPT,
+        2,
+        active_key,
+        owner_key,
+        conversation_id,
+        owner_id or '',
+        ttl,
+    )
+
+
+def claim_in_progress_conversation_id(
+    uid: str,
+    conversation_id: str,
+    owner_id: str,
+    ttl: int = 300,
+) -> bool:
+    """Claim the expected conversation, restoring its expired active-ID key without overwriting another ID."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _CLAIM_IN_PROGRESS_CONVERSATION_SCRIPT,
+            2,
+            active_key,
+            owner_key,
+            conversation_id,
+            owner_id,
+            ttl,
+        )
+    )
+
+
+def refresh_in_progress_conversation_id(
+    uid: str,
+    conversation_id: str,
+    owner_id: str,
+    ttl: int = 300,
+) -> bool:
+    """Refresh a listen socket lease without reclaiming ownership from a replacement socket."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _REFRESH_IN_PROGRESS_CONVERSATION_SCRIPT,
+            2,
+            active_key,
+            owner_key,
+            conversation_id,
+            owner_id,
+            ttl,
+        )
+    )
+
+
+def rotate_in_progress_conversation_id(
+    uid: str,
+    expected_conversation_id: str,
+    expected_owner_id: str,
+    new_conversation_id: str,
+    new_owner_id: Optional[str] = None,
+    ttl: int = 300,
+) -> bool:
+    """Publish a replacement active conversation only while the caller still owns the old one."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _ROTATE_IN_PROGRESS_CONVERSATION_SCRIPT,
+            2,
+            active_key,
+            owner_key,
+            expected_conversation_id,
+            expected_owner_id,
+            new_conversation_id,
+            new_owner_id or '',
+            ttl,
+        )
+    )
 
 
 def remove_in_progress_conversation_id(uid: str):
-    r.delete(f'users:{uid}:in_progress_memory_id')
+    r.delete(*_in_progress_conversation_keys(uid))
 
 
 def get_in_progress_conversation_id(uid: str) -> str:

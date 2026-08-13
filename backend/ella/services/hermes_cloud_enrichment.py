@@ -395,6 +395,7 @@ class HermesCloudEnrichmentService:
         transcript_segments = [
             dict(segment) for segment in (conversation.get("transcript_segments") or []) if isinstance(segment, dict)
         ]
+        source_grounding_hash = transcript_grounding_hash(transcript_segments)
         runtime_service = self._runtime_service(allow_shadow)
         turn = await runtime_service.run_turn(
             runtime,
@@ -488,7 +489,7 @@ class HermesCloudEnrichmentService:
             summary_source="hermes_cloud",
             require_canonical=True,
             require_based_on_match=not same_applied_trace,
-            expected_transcript_hash=transcript_sha256,
+            expected_transcript_hash=source_grounding_hash,
             require_source_match=True,
             preserve_generated_results=True,
             today_card_grounding=today_card_grounding,

@@ -3,7 +3,9 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
+from types import ModuleType
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -28,6 +30,99 @@ from utils.capture_buffer import (
     prepare_conversation_bound_capture_batch,
     queue_pusher_transcript_batch,
 )
+
+
+class InMemoryOwnershipRedis:
+    def __init__(self):
+        self.values = {}
+        self.ttls = {}
+
+    def eval(self, script, key_count, *args):
+        assert key_count == 2
+        active_key, owner_key = args[:key_count]
+        argv = args[key_count:]
+
+        if "local active_id = redis.call('GET', KEYS[1])" in script:
+            conversation_id, owner_id, ttl = argv
+            active_id = self.values.get(active_key)
+            if active_id is not None and active_id != conversation_id:
+                return 0
+            self._set(active_key, conversation_id, ttl)
+            self._set(owner_key, owner_id, ttl)
+            return 1
+
+        if "redis.call('SET', KEYS[1], ARGV[1]" in script:
+            conversation_id, owner_id, ttl = argv
+            self._set(active_key, conversation_id, ttl)
+            if owner_id:
+                self._set(owner_key, owner_id, ttl)
+            else:
+                self.delete(owner_key)
+            return 1
+
+        if "redis.call('SET', KEYS[2], ARGV[2]" in script:
+            conversation_id, owner_id, ttl = argv
+            if self.values.get(active_key) != conversation_id:
+                return 0
+            self._set(owner_key, owner_id, ttl)
+            self.ttls[active_key] = int(ttl)
+            return 1
+
+        if "redis.call('EXPIRE', KEYS[2], ARGV[3]" in script:
+            conversation_id, owner_id, ttl = argv
+            if self.values.get(active_key) != conversation_id or self.values.get(owner_key) != owner_id:
+                return 0
+            self.ttls[active_key] = int(ttl)
+            self.ttls[owner_key] = int(ttl)
+            return 1
+
+        if "redis.call('SET', KEYS[1], ARGV[3]" in script:
+            expected_id, expected_owner, new_id, new_owner, ttl = argv
+            if self.values.get(active_key) != expected_id or self.values.get(owner_key) != expected_owner:
+                return 0
+            self._set(active_key, new_id, ttl)
+            if new_owner:
+                self._set(owner_key, new_owner, ttl)
+            else:
+                self.delete(owner_key)
+            return 1
+
+        raise AssertionError("unexpected Redis script")
+
+    def delete(self, *keys):
+        for key in keys:
+            self.values.pop(key, None)
+            self.ttls.pop(key, None)
+
+    def get(self, key):
+        value = self.values.get(key)
+        return value.encode() if value is not None else None
+
+    def _set(self, key, value, ttl):
+        self.values[key] = str(value)
+        self.ttls[key] = int(ttl)
+
+
+def load_ownership_redis_db():
+    redis_module = ModuleType("redis")
+    redis_module.Redis = lambda **_kwargs: InMemoryOwnershipRedis()
+    attestation_module = ModuleType("database.honcho_attestation")
+    attestation_module.authority_credential = lambda *_args, **_kwargs: ""
+    spec = importlib.util.spec_from_file_location(
+        "database.transcription_ownership_redis_db",
+        Path(__file__).parents[2] / "database" / "redis_db.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(
+        sys.modules,
+        {
+            "redis": redis_module,
+            "database.honcho_attestation": attestation_module,
+        },
+    ):
+        spec.loader.exec_module(module)
+    return module
 
 
 def test_capture_batch_waits_for_all_persistence_guards_without_clearing_buffers():
@@ -389,6 +484,12 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     disconnect_finalize_source = source.split("async def _finalize_current_conversation_on_disconnect", maxsplit=1)[
         1
     ].split("# Process existing conversations", maxsplit=1)[0]
+    prepare_source = source.split("async def _prepare_in_progess_conversations", maxsplit=1)[1].split(
+        "_send_message_event(", maxsplit=1
+    )[0]
+    heartbeat_source = source.split("async def send_heartbeat", maxsplit=1)[1].split("# Start heart beat", maxsplit=1)[
+        0
+    ]
     lifecycle_source = source.split("async def conversation_lifecycle_manager", maxsplit=1)[1].split(
         "async def speaker_identification_task", maxsplit=1
     )[0]
@@ -402,19 +503,35 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "prepare_conversation_bound_capture_batch(" in stream_source
     assert "conversation_id=batch_conversation_id" in stream_source
     assert "drain_capture_persistence_batches(uid, conversation_id)" in process_source
-    assert "if not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
+    assert "if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
     assert "return False" in process_source
     assert "conversation_id_to_process = current_conversation_id" in lifecycle_source
-    assert "await _create_new_in_progress_conversation()" in lifecycle_source
-    assert "await _process_conversation_after_rotation(conversation_id_to_process)" in lifecycle_source
-    assert lifecycle_source.index("await _create_new_in_progress_conversation()") < lifecycle_source.index(
-        "await _process_conversation_after_rotation(conversation_id_to_process)"
+    assert "expected_conversation_id=conversation_id_to_process" in lifecycle_source
+    assert "expected_owner_id=session_id" in lifecycle_source
+    assert lifecycle_source.count("expected_conversation_id=current_conversation_id") == 2
+    assert lifecycle_source.count('reason="socket_ownership_lost"') == 3
+    assert "_schedule_conversation_processing_after_rotation(conversation_id_to_process)" in lifecycle_source
+    assert lifecycle_source.index("expected_conversation_id=conversation_id_to_process") < lifecycle_source.index(
+        "_schedule_conversation_processing_after_rotation(conversation_id_to_process)"
     )
+    assert "await _process_conversation_after_rotation(conversation_id_to_process)" not in lifecycle_source
+    assert "conversation_finalize_tasks.add(task)" in process_source
+    assert "conversation_finalize_tasks.discard(completed)" in process_source
     assert "conversation.get('status') != ConversationStatus.in_progress" in disconnect_finalize_source
-    assert "_process_conversation_after_rotation(conversation_id)" in disconnect_finalize_source
-    assert "timeout=5.0" in disconnect_finalize_source
+    assert "_wait_for_capture_buffers_to_drain(conversation_id, timeout_seconds=5.0)" in disconnect_finalize_source
+    assert "expected_conversation_id=conversation_id" in disconnect_finalize_source
+    assert "expected_owner_id=session_id" in disconnect_finalize_source
+    assert 'reason="socket_ownership_lost"' in disconnect_finalize_source
+    assert disconnect_finalize_source.index(
+        "expected_conversation_id=conversation_id"
+    ) < disconnect_finalize_source.index("_process_conversation(conversation_id, wait_for_buffers=False)")
+    assert "_process_conversation(conversation_id, wait_for_buffers=False)" in disconnect_finalize_source
     assert '"capture_disconnect_finalize_deferred"' in disconnect_finalize_source
     assert '"capture_disconnect_finalized"' in disconnect_finalize_source
+    assert "claim_in_progress_conversation_id(uid, candidate_id, session_id)" in prepare_source
+    assert 'raise RuntimeError("active conversation appeared during initial creation")' in prepare_source
+    assert "refresh_in_progress_conversation_id(" in heartbeat_source
+    assert '"capture_socket_ownership_lost"' in heartbeat_source
     assert "await _finalize_current_conversation_on_disconnect()" in shutdown_source
     assert '"capture_disconnect_finalize_error"' in shutdown_source
     assert "while True:" in process_source
@@ -464,3 +581,31 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
             "uid-a",
             "conversation-a",
         )
+
+
+def test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired_id():
+    redis_db = load_ownership_redis_db()
+    redis_db.set_in_progress_conversation_id("uid-a", "conversation-a", owner_id="socket-old")
+
+    assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-a", "socket-replacement")
+    assert not redis_db.rotate_in_progress_conversation_id(
+        "uid-a",
+        "conversation-a",
+        "socket-old",
+        "conversation-stale-replacement",
+    )
+    assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-a"
+
+    assert redis_db.rotate_in_progress_conversation_id(
+        "uid-a",
+        "conversation-a",
+        "socket-replacement",
+        "conversation-b",
+    )
+    assert not redis_db.refresh_in_progress_conversation_id("uid-a", "conversation-a", "socket-old")
+    assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-b", "socket-next")
+
+    redis_db.remove_in_progress_conversation_id("uid-a")
+    assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-recovered", "socket-recovered")
+    assert not redis_db.claim_in_progress_conversation_id("uid-a", "conversation-stale", "socket-stale")
+    assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-recovered"

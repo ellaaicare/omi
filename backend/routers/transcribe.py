@@ -213,6 +213,7 @@ async def _stream_handler(
     selected_stt_language: Optional[str] = None
     selected_stt_model: Optional[str] = None
     current_conversation_id = None
+    conversation_finalize_tasks: set[asyncio.Task] = set()
     first_audio_frame_at: Optional[float] = None
     first_interim_result_at: Optional[float] = None
     first_stt_result_at: Optional[float] = None
@@ -610,6 +611,19 @@ async def _stream_handler(
                 else:
                     break
 
+                if current_conversation_id and not redis_db.refresh_in_progress_conversation_id(
+                    uid,
+                    current_conversation_id,
+                    session_id,
+                ):
+                    _latency_log(
+                        "capture_socket_ownership_lost",
+                        conversation_id=current_conversation_id,
+                    )
+                    websocket_close_code = 1001
+                    websocket_active = False
+                    break
+
                 # Inactivity timeout
                 if last_activity_time and time.time() - last_activity_time > inactivity_timeout_seconds:
                     print(f"Session timeout due to inactivity ({inactivity_timeout_seconds}s)", uid, session_id)
@@ -729,7 +743,13 @@ async def _stream_handler(
     send_last_conversation()
 
     # Create new stub conversation for next batch
-    async def _create_new_in_progress_conversation():
+    async def _create_new_in_progress_conversation(
+        *,
+        expected_conversation_id: Optional[str] = None,
+        expected_owner_id: Optional[str] = None,
+        new_owner_id: Optional[str] = session_id,
+        adopt: bool = True,
+    ) -> bool:
         nonlocal current_conversation_id
 
         conversation_source = ConversationSource.omi
@@ -755,7 +775,6 @@ async def _stream_handler(
             private_cloud_sync_enabled=private_cloud_sync_enabled,
         )
         conversations_db.upsert_conversation(uid, conversation_data=stub_conversation.dict())
-        redis_db.set_in_progress_conversation_id(uid, new_conversation_id)
 
         detected_meeting_id = None
 
@@ -796,9 +815,32 @@ async def _stream_handler(
         if detected_meeting_id:
             redis_db.set_conversation_meeting_id(new_conversation_id, detected_meeting_id)
 
-        current_conversation_id = new_conversation_id
+        if expected_conversation_id is not None:
+            published = redis_db.rotate_in_progress_conversation_id(
+                uid,
+                expected_conversation_id,
+                expected_owner_id or '',
+                new_conversation_id,
+                new_owner_id,
+            )
+        else:
+            published = redis_db.claim_in_progress_conversation_id(
+                uid,
+                new_conversation_id,
+                new_owner_id or '',
+            )
+
+        if not published:
+            conversations_db.delete_conversation(uid, new_conversation_id)
+            if detected_meeting_id:
+                redis_db.remove_conversation_meeting_id(new_conversation_id)
+            return False
+
+        if adopt:
+            current_conversation_id = new_conversation_id
 
         print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
+        return True
 
     def _capture_buffers_contain_conversation(conversation_id: str) -> bool:
         exact_conversation_id = str(conversation_id or "").strip()
@@ -838,9 +880,9 @@ async def _stream_handler(
                 return not _capture_buffers_contain_conversation(conversation_id)
         return True
 
-    async def _process_conversation(conversation_id: str) -> bool:
+    async def _process_conversation(conversation_id: str, *, wait_for_buffers: bool = True) -> bool:
         print("_process_conversation", uid, session_id)
-        if not await _wait_for_capture_buffers_to_drain(conversation_id):
+        if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):
             _latency_log(
                 "capture_finalize_deferred",
                 conversation_id=conversation_id,
@@ -867,6 +909,24 @@ async def _stream_handler(
                 return
             await asyncio.sleep(0.25)
 
+    def _schedule_conversation_processing_after_rotation(conversation_id: str) -> None:
+        task = asyncio.create_task(_process_conversation_after_rotation(conversation_id))
+        conversation_finalize_tasks.add(task)
+
+        def processing_done(completed: asyncio.Task) -> None:
+            conversation_finalize_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                _latency_log(
+                    "capture_finalize_error",
+                    conversation_id=conversation_id,
+                    error=str(error)[:300],
+                )
+
+        task.add_done_callback(processing_done)
+
     async def _finalize_current_conversation_on_disconnect() -> None:
         conversation_id = str(current_conversation_id or "").strip()
         if not conversation_id:
@@ -876,17 +936,28 @@ async def _stream_handler(
         if not conversation or conversation.get('status') != ConversationStatus.in_progress:
             return
 
-        try:
-            await asyncio.wait_for(
-                _process_conversation_after_rotation(conversation_id),
-                timeout=5.0,
-            )
-        except asyncio.TimeoutError:
+        if not await _wait_for_capture_buffers_to_drain(conversation_id, timeout_seconds=5.0):
             _latency_log(
                 "capture_disconnect_finalize_deferred",
                 conversation_id=conversation_id,
             )
             return
+
+        rotated = await _create_new_in_progress_conversation(
+            expected_conversation_id=conversation_id,
+            expected_owner_id=session_id,
+            new_owner_id=None,
+            adopt=False,
+        )
+        if not rotated:
+            _latency_log(
+                "capture_disconnect_finalize_skipped",
+                conversation_id=conversation_id,
+                reason="socket_ownership_lost",
+            )
+            return
+
+        await _process_conversation(conversation_id, wait_for_buffers=False)
 
         _latency_log(
             "capture_disconnect_finalized",
@@ -897,7 +968,20 @@ async def _stream_handler(
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
 
-        if existing_conversation := retrieve_in_progress_conversation(uid):
+        existing_conversation = None
+        for _ in range(3):
+            candidate = retrieve_in_progress_conversation(uid)
+            if not candidate:
+                break
+            candidate_id = str(candidate.get('id') or '').strip()
+            if candidate_id and redis_db.claim_in_progress_conversation_id(uid, candidate_id, session_id):
+                existing_conversation = candidate
+                break
+            await asyncio.sleep(0)
+        else:
+            raise RuntimeError("active conversation ownership changed during reconnect")
+
+        if existing_conversation:
             finished_at = datetime.fromisoformat(existing_conversation['finished_at'].isoformat())
             seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
             if seconds_since_last_segment >= conversation_creation_timeout:
@@ -906,7 +990,11 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=existing_conversation['id'],
+                    expected_owner_id=session_id,
+                ):
+                    raise RuntimeError("active conversation ownership changed during timeout rotation")
                 return existing_conversation["id"]
 
             # Continue with the existing conversation
@@ -919,7 +1007,8 @@ async def _stream_handler(
             return None
 
         # else
-        await _create_new_in_progress_conversation()
+        if not await _create_new_in_progress_conversation():
+            raise RuntimeError("active conversation appeared during initial creation")
         return None
 
     _send_message_event(
@@ -1621,7 +1710,17 @@ async def _stream_handler(
             conversation = conversations_db.get_conversation(uid, current_conversation_id)
             if not conversation:
                 print(f"WARN: the current conversation is not found (id: {current_conversation_id})", uid, session_id)
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=current_conversation_id,
+                    expected_owner_id=session_id,
+                ):
+                    _latency_log(
+                        "capture_rotation_skipped",
+                        conversation_id=current_conversation_id,
+                        reason="socket_ownership_lost",
+                    )
+                    websocket_active = False
+                    return
                 continue
 
             # Check if conversation status is not in_progress
@@ -1631,7 +1730,17 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=current_conversation_id,
+                    expected_owner_id=session_id,
+                ):
+                    _latency_log(
+                        "capture_rotation_skipped",
+                        conversation_id=current_conversation_id,
+                        reason="socket_ownership_lost",
+                    )
+                    websocket_active = False
+                    return
                 continue
 
             # Check if conversation should be processed
@@ -1665,8 +1774,18 @@ async def _stream_handler(
                     session_id,
                 )
                 conversation_id_to_process = current_conversation_id
-                await _create_new_in_progress_conversation()
-                await _process_conversation_after_rotation(conversation_id_to_process)
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=conversation_id_to_process,
+                    expected_owner_id=session_id,
+                ):
+                    _latency_log(
+                        "capture_rotation_skipped",
+                        conversation_id=conversation_id_to_process,
+                        reason="socket_ownership_lost",
+                    )
+                    websocket_active = False
+                    return
+                _schedule_conversation_processing_after_rotation(conversation_id_to_process)
 
     async def speaker_identification_task():
         """Consume segment queue, accumulate per speaker, trigger match when ready."""
