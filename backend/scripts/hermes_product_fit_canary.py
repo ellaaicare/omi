@@ -27,9 +27,9 @@ from database import voice_canary as voice_canary_db
 from ella.services import ai_consent
 from ella.services.hermes_broker_client import HermesBrokerClient
 from ella.services.hermes_broker_prototype import HermesBrokerPrototypeConfig
-from ella.services.hermes_cloud_enrichment import (
-    build_enrichment_identity,
+from models.hermes_cloud_enrichment_contract import (
     _interaction_identity as production_enrichment_interaction_identity,
+    build_enrichment_identity,
 )
 from ella.services.hermes_cloud_runtime import broker_session_id_for_scope
 from ella.services.runtime_errors import ProvisioningError
@@ -235,6 +235,7 @@ class CanaryConfig:
     voice_summary_version_id: str
     memory_pack_sha256: str
     enrichment_conversation_id: str
+    enrichment_active_summary_version_id: str
     enrichment_transcript_sha256: str
     max_latency_ms: int
 
@@ -293,6 +294,7 @@ class CanaryConfig:
             raise HarnessRefusal("voice_memory_shape_invalid")
         if set(enrichment) != {
             "conversation_id",
+            "active_summary_version_id",
             "transcript_sha256",
         }:
             raise HarnessRefusal("enrichment_shape_invalid")
@@ -378,6 +380,10 @@ class CanaryConfig:
             enrichment_conversation_id=_safe_id(
                 enrichment["conversation_id"],
                 "enrichment_conversation_id",
+            ),
+            enrichment_active_summary_version_id=_safe_id(
+                enrichment["active_summary_version_id"],
+                "enrichment_active_summary_version_id",
             ),
             enrichment_transcript_sha256=transcript_sha256,
             max_latency_ms=max_latency_ms,
@@ -1240,6 +1246,7 @@ class LiveCanaryAdapter:
             self.config.uid,
             self.config.enrichment_conversation_id,
             self.config.enrichment_transcript_sha256,
+            self.config.enrichment_active_summary_version_id,
         )
         payload = {
             "uid": self.config.uid,

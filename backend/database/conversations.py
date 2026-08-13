@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import uuid
 import zlib
@@ -10,12 +11,19 @@ from google.cloud.firestore_v1 import FieldFilter, transactional
 
 import utils.other.hume as hume
 from database import users as users_db
+from database import redis_db
+from database.hermes_cloud_enrichment_outbox import COLLECTION as hermes_cloud_enrichment_outbox_collection
 from models.conversation import (
     ConversationPhoto,
     PostProcessingStatus,
     PostProcessingModel,
     ConversationStatus,
     AudioFile,
+)
+from models.conversation_integrity import transcript_grounding_hash
+from models.hermes_cloud_enrichment_contract import (
+    HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+    build_enrichment_identity,
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
@@ -25,6 +33,7 @@ from utils.other.storage import list_audio_chunks
 
 conversations_collection = 'conversations'
 conversation_processing_retries_collection = 'processing_retries'
+capture_persistence_batches_collection = 'capture_persistence_batches'
 conversation_summary_retryable_errors = {
     'conversation_summary_failed',
     'conversation_summary_recovery_failed',
@@ -36,6 +45,25 @@ conversation_enriched_summary_kinds = {
     'recovered_enriched',
 }
 conversation_processing_retry_lease_seconds = 900
+initial_conversation_processing_lease_seconds = 300
+conversation_stock_summary_cas_lost = 'stock_summary_cas_lost'
+conversation_stock_summary_transcript_changed = 'stock_summary_transcript_changed'
+conversation_stock_summary_malformed = 'stock_summary_authority_malformed'
+conversation_stock_summary_deleted = 'stock_summary_conversation_deleted'
+
+_STOCK_SUMMARY_RESULT_UPDATE_FIELDS = {
+    'discarded',
+    'external_data',
+    'geolocation',
+    'processing_error',
+    'processing_error_at',
+    'status',
+    'structured',
+}
+_STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS = {
+    'external_data',
+    'geolocation',
+}
 
 
 def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -46,6 +74,75 @@ def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, 
             if str(version.get('id') or '') == str(active_id):
                 return version
     return next((version for version in reversed(versions) if version.get('is_active')), None)
+
+
+def _summary_version_id(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _stock_summary_version_id(conversation: Dict[str, Any], structured: Dict[str, Any]) -> str:
+    created_at = conversation.get('created_at')
+    if isinstance(created_at, datetime):
+        created_at_value = _ensure_timezone_aware(created_at).isoformat()
+    else:
+        created_at_value = str(created_at or '')
+    basis = json.dumps(
+        {
+            'conversation_id': conversation.get('id') or '',
+            'created_at': created_at_value,
+            'title': structured.get('title') or '',
+            'overview': structured.get('overview') or '',
+            'emoji': structured.get('emoji') or '',
+            'category': _category_value(structured.get('category')),
+        },
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f'omi-stock-summary:{basis}'))
+
+
+def _validate_summary_authority(conversation: Dict[str, Any]) -> Dict[str, Any]:
+    raw_versions = conversation.get('summary_versions')
+    if raw_versions is None:
+        raw_versions = []
+    if not isinstance(raw_versions, list):
+        return {'status': conversation_stock_summary_malformed, 'reason': 'versions_not_list'}
+
+    versions = [version for version in raw_versions if isinstance(version, dict)]
+    if len(versions) != len(raw_versions):
+        return {'status': conversation_stock_summary_malformed, 'reason': 'version_not_object'}
+
+    raw_active_id = conversation.get('active_summary_version_id')
+    if raw_active_id is not None and not isinstance(raw_active_id, str):
+        return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_not_string'}
+    active_id = _summary_version_id(raw_active_id)
+    active_versions = [version for version in versions if bool(version.get('is_active'))]
+    if len(active_versions) > 1:
+        return {'status': conversation_stock_summary_malformed, 'reason': 'multiple_active_versions'}
+
+    if not versions and not active_id:
+        return {'status': 'empty'}
+
+    matching_versions = [version for version in versions if _summary_version_id(version.get('id')) == active_id]
+    if active_id:
+        if len(matching_versions) != 1:
+            return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_missing_or_duplicate'}
+        active_version = matching_versions[0]
+        if not active_version.get('is_active'):
+            return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_points_inactive'}
+        if active_versions and _summary_version_id(active_versions[0].get('id')) != active_id:
+            return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_mismatch'}
+        return {
+            'status': 'ready',
+            'active_summary_version_id': active_id,
+            'active_version': active_version,
+        }
+
+    if versions or active_versions:
+        return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_missing'}
+
+    return {'status': 'empty'}
 
 
 def has_usable_conversation_summary(conversation: Dict[str, Any]) -> bool:
@@ -407,6 +504,37 @@ def _prepare_conversation_for_read(conversation_data: Optional[Dict[str, Any]], 
     return data
 
 
+def _prepare_conversation_for_transcript_hash(
+    conversation_data: Optional[Dict[str, Any]], uid: str
+) -> Optional[Dict[str, Any]]:
+    """Return a silent, fail-closed transcript projection for protected CAS admission."""
+    if not conversation_data:
+        return None
+
+    data = copy.deepcopy(conversation_data)
+    segments = data.get('transcript_segments')
+
+    try:
+        if data.get('data_protection_level') == 'enhanced' and isinstance(segments, str):
+            segments = encryption.decrypt_strict(segments, uid)
+
+        if data.get('transcript_segments_compressed'):
+            if isinstance(segments, str):
+                segments = bytes.fromhex(segments)
+            if not isinstance(segments, bytes):
+                return None
+            segments = json.loads(zlib.decompress(segments).decode('utf-8'))
+        elif isinstance(segments, str):
+            segments = json.loads(segments)
+    except Exception:
+        return None
+
+    if not isinstance(segments, list):
+        return None
+    data['transcript_segments'] = segments
+    return data
+
+
 def _prepare_photo_for_write(data: Dict[str, Any], uid: str, level: str) -> Dict[str, Any]:
     data = copy.deepcopy(data)
     data['data_protection_level'] = level
@@ -562,6 +690,577 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+def _processing_result_update_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in conversation_data.items()
+        if key in _STOCK_SUMMARY_RESULT_UPDATE_FIELDS and key != 'photos'
+        if key not in _STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS or value is not None
+    }
+
+
+def _parent_conversation_write_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    parent_data = copy.deepcopy(conversation_data)
+    if 'audio_base64_url' in parent_data:
+        del parent_data['audio_base64_url']
+    if 'photos' in parent_data:
+        del parent_data['photos']
+    return parent_data
+
+
+def _build_stock_summary_version(
+    conversation_data: Dict[str, Any],
+    structured: Dict[str, Any],
+    *,
+    based_on_version_id: Optional[str] = None,
+    deterministic: bool = False,
+) -> Dict[str, Any]:
+    created_at = conversation_data.get('created_at') if deterministic else datetime.now(timezone.utc)
+    created_at = created_at or datetime.now(timezone.utc)
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at)
+        except ValueError:
+            created_at = datetime.now(timezone.utc)
+    version_id = _stock_summary_version_id(conversation_data, structured) if deterministic else None
+    return _build_summary_version_payload(
+        structured=structured,
+        created_at=_ensure_timezone_aware(created_at),
+        source='omi',
+        kind='generated',
+        is_active=True,
+        based_on_version_id=based_on_version_id,
+        version_id=version_id,
+    )
+
+
+def _enqueue_hermes_enrichment_in_transaction(
+    transaction,
+    uid: str,
+    conversation: Dict[str, Any],
+    *,
+    now: datetime,
+) -> Dict[str, Any]:
+    conversation_id = str(conversation.get('id') or '')
+    identity = build_enrichment_identity(
+        uid=uid,
+        conversation_id=conversation_id,
+        conversation=conversation,
+    )
+    payload = {
+        'job_id': identity.job_id,
+        'uid': uid,
+        'conversation_id': conversation_id,
+        'client_interaction_id': identity.client_interaction_id,
+        'transcript_sha256': identity.transcript_sha256,
+        'policy_version': HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+        'status': 'pending',
+        'attempt_count': 0,
+        'next_attempt_at': now,
+        'lease_token': None,
+        'lease_expires_at': None,
+        'last_error_code': None,
+        'receipt': None,
+        'created_at': now,
+        'updated_at': now,
+    }
+    outbox_ref = db.collection(hermes_cloud_enrichment_outbox_collection).document(identity.job_id)
+    snapshot = outbox_ref.get(transaction=transaction)
+    if snapshot.exists:
+        existing = snapshot.to_dict() or {}
+        immutable_fields = ('uid', 'conversation_id', 'client_interaction_id', 'transcript_sha256')
+        if any(existing.get(field) != payload[field] for field in immutable_fields):
+            raise ValueError('hermes_cloud_enrichment_outbox_identity_conflict')
+        return existing
+    transaction.set(outbox_ref, payload)
+    return payload
+
+
+def _stock_summary_authority_update(
+    durable_conversation: Dict[str, Any],
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str],
+) -> Dict[str, Any]:
+    authority = _validate_summary_authority(durable_conversation)
+    if authority['status'] == conversation_stock_summary_malformed:
+        return authority
+
+    current_active_id = _summary_version_id(authority.get('active_summary_version_id'))
+    expected_active_id = _summary_version_id(expected_active_summary_version_id)
+    if current_active_id != expected_active_id:
+        return {
+            'status': conversation_stock_summary_cas_lost,
+            'active_summary_version_id': current_active_id,
+        }
+
+    update_data = _processing_result_update_data(processing_conversation)
+    update_data['initial_processing_claimed_at'] = None
+    update_data['initial_processing_claim_token'] = None
+    update_data['initial_processing_release_token'] = None
+    processing_external_data = update_data.get('external_data')
+    if isinstance(processing_external_data, dict):
+        durable_external_data = durable_conversation.get('external_data')
+        update_data['external_data'] = {
+            **(copy.deepcopy(durable_external_data) if isinstance(durable_external_data, dict) else {}),
+            **processing_external_data,
+        }
+    elif 'external_data' in update_data:
+        del update_data['external_data']
+    if processing_conversation.get('discarded'):
+        return {
+            'status': 'committed',
+            'update_data': update_data,
+            'active_summary_version_id': current_active_id,
+        }
+
+    structured = copy.deepcopy(processing_conversation.get('structured') or {})
+    if not _has_summary_content(structured):
+        return {'status': 'version_unavailable', 'reason': 'summary_content_missing'}
+
+    versions = copy.deepcopy(durable_conversation.get('summary_versions') or [])
+    for version in versions:
+        version['is_active'] = False
+
+    if authority['status'] == 'empty':
+        new_version = _build_stock_summary_version(
+            durable_conversation or processing_conversation,
+            structured,
+            deterministic=True,
+        )
+    else:
+        new_version = _build_stock_summary_version(
+            durable_conversation,
+            structured,
+            based_on_version_id=current_active_id,
+        )
+    versions.append(new_version)
+    update_data['summary_versions'] = versions
+    update_data['active_summary_version_id'] = new_version['id']
+    return {
+        'status': 'committed',
+        'update_data': update_data,
+        'active_summary_version_id': new_version['id'],
+    }
+
+
+def _commit_stock_summary_processing_result_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str] = None,
+    allow_create: bool = False,
+    enqueue_hermes_cloud_enrichment: bool = False,
+    enrichment_enqueued_at: Optional[datetime] = None,
+    expected_transcript_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        if not allow_create:
+            return {
+                'status': conversation_stock_summary_deleted,
+                'dispatched': False,
+            }
+        expected_active_id = _summary_version_id(expected_active_summary_version_id)
+        if expected_active_id:
+            return {'status': conversation_stock_summary_cas_lost}
+        durable_conversation = copy.deepcopy(processing_conversation)
+        update_result = _stock_summary_authority_update(durable_conversation, durable_conversation, None)
+        if update_result['status'] != 'committed':
+            return update_result
+        created = {**durable_conversation, **update_result['update_data']}
+        doc_level = created.get('data_protection_level', 'standard')
+        parent_data = _parent_conversation_write_data(created)
+        outbox_job = None
+        if enqueue_hermes_cloud_enrichment and not created.get('discarded'):
+            outbox_job = _enqueue_hermes_enrichment_in_transaction(
+                transaction,
+                uid,
+                created,
+                now=enrichment_enqueued_at or datetime.now(timezone.utc),
+            )
+        transaction.set(conversation_ref, _prepare_conversation_for_write(parent_data, uid, doc_level))
+        return {
+            'status': 'committed',
+            'active_summary_version_id': update_result.get('active_summary_version_id'),
+            'conversation': created,
+            'dispatched': True,
+            'hermes_enrichment_job_id': outbox_job.get('job_id') if outbox_job else None,
+        }
+
+    durable_conversation = snapshot.to_dict() or {}
+    if expected_transcript_hash is not None:
+        readable_durable_conversation = _prepare_conversation_for_transcript_hash(durable_conversation, uid)
+        if (
+            readable_durable_conversation is None
+            or transcript_grounding_hash(readable_durable_conversation.get('transcript_segments') or [])
+            != expected_transcript_hash
+        ):
+            return {
+                'status': conversation_stock_summary_transcript_changed,
+                'conversation': durable_conversation,
+                'dispatched': False,
+            }
+    update_result = _stock_summary_authority_update(
+        durable_conversation,
+        processing_conversation,
+        expected_active_summary_version_id,
+    )
+    if update_result['status'] != 'committed':
+        return {
+            **update_result,
+            'conversation': durable_conversation,
+            'dispatched': False,
+        }
+
+    update_data = update_result['update_data']
+    merged_conversation = {**durable_conversation, **update_data}
+    doc_level = durable_conversation.get('data_protection_level', 'standard')
+    parent_update_data = _parent_conversation_write_data(update_data)
+    outbox_job = None
+    if enqueue_hermes_cloud_enrichment and not merged_conversation.get('discarded'):
+        readable_conversation = _prepare_conversation_for_read(merged_conversation, uid) or merged_conversation
+        outbox_job = _enqueue_hermes_enrichment_in_transaction(
+            transaction,
+            uid,
+            readable_conversation,
+            now=enrichment_enqueued_at or datetime.now(timezone.utc),
+        )
+    transaction.update(conversation_ref, _prepare_conversation_for_write(parent_update_data, uid, doc_level))
+    return {
+        'status': 'committed',
+        'active_summary_version_id': update_result.get('active_summary_version_id'),
+        'conversation': merged_conversation,
+        'dispatched': True,
+        'hermes_enrichment_job_id': outbox_job.get('job_id') if outbox_job else None,
+    }
+
+
+@transactional
+def _commit_stock_summary_processing_result(
+    transaction,
+    conversation_ref,
+    uid: str,
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str] = None,
+    allow_create: bool = False,
+    enqueue_hermes_cloud_enrichment: bool = False,
+    enrichment_enqueued_at: Optional[datetime] = None,
+    expected_transcript_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _commit_stock_summary_processing_result_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        processing_conversation,
+        expected_active_summary_version_id,
+        allow_create,
+        enqueue_hermes_cloud_enrichment,
+        enrichment_enqueued_at,
+        expected_transcript_hash,
+    )
+
+
+@set_data_protection_level(data_arg_name='processing_conversation')
+def commit_stock_summary_processing_result(
+    uid: str,
+    conversation_id: str,
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str] = None,
+    allow_create: bool = False,
+    enqueue_hermes_cloud_enrichment: bool = False,
+    expected_transcript_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    commit_kwargs = {}
+    if expected_transcript_hash is not None:
+        commit_kwargs['expected_transcript_hash'] = expected_transcript_hash
+    result = _commit_stock_summary_processing_result(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        processing_conversation,
+        expected_active_summary_version_id,
+        allow_create,
+        enqueue_hermes_cloud_enrichment,
+        datetime.now(timezone.utc) if enqueue_hermes_cloud_enrichment else None,
+        **commit_kwargs,
+    )
+    conversation = result.get('conversation')
+    if isinstance(conversation, dict):
+        result = {**result, 'conversation': _prepare_conversation_for_read(conversation, uid)}
+    return result
+
+
+def _mark_conversation_processing_failed_if_unfinished_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    error_code: str,
+    failed_at: datetime,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'updated': False, 'reason': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status == ConversationStatus.completed.value:
+        return {'updated': False, 'reason': 'already_completed'}
+    if status == ConversationStatus.failed.value and conversation.get('processing_error'):
+        return {'updated': False, 'reason': 'already_failed'}
+    update_data = {
+        'status': ConversationStatus.failed.value,
+        'discarded': False,
+        'processing_error': error_code,
+        'processing_error_at': _ensure_timezone_aware(failed_at),
+    }
+    transaction.update(conversation_ref, update_data)
+    return {'updated': True, 'reason': 'marked_failed', **update_data}
+
+
+def _mark_conversation_processing_failed_if_released_transaction(
+    transaction,
+    conversation_ref,
+    error_code: str,
+    failed_at: datetime,
+    expected_release_token: str,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'updated': False, 'reason': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status == ConversationStatus.completed.value:
+        return {'updated': False, 'reason': 'already_completed'}
+    if status == ConversationStatus.failed.value and conversation.get('processing_error'):
+        return {'updated': False, 'reason': 'already_failed'}
+    if (
+        status != ConversationStatus.in_progress.value
+        or conversation.get('initial_processing_claimed_at') is not None
+        or str(conversation.get('initial_processing_release_token') or '') != str(expected_release_token or '')
+    ):
+        return {'updated': False, 'reason': 'processing_authority_changed'}
+    update_data = {
+        'status': ConversationStatus.failed.value,
+        'discarded': False,
+        'processing_error': error_code,
+        'processing_error_at': _ensure_timezone_aware(failed_at),
+        'initial_processing_release_token': None,
+    }
+    transaction.update(conversation_ref, update_data)
+    return {'updated': True, 'reason': 'marked_failed', **update_data}
+
+
+@transactional
+def _mark_conversation_processing_failed_if_unfinished(
+    transaction,
+    conversation_ref,
+    uid: str,
+    error_code: str,
+    failed_at: datetime,
+) -> Dict[str, Any]:
+    return _mark_conversation_processing_failed_if_unfinished_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        error_code,
+        failed_at,
+    )
+
+
+def mark_conversation_processing_failed_if_unfinished(
+    uid: str,
+    conversation_id: str,
+    error_code: str,
+    failed_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _mark_conversation_processing_failed_if_unfinished(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        error_code,
+        failed_at or datetime.now(timezone.utc),
+    )
+
+
+@transactional
+def _mark_conversation_processing_failed_if_released(
+    transaction,
+    conversation_ref,
+    error_code: str,
+    failed_at: datetime,
+    expected_release_token: str,
+) -> Dict[str, Any]:
+    return _mark_conversation_processing_failed_if_released_transaction(
+        transaction,
+        conversation_ref,
+        error_code,
+        failed_at,
+        expected_release_token,
+    )
+
+
+def mark_conversation_processing_failed_if_released(
+    uid: str,
+    conversation_id: str,
+    error_code: str,
+    expected_release_token: str,
+    failed_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _mark_conversation_processing_failed_if_released(
+        db.transaction(),
+        conversation_ref,
+        error_code,
+        failed_at or datetime.now(timezone.utc),
+        expected_release_token,
+    )
+
+
+def _assign_conversation_folder_if_unset_transaction(transaction, conversation_ref, folder_id: str) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if conversation.get('folder_id'):
+        return False
+    transaction.update(conversation_ref, {'folder_id': folder_id})
+    return True
+
+
+@transactional
+def _assign_conversation_folder_if_unset(transaction, conversation_ref, folder_id: str) -> bool:
+    return _assign_conversation_folder_if_unset_transaction(transaction, conversation_ref, folder_id)
+
+
+def assign_conversation_folder_if_unset(uid: str, conversation_id: str, folder_id: str) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _assign_conversation_folder_if_unset(db.transaction(), conversation_ref, folder_id)
+
+
+def _claim_initial_conversation_processing_transaction(
+    transaction,
+    conversation_ref,
+    claim_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'status': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status == ConversationStatus.completed.value:
+        return {'status': 'already_completed'}
+    if str(conversation.get('capture_owner_id') or '').strip():
+        return {'status': 'capture_in_progress'}
+    if status == ConversationStatus.processing.value:
+        claimed_at = conversation.get('initial_processing_claimed_at')
+        if isinstance(claimed_at, str):
+            try:
+                claimed_at = datetime.fromisoformat(claimed_at)
+            except ValueError:
+                claimed_at = None
+        if isinstance(claimed_at, datetime):
+            claimed_at = _ensure_timezone_aware(claimed_at)
+            if datetime.now(timezone.utc) - claimed_at < timedelta(
+                seconds=initial_conversation_processing_lease_seconds
+            ):
+                return {'status': 'processing_in_progress'}
+    claimed_at = datetime.now(timezone.utc)
+    exact_claim_token = str(claim_token or uuid.uuid4())
+    transaction.update(
+        conversation_ref,
+        {
+            'status': ConversationStatus.processing.value,
+            'initial_processing_claimed_at': claimed_at,
+            'initial_processing_claim_token': exact_claim_token,
+            'initial_processing_release_token': None,
+        },
+    )
+    return {
+        'status': 'processing_claimed',
+        'claim_token': exact_claim_token,
+    }
+
+
+@transactional
+def _claim_initial_conversation_processing(transaction, conversation_ref, claim_token: str) -> Dict[str, Any]:
+    return _claim_initial_conversation_processing_transaction(transaction, conversation_ref, claim_token)
+
+
+def claim_initial_conversation_processing(uid: str, conversation_id: str) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_initial_conversation_processing(db.transaction(), conversation_ref, str(uuid.uuid4()))
+
+
+def _release_initial_conversation_processing_claim_transaction(
+    transaction,
+    conversation_ref,
+    expected_claim_token: str,
+    release_token: str,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'released': False, 'reason': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status != ConversationStatus.processing.value or str(
+        conversation.get('initial_processing_claim_token') or ''
+    ) != str(expected_claim_token or ''):
+        return {'released': False, 'reason': 'processing_authority_changed'}
+    transaction.update(
+        conversation_ref,
+        {
+            'status': ConversationStatus.in_progress.value,
+            'initial_processing_claimed_at': None,
+            'initial_processing_claim_token': None,
+            'initial_processing_release_token': release_token,
+        },
+    )
+    return {'released': True, 'reason': 'released', 'release_token': release_token}
+
+
+@transactional
+def _release_initial_conversation_processing_claim(
+    transaction,
+    conversation_ref,
+    expected_claim_token: str,
+    release_token: str,
+) -> Dict[str, Any]:
+    return _release_initial_conversation_processing_claim_transaction(
+        transaction,
+        conversation_ref,
+        expected_claim_token,
+        release_token,
+    )
+
+
+def release_initial_conversation_processing_claim(
+    uid: str,
+    conversation_id: str,
+    expected_claim_token: str,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _release_initial_conversation_processing_claim(
+        db.transaction(),
+        conversation_ref,
+        expected_claim_token,
+        str(uuid.uuid4()),
+    )
+
+
 def _update_conversation_if_active_summary_version_transaction(
     transaction,
     conversation_ref,
@@ -613,6 +1312,175 @@ def update_conversation_if_active_summary_version(
         uid,
         expected_active_summary_version_id,
         update_data,
+    )
+
+
+_SUMMARY_ENRICHMENT_AUTHORITY_FIELDS = (
+    'trace_id',
+    'request_fingerprint',
+    'status',
+    'canonical_status',
+    'source',
+    'kind',
+)
+
+
+def _summary_enrichment_authority_matches(
+    conversation: dict,
+    expected_enrichment_state: dict,
+) -> bool:
+    current_state = conversation.get('enrichment_state') or {}
+    return all(
+        current_state.get(field) == expected_enrichment_state.get(field)
+        for field in _SUMMARY_ENRICHMENT_AUTHORITY_FIELDS
+    )
+
+
+def _update_conversation_if_summary_authority_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
+        return False
+    if not _summary_enrichment_authority_matches(
+        conversation,
+        expected_enrichment_state,
+    ):
+        return False
+    doc_level = conversation.get('data_protection_level', 'standard')
+    prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    return True
+
+
+@transactional
+def _update_conversation_if_summary_authority(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    return _update_conversation_if_summary_authority_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        expected_enrichment_state,
+        update_data,
+    )
+
+
+def update_conversation_if_summary_authority(
+    uid: str,
+    conversation_id: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_if_summary_authority(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        expected_enrichment_state,
+        update_data,
+    )
+
+
+def _update_conversation_if_transcript_hash_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_transcript_hash: str,
+    update_data: dict,
+    *,
+    expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
+    expected_enrichment_state: Optional[dict] = None,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    readable_conversation = _prepare_conversation_for_transcript_hash(conversation, uid)
+    if readable_conversation is None:
+        return False
+    if transcript_grounding_hash(readable_conversation.get('transcript_segments') or []) != expected_transcript_hash:
+        return False
+    if (match_active_summary_version or expected_active_summary_version_id is not None) and str(
+        conversation.get('active_summary_version_id') or ''
+    ) != str(expected_active_summary_version_id or ''):
+        return False
+    if expected_enrichment_state is not None and not _summary_enrichment_authority_matches(
+        conversation,
+        expected_enrichment_state,
+    ):
+        return False
+    doc_level = conversation.get('data_protection_level', 'standard')
+    prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    return True
+
+
+@transactional
+def _update_conversation_if_transcript_hash(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_transcript_hash: str,
+    update_data: dict,
+    *,
+    expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
+    expected_enrichment_state: Optional[dict] = None,
+) -> bool:
+    return _update_conversation_if_transcript_hash_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        expected_transcript_hash,
+        update_data,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+        match_active_summary_version=match_active_summary_version,
+        expected_enrichment_state=expected_enrichment_state,
+    )
+
+
+def update_conversation_if_transcript_hash(
+    uid: str,
+    conversation_id: str,
+    expected_transcript_hash: str,
+    update_data: dict,
+    *,
+    expected_active_summary_version_id: Optional[str] = None,
+    match_active_summary_version: bool = False,
+    expected_enrichment_state: Optional[dict] = None,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_if_transcript_hash(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        expected_transcript_hash,
+        update_data,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+        match_active_summary_version=match_active_summary_version,
+        expected_enrichment_state=expected_enrichment_state,
     )
 
 
@@ -2083,6 +2951,503 @@ def update_conversation_segments(uid: str, conversation_id: str, segments: List[
         update_payload['finished_at'] = finished_at
     prepared_payload = _prepare_conversation_for_write(update_payload, uid, doc_level)
     doc_ref.update(prepared_payload)
+
+
+def _capture_batch_id(conversation_id: str, segment_ids: list[str], photo_ids: list[str]) -> str:
+    framed = json.dumps(
+        {
+            "conversation_id": str(conversation_id),
+            "photo_ids": photo_ids,
+            "segment_ids": segment_ids,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(framed.encode("utf-8")).hexdigest()
+
+
+def persist_capture_persistence_batch(
+    uid: str,
+    conversation_id: str,
+    segments: List[dict],
+    finished_at: datetime,
+    capture_owner_id: str,
+    photos: Optional[List[ConversationPhoto]] = None,
+) -> str:
+    segment_ids = [str(segment.get("id") or "").strip() for segment in segments]
+    if any(not segment_id for segment_id in segment_ids):
+        raise ValueError("capture_persistence_segment_id_required")
+    prepared_photos = []
+    for photo in photos or []:
+        if hasattr(photo, "model_dump"):
+            photo_data = photo.model_dump(mode="json")
+        elif hasattr(photo, "json"):
+            photo_data = json.loads(photo.json())
+        else:
+            photo_data = dict(photo)
+        photo_id = str(photo_data.get("id") or uuid.uuid4()).strip()
+        photo_data["id"] = photo_id
+        prepared_photos.append(photo_data)
+    photo_ids = [photo["id"] for photo in prepared_photos]
+    if not segment_ids and not photo_ids:
+        raise ValueError("capture_persistence_content_required")
+    batch_id = _capture_batch_id(conversation_id, segment_ids, photo_ids)
+    payload = {
+        "conversation_id": str(conversation_id),
+        "segments": segments,
+        "photos": prepared_photos,
+        "finished_at": finished_at.astimezone(timezone.utc).isoformat(),
+        "capture_owner_id": str(capture_owner_id or "").strip(),
+    }
+    if not payload["capture_owner_id"]:
+        raise ValueError("capture_persistence_owner_id_required")
+    encrypted_payload = encryption.encrypt(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        uid,
+    )
+    batch_ref = (
+        db.collection('users')
+        .document(uid)
+        .collection(conversations_collection)
+        .document(conversation_id)
+        .collection(capture_persistence_batches_collection)
+        .document(batch_id)
+    )
+    batch_ref.set(
+        {
+            "batch_id": batch_id,
+            "payload": encrypted_payload,
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+    return batch_id
+
+
+def _capture_persistence_batch_sort_key(snapshot) -> tuple[datetime, str]:
+    batch_id = str(snapshot.id or "").strip()
+    data = snapshot.to_dict() or {}
+    created_at = data.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = datetime.min.replace(tzinfo=timezone.utc)
+    elif created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    else:
+        created_at = created_at.astimezone(timezone.utc)
+    return created_at, batch_id
+
+
+def list_capture_persistence_batches(uid: str, conversation_id: str) -> list[str]:
+    batches_ref = (
+        db.collection('users')
+        .document(uid)
+        .collection(conversations_collection)
+        .document(conversation_id)
+        .collection(capture_persistence_batches_collection)
+    )
+    snapshots = [snapshot for snapshot in batches_ref.stream() if str(snapshot.id or "").strip()]
+    return [str(snapshot.id) for snapshot in sorted(snapshots, key=_capture_persistence_batch_sort_key)]
+
+
+def _decode_capture_persistence_batch(uid: str, data: dict) -> dict:
+    encrypted_payload = data.get("payload")
+    if not isinstance(encrypted_payload, str) or not encrypted_payload:
+        raise ValueError("capture_persistence_payload_invalid")
+    payload = json.loads(encryption.decrypt_strict(encrypted_payload, uid))
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("segments"), list)
+        or not isinstance(payload.get("photos", []), list)
+    ):
+        raise ValueError("capture_persistence_payload_invalid")
+    return payload
+
+
+def _bind_capture_conversation_owner_transaction(transaction, conversation_ref, owner_id: Optional[str]) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get("status"), "value", conversation.get("status"))
+    if status != ConversationStatus.in_progress.value:
+        return False
+    transaction.update(conversation_ref, {"capture_owner_id": str(owner_id or "").strip() or None})
+    return True
+
+
+@transactional
+def _bind_capture_conversation_owner(transaction, conversation_ref, owner_id: Optional[str]) -> bool:
+    return _bind_capture_conversation_owner_transaction(transaction, conversation_ref, owner_id)
+
+
+def bind_capture_conversation_owner(uid: str, conversation_id: str, owner_id: Optional[str]) -> bool:
+    conversation_ref = (
+        db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _bind_capture_conversation_owner(db.transaction(), conversation_ref, owner_id)
+
+
+def _rebind_capture_conversation_owner_transaction(
+    transaction,
+    conversation_ref,
+    expected_owner_id: Optional[str],
+    new_owner_id: Optional[str],
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get("status"), "value", conversation.get("status"))
+    durable_owner_id = str(conversation.get("capture_owner_id") or "").strip()
+    exact_expected_owner_id = str(expected_owner_id or "").strip()
+    if status != ConversationStatus.in_progress.value or durable_owner_id != exact_expected_owner_id:
+        return False
+    transaction.update(
+        conversation_ref,
+        {"capture_owner_id": str(new_owner_id or "").strip() or None},
+    )
+    return True
+
+
+@transactional
+def _rebind_capture_conversation_owner(
+    transaction,
+    conversation_ref,
+    expected_owner_id: Optional[str],
+    new_owner_id: Optional[str],
+) -> bool:
+    return _rebind_capture_conversation_owner_transaction(
+        transaction,
+        conversation_ref,
+        expected_owner_id,
+        new_owner_id,
+    )
+
+
+def rebind_capture_conversation_owner(
+    uid: str,
+    conversation_id: str,
+    expected_owner_id: Optional[str],
+    new_owner_id: Optional[str],
+) -> bool:
+    conversation_ref = (
+        db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _rebind_capture_conversation_owner(
+        db.transaction(),
+        conversation_ref,
+        expected_owner_id,
+        new_owner_id,
+    )
+
+
+def _abandon_capture_conversation_if_owned_transaction(
+    transaction,
+    conversation_ref,
+    expected_owner_id: str,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get("status"), "value", conversation.get("status"))
+    owner_id = str(conversation.get("capture_owner_id") or "").strip()
+    if status != ConversationStatus.in_progress.value or owner_id != str(expected_owner_id or "").strip():
+        return False
+    transaction.update(
+        conversation_ref,
+        {
+            "status": ConversationStatus.failed.value,
+            "capture_owner_id": None,
+            "processing_error": "capture_stub_publication_failed",
+            "processing_error_at": datetime.now(timezone.utc),
+        },
+    )
+    return True
+
+
+@transactional
+def _abandon_capture_conversation_if_owned(transaction, conversation_ref, expected_owner_id: str) -> bool:
+    return _abandon_capture_conversation_if_owned_transaction(transaction, conversation_ref, expected_owner_id)
+
+
+def abandon_capture_conversation_if_owned(uid: str, conversation_id: str, expected_owner_id: str) -> bool:
+    conversation_ref = (
+        db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _abandon_capture_conversation_if_owned(
+        db.transaction(),
+        conversation_ref,
+        expected_owner_id,
+    )
+
+
+def _transfer_capture_conversation_owner_transaction(
+    transaction,
+    previous_ref,
+    next_ref,
+    expected_previous_owner_id: str,
+    next_owner_id: Optional[str],
+) -> bool:
+    previous_snapshot = previous_ref.get(transaction=transaction)
+    next_snapshot = next_ref.get(transaction=transaction)
+    if not previous_snapshot.exists or not next_snapshot.exists:
+        return False
+    previous = previous_snapshot.to_dict() or {}
+    previous_status = getattr(previous.get("status"), "value", previous.get("status"))
+    if previous_status != ConversationStatus.in_progress.value:
+        return False
+    current_owner_id = str(previous.get("capture_owner_id") or "").strip()
+    expected_owner_id = str(expected_previous_owner_id or "").strip()
+    if current_owner_id and current_owner_id != expected_owner_id:
+        return False
+    transaction.update(previous_ref, {"capture_owner_id": None})
+    transaction.update(next_ref, {"capture_owner_id": str(next_owner_id or "").strip() or None})
+    return True
+
+
+@transactional
+def _transfer_capture_conversation_owner(
+    transaction,
+    previous_ref,
+    next_ref,
+    expected_previous_owner_id: str,
+    next_owner_id: Optional[str],
+) -> bool:
+    return _transfer_capture_conversation_owner_transaction(
+        transaction,
+        previous_ref,
+        next_ref,
+        expected_previous_owner_id,
+        next_owner_id,
+    )
+
+
+def transfer_capture_conversation_owner(
+    uid: str,
+    previous_conversation_id: str,
+    expected_previous_owner_id: str,
+    next_conversation_id: str,
+    next_owner_id: Optional[str],
+) -> bool:
+    conversations_ref = db.collection("users").document(uid).collection(conversations_collection)
+    return _transfer_capture_conversation_owner(
+        db.transaction(),
+        conversations_ref.document(previous_conversation_id),
+        conversations_ref.document(next_conversation_id),
+        expected_previous_owner_id,
+        next_owner_id,
+    )
+
+
+def _rollback_capture_conversation_owner_transfer_transaction(
+    transaction,
+    previous_ref,
+    next_ref,
+    previous_owner_id: str,
+    expected_next_owner_id: Optional[str],
+) -> bool:
+    previous_snapshot = previous_ref.get(transaction=transaction)
+    next_snapshot = next_ref.get(transaction=transaction)
+    if not previous_snapshot.exists or not next_snapshot.exists:
+        return False
+    previous_owner = str((previous_snapshot.to_dict() or {}).get("capture_owner_id") or "").strip()
+    next_owner = str((next_snapshot.to_dict() or {}).get("capture_owner_id") or "").strip()
+    if previous_owner or next_owner != str(expected_next_owner_id or "").strip():
+        return False
+    transaction.update(previous_ref, {"capture_owner_id": str(previous_owner_id or "").strip() or None})
+    transaction.delete(next_ref)
+    return True
+
+
+@transactional
+def _rollback_capture_conversation_owner_transfer(
+    transaction,
+    previous_ref,
+    next_ref,
+    previous_owner_id: str,
+    expected_next_owner_id: Optional[str],
+) -> bool:
+    return _rollback_capture_conversation_owner_transfer_transaction(
+        transaction,
+        previous_ref,
+        next_ref,
+        previous_owner_id,
+        expected_next_owner_id,
+    )
+
+
+def rollback_capture_conversation_owner_transfer(
+    uid: str,
+    previous_conversation_id: str,
+    previous_owner_id: str,
+    next_conversation_id: str,
+    expected_next_owner_id: Optional[str],
+) -> bool:
+    conversations_ref = db.collection("users").document(uid).collection(conversations_collection)
+    return _rollback_capture_conversation_owner_transfer(
+        db.transaction(),
+        conversations_ref.document(previous_conversation_id),
+        conversations_ref.document(next_conversation_id),
+        previous_owner_id,
+        expected_next_owner_id,
+    )
+
+
+def _commit_capture_persistence_batch_transaction(
+    transaction,
+    conversation_ref,
+    batch_ref,
+    uid: str,
+    conversation_id: str,
+    expected_owner_id: Optional[str] = None,
+) -> dict:
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    batch_snapshot = batch_ref.get(transaction=transaction)
+    if not batch_snapshot.exists:
+        return {"status": "already_committed", "updated_segments": [], "removed_ids": []}
+    if not conversation_snapshot.exists:
+        raise ValueError("capture_persistence_conversation_missing")
+    batch_data = batch_snapshot.to_dict() or {}
+    batch_id = str(batch_data.get("batch_id") or getattr(batch_ref, "id", "")).strip()
+    if not batch_id:
+        raise ValueError("capture_persistence_batch_id_missing")
+    payload = _decode_capture_persistence_batch(uid, batch_data)
+    if str(payload.get("conversation_id") or "") != str(conversation_id):
+        raise ValueError("capture_persistence_conversation_mismatch")
+    capture_owner_id = str(expected_owner_id or payload.get("capture_owner_id") or "").strip()
+    conversation_data = conversation_snapshot.to_dict() or {}
+    durable_owner_id = str(conversation_data.get("capture_owner_id") or "").strip()
+    if not capture_owner_id or durable_owner_id != capture_owner_id:
+        return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+
+    conversation_data = _prepare_conversation_for_read(conversation_data, uid)
+    if conversation_data is None:
+        raise ValueError("capture_persistence_conversation_invalid")
+    applied_batch_ids = [
+        str(value)
+        for value in conversation_data.get("capture_persistence_applied_batch_ids") or []
+        if str(value).strip()
+    ]
+    if batch_id in applied_batch_ids:
+        transaction.delete(batch_ref)
+        return {"status": "already_committed", "updated_segments": [], "removed_ids": []}
+    existing_segments = [TranscriptSegment(**segment) for segment in conversation_data.get("transcript_segments") or []]
+    incoming_segments = [TranscriptSegment(**segment) for segment in payload["segments"]]
+    existing_ids = {str(segment.id) for segment in existing_segments if segment.id}
+    incoming_segments = [segment for segment in incoming_segments if str(segment.id) not in existing_ids]
+    combined_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
+        existing_segments,
+        incoming_segments,
+    )
+    doc_level = conversation_data.get('data_protection_level', 'standard')
+    update_data = {
+        "finished_at": datetime.fromisoformat(payload["finished_at"]),
+        "capture_persistence_applied_batch_ids": (applied_batch_ids + [batch_id])[-128:],
+    }
+    if incoming_segments:
+        update_data["transcript_segments"] = [segment.dict() for segment in combined_segments]
+    incoming_photos = payload.get("photos") or []
+    if incoming_photos:
+        update_data["source"] = "openglass"
+        photos_ref = conversation_ref.collection("photos")
+        for photo in incoming_photos:
+            photo_id = str(photo.get("id") or "").strip()
+            if not photo_id:
+                raise ValueError("capture_persistence_photo_id_required")
+            transaction.set(
+                photos_ref.document(photo_id),
+                _prepare_photo_for_write(photo, uid, doc_level),
+            )
+    update_payload = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, update_payload)
+    transaction.delete(batch_ref)
+    return {
+        "status": "committed",
+        "updated_segments": [segment.dict() for segment in updated_segments],
+        "removed_ids": removed_ids,
+    }
+
+
+@transactional
+def _commit_capture_persistence_batch(
+    transaction,
+    conversation_ref,
+    batch_ref,
+    uid: str,
+    conversation_id: str,
+    expected_owner_id: str,
+):
+    return _commit_capture_persistence_batch_transaction(
+        transaction,
+        conversation_ref,
+        batch_ref,
+        uid,
+        conversation_id,
+        expected_owner_id,
+    )
+
+
+def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: str, owner_id: str) -> dict:
+    exact_owner_id = str(owner_id or "").strip()
+    if not exact_owner_id:
+        raise ValueError("capture_persistence_owner_id_required")
+    if not redis_db.acquire_capture_commit_lease(uid, conversation_id, exact_owner_id):
+        return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    batch_ref = conversation_ref.collection(capture_persistence_batches_collection).document(batch_id)
+    try:
+        return _commit_capture_persistence_batch(
+            db.transaction(),
+            conversation_ref,
+            batch_ref,
+            uid,
+            conversation_id,
+            exact_owner_id,
+        )
+    finally:
+        redis_db.release_capture_commit_lease(uid, exact_owner_id)
+
+
+def persist_and_commit_capture_persistence_batch(
+    uid: str,
+    conversation_id: str,
+    segments: List[dict],
+    finished_at: datetime,
+    capture_owner_id: str,
+    photos: Optional[List[ConversationPhoto]] = None,
+) -> dict:
+    """Persist and commit a live capture while ownership transfer is fenced."""
+    exact_owner_id = str(capture_owner_id or "").strip()
+    if not exact_owner_id:
+        raise ValueError("capture_persistence_owner_id_required")
+    if not redis_db.acquire_capture_commit_lease(uid, conversation_id, exact_owner_id):
+        return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+
+    try:
+        batch_id = persist_capture_persistence_batch(
+            uid,
+            conversation_id,
+            segments,
+            finished_at,
+            exact_owner_id,
+            photos=photos,
+        )
+        conversation_ref = (
+            db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+        )
+        batch_ref = conversation_ref.collection(capture_persistence_batches_collection).document(batch_id)
+        return _commit_capture_persistence_batch(
+            db.transaction(),
+            conversation_ref,
+            batch_ref,
+            uid,
+            conversation_id,
+            exact_owner_id,
+        )
+    finally:
+        redis_db.release_capture_commit_lease(uid, exact_owner_id)
 
 
 # ***********************************

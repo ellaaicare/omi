@@ -31,7 +31,7 @@ import string
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import asyncpg
 import httpx
@@ -62,12 +62,17 @@ from ella.services.runtime_resolver import (
 )
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
+    ConcurrentConversationSummaryChangeError,
     ConversationSummaryNotFoundError,
     InvalidConversationSummaryCategoryError,
     write_conversation_summary,
 )
 from utils.notifications import send_notification
-from utils.ella.canonical_omi import write_omi_canonical_event
+from utils.ella.canonical_omi import (
+    canonical_transcript_segments,
+    transcript_grounding_hash,
+    write_omi_canonical_event,
+)
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
     EllaRequestAuthority,
@@ -207,6 +212,20 @@ def _upload_audio_to_gcs(audio_bytes: bytes, uid: str) -> Optional[str]:
 # ============================================================================
 
 
+class ParallelTodayCardGroundingEvidence(BaseModel):
+    attester: Literal["hermes_parallel_grounding_verifier"]
+    semantic_outcome: Literal["supported"]
+    supporting_quotes: List[str] = Field(min_length=1, max_length=3)
+    policy_version: Literal["hermes-parallel-grounding-verifier-v1"]
+    transcript_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    summary_request_id: str = Field(min_length=1, max_length=512)
+    summary_response_id: str = Field(min_length=1, max_length=512)
+    verifier_request_id: str = Field(min_length=1, max_length=512)
+    verifier_response_id: str = Field(min_length=1, max_length=512)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ConversationSummaryUpdate(BaseModel):
     """Schema for updating conversation structured summary fields."""
 
@@ -218,11 +237,20 @@ class ConversationSummaryUpdate(BaseModel):
     summary_kind: str = "observer_enriched"
     correction_id: Optional[str] = None
     based_on_version_id: Optional[str] = None
+    require_based_on_match: bool = False
     set_active: bool = True
     trace_id: Optional[str] = None
     require_canonical: bool = False
+    expected_transcript_hash: Optional[str] = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    require_source_match: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
+    today_card_grounding_evidence: Optional[ParallelTodayCardGroundingEvidence] = None
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _active_summary_version(conversation: dict) -> Optional[dict]:
@@ -351,6 +379,7 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
         headers = {}
         if provision_api_key:
             headers["Authorization"] = f"Bearer {provision_api_key}"
+            headers["X-Ella-Owner-Uid"] = uid
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
@@ -401,6 +430,7 @@ async def update_conversation_summary(
             summary_kind=update.summary_kind,
             correction_id=update.correction_id,
             based_on_version_id=update.based_on_version_id,
+            require_based_on_match=update.require_based_on_match,
             set_active=update.set_active,
             trace_id=update.trace_id,
             ella_tags=update.ella_tags,
@@ -409,6 +439,13 @@ async def update_conversation_summary(
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
             require_canonical=update.require_canonical,
+            expected_transcript_hash=update.expected_transcript_hash,
+            require_source_match=update.require_source_match,
+            today_card_grounding_evidence=(
+                update.today_card_grounding_evidence.model_dump()
+                if update.today_card_grounding_evidence is not None
+                else None
+            ),
         )
     except SummarySanitizationError as e:
         raise HTTPException(
@@ -419,6 +456,8 @@ async def update_conversation_summary(
         raise HTTPException(status_code=404, detail="Conversation not found")
     except InvalidConversationSummaryCategoryError as e:
         raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
+    except ConcurrentConversationSummaryChangeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -529,14 +568,12 @@ async def get_conversation_data(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     segments = _conversation_field(conversation, "transcript_segments", []) or []
+    transcript_segments = canonical_transcript_segments(list(segments))
     transcript_parts = []
-    for segment in segments:
-        if isinstance(segment, dict):
-            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
-            text = segment.get("text", "")
-        else:
-            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
-            text = getattr(segment, "text", "")
+    for segment in transcript_segments:
+        is_user = bool(segment.get("is_user"))
+        speaker = "User" if is_user else str(segment.get("speaker") or "Other")
+        text = str(segment.get("text") or "")
         transcript_parts.append(f"{speaker}: {text}")
 
     structured_src = _conversation_field(conversation, "structured", {}) or {}
@@ -551,12 +588,22 @@ async def get_conversation_data(
         if structured.get("category") and hasattr(structured["category"], "value"):
             structured["category"] = structured["category"].value
 
+    active_summary_version = _active_summary_version(conversation) or {}
+    enrichment_state = _conversation_field(conversation, "enrichment_state", {}) or {}
     return {
         "conversation_id": conversation_id,
         "uid": uid,
         "transcript": "\n\n".join(transcript_parts),
+        "transcript_segments": transcript_segments,
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
         "segment_count": len(segments),
         "structured": structured,
+        "active_summary_version_id": _conversation_field(conversation, "active_summary_version_id"),
+        "active_summary_source": active_summary_version.get("source"),
+        "active_summary_kind": active_summary_version.get("kind"),
+        "enrichment_status": enrichment_state.get("status"),
+        "enrichment_canonical_status": enrichment_state.get("canonical_status"),
+        "enrichment_trace_id": enrichment_state.get("trace_id"),
         "started_at": str(_conversation_field(conversation, "started_at", "")),
         "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }

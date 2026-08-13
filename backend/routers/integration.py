@@ -19,7 +19,8 @@ import models.integrations as integration_models
 import models.conversation as conversation_models
 from models.conversation import SearchRequest
 from models.app import App
-from routers.conversations import process_conversation, trigger_external_integrations
+from routers.conversations import trigger_external_integrations
+from utils.conversations.process_conversation import process_conversation_with_outcome
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.memories import process_external_integration_memory
 from utils.conversations.search import search_conversations
@@ -129,10 +130,11 @@ async def create_conversation_via_integration(
     create_conversation.app_id = app_id
 
     # Process
-    conversation = process_conversation(uid, language_code, create_conversation)
+    outcome = process_conversation_with_outcome(uid, language_code, create_conversation)
+    conversation = outcome.conversation
 
-    # Always trigger integration
-    trigger_external_integrations(uid, conversation)
+    if outcome.dispatched:
+        trigger_external_integrations(uid, conversation)
 
     # TODO: Empty for now, replace with ConversationCreateResponse once we don't have to wait for process_conversation
     # to finish for the conversation id

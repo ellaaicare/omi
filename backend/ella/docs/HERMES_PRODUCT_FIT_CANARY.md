@@ -59,6 +59,7 @@ Honcho, Mini, or a provider directly.
   },
   "enrichment": {
     "conversation_id": "synthetic-enrichment-REPLACE",
+    "active_summary_version_id": "synthetic-enrichment-summary-REPLACE",
     "transcript_sha256": "REPLACE_WITH_64_LOWERCASE_HEX"
   },
   "max_latency_ms": 120000
@@ -70,8 +71,8 @@ projection returned only after the server-owned full memory pack resolves. The
 exact conversation and active summary version pins prove the intended pack was
 selected without returning its content. Compute the projection hash inside an
 approved protected process; do not print or persist the memory pack. The
-enrichment transcript must already exist under the exact disposable synthetic
-profile. The harness does not seed content or fabricate database rows. It never
+enrichment transcript and active summary version must already exist under the
+exact disposable synthetic profile. The harness does not seed content or fabricate database rows. It never
 calls the voice context route, so this check cannot invoke Honcho.
 
 ## Run

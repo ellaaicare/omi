@@ -19,6 +19,13 @@ from ella.services.hermes_cloud_runtime import (
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime
 from models.conversation import CategoryEnum
+from models.hermes_cloud_enrichment_contract import (
+    ENRICHMENT_INSTRUCTIONS,
+    HermesCloudEnrichmentIdentity,
+    build_enrichment_identity,
+    build_legacy_enrichment_identity,
+    transcript_source,
+)
 from utils.ella.canonical_omi import (
     TODAY_CARD_GROUNDING_ATTESTER,
     TODAY_CARD_GROUNDING_CONTRACT_VERSION,
@@ -27,40 +34,9 @@ from utils.ella.canonical_omi import (
 )
 
 HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
-HERMES_CLOUD_ENRICHMENT_POLICY_VERSION = "hermes-cloud-enrichment-v1"
 HERMES_CLOUD_GROUNDING_CHANNEL = "omi_enrichment_grounding_verifier"
 HERMES_CLOUD_GROUNDING_POLICY_VERSION = "hermes-cloud-grounding-verifier-v1"
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-ENRICHMENT_INSTRUCTIONS = """You are Ella's OMI conversation enrichment worker.
-
-Use the complete authoritative transcript in the input. Return exactly one JSON object and no surrounding prose.
-
-Rules:
-- Ground every claim in the transcript.
-- Do not invent people, locations, relationships, health facts, or actions.
-- The overview must start with "[Ella] ".
-- Keep the title short and free of markdown.
-- category must be one of: personal, education, health, finance, legal, philosophy, spiritual, science, entrepreneurship, parenting, romantic, travel, inspiration, technology, business, social, work, sports, politics, literature, history, architecture, music, weather, news, entertainment, psychology, real, design, family, economics, environment, other.
-- Include concise ella_tags and an ella_signal object.
-- Do not contact anyone, deliver Guardian or caregiver messages, or mutate memory.
-
-Return exactly:
-{
-  "title": "short title",
-  "overview": "[Ella] grounded enriched summary",
-  "emoji": "one emoji",
-  "category": "category",
-  "ella_tags": ["omi", "enriched"],
-  "ella_signal": {
-    "salience": "low|medium|high",
-    "memory_promotion": "none|candidate|promoted",
-    "noise_level": "none|low|medium|high",
-    "contains_media": false,
-    "contains_user_speech": true,
-    "guardian_relevant": false
-  }
-}"""
 
 GROUNDING_VERIFIER_INSTRUCTIONS = """You are Ella's independent summary-grounding verifier.
 
@@ -92,14 +68,6 @@ class HermesCloudEnrichmentResult:
     client_interaction_id: str
 
 
-@dataclass(frozen=True)
-class HermesCloudEnrichmentIdentity:
-    job_id: str
-    client_interaction_id: str
-    trace_id: str
-    transcript_sha256: str
-
-
 def _structured_summary(conversation: dict[str, Any]) -> dict[str, Any]:
     structured = conversation.get("structured") or {}
     return {
@@ -108,17 +76,6 @@ def _structured_summary(conversation: dict[str, Any]) -> dict[str, Any]:
         "emoji": structured.get("emoji") or conversation.get("emoji") or "",
         "category": str(structured.get("category") or conversation.get("category") or "other"),
     }
-
-
-def _transcript_source(conversation: dict[str, Any]) -> tuple[str, str]:
-    source = json.dumps(
-        conversation.get("transcript_segments") or [],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return source, hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def _extract_json_object(content: str) -> dict[str, Any]:
@@ -248,40 +205,6 @@ def _grounding_attestation(
         "supporting_quote_hashes": ["sha256:" + hashlib.sha256(quote.encode("utf-8")).hexdigest() for quote in quotes],
         "policy_version": HERMES_CLOUD_GROUNDING_POLICY_VERSION,
     }
-
-
-def _interaction_identity(
-    uid: str,
-    conversation_id: str,
-    transcript_sha256: str,
-) -> tuple[str, str]:
-    policy_sha256 = hashlib.sha256(ENRICHMENT_INSTRUCTIONS.encode("utf-8")).hexdigest()
-    digest = hashlib.sha256(
-        (
-            f"{uid}|{conversation_id}|{transcript_sha256}|" f"{HERMES_CLOUD_ENRICHMENT_POLICY_VERSION}|{policy_sha256}"
-        ).encode("utf-8")
-    ).hexdigest()
-    return f"omi-enrichment:{digest}", f"omi-enrichment:{digest[:32]}"
-
-
-def build_enrichment_identity(
-    *,
-    uid: str,
-    conversation_id: str,
-    conversation: dict[str, Any],
-) -> HermesCloudEnrichmentIdentity:
-    _, transcript_sha256 = _transcript_source(conversation)
-    client_interaction_id, trace_id = _interaction_identity(
-        uid,
-        conversation_id,
-        transcript_sha256,
-    )
-    return HermesCloudEnrichmentIdentity(
-        job_id=("hce_" + hashlib.sha256(client_interaction_id.encode("utf-8")).hexdigest()),
-        client_interaction_id=client_interaction_id,
-        trace_id=trace_id,
-        transcript_sha256=transcript_sha256,
-    )
 
 
 def _validate_enrichment_output(content: str) -> None:
@@ -435,10 +358,17 @@ class HermesCloudEnrichmentService:
         )
         transcript_sha256 = identity.transcript_sha256
         if expected_client_interaction_id and expected_client_interaction_id != identity.client_interaction_id:
-            raise ProvisioningError(
-                "hermes_cloud_enrichment_interaction_changed",
-                retryable=False,
+            legacy_identity = build_legacy_enrichment_identity(
+                uid=uid,
+                conversation_id=conversation_id,
+                conversation=conversation,
             )
+            if expected_client_interaction_id != legacy_identity.client_interaction_id:
+                raise ProvisioningError(
+                    "hermes_cloud_enrichment_interaction_changed",
+                    retryable=False,
+                )
+            identity = legacy_identity
         if expected_transcript_sha256 and expected_transcript_sha256 != transcript_sha256:
             raise ProvisioningError(
                 "hermes_cloud_enrichment_transcript_changed",
@@ -456,7 +386,7 @@ class HermesCloudEnrichmentService:
             client_metadata={
                 "synthetic": uid.startswith(("synthetic-", "staging-synthetic-")),
                 "source": "omi_conversation_postprocess",
-                "policy_version": HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+                "policy_version": identity.policy_version,
                 "conversation_id_sha256": hashlib.sha256(conversation_id.encode("utf-8")).hexdigest(),
                 "transcript_sha256": transcript_sha256,
             },
@@ -465,6 +395,7 @@ class HermesCloudEnrichmentService:
         transcript_segments = [
             dict(segment) for segment in (conversation.get("transcript_segments") or []) if isinstance(segment, dict)
         ]
+        source_grounding_hash = transcript_grounding_hash(transcript_segments)
         runtime_service = self._runtime_service(allow_shadow)
         turn = await runtime_service.run_turn(
             runtime,
@@ -531,7 +462,7 @@ class HermesCloudEnrichmentService:
                 "hermes_cloud_enrichment_conversation_removed",
                 retryable=False,
             )
-        _, current_transcript_sha256 = _transcript_source(current)
+        _, current_transcript_sha256 = transcript_source(current)
         if current_transcript_sha256 != transcript_sha256:
             raise ProvisioningError(
                 "hermes_cloud_enrichment_transcript_changed",
@@ -552,12 +483,14 @@ class HermesCloudEnrichmentService:
             uid=uid,
             conversation_id=conversation_id,
             trace_id=identity.trace_id,
-            active_summary_version_id=current.get("active_summary_version_id"),
+            active_summary_version_id=active_summary_version_id,
             summary=summary,
             summary_kind="hermes_enriched",
             summary_source="hermes_cloud",
             require_canonical=True,
             require_based_on_match=not same_applied_trace,
+            expected_transcript_hash=source_grounding_hash,
+            require_source_match=True,
             preserve_generated_results=True,
             today_card_grounding=today_card_grounding,
         )

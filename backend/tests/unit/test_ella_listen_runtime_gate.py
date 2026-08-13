@@ -1,4 +1,7 @@
 import asyncio
+import json
+import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from ella.routers import auto_provision
@@ -95,6 +98,104 @@ def test_cloud_authority_forbids_direct_mini_auto_provision(monkeypatch):
         "success": False,
         "error": "isolated_runtime_auto_provision_forbidden",
     }
+
+
+def test_legacy_auto_provision_uses_utc_fallback_without_shadowing_datetime_timezone(monkeypatch):
+    captured = {}
+
+    class FakePool:
+        async def fetchrow(self, query, *args):
+            if "FROM users u" in query:
+                assert args == ("synthetic-user",)
+                return {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "name": "Synthetic",
+                    "email": "synthetic@example.invalid",
+                    "identities": {},
+                    "timezone": "UTC",
+                    "conditions": [],
+                    "medications": [],
+                }
+            assert "INSERT INTO agent_clusters" in query
+            captured["cluster"] = json.loads(args[2])
+            return {"id": args[0]}
+
+    async def get_pool():
+        return FakePool()
+
+    async def authority_disabled(_uid):
+        return False
+
+    class FakeProvisionResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, _url, *, headers, json):
+            assert headers["Content-Type"] == "application/json"
+            captured["payload"] = json
+            return FakeProvisionResponse()
+
+    monkeypatch.setattr(auto_provision, "_get_pool", get_pool)
+    monkeypatch.setattr(auto_provision.runtime_resolver, "runtime_authority_enabled", authority_disabled)
+    monkeypatch.setattr(auto_provision.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(auto_provision.auto_provision_user("synthetic-user"))
+
+    assert result["success"] is True
+    assert captured["payload"]["profile"]["timezone"] == "UTC"
+    provisioned_at = datetime.fromisoformat(captured["cluster"]["provisionedAt"])
+    assert provisioned_at.tzinfo == timezone.utc
+
+
+def test_legacy_cluster_persistence_uses_atomic_authority_preserving_upsert():
+    captured = {}
+
+    class FakePool:
+        async def fetchrow(self, query, *args):
+            captured["query"] = " ".join(query.split())
+            captured["args"] = args
+            return {"id": "00000000-0000-0000-0000-000000000099"}
+
+    result = asyncio.run(
+        auto_provision._persist_agent_cluster(
+            FakePool(),
+            "00000000-0000-0000-0000-000000000001",
+            json.dumps({"userAgentId": "synthetic-agent"}),
+        )
+    )
+
+    candidate_id, user_id, agents = captured["args"]
+    assert uuid.UUID(candidate_id)
+    assert user_id == "00000000-0000-0000-0000-000000000001"
+    assert json.loads(agents) == {"userAgentId": "synthetic-agent"}
+    assert "ON CONFLICT (user_id) DO UPDATE" in captured["query"]
+    assert "agent_clusters.agents || EXCLUDED.agents" in captured["query"]
+    assert "WHEN NULLIF(agent_clusters.agents->>'userAgentId', '') IS NOT NULL" in captured["query"]
+    assert "ELSE '{}'::jsonb" in captured["query"]
+    for authority_key in (
+        "gatewayUrl",
+        "workspace",
+        "userAgentId",
+        "caregiverAgentId",
+        "scannerAgentId",
+        "gatewayToken",
+        "provisionedAt",
+    ):
+        assert f"'{authority_key}', NULLIF(agent_clusters.agents->>'{authority_key}', '')" in captured["query"]
+    assert result == "00000000-0000-0000-0000-000000000099"
 
 
 def test_legacy_firestore_repair_requests_historical_cloud_sync_default(monkeypatch):

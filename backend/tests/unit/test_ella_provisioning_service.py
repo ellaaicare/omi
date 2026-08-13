@@ -955,7 +955,14 @@ elif callsite == "callbacks-provision":
     module.runtime_authority_enabled = authority_enabled
     module._resolve_agent_id_for_uid = resolve_agent
     asyncio.run(module._fetch_internal_assessment("synthetic-user", "synthetic-conversation"))
-    expected_headers = {"Authorization": f"Bearer {expected}"} if expected else {}
+    expected_headers = (
+        {
+            "Authorization": f"Bearer {expected}",
+            "X-Ella-Owner-Uid": "synthetic-user",
+        }
+        if expected
+        else {}
+    )
     assert captured.get("headers") == expected_headers, "outbound header mismatch"
 elif callsite == "resolve-provision":
     assert module.PROVISION_API_KEY == expected, "authority selection mismatch"
@@ -1291,10 +1298,12 @@ elif mode == "profile-map":
     would_send_retained = captured.get("authorization") == f"Bearer {retained}"
 elif mode in {"auto-provision", "auto-gateway"}:
     class SyntheticPool:
-        async def fetchrow(self, *args):
+        async def fetchrow(self, query, *args):
+            if "INSERT INTO agent_clusters" in query:
+                captured["cluster"] = json.loads(args[2])
+                return {"id": args[0]}
             return {
                 "id": "00000000-0000-0000-0000-000000000001",
-                "cluster_id": None,
                 "name": "Synthetic",
                 "email": None,
                 "timezone": "UTC",
@@ -1302,9 +1311,6 @@ elif mode in {"auto-provision", "auto-gateway"}:
                 "medications": [],
                 "identities": {},
             }
-
-        async def execute(self, query, *args):
-            captured["cluster"] = json.loads(args[1])
 
     async def synthetic_pool():
         return SyntheticPool()
@@ -1721,6 +1727,9 @@ if module_name == "ella.routers.callbacks":
     fake_sanitizer.SummarySanitizationError = type("SummarySanitizationError", (Exception,), {})
     sys.modules["ella.services.summary_sanitizer"] = fake_sanitizer
     fake_writeback = types.ModuleType("ella.services.summary_writeback")
+    fake_writeback.ConcurrentConversationSummaryChangeError = type(
+        "ConcurrentConversationSummaryChangeError", (Exception,), {}
+    )
     fake_writeback.ConversationSummaryNotFoundError = type("ConversationSummaryNotFoundError", (Exception,), {})
     fake_writeback.InvalidConversationSummaryCategoryError = type(
         "InvalidConversationSummaryCategoryError", (Exception,), {}
@@ -1734,6 +1743,12 @@ if module_name == "ella.routers.callbacks":
     fake_canonical_omi.TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_grounding_verifier"
     fake_canonical_omi.TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
     fake_canonical_omi.summary_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
+    fake_canonical_omi.today_card_grounding_identity_is_valid = lambda *_args, **_kwargs: True
+    fake_canonical_omi.today_card_grounding_profile = lambda _source: {
+        "attester": "hermes_cloud_grounding_verifier",
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
+    }
+    fake_canonical_omi.canonical_transcript_segments = lambda value: value
     fake_canonical_omi.transcript_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi

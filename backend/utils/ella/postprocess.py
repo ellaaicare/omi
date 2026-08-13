@@ -10,6 +10,12 @@ import time
 
 import requests
 
+from database.hermes_cloud_enrichment_outbox import FirestoreHermesCloudEnrichmentOutbox
+from models.hermes_cloud_enrichment_contract import (
+    HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+    build_enrichment_identity,
+)
+
 from .config import ELLA_CONFIG
 
 # Configurable via environment variable
@@ -49,14 +55,6 @@ def _conversation_payload(conversation) -> dict:
 
 
 def enqueue_cloud_enrichment(uid: str, conversation) -> dict:
-    from database.hermes_cloud_enrichment_outbox import (
-        FirestoreHermesCloudEnrichmentOutbox,
-    )
-    from ella.services.hermes_cloud_enrichment import (
-        HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
-        build_enrichment_identity,
-    )
-
     conversation_id = str(getattr(conversation, "id", "") or "")
     identity = build_enrichment_identity(
         uid=uid,

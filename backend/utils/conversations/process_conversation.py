@@ -5,6 +5,7 @@ import threading
 import uuid
 import logging
 import asyncio
+from dataclasses import dataclass
 from datetime import timezone, timedelta, datetime
 from typing import Union, Tuple, List, Optional
 
@@ -34,6 +35,7 @@ from models.conversation import (
 )
 from utils.notifications import send_important_conversation_message
 from models.conversation import CalendarMeetingContext
+from models.conversation_integrity import transcript_grounding_hash
 from models.other import Person
 from models.task import Task, TaskStatus, TaskAction, TaskActionProvider
 from models.trend import Trend
@@ -65,19 +67,39 @@ from ella.services.ai_consent import assert_current_ai_consent
 
 # ====== ELLA POST-PROCESS HOOK IMPORT ======
 try:
-    from utils.ella.postprocess import fire_postprocess_webhook
+    from utils.ella.postprocess import fire_postprocess_webhook, HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS
 except ImportError:
     fire_postprocess_webhook = None
+    HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS = frozenset()
 # ====== END ELLA IMPORT ======
 from utils.notifications import send_action_item_data_message
 from utils.task_sync import auto_sync_action_items_batch
 from utils.other.storage import precache_conversation_audio
 from utils.conversations.failure_state import (
     CONVERSATION_PROCESSING_FAILED,
-    apply_conversation_processing_failed,
+    CONVERSATION_SUMMARY_FAILED,
     clear_conversation_processing_error,
 )
 from utils.conversations.vector import save_structured_vector
+
+
+@dataclass(frozen=True)
+class ConversationProcessingOutcome:
+    conversation: Conversation
+    dispatched: bool
+    status: str
+    released_claim_token: Optional[str] = None
+
+
+CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED = 'transcript_redelivery_exhausted'
+
+
+def _run_post_commit_effect(name: str, effect):
+    try:
+        return effect()
+    except Exception as exc:
+        print(f"Post-commit effect failed ({name}): {exc}", flush=True)
+        return None
 
 
 def _get_structured(
@@ -237,14 +259,57 @@ def mark_conversation_processing_failed(
     conversation: Conversation,
     error_code: str = "conversation_summary_failed",
 ):
-    apply_conversation_processing_failed(conversation, error_code=error_code)
-    conversations_db.upsert_conversation(uid, conversation.dict())
+    failed_at = datetime.now(timezone.utc)
+    result = conversations_db.mark_conversation_processing_failed_if_unfinished(
+        uid,
+        conversation.id,
+        error_code,
+        failed_at=failed_at,
+    )
+    if result.get('updated'):
+        conversation.status = ConversationStatus.failed
+        conversation.discarded = False
+        conversation.processing_error = error_code
+        conversation.processing_error_at = failed_at
+        return True
+    return False
+
+
+def mark_conversation_processing_failed_update(
+    uid: str,
+    conversation: Conversation,
+    error_code: str = "conversation_summary_failed",
+):
+    return mark_conversation_processing_failed(uid, conversation, error_code=error_code)
 
 
 def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conversation) -> bool:
     if conversation.status == ConversationStatus.failed and conversation.processing_error:
         return False
-    mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+    return mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+
+
+def mark_released_conversation_processing_failed(
+    uid: str,
+    conversation: Conversation,
+    release_token: Optional[str],
+) -> bool:
+    if not release_token:
+        return False
+    failed_at = datetime.now(timezone.utc)
+    result = conversations_db.mark_conversation_processing_failed_if_released(
+        uid,
+        conversation.id,
+        CONVERSATION_PROCESSING_FAILED,
+        release_token,
+        failed_at=failed_at,
+    )
+    if not result.get('updated'):
+        return False
+    conversation.status = ConversationStatus.failed
+    conversation.discarded = False
+    conversation.processing_error = CONVERSATION_PROCESSING_FAILED
+    conversation.processing_error_at = failed_at
     return True
 
 
@@ -554,15 +619,57 @@ def _update_personas_async(uid: str):
         print(f"[PERSONAS] Finished persona updates in background thread for uid={uid}")
 
 
-def process_conversation(
+def process_conversation_with_outcome(
     uid: str,
     language_code: str,
     conversation: Union[Conversation, CreateConversation, ExternalIntegrationCreateConversation],
     force_process: bool = False,
     is_reprocess: bool = False,
     app_id: Optional[str] = None,
-) -> Conversation:
+    _claim_already_held: bool = False,
+    _initial_processing_claim_token: Optional[str] = None,
+    _transcript_retry_count: int = 0,
+) -> ConversationProcessingOutcome:
     assert_current_ai_consent(uid)
+    allow_create = not isinstance(conversation, Conversation)
+    initial_processing_claim_held = bool(_claim_already_held)
+    initial_processing_claim_token = _initial_processing_claim_token
+    if isinstance(conversation, Conversation) and not is_reprocess and not _claim_already_held:
+        claim_result = conversations_db.claim_initial_conversation_processing(uid, conversation.id)
+        claim_status = claim_result.get('status')
+        if claim_status == 'already_completed':
+            durable_conversation = conversations_db.get_conversation(uid, conversation.id) or conversation.dict()
+            return ConversationProcessingOutcome(
+                conversation=Conversation(**durable_conversation),
+                dispatched=False,
+                status=claim_status,
+            )
+        if claim_status in {'processing_in_progress', 'capture_in_progress'}:
+            durable_conversation = conversations_db.get_conversation(uid, conversation.id) or conversation.dict()
+            return ConversationProcessingOutcome(
+                conversation=Conversation(**durable_conversation),
+                dispatched=False,
+                status=claim_status,
+            )
+        if claim_status == 'conversation_missing':
+            return ConversationProcessingOutcome(
+                conversation=conversation,
+                dispatched=False,
+                status=conversations_db.conversation_stock_summary_deleted,
+            )
+        if claim_status != 'processing_claimed':
+            raise RuntimeError(f"conversation processing claim unavailable: {claim_status}")
+        initial_processing_claim_held = True
+        initial_processing_claim_token = str(claim_result.get('claim_token') or '') or None
+        conversation.status = ConversationStatus.processing
+    elif isinstance(conversation, Conversation) and _claim_already_held:
+        conversation.status = ConversationStatus.processing
+    expected_active_summary_version_id = (
+        conversation.active_summary_version_id if isinstance(conversation, Conversation) else None
+    )
+    expected_transcript_hash = (
+        transcript_grounding_hash(conversation.transcript_segments) if isinstance(conversation, Conversation) else None
+    )
 
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
     if hasattr(conversation, 'id') and conversation.id:
@@ -589,7 +696,7 @@ def process_conversation(
         structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
     except Exception:
         if isinstance(conversation, Conversation):
-            mark_conversation_processing_failed(uid, conversation)
+            mark_conversation_processing_failed_update(uid, conversation)
         raise
 
     conversation = _get_conversation_obj(uid, structured, conversation, discarded)
@@ -597,74 +704,166 @@ def process_conversation(
 
     # AI-based folder assignment
     assigned_folder_id = None
+    initialize_system_folders_after_commit = False
+
+    def select_assigned_folder_id(user_folders):
+        folder_id, confidence, reasoning = assign_conversation_to_folder(
+            title=conversation.structured.title or '',
+            overview=conversation.structured.overview or '',
+            category=conversation.structured.category.value if conversation.structured.category else 'other',
+            user_folders=user_folders,
+        )
+        if folder_id:
+            print(
+                f"AI assigned conversation {conversation.id} to folder {folder_id} "
+                f"(confidence: {confidence:.2f}): {reasoning}"
+            )
+        return folder_id
+
     if not discarded and not is_reprocess and not conversation.folder_id:
         try:
-            # Get user's folders
             user_folders = folders_db.get_folders(uid)
             if not user_folders:
-                user_folders = folders_db.initialize_system_folders(uid)
-
-            if user_folders and conversation.structured:
-                folder_id, confidence, reasoning = assign_conversation_to_folder(
-                    title=conversation.structured.title or '',
-                    overview=conversation.structured.overview or '',
-                    category=conversation.structured.category.value if conversation.structured.category else 'other',
-                    user_folders=user_folders,
-                )
-                if folder_id:
-                    conversation.folder_id = folder_id
-                    assigned_folder_id = folder_id
-                    print(
-                        f"AI assigned conversation {conversation.id} to folder {folder_id} (confidence: {confidence:.2f}): {reasoning}"
-                    )
+                initialize_system_folders_after_commit = True
+            elif conversation.structured:
+                assigned_folder_id = select_assigned_folder_id(user_folders)
+                conversation.folder_id = assigned_folder_id
         except Exception as e:
             print(f"Error during folder assignment for conversation {conversation.id}: {e}")
 
-    if not discarded:
-        # Analytics tracking
-        insights_gained = 0
-        if conversation.structured:
-            # Count sentences with more than 5 words from title and overview
-            for text in [conversation.structured.title, conversation.structured.overview]:
-                if text:
-                    sentences = re.split(r'[.!?]+', text)
-                    for sentence in sentences:
+    folder_persisted_by_commit = bool(allow_create and assigned_folder_id)
+    conversation.status = ConversationStatus.completed
+    commit_result = conversations_db.commit_stock_summary_processing_result(
+        uid,
+        conversation.id,
+        conversation.dict(),
+        expected_active_summary_version_id=expected_active_summary_version_id,
+        allow_create=allow_create,
+        enqueue_hermes_cloud_enrichment=uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS,
+        expected_transcript_hash=expected_transcript_hash,
+    )
+    commit_status = commit_result.get('status')
+    if commit_status == conversations_db.conversation_stock_summary_transcript_changed:
+        durable_conversation = commit_result.get('conversation') or conversations_db.get_conversation(
+            uid, conversation.id
+        )
+        if durable_conversation and _transcript_retry_count < 1:
+            print(
+                f"transcript changed while processing conversation.id={conversation.id}; retrying latest snapshot",
+                flush=True,
+            )
+            return process_conversation_with_outcome(
+                uid,
+                language_code,
+                Conversation(**durable_conversation),
+                force_process=force_process,
+                is_reprocess=is_reprocess,
+                app_id=app_id,
+                _claim_already_held=initial_processing_claim_held,
+                _initial_processing_claim_token=initial_processing_claim_token,
+                _transcript_retry_count=_transcript_retry_count + 1,
+            )
+        released_claim_token = None
+        if initial_processing_claim_held:
+            release_result = conversations_db.release_initial_conversation_processing_claim(
+                uid,
+                conversation.id,
+                initial_processing_claim_token or '',
+            )
+            if release_result.get('released'):
+                released_claim_token = str(release_result.get('release_token') or '') or None
+        return ConversationProcessingOutcome(
+            conversation=Conversation(**(durable_conversation or conversation.dict())),
+            dispatched=False,
+            status=commit_status,
+            released_claim_token=released_claim_token,
+        )
+    if commit_status in {
+        conversations_db.conversation_stock_summary_cas_lost,
+        conversations_db.conversation_stock_summary_deleted,
+    }:
+        durable_conversation = commit_result.get('conversation') or conversation.dict()
+        print(
+            f"stock summary CAS lost for conversation.id={conversation.id}; skipping processing side effects",
+            flush=True,
+        )
+        return ConversationProcessingOutcome(
+            conversation=Conversation(**durable_conversation),
+            dispatched=False,
+            status=commit_status,
+        )
+    if commit_status != 'committed':
+        mark_conversation_processing_failed_update(uid, conversation, error_code=CONVERSATION_SUMMARY_FAILED)
+        raise RuntimeError(f"conversation summary authority unavailable: {commit_status}")
+
+    conversation = Conversation(**(commit_result.get('conversation') or conversation.dict()))
+    should_dispatch_processing_side_effects = bool(commit_result.get('dispatched', True))
+
+    if initialize_system_folders_after_commit and should_dispatch_processing_side_effects:
+        try:
+            user_folders = folders_db.initialize_system_folders(uid)
+            if user_folders and conversation.structured:
+                assigned_folder_id = select_assigned_folder_id(user_folders)
+        except Exception as e:
+            print(f"Error during post-commit folder initialization for conversation {conversation.id}: {e}")
+
+    if not discarded and should_dispatch_processing_side_effects:
+
+        def record_processing_usage():
+            insights_gained = 0
+            if conversation.structured:
+                for text in [conversation.structured.title, conversation.structured.overview]:
+                    if text:
+                        for sentence in re.split(r'[.!?]+', text):
+                            if len(sentence.split()) > 5:
+                                insights_gained += 1
+                insights_gained += len(conversation.structured.action_items)
+                insights_gained += len(conversation.structured.events)
+            for app_result in conversation.apps_results:
+                if app_result.content:
+                    for sentence in re.split(r'[.!?]+', app_result.content):
                         if len(sentence.split()) > 5:
                             insights_gained += 1
+            if insights_gained > 0:
+                record_usage(uid, insights_gained=insights_gained)
 
-            # Count number of action items and events
-            insights_gained += len(conversation.structured.action_items)
-            insights_gained += len(conversation.structured.events)
+        def trigger_and_persist_apps():
+            _trigger_apps(
+                uid,
+                conversation,
+                is_reprocess=is_reprocess,
+                app_id=app_id,
+                language_code=language_code,
+                people=people,
+            )
+            conversations_db.update_conversation(
+                uid,
+                conversation.id,
+                {
+                    'apps_results': [result.dict() for result in conversation.apps_results],
+                    'suggested_summarization_apps': conversation.suggested_summarization_apps,
+                },
+            )
 
-        # Count sentences with more than 5 words from app results
-        for app_result in conversation.apps_results:
-            if app_result.content:
-                sentences = re.split(r'[.!?]+', app_result.content)
-                for sentence in sentences:
-                    if len(sentence.split()) > 5:
-                        insights_gained += 1
-
-        if insights_gained > 0:
-            record_usage(uid, insights_gained=insights_gained)
-
-        _trigger_apps(
-            uid, conversation, is_reprocess=is_reprocess, app_id=app_id, language_code=language_code, people=people
+        _run_post_commit_effect('usage', record_processing_usage)
+        _run_post_commit_effect('apps', trigger_and_persist_apps)
+        if not is_reprocess:
+            _run_post_commit_effect(
+                'structured_vector',
+                lambda: threading.Thread(target=save_structured_vector, args=(uid, conversation)).start(),
+            )
+        _run_post_commit_effect(
+            'memories', lambda: threading.Thread(target=_extract_memories, args=(uid, conversation)).start()
         )
-        (
-            threading.Thread(
-                target=save_structured_vector,
-                args=(
-                    uid,
-                    conversation,
-                ),
-            ).start()
-            if not is_reprocess
-            else None
+        _run_post_commit_effect(
+            'trends', lambda: threading.Thread(target=_extract_trends, args=(uid, conversation)).start()
         )
-        threading.Thread(target=_extract_memories, args=(uid, conversation)).start()
-        threading.Thread(target=_extract_trends, args=(uid, conversation)).start()
-        threading.Thread(target=_save_action_items, args=(uid, conversation)).start()
-        threading.Thread(target=_update_goal_progress, args=(uid, conversation)).start()
+        _run_post_commit_effect(
+            'action_items', lambda: threading.Thread(target=_save_action_items, args=(uid, conversation)).start()
+        )
+        _run_post_commit_effect(
+            'goals', lambda: threading.Thread(target=_update_goal_progress, args=(uid, conversation)).start()
+        )
 
     # Create audio files from chunks if private cloud sync was enabled
     if not is_reprocess and conversation.private_cloud_sync_enabled:
@@ -680,23 +879,26 @@ def process_conversation(
         except Exception as e:
             print(f"Error creating audio files: {e}")
 
-    conversation.status = ConversationStatus.completed
-    conversations_db.upsert_conversation(uid, conversation.dict())
-
     # Update folder conversation count after conversation is saved
-    if assigned_folder_id:
-        folders_db.update_folder_conversation_count(uid, assigned_folder_id)
+    if assigned_folder_id and should_dispatch_processing_side_effects:
+        folder_assigned = folder_persisted_by_commit or _run_post_commit_effect(
+            'folder_assignment',
+            lambda: conversations_db.assign_conversation_folder_if_unset(uid, conversation.id, assigned_folder_id),
+        )
+        if folder_assigned:
+            conversation.folder_id = assigned_folder_id
+            _run_post_commit_effect(
+                'folder_count', lambda: folders_db.update_folder_conversation_count(uid, assigned_folder_id)
+            )
 
-    if not is_reprocess:
-        threading.Thread(
-            target=conversation_created_webhook,
-            args=(
-                uid,
-                conversation,
-            ),
-        ).start()
-        # Update persona prompts with new conversation
-        threading.Thread(target=update_personas_async, args=(uid,)).start()
+    if not is_reprocess and should_dispatch_processing_side_effects:
+        _run_post_commit_effect(
+            'conversation_created_webhook',
+            lambda: threading.Thread(target=conversation_created_webhook, args=(uid, conversation)).start(),
+        )
+        _run_post_commit_effect(
+            'persona_update', lambda: threading.Thread(target=update_personas_async, args=(uid,)).start()
+        )
 
         # Disable important conversation for now
         # Send important conversation notification for long conversations (>30 minutes)
@@ -706,14 +908,93 @@ def process_conversation(
         # ).start()
 
     # Ella post-process hook: notify n8n after conversation is fully saved
-    if fire_postprocess_webhook:  # Fires for both initial processing and reprocessing
-        threading.Thread(
-            target=fire_postprocess_webhook,
-            args=(uid, conversation),
-        ).start()
+    if (
+        fire_postprocess_webhook
+        and should_dispatch_processing_side_effects
+        and uid not in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS
+    ):  # Cloud-selected conversations were queued atomically with the summary commit.
+        _run_post_commit_effect(
+            'ella_postprocess_webhook',
+            lambda: threading.Thread(target=fire_postprocess_webhook, args=(uid, conversation)).start(),
+        )
 
     print('process_conversation completed conversation.id=', conversation.id)
-    return conversation
+    return ConversationProcessingOutcome(
+        conversation=conversation,
+        dispatched=should_dispatch_processing_side_effects,
+        status='committed',
+    )
+
+
+def process_conversation_with_transcript_redelivery(
+    uid: str,
+    language_code: str,
+    conversation: Conversation,
+    *,
+    max_redeliveries: int = 1,
+) -> ConversationProcessingOutcome:
+    """Run a fresh claimed processing invocation after transcript CAS exhaustion."""
+    redeliveries = 0
+    while True:
+        outcome = process_conversation_with_outcome(uid, language_code, conversation)
+        if outcome.status != conversations_db.conversation_stock_summary_transcript_changed:
+            return outcome
+        if redeliveries >= max_redeliveries:
+            marked_failed = mark_released_conversation_processing_failed(
+                uid,
+                outcome.conversation,
+                outcome.released_claim_token,
+            )
+            durable_conversation = conversations_db.get_conversation(uid, outcome.conversation.id)
+            durable = Conversation(**(durable_conversation or outcome.conversation.dict()))
+            if not marked_failed and durable.status == ConversationStatus.completed:
+                return ConversationProcessingOutcome(
+                    conversation=durable,
+                    dispatched=False,
+                    status='already_completed',
+                )
+            if not marked_failed and durable.status in {
+                ConversationStatus.in_progress,
+                ConversationStatus.processing,
+            }:
+                return ConversationProcessingOutcome(
+                    conversation=durable,
+                    dispatched=False,
+                    status='processing_in_progress',
+                )
+            return ConversationProcessingOutcome(
+                conversation=durable,
+                dispatched=False,
+                status=CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED,
+            )
+        redeliveries += 1
+        conversation = outcome.conversation
+        print(
+            f"re-dispatching conversation.id={conversation.id} after transcript CAS exhaustion "
+            f"({redeliveries}/{max_redeliveries})",
+            flush=True,
+        )
+
+
+def process_conversation(
+    uid: str,
+    language_code: str,
+    conversation: Union[Conversation, CreateConversation, ExternalIntegrationCreateConversation],
+    force_process: bool = False,
+    is_reprocess: bool = False,
+    app_id: Optional[str] = None,
+) -> Conversation:
+    outcome = process_conversation_with_outcome(
+        uid,
+        language_code,
+        conversation,
+        force_process=force_process,
+        is_reprocess=is_reprocess,
+        app_id=app_id,
+    )
+    if not outcome.dispatched and outcome.status != 'already_completed':
+        raise RuntimeError(f"conversation processing not committed: {outcome.status}")
+    return outcome.conversation
 
 
 def _send_important_conversation_notification_if_needed(uid: str, conversation: Conversation):

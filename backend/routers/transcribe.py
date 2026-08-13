@@ -68,8 +68,17 @@ from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
     mark_unexpected_conversation_processing_failed,
-    process_conversation,
+    process_conversation_with_outcome,
+    process_conversation_with_transcript_redelivery,
     retrieve_in_progress_conversation,
+)
+from utils.capture_buffer import (
+    PusherTranscriptBatch,
+    acknowledge_capture_persistence_batch,
+    capture_buffer_contains_conversation,
+    deliver_all_pusher_transcript_batches,
+    prepare_conversation_bound_capture_batch,
+    queue_pusher_transcript_batch,
 )
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
@@ -117,11 +126,43 @@ router = APIRouter()
 
 
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
+CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
+
+
+def drain_capture_persistence_batches(uid: str, conversation_id: str, owner_id: str) -> int:
+    batch_ids = conversations_db.list_capture_persistence_batches(uid, conversation_id)
+    for batch_id in batch_ids:
+        result = conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id, owner_id)
+        if result.get("status") == "ownership_lost":
+            raise RuntimeError("capture_persistence_ownership_lost")
+    return len(batch_ids)
+
+
+def poll_capture_persistence_batches(uid: str, conversation_id: str, owner_id: str) -> Tuple[int, bool]:
+    """Commit one recovery scan and report whether the socket still owns the conversation."""
+    batch_ids = conversations_db.list_capture_persistence_batches(uid, conversation_id)
+    for batch_id in batch_ids:
+        result = conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id, owner_id)
+        if result.get("status") == "ownership_lost":
+            return len(batch_ids), False
+    return len(batch_ids), True
+
+
+def should_keep_capture_recovery_polling(
+    recovery_conversation_id: str,
+    current_conversation_id: Optional[str],
+    websocket_active: bool,
+) -> bool:
+    """Keep polling the active owned conversation for batches from a superseded socket."""
+    return websocket_active and recovery_conversation_id == str(current_conversation_id or "").strip()
+
+
 STT_LATENCY_LOGS_ENABLED = os.getenv('ELLA_STT_LATENCY_LOGS_ENABLED', 'true').lower() == 'true'
 STT_LATENCY_CLIENT_EVENT_LIMIT = int(os.getenv('ELLA_STT_LATENCY_CLIENT_EVENT_LIMIT', '25'))
 # Server-side STT override: when set, all sessions use this provider regardless of client request.
 # Useful when a provider hallucinates on ambient noise (e.g. soniox/grok for wearable use).
 STT_FORCE_SERVICE = os.getenv('STT_FORCE_SERVICE', '').strip().lower() or None
+PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS = float(os.getenv('PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS', '120'))
 
 # Freemium: Send notification when credits threshold is reached
 FREEMIUM_THRESHOLD_SECONDS = 180  # 3 minutes remaining - notify user
@@ -195,6 +236,7 @@ async def _stream_handler(
     selected_stt_language: Optional[str] = None
     selected_stt_model: Optional[str] = None
     current_conversation_id = None
+    conversation_finalize_tasks: set[asyncio.Task] = set()
     first_audio_frame_at: Optional[float] = None
     first_interim_result_at: Optional[float] = None
     first_stt_result_at: Optional[float] = None
@@ -419,7 +461,18 @@ async def _stream_handler(
 
     # Initialize segment buffers early (before onboarding handler needs them)
     realtime_segment_buffers = []
-    realtime_photo_buffers: list[ConversationPhoto] = []
+    realtime_photo_buffers: list[dict] = []
+    image_chunks: dict[str, dict] = {}
+    photo_processing_tasks: dict[str, tuple[str, asyncio.Task]] = {}
+    capture_recovery_conversation_ids: set[str] = set()
+    capture_buffers_changed = asyncio.Event()
+
+    def bind_capture_conversation(item: dict) -> dict:
+        conversation_id = str(current_conversation_id or "").strip()
+        if not conversation_id:
+            raise RuntimeError("capture_conversation_not_ready")
+        item[CAPTURE_CONVERSATION_ID_KEY] = conversation_id
+        return item
 
     # === Speaker Identification State ===
     RING_BUFFER_DURATION = 60.0  # seconds
@@ -445,6 +498,9 @@ async def _stream_handler(
         def onboarding_stream_transcript(segments: List[dict]):
             """Inject onboarding question segments into the transcript stream."""
             nonlocal realtime_segment_buffers
+            for segment in segments:
+                segment.setdefault("id", str(uuid.uuid4()))
+                bind_capture_conversation(segment)
             realtime_segment_buffers.extend(segments)
 
         onboarding_handler = OnboardingHandler(uid, send_onboarding_event, onboarding_stream_transcript)
@@ -579,6 +635,19 @@ async def _stream_handler(
                 else:
                     break
 
+                if current_conversation_id and not redis_db.refresh_in_progress_conversation_id(
+                    uid,
+                    current_conversation_id,
+                    session_id,
+                ):
+                    _latency_log(
+                        "capture_socket_ownership_lost",
+                        conversation_id=current_conversation_id,
+                    )
+                    websocket_close_code = 1001
+                    websocket_active = False
+                    break
+
                 # Inactivity timeout
                 if last_activity_time and time.time() - last_activity_time > inactivity_timeout_seconds:
                     print(f"Session timeout due to inactivity ({inactivity_timeout_seconds}s)", uid, session_id)
@@ -645,10 +714,8 @@ async def _stream_handler(
     # Fallback for when pusher is not available
     async def _create_conversation_fallback(conversation_data: dict):
         conversation = Conversation(**conversation_data)
-        if conversation.status != ConversationStatus.processing:
+        if conversation.status not in {ConversationStatus.processing, ConversationStatus.completed}:
             _send_message_event(ConversationEvent(event_type="memory_processing_started", memory=conversation))
-            conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
-            conversation.status = ConversationStatus.processing
 
         try:
             # Geolocation
@@ -657,17 +724,29 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            conversation = process_conversation(uid, language, conversation)
+            outcome = await asyncio.to_thread(
+                process_conversation_with_transcript_redelivery,
+                uid,
+                language,
+                conversation,
+            )
+            conversation = outcome.conversation
+            if not outcome.dispatched and outcome.status in {
+                'processing_in_progress',
+                conversations_db.conversation_stock_summary_transcript_changed,
+            }:
+                return
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
             mark_unexpected_conversation_processing_failed(uid, conversation)
             messages = []
         else:
-            try:
-                messages = trigger_external_integrations(uid, conversation)
-            except Exception as e:
-                print(f"External integrations failed after conversation processing: {e}", uid, session_id)
-                messages = []
+            messages = []
+            if outcome.dispatched:
+                try:
+                    messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
+                except Exception as e:
+                    print(f"External integrations failed after conversation processing: {e}", uid, session_id)
 
         _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=messages))
 
@@ -679,7 +758,9 @@ async def _stream_handler(
 
         for conversation in processing:
             if PUSHER_ENABLED:
-                await request_conversation_processing(conversation['id'])
+                processing_result = await request_conversation_processing(conversation['id'])
+                if processing_result == 'unavailable':
+                    await _create_conversation_fallback(conversation)
             else:
                 await _create_conversation_fallback(conversation)
 
@@ -698,7 +779,14 @@ async def _stream_handler(
     send_last_conversation()
 
     # Create new stub conversation for next batch
-    async def _create_new_in_progress_conversation():
+    async def _create_new_in_progress_conversation(
+        *,
+        expected_conversation_id: Optional[str] = None,
+        expected_owner_id: Optional[str] = None,
+        replace_stale_conversation_id: Optional[str] = None,
+        new_owner_id: Optional[str] = session_id,
+        adopt: bool = True,
+    ) -> bool:
         nonlocal current_conversation_id
 
         conversation_source = ConversationSource.omi
@@ -723,8 +811,9 @@ async def _stream_handler(
             source=conversation_source,
             private_cloud_sync_enabled=private_cloud_sync_enabled,
         )
-        conversations_db.upsert_conversation(uid, conversation_data=stub_conversation.dict())
-        redis_db.set_in_progress_conversation_id(uid, new_conversation_id)
+        stub_conversation_data = stub_conversation.dict()
+        stub_conversation_data['capture_owner_id'] = str(new_owner_id or '').strip() or None
+        conversations_db.upsert_conversation(uid, conversation_data=stub_conversation_data)
 
         detected_meeting_id = None
 
@@ -765,90 +854,288 @@ async def _stream_handler(
         if detected_meeting_id:
             redis_db.set_conversation_meeting_id(new_conversation_id, detected_meeting_id)
 
-        current_conversation_id = new_conversation_id
+        if expected_conversation_id is not None:
+            transferred = conversations_db.transfer_capture_conversation_owner(
+                uid,
+                expected_conversation_id,
+                expected_owner_id or '',
+                new_conversation_id,
+                new_owner_id,
+            )
+            if not transferred:
+                abandoned = conversations_db.abandon_capture_conversation_if_owned(
+                    uid,
+                    new_conversation_id,
+                    new_owner_id or '',
+                )
+                if detected_meeting_id and abandoned:
+                    redis_db.remove_conversation_meeting_id(new_conversation_id)
+                return False
+            published = redis_db.rotate_in_progress_conversation_id(
+                uid,
+                expected_conversation_id,
+                expected_owner_id or '',
+                new_conversation_id,
+                new_owner_id,
+            )
+        elif replace_stale_conversation_id is not None:
+            published = redis_db.replace_stale_in_progress_conversation_id(
+                uid,
+                replace_stale_conversation_id,
+                new_conversation_id,
+                new_owner_id or '',
+            )
+        else:
+            published = redis_db.claim_in_progress_conversation_id(
+                uid,
+                new_conversation_id,
+                new_owner_id or '',
+            )
+
+        if not published:
+            rolled_back = True
+            if expected_conversation_id is not None:
+                rolled_back = conversations_db.rollback_capture_conversation_owner_transfer(
+                    uid,
+                    expected_conversation_id,
+                    expected_owner_id or '',
+                    new_conversation_id,
+                    new_owner_id,
+                )
+            abandoned = False
+            if expected_conversation_id is None:
+                abandoned = conversations_db.abandon_capture_conversation_if_owned(
+                    uid,
+                    new_conversation_id,
+                    new_owner_id or '',
+                )
+            cleanup_succeeded = rolled_back if expected_conversation_id is not None else abandoned
+            if detected_meeting_id and cleanup_succeeded:
+                redis_db.remove_conversation_meeting_id(new_conversation_id)
+            return False
+
+        if replace_stale_conversation_id is not None:
+            conversations_db.bind_capture_conversation_owner(uid, replace_stale_conversation_id, None)
+
+        if adopt:
+            current_conversation_id = new_conversation_id
 
         print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
+        return True
 
-    async def _process_conversation(conversation_id: str):
+    def _capture_buffers_contain_conversation(conversation_id: str) -> bool:
+        exact_conversation_id = str(conversation_id or "").strip()
+        if capture_buffer_contains_conversation(
+            realtime_segment_buffers,
+            realtime_photo_buffers,
+            conversation_key=CAPTURE_CONVERSATION_ID_KEY,
+            conversation_id=exact_conversation_id,
+        ):
+            return True
+        if any(
+            str(upload.get("conversation_id") or "").strip() == exact_conversation_id
+            for upload in image_chunks.values()
+        ):
+            return True
+        return any(
+            bound_conversation_id == exact_conversation_id and not task.done()
+            for bound_conversation_id, task in photo_processing_tasks.values()
+        )
+
+    async def _wait_for_capture_buffers_to_drain(
+        conversation_id: str,
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while _capture_buffers_contain_conversation(conversation_id):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            capture_buffers_changed.clear()
+            if not _capture_buffers_contain_conversation(conversation_id):
+                return True
+            try:
+                await asyncio.wait_for(capture_buffers_changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return not _capture_buffers_contain_conversation(conversation_id)
+        return True
+
+    async def _process_conversation(conversation_id: str, *, wait_for_buffers: bool = True) -> bool:
         print("_process_conversation", uid, session_id)
+        if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):
+            _latency_log(
+                "capture_finalize_deferred",
+                conversation_id=conversation_id,
+            )
+            return False
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if conversation:
             has_content = conversation.get('transcript_segments') or conversation.get('photos')
             if has_content:
                 if PUSHER_ENABLED:
                     on_conversation_processing_started(conversation_id)
-                    await request_conversation_processing(conversation_id)
+                    processing_result = await request_conversation_processing(conversation_id)
+                    if processing_result == 'unavailable':
+                        await _create_conversation_fallback(conversation)
                 else:
                     await _create_conversation_fallback(conversation)
             else:
                 print(f'Clean up the conversation {conversation_id}, reason: no content', uid, session_id)
                 conversations_db.delete_conversation(uid, conversation_id)
+        return True
+
+    async def _process_conversation_after_rotation(conversation_id: str) -> None:
+        while True:
+            if await _process_conversation(conversation_id):
+                return
+            await asyncio.sleep(0.25)
+
+    def _schedule_conversation_processing_after_rotation(conversation_id: str) -> None:
+        task = asyncio.create_task(_process_conversation_after_rotation(conversation_id))
+        conversation_finalize_tasks.add(task)
+
+        def processing_done(completed: asyncio.Task) -> None:
+            conversation_finalize_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                _latency_log(
+                    "capture_finalize_error",
+                    conversation_id=conversation_id,
+                    error=str(error)[:300],
+                )
+
+        task.add_done_callback(processing_done)
+
+    async def _await_conversation_finalize_tasks() -> None:
+        while conversation_finalize_tasks:
+            await asyncio.gather(
+                *tuple(conversation_finalize_tasks),
+                return_exceptions=True,
+            )
+
+    async def _finalize_current_conversation_on_disconnect() -> None:
+        conversation_id = str(current_conversation_id or "").strip()
+        if not conversation_id:
+            return
+
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+        if not conversation or conversation.get('status') != ConversationStatus.in_progress:
+            return
+
+        if not await _wait_for_capture_buffers_to_drain(conversation_id, timeout_seconds=5.0):
+            _latency_log(
+                "capture_disconnect_finalize_deferred",
+                conversation_id=conversation_id,
+            )
+            return
+
+        drain_capture_persistence_batches(uid, conversation_id, session_id)
+
+        rotated = await _create_new_in_progress_conversation(
+            expected_conversation_id=conversation_id,
+            expected_owner_id=session_id,
+            new_owner_id=None,
+            adopt=False,
+        )
+        if not rotated:
+            _latency_log(
+                "capture_disconnect_finalize_skipped",
+                conversation_id=conversation_id,
+                reason="socket_ownership_lost",
+            )
+            return
+
+        await _process_conversation(conversation_id, wait_for_buffers=False)
+
+        _latency_log(
+            "capture_disconnect_finalized",
+            conversation_id=conversation_id,
+        )
 
     # Process existing conversations
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
 
-        if existing_conversation := retrieve_in_progress_conversation(uid):
-            finished_at = datetime.fromisoformat(existing_conversation['finished_at'].isoformat())
-            seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
-            if seconds_since_last_segment >= conversation_creation_timeout:
+        for _ in range(3):
+            active_conversation_id = redis_db.get_in_progress_conversation_id(uid)
+            candidate = retrieve_in_progress_conversation(uid)
+            if candidate:
+                candidate_id = str(candidate.get('id') or '').strip()
+                candidate_owner_id = str(candidate.get('capture_owner_id') or '').strip() or None
+                rebound = bool(candidate_id) and conversations_db.rebind_capture_conversation_owner(
+                    uid,
+                    candidate_id,
+                    candidate_owner_id,
+                    session_id,
+                )
+                if not rebound:
+                    await asyncio.sleep(0)
+                    continue
+                claimed = bool(candidate_id) and redis_db.claim_in_progress_conversation_id(
+                    uid, candidate_id, session_id
+                )
+                if not claimed and candidate_id and active_conversation_id and active_conversation_id != candidate_id:
+                    claimed = redis_db.replace_stale_in_progress_conversation_id(
+                        uid,
+                        active_conversation_id,
+                        candidate_id,
+                        session_id,
+                    )
+                if not claimed:
+                    conversations_db.rebind_capture_conversation_owner(
+                        uid,
+                        candidate_id,
+                        session_id,
+                        candidate_owner_id,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+
+                drain_capture_persistence_batches(uid, candidate_id, session_id)
+
+                finished_at = datetime.fromisoformat(candidate['finished_at'].isoformat())
+                seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
+                if seconds_since_last_segment >= conversation_creation_timeout:
+                    print(
+                        f'Processing existing conversation {candidate["id"]} (timed out: {seconds_since_last_segment:.1f}s)',
+                        uid,
+                        session_id,
+                    )
+                    if not await _create_new_in_progress_conversation(
+                        expected_conversation_id=candidate_id,
+                        expected_owner_id=session_id,
+                    ):
+                        await asyncio.sleep(0)
+                        continue
+                    return candidate_id
+
+                current_conversation_id = candidate_id
+                capture_recovery_conversation_ids.add(candidate_id)
                 print(
-                    f'Processing existing conversation {existing_conversation["id"]} (timed out: {seconds_since_last_segment:.1f}s)',
+                    f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
                     uid,
                     session_id,
                 )
-                await _create_new_in_progress_conversation()
-                return existing_conversation["id"]
+                return None
 
-            # Continue with the existing conversation
-            current_conversation_id = existing_conversation['id']
-            print(
-                f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
-                uid,
-                session_id,
-            )
-            return None
+            if await _create_new_in_progress_conversation(
+                replace_stale_conversation_id=active_conversation_id or None,
+            ):
+                return None
+            await asyncio.sleep(0)
 
-        # else
-        await _create_new_in_progress_conversation()
-        return None
+        raise RuntimeError("active conversation ownership changed during reconnect")
 
     _send_message_event(
         MessageServiceStatusEvent(status="in_progress_conversations_processing", status_text="Processing Conversations")
     )
     timed_out_conversation_id = await _prepare_in_progess_conversations()
-
-    def _update_in_progress_conversation(
-        conversation: Conversation,
-        segments: List[TranscriptSegment],
-        photos: List[ConversationPhoto],
-        finished_at: datetime,
-    ):
-        updated_segments: List[TranscriptSegment] = []
-        removed_ids: List[str] = []
-
-        if segments:
-            conversation.transcript_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
-                conversation.transcript_segments, segments
-            )
-            process_speaker_assigned_segments(
-                updated_segments,
-                segment_person_assignment_map,
-                speaker_to_person_map,
-            )
-            conversations_db.update_conversation_segments(
-                uid, conversation.id, [segment.dict() for segment in conversation.transcript_segments]
-            )
-
-        if photos:
-            conversations_db.store_conversation_photos(uid, conversation.id, photos)
-            # Update source if we now have photos
-            if conversation.source != ConversationSource.openglass:
-                conversations_db.update_conversation(uid, conversation.id, {'source': ConversationSource.openglass})
-                conversation.source = ConversationSource.openglass
-
-        conversations_db.update_conversation_finished_at(uid, conversation.id, finished_at)
-        return conversation, updated_segments, removed_ids
+    capture_recovery_conversation_ids.update(
+        conversation_id for conversation_id in (current_conversation_id, timed_out_conversation_id) if conversation_id
+    )
 
     # STT
     # Validate websocket_active before initiating STT
@@ -883,14 +1170,15 @@ async def _stream_handler(
             _latency_log(
                 "first_final_result",
                 segment_count=len(segments),
-                first_text=(first_segment.get("text", "")[:80] if isinstance(first_segment, dict) else None),
                 provider=result_provider,
                 since_stt_ready_ms=_elapsed_ms(stt_connect_ready_at, first_stt_result_at),
                 since_stt_connect_start_ms=_elapsed_ms(stt_connect_started_at, first_stt_result_at),
             )
         for segment in segments or []:
             if isinstance(segment, dict):
+                segment.setdefault("id", str(uuid.uuid4()))
                 segment.setdefault("stt_provider", _stt_service_value(stt_service))
+                bind_capture_conversation(segment)
         realtime_segment_buffers.extend(segments)
 
     async def _process_stt():
@@ -1160,37 +1448,59 @@ async def _stream_handler(
         pusher_connected = False
 
         # Transcript
-        segment_buffers = []
+        segment_buffers: list[PusherTranscriptBatch] = []
 
         last_synced_conversation_id = None
 
         # Conversation processing
-        pending_conversation_requests = set()
+        pending_conversation_requests: dict[str, asyncio.Future] = {}
         pending_request_event = asyncio.Event()
 
-        def transcript_send(segments):
+        def fail_pending_conversation_requests() -> None:
+            for future in tuple(pending_conversation_requests.values()):
+                if not future.done():
+                    future.set_result('unavailable')
+
+        def transcript_send(segments, conversation_id: str):
             nonlocal segment_buffers
-            segment_buffers.extend(segments)
+            queue_pusher_transcript_batch(
+                segment_buffers,
+                segments,
+                conversation_id,
+            )
 
         async def request_conversation_processing(conversation_id: str):
             """Request pusher to process a conversation."""
             nonlocal pusher_ws, pusher_connected, pending_conversation_requests, pending_request_event
             if not pusher_connected or not pusher_ws:
                 print(f"Pusher not connected, falling back to local processing for {conversation_id}", uid, session_id)
-                return False
+                return 'unavailable'
+            response = None
             try:
-                pending_conversation_requests.add(conversation_id)
+                existing = pending_conversation_requests.get(conversation_id)
+                if existing is not None and not existing.done():
+                    return await asyncio.shield(existing)
+                response = asyncio.get_running_loop().create_future()
+                pending_conversation_requests[conversation_id] = response
                 pending_request_event.set()  # Signal the receiver
                 data = bytearray()
                 data.extend(struct.pack("I", 104))
                 data.extend(bytes(json.dumps({"conversation_id": conversation_id, "language": language}), "utf-8"))
                 await pusher_ws.send(data)
                 print(f"Sent process_conversation request to pusher: {conversation_id}", uid, session_id)
-                return True
+                deadline = asyncio.get_running_loop().time() + PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS
+                while websocket_active and asyncio.get_running_loop().time() < deadline:
+                    try:
+                        return await asyncio.wait_for(asyncio.shield(response), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                return 'unavailable'
             except Exception as e:
                 print(f"Failed to send process_conversation request: {e}", uid, session_id)
-                pending_conversation_requests.discard(conversation_id)
-                return False
+                return 'unavailable'
+            finally:
+                if response is not None and pending_conversation_requests.get(conversation_id) is response:
+                    pending_conversation_requests.pop(conversation_id, None)
 
         async def _transcript_flush(auto_reconnect: bool = True):
             nonlocal segment_buffers
@@ -1198,17 +1508,17 @@ async def _stream_handler(
             nonlocal pusher_connected
             if pusher_connected and pusher_ws and len(segment_buffers) > 0:
                 try:
-                    # 102|data
-                    data = bytearray()
-                    data.extend(struct.pack("I", 102))
-                    data.extend(
-                        bytes(
-                            json.dumps({"segments": segment_buffers, "memory_id": current_conversation_id}),
-                            "utf-8",
-                        )
+
+                    async def send_payload(payload: dict) -> None:
+                        data = bytearray()
+                        data.extend(struct.pack("I", 102))
+                        data.extend(bytes(json.dumps(payload), "utf-8"))
+                        await pusher_ws.send(data)
+
+                    await deliver_all_pusher_transcript_batches(
+                        segment_buffers,
+                        send_payload,
                     )
-                    segment_buffers = []  # reset
-                    await pusher_ws.send(data)
                 except ConnectionClosed as e:
                     print(f"Pusher transcripts Connection closed: {e}", uid, session_id)
                     pusher_connected = False
@@ -1323,15 +1633,21 @@ async def _stream_handler(
                     if header_type == 201:
                         result = json.loads(msg[4:].decode("utf-8"))
                         conversation_id = result.get("conversation_id")
-                        pending_conversation_requests.discard(conversation_id)
+                        response = pending_conversation_requests.get(conversation_id)
 
                         if "error" in result:
                             print(f"Conversation processing failed: {result['error']}", uid, session_id)
+                            if response is not None and not response.done():
+                                response.set_result('terminal_error')
                             continue
 
                         if result.get("success"):
                             print(f"Conversation processed by pusher: {conversation_id}", uid, session_id)
+                            if response is not None and not response.done():
+                                response.set_result('processed')
                             on_conversation_processed(conversation_id)
+                        elif response is not None and not response.done():
+                            response.set_result('terminal_error')
 
                 except asyncio.TimeoutError:
                     continue  # Check loop conditions again
@@ -1340,8 +1656,10 @@ async def _stream_handler(
                 except ConnectionClosed as e:
                     print(f"Pusher receive connection closed: {e}", uid, session_id)
                     pusher_connected = False
+                    fail_pending_conversation_requests()
                 except Exception as e:
                     print(f"Pusher receive error: {e}", uid, session_id)
+                    fail_pending_conversation_requests()
                     await asyncio.sleep(0.5)
 
                 # Reconnect outside try/except (same pattern as flush functions)
@@ -1386,6 +1704,7 @@ async def _stream_handler(
                 print(f"Exception in connect: {e}")
 
         async def close(code: int = 1000):
+            fail_pending_conversation_requests()
             await _flush()
             if pusher_ws:
                 await pusher_ws.close(code)
@@ -1536,7 +1855,17 @@ async def _stream_handler(
             conversation = conversations_db.get_conversation(uid, current_conversation_id)
             if not conversation:
                 print(f"WARN: the current conversation is not found (id: {current_conversation_id})", uid, session_id)
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=current_conversation_id,
+                    expected_owner_id=session_id,
+                ):
+                    _latency_log(
+                        "capture_rotation_skipped",
+                        conversation_id=current_conversation_id,
+                        reason="socket_ownership_lost",
+                    )
+                    websocket_active = False
+                    return
                 continue
 
             # Check if conversation status is not in_progress
@@ -1546,7 +1875,17 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=current_conversation_id,
+                    expected_owner_id=session_id,
+                ):
+                    _latency_log(
+                        "capture_rotation_skipped",
+                        conversation_id=current_conversation_id,
+                        reason="socket_ownership_lost",
+                    )
+                    websocket_active = False
+                    return
                 continue
 
             # Check if conversation should be processed
@@ -1579,8 +1918,29 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                await _process_conversation(current_conversation_id)
-                await _create_new_in_progress_conversation()
+                conversation_id_to_process = current_conversation_id
+                if not await _wait_for_capture_buffers_to_drain(
+                    conversation_id_to_process,
+                    timeout_seconds=5.0,
+                ):
+                    _latency_log(
+                        "capture_rotation_deferred",
+                        conversation_id=conversation_id_to_process,
+                    )
+                    continue
+                drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)
+                if not await _create_new_in_progress_conversation(
+                    expected_conversation_id=conversation_id_to_process,
+                    expected_owner_id=session_id,
+                ):
+                    _latency_log(
+                        "capture_rotation_skipped",
+                        conversation_id=conversation_id_to_process,
+                        reason="socket_ownership_lost",
+                    )
+                    websocket_active = False
+                    return
+                _schedule_conversation_processing_after_rotation(conversation_id_to_process)
 
     async def speaker_identification_task():
         """Consume segment queue, accumulate per speaker, trigger match when ready."""
@@ -1757,15 +2117,80 @@ async def _stream_handler(
         nonlocal current_conversation_id, translation_enabled, speaker_to_person_map, suggested_segments, words_transcribed_since_last_record, last_transcript_time
         nonlocal first_transcript_buffered_at, first_transcript_dispatched_at
 
-        while websocket_active or len(realtime_segment_buffers) > 0 or len(realtime_photo_buffers) > 0:
+        while True:
             await asyncio.sleep(0.6)
+
+            pending_batch_count = 0
+            for recovery_conversation_id in tuple(capture_recovery_conversation_ids):
+                try:
+                    recovered_batch_count, recovery_owned = poll_capture_persistence_batches(
+                        uid,
+                        recovery_conversation_id,
+                        session_id,
+                    )
+                    pending_batch_count += recovered_batch_count
+                    if not recovery_owned:
+                        capture_recovery_conversation_ids.discard(recovery_conversation_id)
+                        websocket_active = False
+                        _latency_log(
+                            "capture_persistence_ownership_lost",
+                            conversation_id=recovery_conversation_id,
+                            phase="recovery",
+                        )
+                        return
+                except Exception:
+                    pending_batch_count += 1
+                    _latency_log("capture_persistence_recovery_retry")
+                    if not websocket_active and not realtime_segment_buffers and not realtime_photo_buffers:
+                        continue
+                else:
+                    if not should_keep_capture_recovery_polling(
+                        recovery_conversation_id,
+                        current_conversation_id,
+                        websocket_active,
+                    ):
+                        capture_recovery_conversation_ids.discard(recovery_conversation_id)
+
+            if (
+                not websocket_active
+                and not realtime_segment_buffers
+                and not realtime_photo_buffers
+                and not image_chunks
+                and not photo_processing_tasks
+                and not capture_recovery_conversation_ids
+                and pending_batch_count == 0
+            ):
+                break
 
             if not realtime_segment_buffers and not realtime_photo_buffers:
                 continue
 
-            segments_to_process = realtime_segment_buffers.copy()
+            persistence_batch = prepare_conversation_bound_capture_batch(
+                realtime_segment_buffers,
+                realtime_photo_buffers,
+                conversation_key=CAPTURE_CONVERSATION_ID_KEY,
+                timestamp_ready=first_audio_byte_timestamp is not None,
+            )
+            if persistence_batch is None:
+                continue
+            batch_conversation_id = persistence_batch.conversation_id
+            if not batch_conversation_id:
+                raise RuntimeError("capture_batch_conversation_missing")
+            conversation_data = conversations_db.get_conversation(uid, batch_conversation_id)
+            if not conversation_data:
+                print(
+                    f"Warning: conversation {batch_conversation_id} not found during segment processing",
+                    uid,
+                    session_id,
+                )
+                continue
+            segments_to_process = []
+            for segment in persistence_batch.segments:
+                item = dict(segment)
+                item.pop(CAPTURE_CONVERSATION_ID_KEY, None)
+                segments_to_process.append(item)
+            photos_to_process = [photo["photo"] for photo in persistence_batch.photos]
 
-            # DEBUG: Log received transcript segments
             if segments_to_process:
                 if first_transcript_buffered_at is None:
                     first_transcript_buffered_at = time.time()
@@ -1775,37 +2200,10 @@ async def _stream_handler(
                         since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_buffered_at),
                     )
                 print(
-                    f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id}  conv={current_conversation_id}"
+                    f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id} conv={batch_conversation_id}"
                 )
-                if len(segments_to_process) > 0:
-                    first_text = (
-                        segments_to_process[0].get("text", "")[:80]
-                        if isinstance(segments_to_process[0], dict)
-                        else str(segments_to_process[0])[:80]
-                    )
-                    print(f"[TRANSCRIPT-RECV] First segment: {first_text}")
-
-            realtime_segment_buffers = []
-
-            photos_to_process = realtime_photo_buffers.copy()
-            realtime_photo_buffers = []
 
             finished_at = datetime.now(timezone.utc)
-
-            # Get conversation
-            conversation_data = conversations_db.get_conversation(uid, current_conversation_id)
-            if not conversation_data:
-                print(
-                    f"Warning: conversation {current_conversation_id} not found during segment processing",
-                    uid,
-                    session_id,
-                )
-                continue
-
-            # Guard first_audio_byte_timestamp must be set
-            if not first_audio_byte_timestamp:
-                print(f"Warning: first_audio_byte_timestamp not set, skipping segment processing", uid, session_id)
-                continue
 
             transcript_segments = []
             if segments_to_process:
@@ -1815,7 +2213,7 @@ async def _stream_handler(
                 if not conversation_data.get('transcript_segments'):
                     first_speech_timestamp = first_audio_byte_timestamp + segments_to_process[0]["start"]
                     new_started_at = datetime.fromtimestamp(first_speech_timestamp, tz=timezone.utc)
-                    conversations_db.update_conversation(uid, current_conversation_id, {'started_at': new_started_at})
+                    conversations_db.update_conversation(uid, batch_conversation_id, {'started_at': new_started_at})
                     conversation_data['started_at'] = new_started_at
 
                 # Calculate unified time offset: audio stream start relative to conversation start
@@ -1844,13 +2242,60 @@ async def _stream_handler(
                 for seg in newly_processed_segments:
                     current_session_segments[seg.id] = seg.speech_profile_processed
                 transcript_segments, _, _ = TranscriptSegment.combine_segments([], newly_processed_segments)
+                process_speaker_assigned_segments(
+                    transcript_segments,
+                    segment_person_assignment_map,
+                    speaker_to_person_map,
+                )
 
             # Update transcript segments
-            conversation = Conversation(**conversation_data)
-            result = _update_in_progress_conversation(conversation, transcript_segments, photos_to_process, finished_at)
-            if not result or not result[0]:
-                continue
-            conversation, updated_segments, removed_ids = result
+            updated_segments = []
+            removed_ids = []
+            if transcript_segments or photos_to_process:
+                try:
+                    commit_result = conversations_db.persist_and_commit_capture_persistence_batch(
+                        uid,
+                        batch_conversation_id,
+                        [segment.dict() for segment in transcript_segments],
+                        finished_at,
+                        session_id,
+                        photos=photos_to_process,
+                    )
+                except Exception:
+                    capture_recovery_conversation_ids.add(batch_conversation_id)
+                    _latency_log(
+                        "capture_persistence_retry",
+                        segment_count=len(segments_to_process),
+                        photo_count=len(photos_to_process),
+                    )
+                    continue
+                if commit_result.get("status") == "ownership_lost":
+                    acknowledge_capture_persistence_batch(
+                        realtime_segment_buffers,
+                        realtime_photo_buffers,
+                        persistence_batch,
+                        segments=bool(transcript_segments),
+                        photos=bool(photos_to_process),
+                    )
+                    capture_buffers_changed.set()
+                    capture_recovery_conversation_ids.discard(batch_conversation_id)
+                    websocket_active = False
+                    _latency_log(
+                        "capture_persistence_ownership_lost",
+                        conversation_id=batch_conversation_id,
+                        phase="live",
+                    )
+                    return
+                updated_segments = [TranscriptSegment(**segment) for segment in commit_result["updated_segments"]]
+                removed_ids = commit_result["removed_ids"]
+                acknowledge_capture_persistence_batch(
+                    realtime_segment_buffers,
+                    realtime_photo_buffers,
+                    persistence_batch,
+                    segments=bool(transcript_segments),
+                    photos=bool(photos_to_process),
+                )
+                capture_buffers_changed.set()
 
             if removed_ids:
                 _send_message_event(SegmentsDeletedEvent(segment_ids=removed_ids))
@@ -1862,7 +2307,7 @@ async def _stream_handler(
 
                     send_to_scanner(
                         uid=uid,
-                        conversation_id=str(current_conversation_id),
+                        conversation_id=batch_conversation_id,
                         segments=[s.dict() for s in transcript_segments],
                         latency_metadata=_latency_metadata(),
                     )
@@ -1889,12 +2334,15 @@ async def _stream_handler(
                     print(f"Error sending transcript segments to websocket: {e}", uid, session_id)
 
                 if transcript_send is not None and user_has_credits:
-                    transcript_send([segment.dict() for segment in transcript_segments])
+                    transcript_send(
+                        [segment.dict() for segment in transcript_segments],
+                        batch_conversation_id,
+                    )
                 elif not PUSHER_ENABLED and user_has_credits:
                     # Fallback: trigger realtime integrations directly when pusher is disabled
                     try:
                         await trigger_realtime_integrations(
-                            uid, [s.dict() for s in transcript_segments], current_conversation_id
+                            uid, [s.dict() for s in transcript_segments], batch_conversation_id
                         )
                     except Exception as e:
                         print(f"Error triggering realtime integrations: {e}", uid, session_id)
@@ -1904,7 +2352,7 @@ async def _stream_handler(
                     onboarding_handler.on_segments_received([s.dict() for s in transcript_segments])
 
                 if translation_enabled:
-                    await translate(updated_segments, conversation.id)
+                    await translate(updated_segments, batch_conversation_id)
 
                 # Speaker detection
                 for segment in updated_segments:
@@ -1985,10 +2433,13 @@ async def _stream_handler(
                         segment_person_assignment_map[segment.id] = person_id
                         suggested_segments.add(segment.id)
 
-    image_chunks = {str: any}  # A temporary in-memory cache for image chunks
-
     async def process_photo(
-        uid: str, image_b64: str, temp_id: str, send_event_func, photo_buffer: list[ConversationPhoto]
+        uid: str,
+        image_b64: str,
+        temp_id: str,
+        send_event_func,
+        photo_buffer: list[dict],
+        conversation_id: str,
     ):
         from utils.llm.openglass import describe_image
 
@@ -2004,11 +2455,21 @@ async def _stream_handler(
             discarded = True
 
         final_photo = ConversationPhoto(id=photo_id, base64=image_b64, description=description, discarded=discarded)
-        photo_buffer.append(final_photo)
+        photo_buffer.append(
+            {
+                CAPTURE_CONVERSATION_ID_KEY: conversation_id,
+                "photo": final_photo,
+            }
+        )
         await send_event_func(PhotoDescribedEvent(photo_id=photo_id, description=description, discarded=discarded))
 
     async def handle_image_chunk(
-        uid: str, chunk_data: dict, image_chunks_cache: dict, send_event_func, photo_buffer: list[ConversationPhoto]
+        uid: str,
+        chunk_data: dict,
+        image_chunks_cache: dict,
+        send_event_func,
+        photo_buffer: list[dict],
+        conversation_id: str,
     ):
         temp_id = chunk_data.get('id')
         index = chunk_data.get('index')
@@ -2022,15 +2483,38 @@ async def _stream_handler(
         if temp_id not in image_chunks_cache:
             if total <= 0:
                 return
-            image_chunks_cache[temp_id] = [None] * total
+            image_chunks_cache[temp_id] = {
+                "conversation_id": conversation_id,
+                "chunks": [None] * total,
+            }
 
-        if index < total and image_chunks_cache[temp_id][index] is None:
-            image_chunks_cache[temp_id][index] = data
+        image_upload = image_chunks_cache[temp_id]
+        chunks = image_upload["chunks"]
 
-        if all(chunk is not None for chunk in image_chunks_cache[temp_id]):
-            b64_image_data = "".join(image_chunks_cache[temp_id])
+        if index < total and chunks[index] is None:
+            chunks[index] = data
+
+        if all(chunk is not None for chunk in chunks):
+            b64_image_data = "".join(chunks)
+            bound_conversation_id = str(image_upload["conversation_id"])
             del image_chunks_cache[temp_id]
-            safe_create_task(process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer))
+            task = safe_create_task(
+                process_photo(
+                    uid,
+                    b64_image_data,
+                    temp_id,
+                    send_event_func,
+                    photo_buffer,
+                    bound_conversation_id,
+                )
+            )
+            photo_processing_tasks[temp_id] = (bound_conversation_id, task)
+
+            def photo_processing_done(_task: asyncio.Task) -> None:
+                photo_processing_tasks.pop(temp_id, None)
+                capture_buffers_changed.set()
+
+            task.add_done_callback(photo_processing_done)
 
     # Initialize decoders based on codec
     opus_decoder = None
@@ -2249,8 +2733,16 @@ async def _stream_handler(
                         if json_data.get('type') in {'client_latency_event', 'latency_event', 'timing_event'}:
                             _remember_client_latency_event(json_data)
                         elif json_data.get('type') == 'image_chunk':
+                            capture_conversation_id = str(current_conversation_id or "").strip()
+                            if not capture_conversation_id:
+                                raise RuntimeError("capture_conversation_not_ready")
                             await handle_image_chunk(
-                                uid, json_data, image_chunks, _asend_message_event, realtime_photo_buffers
+                                uid,
+                                json_data,
+                                image_chunks,
+                                _asend_message_event,
+                                realtime_photo_buffers,
+                                capture_conversation_id,
                             )
                         elif json_data.get('type') == 'skip_question':
                             if onboarding_handler and not onboarding_handler.completed:
@@ -2334,6 +2826,8 @@ async def _stream_handler(
             if not use_custom_stt:
                 await flush_stt_buffer(force=True)
             websocket_active = False
+            image_chunks.clear()
+            capture_buffers_changed.set()
 
     # Start
     #
@@ -2417,6 +2911,18 @@ async def _stream_handler(
             if transcription_seconds > 0 or words_to_record > 0:
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
+
+        try:
+            await _finalize_current_conversation_on_disconnect()
+        except Exception as e:
+            _latency_log(
+                "capture_disconnect_finalize_error",
+                conversation_id=str(current_conversation_id or "").strip() or None,
+                error=str(e)[:300],
+            )
+            print(f"Error finalizing conversation after disconnect: {e}", uid, session_id)
+
+        await _await_conversation_finalize_tasks()
 
         # STT sockets
         try:

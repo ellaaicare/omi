@@ -26,7 +26,6 @@ def test_openapi_covers_every_reviewed_runtime_boundary_with_exact_targets():
         "/v1/voice/search": "hermes-cloud-voice",
         "/v4/listen": "hermes-cloud-transcript",
         "/v4/web/listen": "hermes-cloud-transcript",
-        "/v1/ella/conversation/{conversation_id}/summary": "hermes-cloud-transcript",
         "/v1/conversations/{conversation_id}/processing-retries": "hermes-cloud-transcript",
         "/v1/ella/observer/run": "hermes-cloud-guardian",
         "/v1/ella/guardian/next-audio": "hermes-cloud-guardian",
@@ -39,6 +38,82 @@ def test_openapi_covers_every_reviewed_runtime_boundary_with_exact_targets():
     invitation = paths["/v1/invite/redeem"]["post"]["x-ella-runtime-target"]
     assert tuple(invitation["publishes-modes"]) == CLOUD_RUNTIME_TARGET_MODES
     assert invitation["fallback"] == "none"
+
+
+def test_openapi_documents_exact_parallel_grounding_callback_contract():
+    contract = yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / "ella" / "docs" / "hermes-cloud-runtime-targets.openapi.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    paths = contract["paths"]
+    summary = paths["/v1/ella/conversation/{conversation_id}/summary"]["patch"]
+    data = paths["/v1/ella/conversation/{conversation_id}/data"]["get"]
+
+    required_authority = [{"callbackServiceKey": [], "callbackSubjectUid": []}]
+    assert summary["security"] == required_authority
+    assert data["security"] == required_authority
+    assert data["x-ella-authoritative-grounding-input"] is True
+    assert (
+        data["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/ConversationData"
+    )
+
+    profiles = summary["x-ella-runtime-target"]
+    assert profiles["fallback"] == "none"
+    assert profiles["profiles"] == {
+        "hermes_cloud": {
+            "mode": "hermes-cloud-transcript",
+            "summary-source": "hermes_cloud",
+            "attester": "hermes_cloud_grounding_verifier",
+            "policy-version": "hermes-cloud-grounding-verifier-v1",
+        },
+        "hermes_parallel": {
+            "mode": "retained-hermes-enrichment",
+            "summary-source": "hermes_parallel",
+            "attester": "hermes_parallel_grounding_verifier",
+            "policy-version": "hermes-parallel-grounding-verifier-v1",
+        },
+    }
+
+    evidence = contract["components"]["schemas"]["ParallelTodayCardGroundingEvidence"]
+    assert evidence["additionalProperties"] is False
+    assert set(evidence["required"]) == {
+        "attester",
+        "semantic_outcome",
+        "supporting_quotes",
+        "policy_version",
+        "transcript_hash",
+        "summary_request_id",
+        "summary_response_id",
+        "verifier_request_id",
+        "verifier_response_id",
+    }
+    assert evidence["properties"]["attester"]["const"] == "hermes_parallel_grounding_verifier"
+    assert evidence["properties"]["supporting_quotes"]["maxItems"] == 3
+    assert evidence["properties"]["transcript_hash"]["pattern"] == "^sha256:[0-9a-f]{64}$"
+
+    conversation_data = contract["components"]["schemas"]["ConversationData"]
+    assert "transcript_hash" in conversation_data["required"]
+    assert conversation_data["properties"]["transcript_hash"]["pattern"] == "^sha256:[0-9a-f]{64}$"
+    summary_update = contract["components"]["schemas"]["ConversationSummaryUpdate"]
+    assert summary_update["properties"]["based_on_version_id"]["type"] == ["string", "null"]
+    assert summary_update["properties"]["require_based_on_match"]["type"] == "boolean"
+    assert summary_update["properties"]["expected_transcript_hash"] == {
+        "type": ["string", "null"],
+        "pattern": "^sha256:[0-9a-f]{64}$",
+    }
+    assert summary_update["properties"]["require_source_match"]["type"] == "boolean"
+    replay_fields = {
+        "active_summary_version_id",
+        "active_summary_source",
+        "active_summary_kind",
+        "enrichment_status",
+        "enrichment_canonical_status",
+        "enrichment_trace_id",
+    }
+    assert replay_fields <= set(conversation_data["required"])
+    assert replay_fields <= set(conversation_data["properties"])
 
 
 def test_openapi_processor_disclosure_uses_only_exact_v8_processor_ids():

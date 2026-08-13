@@ -22,7 +22,7 @@ from utils.app_integrations import (
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
     mark_unexpected_conversation_processing_failed,
-    process_conversation,
+    process_conversation_with_transcript_redelivery,
 )
 from utils.webhooks import (
     send_audio_bytes_developer_webhook,
@@ -71,10 +71,6 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
 
         conversation = Conversation(**conversation_data)
 
-        if conversation.status != ConversationStatus.processing:
-            conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
-            conversation.status = ConversationStatus.processing
-
         try:
             # Geolocation
             geolocation = get_cached_user_geolocation(uid)
@@ -83,17 +79,31 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             # Run blocking operations in thread pool to avoid blocking event loop
-            conversation = await asyncio.to_thread(process_conversation, uid, language, conversation)
+            outcome = await asyncio.to_thread(
+                process_conversation_with_transcript_redelivery,
+                uid,
+                language,
+                conversation,
+            )
+            conversation = outcome.conversation
+            if not outcome.dispatched and outcome.status not in {'already_completed'}:
+                response = {"conversation_id": conversation_id, "error": outcome.status}
+                data = bytearray()
+                data.extend(struct.pack("I", 201))
+                data.extend(bytes(json.dumps(response), "utf-8"))
+                await websocket.send_bytes(data)
+                return
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, conversation_id)
             await asyncio.to_thread(mark_unexpected_conversation_processing_failed, uid, conversation)
             messages = []
         else:
-            try:
-                messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
-            except Exception as e:
-                print(f"External integrations failed after conversation processing: {e}", uid, conversation_id)
-                messages = []
+            messages = []
+            if outcome.dispatched:
+                try:
+                    messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
+                except Exception as e:
+                    print(f"External integrations failed after conversation processing: {e}", uid, conversation_id)
 
         # Send success response back (minimal - transcribe will fetch from DB)
         response = {"conversation_id": conversation_id, "success": True}
@@ -327,11 +337,15 @@ async def _websocket_util_trigger(
                     memory_id = res.get('memory_id')
 
                     # DEBUG: Log received transcript segments
-                    print(f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}")
+                    print(
+                        f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}"
+                    )
                     if segments and len(segments) > 0:
                         # Log first segment content (truncated)
                         first_seg = segments[0]
-                        text_preview = first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
+                        text_preview = (
+                            first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
+                        )
                         print(f"[TRANSCRIPT-DEBUG] First segment preview: {text_preview}")
 
                     # Update conversation_id from transcript if provided
@@ -412,11 +426,13 @@ async def _websocket_util_trigger(
                     ):
                         if len(audio_bytes_queue) >= AUDIO_BYTES_QUEUE_WARN_SIZE:
                             print(f"Warning: audio_bytes_queue size {len(audio_bytes_queue)}", uid)
-                        audio_bytes_queue.append({
-                            'type': 'app',
-                            'sample_rate': sample_rate,
-                            'data': trigger_audiobuffer.copy(),
-                        })
+                        audio_bytes_queue.append(
+                            {
+                                'type': 'app',
+                                'sample_rate': sample_rate,
+                                'data': trigger_audiobuffer.copy(),
+                            }
+                        )
                         audio_bytes_event.set()  # Wake consumer immediately
                         trigger_audiobuffer = bytearray()
                     if (
@@ -425,11 +441,13 @@ async def _websocket_util_trigger(
                     ):
                         if len(audio_bytes_queue) >= AUDIO_BYTES_QUEUE_WARN_SIZE:
                             print(f"Warning: audio_bytes_queue size {len(audio_bytes_queue)}", uid)
-                        audio_bytes_queue.append({
-                            'type': 'webhook',
-                            'sample_rate': sample_rate,
-                            'data': audiobuffer.copy(),
-                        })
+                        audio_bytes_queue.append(
+                            {
+                                'type': 'webhook',
+                                'sample_rate': sample_rate,
+                                'data': audiobuffer.copy(),
+                            }
+                        )
                         audio_bytes_event.set()  # Wake consumer immediately
                         audiobuffer = bytearray()
                     continue

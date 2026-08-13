@@ -130,11 +130,12 @@ def test_stored_transcript_processing_routes_require_current_consent():
 
 def test_shared_conversation_processor_gates_target_uid_before_model_work():
     source_path = BACKEND / "utils" / "conversations" / "process_conversation.py"
-    source = _function_source(source_path, "process_conversation")
+    source = _function_source(source_path, "process_conversation_with_outcome")
 
     assert source.index("assert_current_ai_consent(uid)") < source.index("_get_structured(")
     for caller in ("integration.py", "workflow.py", "developer.py"):
-        assert "process_conversation(" in (BACKEND / "routers" / caller).read_text()
+        caller_source = (BACKEND / "routers" / caller).read_text()
+        assert "process_conversation(" in caller_source or "process_conversation_with_outcome(" in caller_source
 
 
 def test_stored_sync_gates_target_uid_before_deepgram_and_processing():

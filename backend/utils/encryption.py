@@ -49,6 +49,30 @@ def encrypt(data: str, uid: str) -> str:
     return base64.b64encode(encrypted_payload).decode('utf-8')
 
 
+def decrypt_strict(encrypted_data: str, uid: str) -> str:
+    """
+    Decrypts a base64 encoded string using a user-specific key.
+
+    Unlike ``decrypt``, this helper does not log identifiers or suppress failures. Callers
+    handling protected-data admission can therefore fail closed without leaking context.
+    """
+    if not encrypted_data or not isinstance(encrypted_data, str):
+        raise ValueError('Encrypted data must be a non-empty string')
+
+    key = derive_key(uid)
+    aesgcm = AESGCM(key)
+
+    encrypted_payload = base64.b64decode(encrypted_data.encode('utf-8'), validate=True)
+
+    # Extract nonce and ciphertext
+    nonce = encrypted_payload[:12]
+    ciphertext = encrypted_payload[12:]
+
+    decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
+
+    return decrypted_bytes.decode('utf-8')
+
+
 def decrypt(encrypted_data: str, uid: str) -> str:
     """
     Decrypts a base64 encoded string using a user-specific key.
@@ -57,18 +81,7 @@ def decrypt(encrypted_data: str, uid: str) -> str:
         return encrypted_data
 
     try:
-        key = derive_key(uid)
-        aesgcm = AESGCM(key)
-
-        encrypted_payload = base64.b64decode(encrypted_data.encode('utf-8'))
-
-        # Extract nonce and ciphertext
-        nonce = encrypted_payload[:12]
-        ciphertext = encrypted_payload[12:]
-
-        decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
-
-        return decrypted_bytes.decode('utf-8')
+        return decrypt_strict(encrypted_data, uid)
     except Exception as e:
         # If decryption fails (e.g., wrong key, corrupted data), return the original encrypted data
         # to avoid data loss and to make debugging easier. In a production system, you might want
