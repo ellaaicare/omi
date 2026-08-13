@@ -465,6 +465,7 @@ jobs:
           utils/ella/scanner_keyterms.py
           utils/other/endpoints.py
           tests/unit/test_capture_buffer_retention.py
+          tests/unit/test_capture_incident_1210_regressions.py
           tests/unit/test_ella_reviewed_route_integration.py
 
       - name: Validate formatting and OpenAPI contract
@@ -523,6 +524,7 @@ jobs:
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_capture_buffer_retention.py
+          tests/unit/test_capture_incident_1210_regressions.py
           tests/unit/test_conversation_summary_cas.py
           tests/unit/test_conversation_processing_callers.py
           tests/unit/test_authority_advisory_lock.py
@@ -582,7 +584,12 @@ jobs:
       - name: Run capture buffer persistence regression
         run: |
           set -euo pipefail
-          capture_ids="$(pytest --collect-only -q tests/unit/test_capture_buffer_retention.py | sed '/^$/d')"
+          capture_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_capture_buffer_retention.py \
+              tests/unit/test_capture_incident_1210_regressions.py |
+              sed '/^$/d'
+          )"
           required_capture_ids=(
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_waits_for_all_persistence_guards_without_clearing_buffers"
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arrivals"
@@ -592,13 +599,21 @@ jobs:
             "tests/unit/test_capture_buffer_retention.py::test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch"
             "tests/unit/test_capture_buffer_retention.py::test_capture_commit_rejects_conversation_rotation_before_write"
             "tests/unit/test_capture_buffer_retention.py::test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired_id"
+            "tests/unit/test_capture_buffer_retention.py::test_capture_commit_lease_blocks_ownership_transfer_until_release"
             "tests/unit/test_capture_buffer_retention.py::test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_waits_for_terminal_response"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 9
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 14
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
-          pytest tests/unit/test_capture_buffer_retention.py -v | tee /tmp/capture-buffer-retention-pytest.log
+          pytest \
+            tests/unit/test_capture_buffer_retention.py \
+            tests/unit/test_capture_incident_1210_regressions.py \
+            -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
