@@ -1134,12 +1134,32 @@ def test_postprocessing_marks_failed_when_summary_reprocess_does_not_dispatch(mo
 def test_manual_conversation_processing_suppresses_integrations_for_non_dispatch_outcome(monkeypatch):
     conversation = _long_conversation()
     integration_calls = []
+    released_fences = []
     monkeypatch.setattr(
         conversations_router,
         "retrieve_in_progress_conversation",
         lambda _uid: conversation.model_dump(),
     )
-    monkeypatch.setattr(conversations_router.redis_db, "get_in_progress_conversation_id", lambda _uid: "")
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: conversation.model_dump(),
+    )
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "claim_initial_conversation_processing",
+        lambda uid, conversation_id: {"status": "already_completed"},
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "acquire_in_progress_processing_fence",
+        lambda uid, conversation_id, token: True,
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "release_capture_commit_lease",
+        lambda uid, token: released_fences.append((uid, token)) or True,
+    )
     monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
     monkeypatch.setattr(
         conversations_router,
@@ -1161,6 +1181,8 @@ def test_manual_conversation_processing_suppresses_integrations_for_non_dispatch
     assert response.conversation.id == conversation.id
     assert response.messages == []
     assert integration_calls == []
+    assert len(released_fences) == 1
+    assert released_fences[0][0] == "uid-1"
 
 
 def test_manual_conversation_processing_rejects_live_capture_owner(monkeypatch):
@@ -1172,13 +1194,8 @@ def test_manual_conversation_processing_rejects_live_capture_owner(monkeypatch):
     )
     monkeypatch.setattr(
         conversations_router.redis_db,
-        "get_in_progress_conversation_id",
-        lambda _uid: conversation.id,
-    )
-    monkeypatch.setattr(
-        conversations_router.redis_db,
-        "get_in_progress_conversation_owner",
-        lambda _uid: "socket-active",
+        "acquire_in_progress_processing_fence",
+        lambda uid, conversation_id, token: False,
     )
 
     with pytest.raises(conversations_router.HTTPException) as raised:
@@ -1191,6 +1208,8 @@ def test_manual_conversation_processing_rejects_live_capture_owner(monkeypatch):
 def test_manual_conversation_processing_targets_exact_closed_conversation(monkeypatch):
     conversation = _long_conversation()
     processed = []
+    processing_fences = []
+    released_fences = []
     monkeypatch.setattr(
         conversations_router.conversations_db,
         "get_conversation",
@@ -1199,16 +1218,29 @@ def test_manual_conversation_processing_targets_exact_closed_conversation(monkey
         ),
     )
     monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "claim_initial_conversation_processing",
+        lambda uid, conversation_id: {
+            "status": "processing_claimed",
+            "claim_token": "durable-processing-claim",
+        },
+    )
+    monkeypatch.setattr(
         conversations_router.redis_db,
-        "get_in_progress_conversation_id",
-        lambda _uid: "replacement-conversation",
+        "acquire_in_progress_processing_fence",
+        lambda uid, conversation_id, token: processing_fences.append((uid, conversation_id, token)) or True,
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "release_capture_commit_lease",
+        lambda uid, token: released_fences.append((uid, token)) or True,
     )
     monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
     monkeypatch.setattr(
         conversations_router,
         "process_conversation_with_outcome",
-        lambda uid, language, target, force_process: (
-            processed.append((uid, target.id, force_process))
+        lambda uid, language, target, force_process, **kwargs: (
+            processed.append((uid, target.id, force_process, kwargs))
             or types.SimpleNamespace(conversation=target, dispatched=False, status="already_completed")
         ),
     )
@@ -1219,7 +1251,20 @@ def test_manual_conversation_processing_targets_exact_closed_conversation(monkey
     )
 
     assert response.conversation.id == conversation.id
-    assert processed == [("uid-1", conversation.id, True)]
+    assert processed == [
+        (
+            "uid-1",
+            conversation.id,
+            True,
+            {
+                "_claim_already_held": True,
+                "_initial_processing_claim_token": "durable-processing-claim",
+            },
+        )
+    ]
+    assert len(processing_fences) == 1
+    assert processing_fences[0][:2] == ("uid-1", conversation.id)
+    assert released_fences == [("uid-1", processing_fences[0][2])]
 
 
 class _FakeSnapshot:
@@ -1249,6 +1294,25 @@ class _FakeTransaction:
 
     def set(self, ref, data):
         self.sets.append((ref, data))
+
+
+def test_initial_processing_claim_rejects_a_durable_capture_owner():
+    transaction = _FakeTransaction()
+    conversation_ref = _FakeDocumentRef(
+        {
+            "status": ConversationStatus.in_progress.value,
+            "capture_owner_id": "socket-reconnect",
+        }
+    )
+
+    result = conversation_processor.conversations_db._claim_initial_conversation_processing_transaction(
+        transaction,
+        conversation_ref,
+        "processing-token",
+    )
+
+    assert result == {"status": "capture_in_progress"}
+    assert transaction.updates == []
 
 
 def _claim_retry(conversation_data, request_id, retry_data=None):

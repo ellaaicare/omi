@@ -398,6 +398,9 @@ def get_public_conversations() -> List[str]:
 
 
 _SET_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('EXISTS', KEYS[1] .. ':capture_commit') == 1 then
+    return 0
+end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
 if ARGV[2] == '' then
     redis.call('DEL', KEYS[2])
@@ -487,6 +490,21 @@ redis.call('DEL', KEYS[1])
 return 1
 """
 
+_ACQUIRE_IN_PROGRESS_PROCESSING_FENCE_SCRIPT = """
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    return 0
+end
+local active_id = redis.call('GET', KEYS[1])
+if active_id == ARGV[1] then
+    if redis.call('EXISTS', KEYS[2]) == 1 then
+        return 0
+    end
+    redis.call('DEL', KEYS[1])
+end
+redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[3])
+return 1
+"""
+
 
 def _in_progress_conversation_keys(uid: str) -> tuple[str, str]:
     return (
@@ -504,16 +522,18 @@ def set_in_progress_conversation_id(
     conversation_id: str,
     ttl: int = 300,
     owner_id: Optional[str] = None,
-):
+) -> bool:
     active_key, owner_key = _in_progress_conversation_keys(uid)
-    r.eval(
-        _SET_IN_PROGRESS_CONVERSATION_SCRIPT,
-        2,
-        active_key,
-        owner_key,
-        conversation_id,
-        owner_id or '',
-        ttl,
+    return bool(
+        r.eval(
+            _SET_IN_PROGRESS_CONVERSATION_SCRIPT,
+            2,
+            active_key,
+            owner_key,
+            conversation_id,
+            owner_id or '',
+            ttl,
+        )
     )
 
 
@@ -658,6 +678,28 @@ def release_unowned_in_progress_conversation_id(uid: str, expected_conversation_
             owner_key,
             _capture_commit_lease_key(uid),
             expected_conversation_id,
+        )
+    )
+
+
+def acquire_in_progress_processing_fence(
+    uid: str,
+    conversation_id: str,
+    processing_token: str,
+    ttl: int = 120,
+) -> bool:
+    """Fence reconnect publication while an exact conversation processing claim is acquired."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _ACQUIRE_IN_PROGRESS_PROCESSING_FENCE_SCRIPT,
+            3,
+            active_key,
+            owner_key,
+            _capture_commit_lease_key(uid),
+            conversation_id,
+            processing_token,
+            ttl,
         )
     )
 

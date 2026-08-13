@@ -1159,6 +1159,8 @@ def _claim_initial_conversation_processing_transaction(
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
     if status == ConversationStatus.completed.value:
         return {'status': 'already_completed'}
+    if str(conversation.get('capture_owner_id') or '').strip():
+        return {'status': 'capture_in_progress'}
     if status == ConversationStatus.processing.value:
         claimed_at = conversation.get('initial_processing_claimed_at')
         if isinstance(claimed_at, str):

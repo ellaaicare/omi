@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from typing import Optional, List
 from datetime import datetime, timezone
+import uuid
 
 import database.conversations as conversations_db
 import database.action_items as action_items_db
@@ -74,47 +75,72 @@ def process_in_progress_conversation(
     request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
 ):
     requested_conversation_id = str(request.conversation_id or '').strip() if request else ''
-    conversation = (
-        conversations_db.get_conversation(uid, requested_conversation_id)
-        if requested_conversation_id
-        else retrieve_in_progress_conversation(uid)
-    )
-    if not conversation:
+    discovered_conversation = None if requested_conversation_id else retrieve_in_progress_conversation(uid)
+    conversation_id = requested_conversation_id or str((discovered_conversation or {}).get('id') or '').strip()
+    if not conversation_id:
         raise HTTPException(status_code=404, detail="Conversation in progress not found")
 
-    conversation_id = str(conversation.get('id') or '').strip()
-    active_conversation_id = redis_db.get_in_progress_conversation_id(uid)
-    if active_conversation_id == conversation_id:
-        if redis_db.get_in_progress_conversation_owner(uid):
+    processing_fence_token = f'conversation-processing:{uuid.uuid4()}'
+    if not redis_db.acquire_in_progress_processing_fence(uid, conversation_id, processing_fence_token):
+        raise HTTPException(
+            status_code=409,
+            detail="Capture transport is still active or finalization state changed; retry processing",
+        )
+
+    processing_fence_held = True
+    try:
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation in progress not found")
+
+        conversation = Conversation(**conversation)
+
+        claim_result = conversations_db.claim_initial_conversation_processing(uid, conversation_id)
+        claim_status = str(claim_result.get('status') or '')
+        if claim_status == 'capture_in_progress':
             raise HTTPException(
                 status_code=409,
-                detail="Capture transport is still active; close it before processing",
+                detail="Capture transport acquired the conversation before processing; retry after it closes",
             )
-        if not redis_db.release_unowned_in_progress_conversation_id(uid, conversation_id):
+        if claim_status == 'conversation_missing':
+            raise HTTPException(status_code=404, detail="Conversation in progress not found")
+        if claim_status not in {'processing_claimed', 'already_completed', 'processing_in_progress'}:
+            raise RuntimeError(f"conversation processing claim unavailable: {claim_status}")
+
+        processing_fence_held = not redis_db.release_capture_commit_lease(uid, processing_fence_token)
+
+        # Inject calendar context if provided
+        if request and request.calendar_meeting_context:
+            if not conversation.external_data:
+                conversation.external_data = {}
+            conversation.external_data['calendar_meeting_context'] = request.calendar_meeting_context.dict()
+
+        # Geolocation
+        geolocation = redis_db.get_cached_user_geolocation(uid)
+        if geolocation:
+            geolocation = Geolocation(**geolocation)
+            conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
+
+        outcome = process_conversation_with_outcome(
+            uid,
+            conversation.language,
+            conversation,
+            force_process=True,
+            _claim_already_held=claim_status == 'processing_claimed',
+            _initial_processing_claim_token=str(claim_result.get('claim_token') or '') or None,
+        )
+        if outcome.status == 'capture_in_progress':
             raise HTTPException(
                 status_code=409,
-                detail="Capture finalization state changed; retry processing",
+                detail="Capture transport acquired the conversation before processing; retry after it closes",
             )
+        conversation = outcome.conversation
+        messages = trigger_external_integrations(uid, conversation) if outcome.dispatched else []
 
-    conversation = Conversation(**conversation)
-
-    # Inject calendar context if provided
-    if request and request.calendar_meeting_context:
-        if not conversation.external_data:
-            conversation.external_data = {}
-        conversation.external_data['calendar_meeting_context'] = request.calendar_meeting_context.dict()
-
-    # Geolocation
-    geolocation = redis_db.get_cached_user_geolocation(uid)
-    if geolocation:
-        geolocation = Geolocation(**geolocation)
-        conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
-
-    outcome = process_conversation_with_outcome(uid, conversation.language, conversation, force_process=True)
-    conversation = outcome.conversation
-    messages = trigger_external_integrations(uid, conversation) if outcome.dispatched else []
-
-    return CreateConversationResponse(conversation=conversation, messages=messages)
+        return CreateConversationResponse(conversation=conversation, messages=messages)
+    finally:
+        if processing_fence_held:
+            redis_db.release_capture_commit_lease(uid, processing_fence_token)
 
 
 @router.post(
