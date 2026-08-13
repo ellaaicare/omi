@@ -698,6 +698,40 @@ void main() {
     expect(provider.hasCapturableContent, isTrue);
   });
 
+  test('voice takeover fences and joins a pending phone capture start', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final startEntered = Completer<void>();
+    final startGate = Completer<void>();
+    final mic = _FakeMicRecorder();
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneCaptureStarter: () async {
+        startEntered.complete();
+        await startGate.future;
+        return PhoneCaptureStartResult.started;
+      },
+      phoneMicRecorder: mic,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await startEntered.future;
+    var takeoverCompleted = false;
+    final takeover = provider.stopPhoneCaptureForVoiceTakeover().whenComplete(() => takeoverCompleted = true);
+    await pumpEventQueue();
+
+    expect(takeoverCompleted, isFalse);
+    expect(provider.recordingState, isNot(RecordingState.record));
+
+    startGate.complete();
+    expect(await start, PhoneCaptureStartResult.cancelled);
+    expect(await takeover, PhoneCaptureStopResult.empty);
+    expect(takeoverCompleted, isTrue);
+    expect(provider.recordingState, RecordingState.stop);
+    expect(mic.stops, 2);
+  });
+
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(

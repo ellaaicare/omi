@@ -2076,9 +2076,22 @@ class CaptureProvider extends ChangeNotifier
   Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() => _stopPhoneCaptureAndFinalize();
 
   Future<PhoneCaptureStopResult> _stopPhoneCaptureAndFinalize() async {
+    final pendingStart = _micStartFuture;
+    _captureGeneration++;
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
     await _cleanupCurrentState();
-    await (_phoneMicRecorder ?? ServiceManager.instance().mic).stop();
+    final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+    await mic.stop();
+    if (pendingStart != null) {
+      try {
+        await pendingStart;
+      } catch (error) {
+        Logger.error('Pending phone capture start failed during microphone takeover: $error');
+      }
+      // A native/injected start can finish after the first stop. Reassert the
+      // stop only after the generation-fenced start future has settled.
+      await mic.stop();
+    }
     updateRecordingState(RecordingState.stop);
     final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
     try {
