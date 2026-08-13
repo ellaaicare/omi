@@ -2979,7 +2979,12 @@ def persist_capture_persistence_batch(
         raise ValueError("capture_persistence_segment_id_required")
     prepared_photos = []
     for photo in photos or []:
-        photo_data = photo.dict() if hasattr(photo, "dict") else dict(photo)
+        if hasattr(photo, "model_dump"):
+            photo_data = photo.model_dump(mode="json")
+        elif hasattr(photo, "json"):
+            photo_data = json.loads(photo.json())
+        else:
+            photo_data = dict(photo)
         photo_id = str(photo_data.get("id") or uuid.uuid4()).strip()
         photo_data["id"] = photo_id
         prepared_photos.append(photo_data)

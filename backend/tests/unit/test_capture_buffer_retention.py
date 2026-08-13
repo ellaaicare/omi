@@ -419,6 +419,38 @@ def test_capture_batch_can_acknowledge_segments_without_dropping_photos():
     assert photos == [photo]
 
 
+def test_capture_persistence_serializes_photo_timestamp_before_encryption(monkeypatch):
+    encrypted_payloads = []
+    monkeypatch.setattr(
+        conversations_db.encryption,
+        "encrypt",
+        lambda payload, uid: encrypted_payloads.append((payload, uid)) or payload,
+    )
+    created_at = datetime(2026, 8, 13, 20, 45, tzinfo=timezone.utc)
+
+    conversations_db.persist_capture_persistence_batch(
+        "uid-a",
+        "conversation-a",
+        [],
+        created_at,
+        "socket-a",
+        photos=[
+            conversations_db.ConversationPhoto(
+                id="photo-a",
+                base64="cGhvdG8=",
+                created_at=created_at,
+            )
+        ],
+    )
+
+    payload, uid = encrypted_payloads[0]
+    decoded = conversations_db.json.loads(payload)
+    assert uid == "uid-a"
+    assert decoded["photos"][0]["id"] == "photo-a"
+    serialized_created_at = datetime.fromisoformat(decoded["photos"][0]["created_at"].replace("Z", "+00:00"))
+    assert serialized_created_at == created_at
+
+
 def test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch(monkeypatch):
     class OrderingSnapshot:
         def __init__(self, batch_id, created_at):
