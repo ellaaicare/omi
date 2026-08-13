@@ -194,8 +194,14 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
         return false;
       }
       if (processNow != null) return processNow();
-      await _stopCaptureTransport(provider, stopTarget);
-      return provider.forceProcessingCurrentConversation();
+      return switch (stopTarget) {
+        _CaptureStopTarget.phone => provider.stopStreamRecordingAndFinalize(),
+        _CaptureStopTarget.necklace => provider.stopStreamDeviceRecordingAndFinalize(),
+        _CaptureStopTarget.systemAudio || _CaptureStopTarget.none => () async {
+            await _stopCaptureTransport(provider, stopTarget);
+            return provider.forceProcessingCurrentConversation();
+          }(),
+      };
     });
     _processNowInFlight = operation;
     if (mounted) setState(() {});

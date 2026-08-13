@@ -566,12 +566,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
 
     final source = _homeCaptureSource;
+    bool? transportFinalized;
     switch (source) {
       case _HomeCaptureSource.phone:
-        await capture.stopStreamRecording();
+        transportFinalized = await capture.stopStreamRecordingAndFinalize();
         break;
       case _HomeCaptureSource.necklaceOwned:
-        await capture.stopStreamDeviceRecording();
+        transportFinalized = await capture.stopStreamDeviceRecordingAndFinalize();
         if (capture.recordingState == RecordingState.deviceRecord) {
           throw StateError('Home-owned necklace stream did not stop');
         }
@@ -580,7 +581,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         break;
       case null:
         if (capture.recordingState == RecordingState.record) {
-          await capture.stopStreamRecording();
+          transportFinalized = await capture.stopStreamRecordingAndFinalize();
         }
         break;
     }
@@ -603,6 +604,21 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           _homeCaptureSource = null;
         }
       });
+    }
+    if (transportFinalized != null) {
+      if (transportFinalized) {
+        if (mounted) {
+          setState(() {
+            _homeCaptureFinalizationPending = false;
+            _homeCaptureSource = null;
+          });
+        }
+        return true;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+      }
+      return false;
     }
     final finalized = await _finalizeHomeMoment(
       capture,

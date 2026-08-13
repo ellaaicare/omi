@@ -940,7 +940,7 @@ class CaptureProvider extends ChangeNotifier
       return false;
     }
 
-    final shouldFinalize = sessionMatched && _captureDiagnostics.hasPhysicalAudio;
+    final shouldFinalize = sessionMatched && (_captureDiagnostics.hasPhysicalAudio || hasCapturableContent);
     _deviceCaptureGeneration++;
     if (attemptMatched) attempt.cancel();
     if (sessionMatched && !session.cancelled.isCompleted) session.cancelled.complete();
@@ -953,9 +953,6 @@ class CaptureProvider extends ChangeNotifier
       failure: CaptureDiagnosticFailure.deviceDisconnected,
     );
     var succeeded = true;
-    if (sessionMatched) {
-      succeeded = await _closeDeviceCaptureSession(session, stopSocket: true);
-    }
     final pendingStart = attemptMatched ? _deviceCaptureStartFuture : null;
     if (pendingStart != null) {
       try {
@@ -978,6 +975,10 @@ class CaptureProvider extends ChangeNotifier
         );
         succeeded = false;
       }
+    }
+    if (sessionMatched) {
+      final closed = await _closeDeviceCaptureSession(session, stopSocket: true);
+      succeeded = closed && succeeded;
     }
     return succeeded;
   }
@@ -2042,6 +2043,23 @@ class CaptureProvider extends ChangeNotifier
     await _socket?.stop(reason: 'stop stream recording');
   }
 
+  /// Stops phone audio, processes any proven capture while its transcript
+  /// socket is still authoritative, then closes the socket. Closing first can
+  /// race the server disconnect finalizer and make a successful memory look
+  /// like an empty capture in the app.
+  Future<bool> stopStreamRecordingAndFinalize() async {
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+    await _cleanupCurrentState();
+    await (_phoneMicRecorder ?? ServiceManager.instance().mic).stop();
+    updateRecordingState(RecordingState.stop);
+    final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+    try {
+      return shouldFinalize ? await finalizeCurrentConversation() : false;
+    } finally {
+      await _socket?.stop(reason: 'phone capture finalized');
+    }
+  }
+
   Future<void> stopForAccountTransition() async {
     _captureGeneration++;
     _deviceCaptureGeneration++;
@@ -2273,6 +2291,22 @@ class CaptureProvider extends ChangeNotifier
     }
     updateRecordingState(RecordingState.stop);
     await _socket?.stop(reason: 'stop stream device recording');
+  }
+
+  /// Stops necklace transport and processes the exact active transcript before
+  /// closing its socket. The server-side disconnect path remains a fallback for
+  /// crashes and transport loss.
+  Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+    await _cleanupCurrentState();
+    if (cleanDevice) _updateRecordingDevice(null);
+    updateRecordingState(RecordingState.stop);
+    final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+    try {
+      return shouldFinalize ? await finalizeCurrentConversation() : false;
+    } finally {
+      await _socket?.stop(reason: 'necklace capture finalized');
+    }
   }
 
   Future<bool> streamSystemAudioRecording() {

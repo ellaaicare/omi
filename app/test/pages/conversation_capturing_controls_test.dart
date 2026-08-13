@@ -258,9 +258,21 @@ class _FakeCaptureProvider extends CaptureProvider {
   }
 
   @override
+  Future<bool> stopStreamRecordingAndFinalize() async {
+    await stopStreamRecording();
+    return forceProcessingCurrentConversation();
+  }
+
+  @override
   Future<void> stopStreamDeviceRecording({bool cleanDevice = false}) async {
     deviceStops++;
     updateRecordingState(RecordingState.stop);
+  }
+
+  @override
+  Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    await stopStreamDeviceRecording(cleanDevice: cleanDevice);
+    return forceProcessingCurrentConversation();
   }
 
   @override
