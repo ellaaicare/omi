@@ -691,6 +691,70 @@ void main() {
     expect(provider.hasUnfinalizedPhoneCaptureContent, isFalse);
   });
 
+  test('home stop and voice takeover share one phone finalization', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final transcriptSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('active-phone', 'One shared phone capture')];
+      },
+      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        if (!processEntered.isCompleted) processEntered.complete();
+        await processGate.future;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'completed-phone',
+            'One shared phone capture',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..reconnectDeviceCaptureSocketForTesting(transcriptSocket.service);
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+
+    final homeStop = provider.stopStreamRecordingAndFinalize();
+    await processEntered.future;
+    var takeoverCompleted = false;
+    final takeover = provider.stopPhoneCaptureForVoiceTakeover().whenComplete(() => takeoverCompleted = true);
+    await pumpEventQueue();
+
+    expect(takeoverCompleted, isFalse);
+    expect(processCalls, 1);
+    expect(mic.stops, 1);
+    expect(transcriptSocket.pure.stops, 0);
+
+    processGate.complete();
+    expect(await homeStop, isTrue);
+    expect(await takeover, PhoneCaptureStopResult.finalized);
+    expect(processCalls, 1);
+    expect(mic.stops, 1);
+    expect(transcriptSocket.pure.stops, 1);
+    expect(provider.phoneCaptureOwnsMobileAudio, isFalse);
+  });
+
   test('voice takeover observes transcript content that arrives while the recorder stops', () async {
     final authority = _CaptureAuthority('uid-a');
     final stopEntered = Completer<void>();

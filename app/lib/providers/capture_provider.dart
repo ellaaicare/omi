@@ -454,6 +454,7 @@ class CaptureProvider extends ChangeNotifier
   bool _systemAudioCaching = true;
   Future<PhoneCaptureStartResult>? _micStartFuture;
   int _phoneCaptureReleaseOperations = 0;
+  Future<PhoneCaptureStopResult>? _phoneCaptureStopFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
@@ -2094,13 +2095,27 @@ class CaptureProvider extends ChangeNotifier
   /// race the server disconnect finalizer and make a successful memory look
   /// like an empty capture in the app.
   Future<bool> stopStreamRecordingAndFinalize() async {
-    return await _stopPhoneCaptureAndFinalize() == PhoneCaptureStopResult.finalized;
+    return await _serializedPhoneCaptureStopAndFinalize() == PhoneCaptureStopResult.finalized;
   }
 
   /// Returns an exact stop disposition for voice microphone takeover. Unlike
   /// the legacy bool API, this distinguishes a genuinely empty capture from a
   /// contentful capture whose finalization failed.
-  Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() => _stopPhoneCaptureAndFinalize();
+  Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() => _serializedPhoneCaptureStopAndFinalize();
+
+  Future<PhoneCaptureStopResult> _serializedPhoneCaptureStopAndFinalize() {
+    final activeStop = _phoneCaptureStopFuture;
+    if (activeStop != null) return activeStop;
+
+    late final Future<PhoneCaptureStopResult> trackedStop;
+    trackedStop = _stopPhoneCaptureAndFinalize().whenComplete(() {
+      if (identical(_phoneCaptureStopFuture, trackedStop)) {
+        _phoneCaptureStopFuture = null;
+      }
+    });
+    _phoneCaptureStopFuture = trackedStop;
+    return trackedStop;
+  }
 
   Future<PhoneCaptureStopResult> _stopPhoneCaptureAndFinalize() async {
     _beginPhoneCaptureRelease();

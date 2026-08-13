@@ -69,11 +69,17 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.failuresBeforeStart = 0});
+  _RecordingCaptureProvider({
+    this.startGate,
+    this.disconnectGate,
+    this.failuresBeforeStart = 0,
+    this.onDeviceStart,
+  });
 
   final Completer<void>? startGate;
   final Completer<void>? disconnectGate;
   final int failuresBeforeStart;
+  final void Function(int attempt)? onDeviceStart;
   int deviceStarts = 0;
   final List<String> disconnectedDeviceIds = [];
 
@@ -82,8 +88,10 @@ class _RecordingCaptureProvider extends CaptureProvider {
     deviceStarts++;
     if (deviceStarts <= failuresBeforeStart) {
       updateRecordingState(RecordingState.error);
+      onDeviceStart?.call(deviceStarts);
       throw StateError('synthetic necklace setup failure');
     }
+    onDeviceStart?.call(deviceStarts);
     await startGate?.future;
     updateRecordingState(RecordingState.deviceRecord);
   }
@@ -343,6 +351,39 @@ void main() {
     await pumpEventQueue();
 
     expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.connectedDevice?.id, necklace.id);
+  });
+
+  test('necklace retry re-defers when phone reacquires audio', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    late final _RecordingCaptureProvider capture;
+    capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 1,
+      onDeviceStart: (attempt) {
+        if (attempt == 1) capture.updateRecordingState(RecordingState.record);
+      },
+    );
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.record);
+
+    capture.updateRecordingState(RecordingState.stop);
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 2);
     expect(capture.recordingState, RecordingState.deviceRecord);
     expect(provider.connectedDevice?.id, necklace.id);
   });

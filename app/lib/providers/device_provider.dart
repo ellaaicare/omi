@@ -700,6 +700,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     if (capture == null) return false;
     for (var attempt = 1; attempt <= _maxDeviceCaptureStartAttempts; attempt++) {
       if (!_isDeviceOperationCurrent(operationGeneration)) return false;
+      if (capture.phoneCaptureOwnsMobileAudio) {
+        _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+        return false;
+      }
       try {
         await capture.streamDeviceRecording(device: device);
       } catch (error) {
@@ -707,6 +711,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
       }
       if (!_isDeviceOperationCurrent(operationGeneration)) return false;
       if (capture.recordingState == RecordingState.deviceRecord) return true;
+      if (capture.phoneCaptureOwnsMobileAudio) {
+        _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+        return false;
+      }
       if (attempt < _maxDeviceCaptureStartAttempts) {
         await Future<void>.delayed(_deviceCaptureRetryDelay);
       }
