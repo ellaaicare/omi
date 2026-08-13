@@ -455,6 +455,32 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
+  test('automatic reconnect preserves a connection committed before its scan future throws', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    late DeviceProvider provider;
+    provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        provider.connectedDevice = necklace;
+        provider.setIsConnected(true);
+        throw StateError('synthetic late scan failure');
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test successful event racing scan failure');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.automaticReconnectAttempts, 0);
+    expect(provider.automaticReconnectExhausted, isFalse);
+    expect(provider.isConnecting, isFalse);
+  });
+
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
