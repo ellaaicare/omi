@@ -2815,6 +2815,19 @@ def persist_capture_persistence_batch(
     return batch_id
 
 
+def _capture_persistence_batch_sort_key(snapshot) -> tuple[datetime, str]:
+    batch_id = str(snapshot.id or "").strip()
+    data = snapshot.to_dict() or {}
+    created_at = data.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = datetime.min.replace(tzinfo=timezone.utc)
+    elif created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    else:
+        created_at = created_at.astimezone(timezone.utc)
+    return created_at, batch_id
+
+
 def list_capture_persistence_batches(uid: str, conversation_id: str) -> list[str]:
     batches_ref = (
         db.collection('users')
@@ -2823,7 +2836,8 @@ def list_capture_persistence_batches(uid: str, conversation_id: str) -> list[str
         .document(conversation_id)
         .collection(capture_persistence_batches_collection)
     )
-    return sorted(str(snapshot.id) for snapshot in batches_ref.stream() if str(snapshot.id or "").strip())
+    snapshots = [snapshot for snapshot in batches_ref.stream() if str(snapshot.id or "").strip()]
+    return [str(snapshot.id) for snapshot in sorted(snapshots, key=_capture_persistence_batch_sort_key)]
 
 
 def _decode_capture_persistence_batch(uid: str, data: dict) -> dict:

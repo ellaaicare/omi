@@ -861,6 +861,12 @@ async def _stream_handler(
                 conversations_db.delete_conversation(uid, conversation_id)
         return True
 
+    async def _process_conversation_after_rotation(conversation_id: str) -> None:
+        while True:
+            if await _process_conversation(conversation_id):
+                return
+            await asyncio.sleep(0.25)
+
     # Process existing conversations
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
@@ -1632,9 +1638,9 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                processed = await _process_conversation(current_conversation_id)
-                if processed:
-                    await _create_new_in_progress_conversation()
+                conversation_id_to_process = current_conversation_id
+                await _create_new_in_progress_conversation()
+                await _process_conversation_after_rotation(conversation_id_to_process)
 
     async def speaker_identification_task():
         """Consume segment queue, accumulate per speaker, trigger match when ready."""

@@ -273,6 +273,31 @@ def test_capture_batch_can_acknowledge_segments_without_dropping_photos():
 
 
 def test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch(monkeypatch):
+    class OrderingSnapshot:
+        def __init__(self, batch_id, created_at):
+            self.id = batch_id
+            self._created_at = created_at
+
+        def to_dict(self):
+            return {"created_at": self._created_at}
+
+    later = OrderingSnapshot(
+        "000-hash-sorts-first",
+        datetime(2026, 8, 12, 20, 0, 2, tzinfo=timezone.utc),
+    )
+    earlier = OrderingSnapshot(
+        "fff-hash-sorts-last",
+        datetime(2026, 8, 12, 20, 0, 1, tzinfo=timezone.utc),
+    )
+    ordered = sorted(
+        [later, earlier],
+        key=conversations_db._capture_persistence_batch_sort_key,
+    )
+    assert [snapshot.id for snapshot in ordered] == [
+        "fff-hash-sorts-last",
+        "000-hash-sorts-first",
+    ]
+
     segment = {
         "id": "segment-1",
         "text": "synthetic",
@@ -373,8 +398,14 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "drain_capture_persistence_batches(uid, conversation_id)" in process_source
     assert "if not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
     assert "return False" in process_source
-    assert "processed = await _process_conversation(current_conversation_id)" in lifecycle_source
-    assert "if processed:" in lifecycle_source
+    assert "conversation_id_to_process = current_conversation_id" in lifecycle_source
+    assert "await _create_new_in_progress_conversation()" in lifecycle_source
+    assert "await _process_conversation_after_rotation(conversation_id_to_process)" in lifecycle_source
+    assert lifecycle_source.index("await _create_new_in_progress_conversation()") < lifecycle_source.index(
+        "await _process_conversation_after_rotation(conversation_id_to_process)"
+    )
+    assert "while True:" in process_source
+    assert "while websocket_active:" not in process_source
     assert "queue_pusher_transcript_batch(" in pusher_source
     assert "deliver_all_pusher_transcript_batches(" in pusher_source
     assert "batch_conversation_id," in stream_source
