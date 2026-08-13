@@ -867,6 +867,32 @@ async def _stream_handler(
                 return
             await asyncio.sleep(0.25)
 
+    async def _finalize_current_conversation_on_disconnect() -> None:
+        conversation_id = str(current_conversation_id or "").strip()
+        if not conversation_id:
+            return
+
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+        if not conversation or conversation.get('status') != ConversationStatus.in_progress:
+            return
+
+        try:
+            await asyncio.wait_for(
+                _process_conversation_after_rotation(conversation_id),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            _latency_log(
+                "capture_disconnect_finalize_deferred",
+                conversation_id=conversation_id,
+            )
+            return
+
+        _latency_log(
+            "capture_disconnect_finalized",
+            conversation_id=conversation_id,
+        )
+
     # Process existing conversations
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
@@ -2615,6 +2641,16 @@ async def _stream_handler(
             if transcription_seconds > 0 or words_to_record > 0:
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
+
+        try:
+            await _finalize_current_conversation_on_disconnect()
+        except Exception as e:
+            _latency_log(
+                "capture_disconnect_finalize_error",
+                conversation_id=str(current_conversation_id or "").strip() or None,
+                error=str(e)[:300],
+            )
+            print(f"Error finalizing conversation after disconnect: {e}", uid, session_id)
 
         # STT sockets
         try:

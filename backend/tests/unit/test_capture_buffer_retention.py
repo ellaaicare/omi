@@ -386,10 +386,16 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     process_source = source.split("async def _process_conversation", maxsplit=1)[1].split(
         "async def _prepare_in_progess_conversations", maxsplit=1
     )[0]
+    disconnect_finalize_source = source.split("async def _finalize_current_conversation_on_disconnect", maxsplit=1)[
+        1
+    ].split("# Process existing conversations", maxsplit=1)[0]
     lifecycle_source = source.split("async def conversation_lifecycle_manager", maxsplit=1)[1].split(
         "async def speaker_identification_task", maxsplit=1
     )[0]
     pusher_source = source.split("def create_pusher_task_handler", maxsplit=1)[1].split("# Translate", maxsplit=1)[0]
+    shutdown_source = source.split("finally:\n        if not use_custom_stt", maxsplit=1)[1].split(
+        "# STT sockets", maxsplit=1
+    )[0]
 
     assert "bind_capture_conversation(segment)" in source
     assert "CAPTURE_CONVERSATION_ID_KEY: conversation_id" in source
@@ -404,6 +410,13 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert lifecycle_source.index("await _create_new_in_progress_conversation()") < lifecycle_source.index(
         "await _process_conversation_after_rotation(conversation_id_to_process)"
     )
+    assert "conversation.get('status') != ConversationStatus.in_progress" in disconnect_finalize_source
+    assert "_process_conversation_after_rotation(conversation_id)" in disconnect_finalize_source
+    assert "timeout=5.0" in disconnect_finalize_source
+    assert '"capture_disconnect_finalize_deferred"' in disconnect_finalize_source
+    assert '"capture_disconnect_finalized"' in disconnect_finalize_source
+    assert "await _finalize_current_conversation_on_disconnect()" in shutdown_source
+    assert '"capture_disconnect_finalize_error"' in shutdown_source
     assert "while True:" in process_source
     assert "while websocket_active:" not in process_source
     assert "queue_pusher_transcript_batch(" in pusher_source
