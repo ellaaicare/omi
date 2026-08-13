@@ -210,7 +210,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         user_phone = None
         user_db_id = None
         cluster_id = None
-        timezone = "America/Los_Angeles"
+        timezone_name = "America/Los_Angeles"
         conditions = []
         medications = []
 
@@ -219,7 +219,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             cluster_id = str(user_row["cluster_id"]) if user_row["cluster_id"] else None
             user_name = user_row["name"] or name
             user_email = user_row["email"]
-            timezone = user_row["timezone"] or timezone
+            timezone_name = user_row["timezone"] or timezone_name
             conditions = user_row["conditions"] or []
             medications = user_row["medications"] or []
             identities = user_row["identities"]
@@ -239,7 +239,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             "firebaseUid": uid,
             "profile": {
                 "preferredName": user_name,
-                "timezone": timezone,
+                "timezone": timezone_name,
                 "conditions": conditions if isinstance(conditions, list) else [],
                 "medications": medications if isinstance(medications, list) else [],
             },
