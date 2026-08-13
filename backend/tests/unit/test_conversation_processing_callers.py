@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import importlib.util
+import json
 import sys
 import types
 from datetime import datetime, timezone
@@ -152,6 +153,7 @@ def caller_modules(monkeypatch):
         "utils.conversations.process_conversation",
         mark_unexpected_conversation_processing_failed=_noop,
         process_conversation_with_outcome=lambda *_args, **_kwargs: None,
+        process_conversation_with_transcript_redelivery=lambda *_args, **_kwargs: None,
         retrieve_in_progress_conversation=lambda *_args, **_kwargs: None,
     )
     _stub_module(monkeypatch, "utils.conversations.location", get_google_maps_location=lambda *_args: None)
@@ -307,13 +309,13 @@ async def _async_value(value):
     return value
 
 
-@pytest.mark.parametrize("status", ["already_completed", "stock_summary_cas_lost"])
+@pytest.mark.parametrize("status", ["already_completed", "stock_summary_cas_lost", "stock_summary_transcript_changed"])
 def test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes(monkeypatch, caller_modules, status):
     calls = []
     conversation = _conversation()
     monkeypatch.setattr(
         caller_modules.pusher,
-        "process_conversation_with_outcome",
+        "process_conversation_with_transcript_redelivery",
         lambda *_args, **_kwargs: SimpleNamespace(
             conversation=conversation,
             dispatched=False,
@@ -338,6 +340,11 @@ def test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcome
 
     assert calls == []
     assert len(websocket.sent_bytes) == 1
+    response = json.loads(websocket.sent_bytes[0][4:].decode())
+    if status == "already_completed":
+        assert response == {"conversation_id": conversation.id, "success": True}
+    else:
+        assert response == {"conversation_id": conversation.id, "error": status}
 
 
 def test_workflow_does_not_dispatch_external_integrations_for_non_dispatch_outcome(monkeypatch, caller_modules):
@@ -423,7 +430,7 @@ def test_pusher_dispatches_external_integrations_once_for_winning_outcome(monkey
     conversation = _conversation()
     monkeypatch.setattr(
         caller_modules.pusher,
-        "process_conversation_with_outcome",
+        "process_conversation_with_transcript_redelivery",
         lambda *_args, **_kwargs: SimpleNamespace(
             conversation=conversation,
             dispatched=True,
@@ -501,7 +508,7 @@ def test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dis
     websocket = _FakeWebSocket()
     monkeypatch.setattr(
         caller_modules.transcribe,
-        "process_conversation_with_outcome",
+        "process_conversation_with_transcript_redelivery",
         lambda *_args, **_kwargs: SimpleNamespace(
             conversation=conversation,
             dispatched=False,

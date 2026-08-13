@@ -15,6 +15,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
@@ -156,6 +157,7 @@ on:
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
+      - "backend/tests/unit/test_capture_incident_1210_regressions.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
@@ -172,6 +174,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
@@ -313,6 +316,7 @@ on:
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
+      - "backend/tests/unit/test_capture_incident_1210_regressions.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -374,6 +378,7 @@ jobs:
           python -m py_compile
           database/authority_advisory_lock.py
           database/conversations.py
+          database/redis_db.py
           database/ella_caregivers.py
           database/ella_provisioning.py
           database/ella_postgres.py
@@ -462,6 +467,7 @@ jobs:
           utils/ella/scanner_keyterms.py
           utils/other/endpoints.py
           tests/unit/test_capture_buffer_retention.py
+          tests/unit/test_capture_incident_1210_regressions.py
           tests/unit/test_ella_reviewed_route_integration.py
 
       - name: Validate formatting and OpenAPI contract
@@ -520,6 +526,7 @@ jobs:
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_capture_buffer_retention.py
+          tests/unit/test_capture_incident_1210_regressions.py
           tests/unit/test_conversation_summary_cas.py
           tests/unit/test_conversation_processing_callers.py
           tests/unit/test_authority_advisory_lock.py
@@ -579,21 +586,52 @@ jobs:
       - name: Run capture buffer persistence regression
         run: |
           set -euo pipefail
-          capture_ids="$(pytest --collect-only -q tests/unit/test_capture_buffer_retention.py | sed '/^$/d')"
+          capture_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_capture_buffer_retention.py \
+              tests/unit/test_capture_incident_1210_regressions.py |
+              sed '/^$/d'
+          )"
           required_capture_ids=(
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_waits_for_all_persistence_guards_without_clearing_buffers"
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arrivals"
             "tests/unit/test_capture_buffer_retention.py::test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_content"
             "tests/unit/test_capture_buffer_retention.py::test_photo_only_capture_does_not_require_audio_timestamp"
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_can_acknowledge_segments_without_dropping_photos"
+            "tests/unit/test_capture_buffer_retention.py::test_capture_persistence_serializes_photo_timestamp_before_encryption"
             "tests/unit/test_capture_buffer_retention.py::test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch"
             "tests/unit/test_capture_buffer_retention.py::test_capture_commit_rejects_conversation_rotation_before_write"
+            "tests/unit/test_capture_buffer_retention.py::test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired_id"
+            "tests/unit/test_capture_buffer_retention.py::test_capture_commit_lease_blocks_ownership_transfer_until_release"
+            "tests/unit/test_capture_buffer_retention.py::test_manual_processing_cannot_release_active_or_committing_capture"
+            "tests/unit/test_capture_buffer_retention.py::test_manual_processing_fence_blocks_exact_reconnect_until_processing_claim"
+            "tests/unit/test_capture_buffer_retention.py::test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_waits_for_terminal_response"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committed"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_superseded_socket_cannot_persist_a_batch_after_ownership_handoff"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_live_capture_persistence_holds_ownership_lease_through_commit"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_is_initialized_before_reconnect_preparation_uses_it"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_duplicate_processing_claim_is_a_no_write_inflight_result"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_stale_processing_claim_without_a_lease_can_be_recovered"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_rebinds_firestore_before_publishing_redis_owner"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_rebind_and_rollback_are_generation_conditional"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_photo_commit_uses_the_same_durable_owner_fence"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_transfer_fences_the_previous_firestore_generation"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_ownership_loss_exits_old_stream_and_photos_have_no_unfenced_write_path"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 7
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 30
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
-          pytest tests/unit/test_capture_buffer_retention.py -v | tee /tmp/capture-buffer-retention-pytest.log
+          pytest \
+            tests/unit/test_capture_buffer_retention.py \
+            tests/unit/test_capture_incident_1210_regressions.py \
+            -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
@@ -888,12 +926,19 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_post_commit_app_failure_does_not_rollback_or_suppress_hermes_dispatch"
             "tests/unit/test_conversation_processing_failures.py::test_unexpected_failure_after_durable_completion_is_a_noop"
             "tests/unit/test_conversation_processing_failures.py::test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_effects"
+            "tests/unit/test_conversation_processing_failures.py::test_transcript_cas_exhaustion_redelivers_a_fresh_processing_invocation"
+            "tests/unit/test_conversation_processing_failures.py::test_transcript_redelivery_exhaustion_is_failed_instead_of_left_unowned"
+            "tests/unit/test_conversation_processing_failures.py::test_transcript_redelivery_exhaustion_accepts_a_concurrent_completed_winner"
+            "tests/unit/test_conversation_processing_failures.py::test_transcript_redelivery_exhaustion_preserves_a_new_processing_claimant"
             "tests/unit/test_conversation_processing_failures.py::test_live_recording_callers_gate_external_integrations_on_dispatch_outcome[routers/pusher.py]"
             "tests/unit/test_conversation_processing_failures.py::test_live_recording_callers_gate_external_integrations_on_dispatch_outcome[routers/transcribe.py]"
             "tests/unit/test_conversation_processing_failures.py::test_intentional_reprocess_and_destructive_merge_callers_require_explicit_outcomes"
             "tests/unit/test_conversation_processing_failures.py::test_merge_preserves_sources_when_new_conversation_processing_does_not_dispatch"
             "tests/unit/test_conversation_processing_failures.py::test_postprocessing_marks_failed_when_summary_reprocess_does_not_dispatch"
             "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_suppresses_integrations_for_non_dispatch_outcome"
+            "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_rejects_live_capture_owner"
+            "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_targets_exact_closed_conversation"
+            "tests/unit/test_conversation_processing_failures.py::test_initial_processing_claim_rejects_a_durable_capture_owner"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
@@ -912,7 +957,7 @@ jobs:
           for required_id in "${required_today_card_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$today_card_ids"
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 211
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 221
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
@@ -1033,11 +1078,13 @@ jobs:
             "tests/unit/test_conversation_summary_cas.py::test_folder_assignment_cas_does_not_overwrite_concurrent_owner_choice"
             "tests/unit/test_conversation_summary_cas.py::test_initial_processing_claim_rejects_completed_duplicate_without_status_rollback"
             "tests/unit/test_conversation_summary_cas.py::test_initial_processing_claim_promotes_in_progress_once_with_partial_update"
+            "tests/unit/test_conversation_summary_cas.py::test_released_processing_claim_fences_terminal_failure_from_new_claimant"
+            "tests/unit/test_conversation_summary_cas.py::test_terminal_failure_updates_only_the_exact_released_generation"
           )
           for required_id in "${required_conversation_summary_cas_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
-          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 46
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 48
           pytest tests/unit/test_conversation_summary_cas.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v

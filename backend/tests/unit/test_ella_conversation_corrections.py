@@ -2270,6 +2270,10 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
     assert captured["apply"]["summary"]["category"] == "entertainment"
     assert captured["apply"]["trace_id"] == migration_trace_id
     assert captured["apply"]["require_canonical"] is True
+    assert captured["apply"]["expected_transcript_hash"] == summary_recovery.transcript_grounding_hash(
+        conversation["transcript_segments"]
+    )
+    assert captured["apply"]["require_source_match"] is True
     assert captured["apply"]["preserve_generated_results"] is True
     assert result == {
         "active_summary_version_id": "enriched-v2",
@@ -2309,6 +2313,7 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
     }
     reads = [conversation, conversation, generic, completed_generic, enriched]
     events = []
+    apply_calls = []
 
     monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
     monkeypatch.setattr(
@@ -2329,6 +2334,7 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
 
     async def fake_apply(**kwargs):
         events.append(f"apply:{kwargs['summary_kind']}")
+        apply_calls.append(kwargs)
         version_id = "generic-v1" if kwargs["summary_kind"] == "generic_recovered" else "enriched-v2"
         return {
             "status": "ok",
@@ -2378,6 +2384,10 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
     )
 
     assert outcome == "completed"
+    assert apply_calls[0]["expected_transcript_hash"] == summary_recovery.transcript_grounding_hash(
+        conversation["transcript_segments"]
+    )
+    assert apply_calls[0]["require_source_match"] is True
     assert events == [
         "generic_generate",
         "apply:generic_recovered",

@@ -35,6 +35,7 @@ from models.conversation import (
 )
 from utils.notifications import send_important_conversation_message
 from models.conversation import CalendarMeetingContext
+from models.conversation_integrity import transcript_grounding_hash
 from models.other import Person
 from models.task import Task, TaskStatus, TaskAction, TaskActionProvider
 from models.trend import Trend
@@ -87,6 +88,10 @@ class ConversationProcessingOutcome:
     conversation: Conversation
     dispatched: bool
     status: str
+    released_claim_token: Optional[str] = None
+
+
+CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED = 'transcript_redelivery_exhausted'
 
 
 def _run_post_commit_effect(name: str, effect):
@@ -282,6 +287,30 @@ def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conve
     if conversation.status == ConversationStatus.failed and conversation.processing_error:
         return False
     return mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+
+
+def mark_released_conversation_processing_failed(
+    uid: str,
+    conversation: Conversation,
+    release_token: Optional[str],
+) -> bool:
+    if not release_token:
+        return False
+    failed_at = datetime.now(timezone.utc)
+    result = conversations_db.mark_conversation_processing_failed_if_released(
+        uid,
+        conversation.id,
+        CONVERSATION_PROCESSING_FAILED,
+        release_token,
+        failed_at=failed_at,
+    )
+    if not result.get('updated'):
+        return False
+    conversation.status = ConversationStatus.failed
+    conversation.discarded = False
+    conversation.processing_error = CONVERSATION_PROCESSING_FAILED
+    conversation.processing_error_at = failed_at
+    return True
 
 
 # Function to get conversation summary apps from Redis
@@ -597,13 +626,25 @@ def process_conversation_with_outcome(
     force_process: bool = False,
     is_reprocess: bool = False,
     app_id: Optional[str] = None,
+    _claim_already_held: bool = False,
+    _initial_processing_claim_token: Optional[str] = None,
+    _transcript_retry_count: int = 0,
 ) -> ConversationProcessingOutcome:
     assert_current_ai_consent(uid)
     allow_create = not isinstance(conversation, Conversation)
-    if isinstance(conversation, Conversation) and not is_reprocess:
+    initial_processing_claim_held = bool(_claim_already_held)
+    initial_processing_claim_token = _initial_processing_claim_token
+    if isinstance(conversation, Conversation) and not is_reprocess and not _claim_already_held:
         claim_result = conversations_db.claim_initial_conversation_processing(uid, conversation.id)
         claim_status = claim_result.get('status')
         if claim_status == 'already_completed':
+            durable_conversation = conversations_db.get_conversation(uid, conversation.id) or conversation.dict()
+            return ConversationProcessingOutcome(
+                conversation=Conversation(**durable_conversation),
+                dispatched=False,
+                status=claim_status,
+            )
+        if claim_status in {'processing_in_progress', 'capture_in_progress'}:
             durable_conversation = conversations_db.get_conversation(uid, conversation.id) or conversation.dict()
             return ConversationProcessingOutcome(
                 conversation=Conversation(**durable_conversation),
@@ -618,9 +659,16 @@ def process_conversation_with_outcome(
             )
         if claim_status != 'processing_claimed':
             raise RuntimeError(f"conversation processing claim unavailable: {claim_status}")
+        initial_processing_claim_held = True
+        initial_processing_claim_token = str(claim_result.get('claim_token') or '') or None
+        conversation.status = ConversationStatus.processing
+    elif isinstance(conversation, Conversation) and _claim_already_held:
         conversation.status = ConversationStatus.processing
     expected_active_summary_version_id = (
         conversation.active_summary_version_id if isinstance(conversation, Conversation) else None
+    )
+    expected_transcript_hash = (
+        transcript_grounding_hash(conversation.transcript_segments) if isinstance(conversation, Conversation) else None
     )
 
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
@@ -692,8 +740,44 @@ def process_conversation_with_outcome(
         expected_active_summary_version_id=expected_active_summary_version_id,
         allow_create=allow_create,
         enqueue_hermes_cloud_enrichment=uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS,
+        expected_transcript_hash=expected_transcript_hash,
     )
     commit_status = commit_result.get('status')
+    if commit_status == conversations_db.conversation_stock_summary_transcript_changed:
+        durable_conversation = commit_result.get('conversation') or conversations_db.get_conversation(
+            uid, conversation.id
+        )
+        if durable_conversation and _transcript_retry_count < 1:
+            print(
+                f"transcript changed while processing conversation.id={conversation.id}; retrying latest snapshot",
+                flush=True,
+            )
+            return process_conversation_with_outcome(
+                uid,
+                language_code,
+                Conversation(**durable_conversation),
+                force_process=force_process,
+                is_reprocess=is_reprocess,
+                app_id=app_id,
+                _claim_already_held=initial_processing_claim_held,
+                _initial_processing_claim_token=initial_processing_claim_token,
+                _transcript_retry_count=_transcript_retry_count + 1,
+            )
+        released_claim_token = None
+        if initial_processing_claim_held:
+            release_result = conversations_db.release_initial_conversation_processing_claim(
+                uid,
+                conversation.id,
+                initial_processing_claim_token or '',
+            )
+            if release_result.get('released'):
+                released_claim_token = str(release_result.get('release_token') or '') or None
+        return ConversationProcessingOutcome(
+            conversation=Conversation(**(durable_conversation or conversation.dict())),
+            dispatched=False,
+            status=commit_status,
+            released_claim_token=released_claim_token,
+        )
     if commit_status in {
         conversations_db.conversation_stock_summary_cas_lost,
         conversations_db.conversation_stock_summary_deleted,
@@ -840,6 +924,56 @@ def process_conversation_with_outcome(
         dispatched=should_dispatch_processing_side_effects,
         status='committed',
     )
+
+
+def process_conversation_with_transcript_redelivery(
+    uid: str,
+    language_code: str,
+    conversation: Conversation,
+    *,
+    max_redeliveries: int = 1,
+) -> ConversationProcessingOutcome:
+    """Run a fresh claimed processing invocation after transcript CAS exhaustion."""
+    redeliveries = 0
+    while True:
+        outcome = process_conversation_with_outcome(uid, language_code, conversation)
+        if outcome.status != conversations_db.conversation_stock_summary_transcript_changed:
+            return outcome
+        if redeliveries >= max_redeliveries:
+            marked_failed = mark_released_conversation_processing_failed(
+                uid,
+                outcome.conversation,
+                outcome.released_claim_token,
+            )
+            durable_conversation = conversations_db.get_conversation(uid, outcome.conversation.id)
+            durable = Conversation(**(durable_conversation or outcome.conversation.dict()))
+            if not marked_failed and durable.status == ConversationStatus.completed:
+                return ConversationProcessingOutcome(
+                    conversation=durable,
+                    dispatched=False,
+                    status='already_completed',
+                )
+            if not marked_failed and durable.status in {
+                ConversationStatus.in_progress,
+                ConversationStatus.processing,
+            }:
+                return ConversationProcessingOutcome(
+                    conversation=durable,
+                    dispatched=False,
+                    status='processing_in_progress',
+                )
+            return ConversationProcessingOutcome(
+                conversation=durable,
+                dispatched=False,
+                status=CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED,
+            )
+        redeliveries += 1
+        conversation = outcome.conversation
+        print(
+            f"re-dispatching conversation.id={conversation.id} after transcript CAS exhaustion "
+            f"({redeliveries}/{max_redeliveries})",
+            flush=True,
+        )
 
 
 def process_conversation(

@@ -1,6 +1,8 @@
 import asyncio
+import ast
 import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -281,11 +283,21 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
             "canonical_confirmed": True,
         }
     )
+    replayed_conversation = deepcopy(conversation)
+    replayed_conversation["active_summary_version_id"] = "version-enriched"
+    replayed_conversation["enrichment_state"] = {
+        "trace_id": identity.trace_id,
+        "status": "writeback_applied",
+        "source_transcript_hash": identity.transcript_sha256,
+        "source_active_summary_version_id": "version-a",
+        "result_summary_version_id": "version-enriched",
+    }
+    conversation_reads = iter((conversation, replayed_conversation))
     service = HermesCloudEnrichmentService(
         repository=SimpleNamespace(),
         event_store=SimpleNamespace(),
         runtime_service_factory=lambda allow_shadow: runtime_service,
-        conversation_reader=lambda uid, conversation_id: deepcopy(conversation),
+        conversation_reader=lambda uid, conversation_id: deepcopy(next(conversation_reads)),
         summary_applier=summary_applier,
     )
     service._runtime = AsyncMock(return_value=_runtime())
@@ -316,9 +328,36 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
     assert verifier_input["transcript_segments"] == conversation["transcript_segments"]
     assert verifier_input["candidate_summary"]["title"] == "Synthetic cafe order"
     assert "conversation-a" not in verifier_request.user_input
-    assert summary_applier.await_args.kwargs["require_canonical"] is True
-    assert summary_applier.await_args.kwargs["summary_source"] == "hermes_cloud"
-    grounding = summary_applier.await_args.kwargs["today_card_grounding"]
+    writeback = summary_applier.await_args.kwargs
+    assert writeback["require_canonical"] is True
+    assert writeback["summary_source"] == "hermes_cloud"
+    assert writeback["active_summary_version_id"] == "version-a"
+    assert writeback["expected_transcript_hash"] == hermes_cloud_enrichment.transcript_grounding_hash(
+        conversation["transcript_segments"]
+    )
+    assert writeback["require_source_match"] is True
+    recovery_source = (Path(__file__).parents[2] / "ella" / "services" / "summary_recovery.py").read_text()
+    recovery_module = ast.parse(recovery_source)
+    adapter = next(
+        node
+        for node in recovery_module.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "apply_summary_update"
+    )
+    adapter_args = {argument.arg for argument in adapter.args.kwonlyargs}
+    write_call = next(
+        node
+        for node in ast.walk(adapter)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "write_conversation_summary"
+    )
+    forwarded_args = {
+        keyword.arg: keyword.value.id for keyword in write_call.keywords if isinstance(keyword.value, ast.Name)
+    }
+    assert {"expected_transcript_hash", "require_source_match"} <= adapter_args
+    assert forwarded_args["expected_transcript_hash"] == "expected_transcript_hash"
+    assert forwarded_args["require_source_match"] == "require_source_match"
+    grounding = writeback["today_card_grounding"]
     assert grounding["semantic_outcome"] == "supported"
     assert grounding["owner_hash"].startswith("sha256:")
     assert grounding["conversation_id_hash"].startswith("sha256:")
