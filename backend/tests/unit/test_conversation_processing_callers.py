@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import importlib.util
+import json
 import sys
 import types
 from datetime import datetime, timezone
@@ -307,7 +308,7 @@ async def _async_value(value):
     return value
 
 
-@pytest.mark.parametrize("status", ["already_completed", "stock_summary_cas_lost"])
+@pytest.mark.parametrize("status", ["already_completed", "stock_summary_cas_lost", "stock_summary_transcript_changed"])
 def test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes(monkeypatch, caller_modules, status):
     calls = []
     conversation = _conversation()
@@ -338,6 +339,11 @@ def test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcome
 
     assert calls == []
     assert len(websocket.sent_bytes) == 1
+    response = json.loads(websocket.sent_bytes[0][4:].decode())
+    if status == "already_completed":
+        assert response == {"conversation_id": conversation.id, "success": True}
+    else:
+        assert response == {"conversation_id": conversation.id, "error": status}
 
 
 def test_workflow_does_not_dispatch_external_integrations_for_non_dispatch_outcome(monkeypatch, caller_modules):

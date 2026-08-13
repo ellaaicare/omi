@@ -538,6 +538,55 @@ def test_process_cas_loser_returns_durable_authority_without_dispatch(monkeypatc
     assert outcome.status == conversation_processor.conversations_db.conversation_stock_summary_cas_lost
 
 
+def test_process_retries_latest_transcript_after_capture_cas_loss(monkeypatch):
+    conversation = _long_conversation()
+    latest = conversation.dict()
+    latest["transcript_segments"] = [
+        *latest["transcript_segments"],
+        TranscriptSegment(
+            text="late durable capture",
+            speaker="SPEAKER_00",
+            is_user=True,
+            start=1621,
+            end=1622,
+        ).dict(),
+    ]
+    commits = []
+    summaries = []
+    monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda _uid: None)
+    monkeypatch.setattr(
+        conversation_processor,
+        "_get_structured",
+        lambda _uid, _language, current, *_args, **_kwargs: summaries.append(len(current.transcript_segments))
+        or (Structured(title="Latest", overview="Latest transcript."), False),
+    )
+
+    def commit(_uid, _conversation_id, payload, **_kwargs):
+        commits.append(payload)
+        if len(commits) == 1:
+            return {
+                "status": conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+                "conversation": latest,
+                "dispatched": False,
+            }
+        return _committed_processing_result(payload)
+
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "commit_stock_summary_processing_result",
+        commit,
+    )
+    monkeypatch.setattr(conversation_processor, "fire_postprocess_webhook", None)
+
+    outcome = conversation_processor.process_conversation_with_outcome("uid-1", "en", conversation)
+
+    assert summaries == [1, 2]
+    assert len(commits) == 2
+    assert outcome.status == "committed"
+    assert outcome.dispatched is True
+    assert len(outcome.conversation.transcript_segments) == 2
+
+
 def test_completed_duplicate_initial_processing_returns_explicit_no_dispatch(monkeypatch):
     conversation = _long_conversation()
     conversation.status = ConversationStatus.completed

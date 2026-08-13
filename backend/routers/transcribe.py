@@ -706,7 +706,10 @@ async def _stream_handler(
 
             outcome = await asyncio.to_thread(process_conversation_with_outcome, uid, language, conversation)
             conversation = outcome.conversation
-            if not outcome.dispatched and outcome.status == 'processing_in_progress':
+            if not outcome.dispatched and outcome.status in {
+                'processing_in_progress',
+                conversations_db.conversation_stock_summary_transcript_changed,
+            }:
                 return
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)

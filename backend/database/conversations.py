@@ -47,6 +47,7 @@ conversation_enriched_summary_kinds = {
 conversation_processing_retry_lease_seconds = 900
 initial_conversation_processing_lease_seconds = 300
 conversation_stock_summary_cas_lost = 'stock_summary_cas_lost'
+conversation_stock_summary_transcript_changed = 'stock_summary_transcript_changed'
 conversation_stock_summary_malformed = 'stock_summary_authority_malformed'
 conversation_stock_summary_deleted = 'stock_summary_conversation_deleted'
 
@@ -894,7 +895,7 @@ def _commit_stock_summary_processing_result_transaction(
             != expected_transcript_hash
         ):
             return {
-                'status': conversation_stock_summary_cas_lost,
+                'status': conversation_stock_summary_transcript_changed,
                 'conversation': durable_conversation,
                 'dispatched': False,
             }

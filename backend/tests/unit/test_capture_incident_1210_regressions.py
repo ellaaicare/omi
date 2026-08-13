@@ -365,7 +365,7 @@ def test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership(mon
         "conversation-a",
     )
 
-    assert result["status"] != "committed"
+    assert result["status"] == "ownership_lost"
     assert transaction.updates == []
     assert transaction.deletes == []
 
@@ -640,5 +640,5 @@ def test_stock_summary_commit_rejects_transcript_appended_after_processing_snaps
         expected_transcript_hash=conversations.transcript_grounding_hash(transcript_snapshot),
     )
 
-    assert result["status"] != "committed"
+    assert result["status"] == conversations.conversation_stock_summary_transcript_changed
     assert transaction.updates == []

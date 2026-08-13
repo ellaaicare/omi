@@ -81,6 +81,13 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
             # Run blocking operations in thread pool to avoid blocking event loop
             outcome = await asyncio.to_thread(process_conversation_with_outcome, uid, language, conversation)
             conversation = outcome.conversation
+            if not outcome.dispatched and outcome.status not in {'already_completed'}:
+                response = {"conversation_id": conversation_id, "error": outcome.status}
+                data = bytearray()
+                data.extend(struct.pack("I", 201))
+                data.extend(bytes(json.dumps(response), "utf-8"))
+                await websocket.send_bytes(data)
+                return
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, conversation_id)
             await asyncio.to_thread(mark_unexpected_conversation_processing_failed, uid, conversation)
