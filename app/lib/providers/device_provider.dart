@@ -566,7 +566,13 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     } catch (error) {
       Logger.debug('Could not clear the stale disconnect notification: $error');
     }
-    await setConnectedDevice(device, operationGeneration: operationGeneration);
+    // The transport callback is the connection authority. Publish the device
+    // and connected bit in one synchronous turn before any setup await so a
+    // failed overlapping scan cannot clear half of the committed state.
+    connectedDevice = device;
+    pairedDevice = device;
+    setIsConnected(true);
+    await getDeviceInfo(operationGeneration: operationGeneration);
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
     if (captureProvider != null) {
@@ -575,7 +581,6 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
     await setisDeviceStorageSupport(operationGeneration: operationGeneration);
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    setIsConnected(true);
 
     // Read initial battery level
     int currentLevel = await _retrieveBatteryLevel(device.id);

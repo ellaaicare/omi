@@ -481,6 +481,55 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
+  test('connected callback publishes device and connection atomically before reconnect scan failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final scanEntered = Completer<void>();
+    final scanResult = Completer<BtDevice?>();
+    final storageEntered = Completer<void>();
+    final storageResult = Completer<List<int>>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        scanEntered.complete();
+        return scanResult.future;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) {
+        storageEntered.complete();
+        return storageResult.future;
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.periodicConnect('test callback publication ordering');
+    await scanEntered.future;
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await storageEntered.future.timeout(const Duration(seconds: 1));
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+
+    scanResult.completeError(StateError('synthetic reconnect scan failed after callback publication'));
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+
+    storageResult.complete(const []);
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.automaticReconnectAttempts, 0);
+    expect(provider.automaticReconnectExhausted, isFalse);
+  });
+
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
