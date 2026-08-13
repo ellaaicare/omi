@@ -56,6 +56,27 @@ def _conversation(text: str = "Synthetic cafe order.") -> dict:
     }
 
 
+def test_enrichment_identity_is_scoped_to_active_summary_version():
+    first = _conversation()
+    second = deepcopy(first)
+    second["active_summary_version_id"] = "version-b"
+
+    first_identity = hermes_cloud_enrichment.build_enrichment_identity(
+        uid="synthetic-user",
+        conversation_id=first["id"],
+        conversation=first,
+    )
+    second_identity = hermes_cloud_enrichment.build_enrichment_identity(
+        uid="synthetic-user",
+        conversation_id=second["id"],
+        conversation=second,
+    )
+
+    assert first_identity.transcript_sha256 == second_identity.transcript_sha256
+    assert first_identity.client_interaction_id != second_identity.client_interaction_id
+    assert first_identity.job_id != second_identity.job_id
+
+
 def test_enrichment_resolves_exact_published_transcript_target(monkeypatch):
     repository = SimpleNamespace()
     requested = []

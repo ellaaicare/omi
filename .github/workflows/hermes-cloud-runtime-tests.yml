@@ -23,8 +23,15 @@ on:
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
+      - "backend/models/conversation.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/conversations/postprocess_conversation.py"
+      - "backend/utils/conversations/merge_conversations.py"
       - "backend/routers/conversations.py"
       - "backend/routers/developer.py"
       - "backend/routers/users.py"
@@ -121,6 +128,7 @@ on:
       - "backend/tests/unit/test_voice_proxy_auth.py"
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
       - "backend/tests/unit/test_conversation_summary_cas.py"
+      - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
@@ -170,8 +178,15 @@ on:
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
+      - "backend/models/conversation.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/pusher.py"
+      - "backend/routers/integration.py"
+      - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/process_conversation.py"
+      - "backend/utils/conversations/postprocess_conversation.py"
+      - "backend/utils/conversations/merge_conversations.py"
       - "backend/routers/conversations.py"
       - "backend/routers/developer.py"
       - "backend/routers/users.py"
@@ -268,6 +283,7 @@ on:
       - "backend/tests/unit/test_voice_proxy_auth.py"
       - "backend/tests/unit/test_ella_callbacks_summary_update.py"
       - "backend/tests/unit/test_conversation_summary_cas.py"
+      - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
@@ -353,6 +369,7 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
+          database/conversations.py
           database/ella_caregivers.py
           database/ella_provisioning.py
           database/ella_postgres.py
@@ -362,11 +379,16 @@ jobs:
           database/managed_cloud_consent.py
           database/runtime_targets.py
           database/voice_canary.py
+          models/conversation.py
           routers/transcribe.py
           routers/conversations.py
           routers/developer.py
           routers/users.py
           utils/capture_buffer.py
+          utils/conversations/process_conversation.py
+          utils/conversations/postprocess_conversation.py
+          utils/conversations/merge_conversations.py
+          routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
           ella/__init__.py
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
@@ -446,8 +468,13 @@ jobs:
           database/ella_postgres.py
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
+          models/conversation.py
           routers/users.py
           routers/conversations.py routers/developer.py
+          routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
+          utils/conversations/process_conversation.py
+          utils/conversations/postprocess_conversation.py
+          utils/conversations/merge_conversations.py
           ella/__init__.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/ai_consent.py ella/routers/canonical_events.py ella/routers/chat.py
@@ -470,6 +497,7 @@ jobs:
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
+          ella/services/summary_writeback.py
           ella/services/today_card.py ella/services/today_card_postgres.py
           ella/utils/auto_provision.py ella/utils/identity_sync.py
           ella/utils/provision_authority.py
@@ -485,6 +513,7 @@ jobs:
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_capture_buffer_retention.py
           tests/unit/test_conversation_summary_cas.py
+          tests/unit/test_conversation_processing_callers.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
           tests/unit/test_ella_ai_consent.py
@@ -746,6 +775,8 @@ jobs:
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
             "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[memory]"
             "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[daily_card]"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_identity_is_scoped_to_active_summary_version"
+            "tests/unit/test_hermes_product_fit_canary.py::test_config_requires_safe_enrichment_summary_version_pin"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript"
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_ignores_self_attestation_and_requires_independent_verifier"
             "tests/unit/test_hermes_cloud_runtime.py::test_grounding_verifier_is_stateless_and_uses_transcript_admission"
@@ -779,8 +810,8 @@ jobs:
           test "$(
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
-          )" -eq 19
-          test "$collected" -eq 559
+          )" -eq 20
+          test "$collected" -eq 561
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -821,6 +852,7 @@ jobs:
               tests/unit/test_ella_canonical_omi.py \
               tests/unit/test_today_card_reinterpretation.py \
               tests/unit/test_conversation_processing_failures.py \
+              tests/unit/test_conversation_processing_callers.py \
               tests/postgres/test_today_card_lifecycle_postgres.py |
               sed '/^$/d'
           )"
@@ -839,7 +871,26 @@ jobs:
             "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[owner]"
             "tests/unit/test_today_card_api.py::test_internal_uid_mutations_require_exact_service_subject"
             "tests/unit/test_today_card_api.py::test_cross_account_materialize_due_route_is_not_exposed"
+            "tests/unit/test_conversation_processing_failures.py::test_process_commits_summary_authority_before_apps_and_postprocess_webhook"
+            "tests/unit/test_conversation_processing_failures.py::test_process_cas_loser_returns_durable_authority_without_dispatch"
+            "tests/unit/test_conversation_processing_failures.py::test_completed_duplicate_initial_processing_returns_explicit_no_dispatch"
+            "tests/unit/test_conversation_processing_failures.py::test_post_commit_app_failure_does_not_rollback_or_suppress_hermes_dispatch"
+            "tests/unit/test_conversation_processing_failures.py::test_unexpected_failure_after_durable_completion_is_a_noop"
+            "tests/unit/test_conversation_processing_failures.py::test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_effects"
+            "tests/unit/test_conversation_processing_failures.py::test_live_recording_callers_gate_external_integrations_on_dispatch_outcome[routers/pusher.py]"
+            "tests/unit/test_conversation_processing_failures.py::test_live_recording_callers_gate_external_integrations_on_dispatch_outcome[routers/transcribe.py]"
+            "tests/unit/test_conversation_processing_failures.py::test_intentional_reprocess_and_destructive_merge_callers_require_explicit_outcomes"
+            "tests/unit/test_conversation_processing_failures.py::test_merge_preserves_sources_when_new_conversation_processing_does_not_dispatch"
+            "tests/unit/test_conversation_processing_failures.py::test_postprocessing_marks_failed_when_summary_reprocess_does_not_dispatch"
+            "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_suppresses_integrations_for_non_dispatch_outcome"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
+            "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
+            "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
+            "tests/unit/test_conversation_processing_callers.py::test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
+            "tests/unit/test_conversation_processing_callers.py::test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
+            "tests/unit/test_conversation_processing_callers.py::test_pusher_dispatches_external_integrations_once_for_winning_outcome"
+            "tests/unit/test_conversation_processing_callers.py::test_workflow_does_not_dispatch_external_integrations_for_non_dispatch_outcome"
+            "tests/unit/test_conversation_processing_callers.py::test_integration_does_not_dispatch_external_integrations_for_non_dispatch_outcome"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_deleted_source_is_tombstoned_removed_and_excluded_after_stale_reinsert"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_source_less_card_watermark_detects_delayed_canonical_evidence"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_same_version_safety_tightening_invalidates_ready_source_fingerprint"
@@ -850,6 +901,7 @@ jobs:
           for required_id in "${required_today_card_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$today_card_ids"
           done
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 211
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
@@ -857,6 +909,7 @@ jobs:
             tests/unit/test_ella_canonical_omi.py \
             tests/unit/test_today_card_reinterpretation.py \
             tests/unit/test_conversation_processing_failures.py \
+            tests/unit/test_conversation_processing_callers.py \
             tests/postgres/test_today_card_lifecycle_postgres.py \
             -v | tee /tmp/today-card-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/today-card-pytest.log
@@ -948,7 +1001,31 @@ jobs:
             -v
           test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 30
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | grep -c '::')" -eq 19
+          conversation_summary_cas_ids="$(
+            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py |
+              sed '/^$/d'
+          )"
+          required_conversation_summary_cas_ids=(
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_preserves_concurrent_capture_fields_and_unknowns"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_two_processors_from_empty_source_produce_one_winner"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_persisted_conversation_does_not_resurrect_without_create_authority"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_doc_parent_write_sanitizes_photos_and_audio_url"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_doc_honors_enhanced_data_protection"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_sequential_reprocess_uses_expected_active_version_cas"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_discarded_processing_preserves_durable_authority"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_falsey_non_list_authority_fails_closed[malformed_versions0]"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_falsey_non_string_active_id_fails_closed[malformed_active_id0]"
+            "tests/unit/test_conversation_summary_cas.py::test_hermes_enrichment_outbox_is_written_in_same_transaction_as_summary"
+            "tests/unit/test_conversation_summary_cas.py::test_conditional_processing_failure_cannot_roll_back_completed_authority"
+            "tests/unit/test_conversation_summary_cas.py::test_conditional_processing_failure_updates_only_failure_fields"
+            "tests/unit/test_conversation_summary_cas.py::test_folder_assignment_cas_does_not_overwrite_concurrent_owner_choice"
+            "tests/unit/test_conversation_summary_cas.py::test_initial_processing_claim_rejects_completed_duplicate_without_status_rollback"
+            "tests/unit/test_conversation_summary_cas.py::test_initial_processing_claim_promotes_in_progress_once_with_partial_update"
+          )
+          for required_id in "${required_conversation_summary_cas_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
+          done
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 45
           pytest tests/unit/test_conversation_summary_cas.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v

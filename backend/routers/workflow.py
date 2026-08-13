@@ -8,7 +8,8 @@ from fastapi import Request, HTTPException
 import database.conversations as conversations_db
 import models.integrations as integration_models
 import models.conversation as conversation_models
-from routers.conversations import process_conversation, trigger_external_integrations
+from routers.conversations import trigger_external_integrations
+from utils.conversations.process_conversation import process_conversation_with_outcome
 from utils.conversations.location import get_google_maps_location
 
 router = APIRouter()
@@ -50,10 +51,11 @@ def create_memory(
         create_memory.language = language_code
 
     # Process
-    memory = process_conversation(uid, language_code, create_memory)
+    outcome = process_conversation_with_outcome(uid, language_code, create_memory)
+    memory = outcome.conversation
 
-    # Always trigger integration
-    trigger_external_integrations(uid, memory)
+    if outcome.dispatched:
+        trigger_external_integrations(uid, memory)
 
     # Empty response
     return {}

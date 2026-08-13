@@ -8,7 +8,7 @@ from pydub import AudioSegment
 import database.conversations as conversations_db
 from database.users import get_user_store_recording_permission
 from models.conversation import *
-from utils.conversations.process_conversation import process_conversation, process_user_emotion
+from utils.conversations.process_conversation import process_conversation_with_outcome, process_user_emotion
 from utils.other.storage import upload_postprocessing_audio, delete_postprocessing_audio, upload_conversation_recording
 from utils.stt.pre_recorded import deepgram_prerecorded, postprocess_words
 from utils.stt.speech_profile import get_speech_profile_matching_predictions
@@ -112,7 +112,16 @@ def postprocess_conversation(
             return 200, conversation
 
         # Reprocess conversation with improved transcription
-        result: Conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
+        outcome = process_conversation_with_outcome(
+            uid,
+            conversation.language,
+            conversation,
+            force_process=True,
+            is_reprocess=True,
+        )
+        if not outcome.dispatched:
+            raise RuntimeError(f"postprocessing summary regeneration not committed: {outcome.status}")
+        result: Conversation = outcome.conversation
 
         # Process users emotion, async
         if emotional_feedback:

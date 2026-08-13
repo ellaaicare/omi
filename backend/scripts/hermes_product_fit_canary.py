@@ -235,6 +235,7 @@ class CanaryConfig:
     voice_summary_version_id: str
     memory_pack_sha256: str
     enrichment_conversation_id: str
+    enrichment_active_summary_version_id: str
     enrichment_transcript_sha256: str
     max_latency_ms: int
 
@@ -293,6 +294,7 @@ class CanaryConfig:
             raise HarnessRefusal("voice_memory_shape_invalid")
         if set(enrichment) != {
             "conversation_id",
+            "active_summary_version_id",
             "transcript_sha256",
         }:
             raise HarnessRefusal("enrichment_shape_invalid")
@@ -378,6 +380,10 @@ class CanaryConfig:
             enrichment_conversation_id=_safe_id(
                 enrichment["conversation_id"],
                 "enrichment_conversation_id",
+            ),
+            enrichment_active_summary_version_id=_safe_id(
+                enrichment["active_summary_version_id"],
+                "enrichment_active_summary_version_id",
             ),
             enrichment_transcript_sha256=transcript_sha256,
             max_latency_ms=max_latency_ms,
@@ -1240,6 +1246,7 @@ class LiveCanaryAdapter:
             self.config.uid,
             self.config.enrichment_conversation_id,
             self.config.enrichment_transcript_sha256,
+            self.config.enrichment_active_summary_version_id,
         )
         payload = {
             "uid": self.config.uid,
