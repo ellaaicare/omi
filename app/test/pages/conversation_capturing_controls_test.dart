@@ -73,7 +73,7 @@ void main() {
     expect(find.text('Stop Recording'), findsOneWidget);
   });
 
-  testWidgets('empty phone action stops phone transport once and exits after owner finalization', (tester) async {
+  testWidgets('empty phone action delegates finalize-before-close to its owner once', (tester) async {
     final capture = _FakeCaptureProvider(
       RecordingState.stop,
       transcriptReady: false,
@@ -84,10 +84,12 @@ void main() {
     await _pumpCapturePage(
       tester,
       capture,
-      onProcessNow: () {
+      onProcessNow: () async {
         ownerCalls++;
-        expect(capture.phoneStops, 1, reason: 'physical capture must stop before final transcript processing');
-        return ownerGate.future;
+        expect(capture.phoneStops, 0, reason: 'the page must not close the transcript socket before its owner');
+        final finalized = await capture.stopStreamRecordingAndFinalize();
+        await ownerGate.future;
+        return finalized;
       },
     );
 
@@ -97,6 +99,7 @@ void main() {
     await tester.pump();
 
     expect(capture.phoneStops, 1);
+    expect(capture.phoneFinalizeCalls, 1);
     expect(capture.deviceStops, 0);
     expect(ownerCalls, 1);
     expect(find.byKey(const Key('conversation-process-now-progress')), findsOneWidget);
@@ -119,7 +122,7 @@ void main() {
       capture,
       onProcessNow: () async {
         ownerCalls++;
-        await capture.stopStreamRecording();
+        await capture.stopStreamRecordingAndFinalize();
         await finalTranscriptGate.future;
         return true;
       },
@@ -133,6 +136,7 @@ void main() {
 
     expect(ownerCalls, 1);
     expect(capture.phoneStops, 1);
+    expect(capture.phoneFinalizeCalls, 1);
     expect(find.byKey(const Key('conversation-process-now-progress')), findsOneWidget);
     expect(find.byType(ConversationCapturingPage), findsOneWidget);
 
@@ -141,7 +145,25 @@ void main() {
 
     expect(ownerCalls, 1);
     expect(capture.phoneStops, 1);
+    expect(capture.phoneFinalizeCalls, 1);
     expect(find.byType(ConversationCapturingPage), findsNothing);
+  });
+
+  testWidgets('mute targets active phone capture even when a stale necklace reference exists', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final capture = _FakeCaptureProvider(
+      RecordingState.record,
+      transcriptReady: true,
+      phoneOwnsMobileAudio: true,
+    )..updateRecordingDevice(necklace);
+    await _pumpCapturePage(tester, capture);
+
+    await tester.tap(find.byKey(const Key('conversation-capture-mute')));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(capture.phoneStops, 1);
+    expect(capture.devicePauses, 0);
+    expect(capture.recordingState, RecordingState.stop);
   });
 
   testWidgets('empty initializing necklace action targets necklace transport and exits', (tester) async {
@@ -229,7 +251,9 @@ class _FakeCaptureProvider extends CaptureProvider {
   bool _transcriptReady;
   bool _phoneOwnsMobileAudio;
   int phoneStops = 0;
+  int phoneFinalizeCalls = 0;
   int deviceStops = 0;
+  int devicePauses = 0;
   int systemAudioStops = 0;
   int processingCalls = 0;
 
@@ -259,8 +283,15 @@ class _FakeCaptureProvider extends CaptureProvider {
 
   @override
   Future<bool> stopStreamRecordingAndFinalize() async {
+    phoneFinalizeCalls++;
     await stopStreamRecording();
     return forceProcessingCurrentConversation();
+  }
+
+  @override
+  Future<void> pauseDeviceRecording() async {
+    devicePauses++;
+    updateRecordingState(RecordingState.pause);
   }
 
   @override

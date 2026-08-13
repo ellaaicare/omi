@@ -60,6 +60,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   late bool showSummarizeConfirmation;
   late AnimationController _animationController;
   bool _isMuted = false;
+  _CaptureStopTarget _mutedCaptureTarget = _CaptureStopTarget.none;
   bool _isProcessDialogOpen = false;
   Future<bool>? _processNowInFlight;
   final ScrollController _timelineScrollController = ScrollController();
@@ -92,16 +93,20 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       // Unmute - resume recording
       HapticFeedback.mediumImpact();
 
-      if (PlatformService.isDesktop) {
+      final target = _mutedCaptureTarget;
+      if (target == _CaptureStopTarget.systemAudio ||
+          (PlatformService.isDesktop && target == _CaptureStopTarget.none)) {
         // Desktop - system audio
         setState(() {
           _isMuted = false;
+          _mutedCaptureTarget = _CaptureStopTarget.none;
         });
         await provider.resumeSystemAudioRecording();
-      } else if (provider.havingRecordingDevice) {
+      } else if (target == _CaptureStopTarget.necklace) {
         // Device recording (Omi device)
         setState(() {
           _isMuted = false;
+          _mutedCaptureTarget = _CaptureStopTarget.none;
         });
         await provider.resumeDeviceRecording();
       } else {
@@ -111,6 +116,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
         if (result == PhoneCaptureStartResult.started && provider.recordingState == RecordingState.record) {
           setState(() {
             _isMuted = false;
+            _mutedCaptureTarget = _CaptureStopTarget.none;
           });
           MixpanelManager().phoneMicRecordingStarted();
         } else {
@@ -122,17 +128,20 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       HapticFeedback.heavyImpact();
       await Future.delayed(const Duration(milliseconds: 80));
       HapticFeedback.lightImpact();
+      final target = _captureStopTarget(provider);
       setState(() {
         _isMuted = true;
+        _mutedCaptureTarget = target;
       });
 
-      if (PlatformService.isDesktop) {
+      if (target == _CaptureStopTarget.systemAudio ||
+          (PlatformService.isDesktop && target == _CaptureStopTarget.none)) {
         // Desktop - system audio
         await provider.pauseSystemAudioRecording();
-      } else if (provider.havingRecordingDevice) {
+      } else if (target == _CaptureStopTarget.necklace) {
         // Device recording (Omi device)
         await provider.pauseDeviceRecording();
-      } else {
+      } else if (target == _CaptureStopTarget.phone) {
         // Phone mic
         await provider.stopStreamRecording();
         MixpanelManager().phoneMicRecordingStopped();
@@ -181,18 +190,13 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     }
   }
 
-  Future<bool> _runProcessNow(CaptureProvider provider, {bool processConversation = true}) {
+  Future<bool> _runProcessNow(CaptureProvider provider) {
     final existing = _processNowInFlight;
     if (existing != null) return existing;
 
     final processNow = widget.onProcessNow;
     final stopTarget = _captureStopTarget(provider);
     final operation = Future<bool>.sync(() async {
-      if (!processConversation) {
-        await _stopCaptureTransport(provider, stopTarget);
-        if (processNow != null) return processNow();
-        return false;
-      }
       if (processNow != null) return processNow();
       return switch (stopTarget) {
         _CaptureStopTarget.phone => provider.stopStreamRecordingAndFinalize(),
@@ -225,7 +229,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     final hasContent = provider.segments.isNotEmpty || provider.photos.isNotEmpty;
     if (!hasContent) {
       try {
-        await _runProcessNow(provider, processConversation: false);
+        await _runProcessNow(provider);
       } finally {
         if (mounted) Navigator.of(context).pop();
       }
@@ -494,6 +498,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                       const SizedBox(width: 12),
                       // Mute button
                       GestureDetector(
+                        key: const Key('conversation-capture-mute'),
                         onTap: () => _toggleMute(provider),
                         child: Container(
                           width: 52,

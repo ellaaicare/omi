@@ -644,6 +644,7 @@ class CaptureProvider extends ChangeNotifier
     _freemiumThresholdReached = false;
     _freemiumRemainingSeconds = 0;
     _freemiumRequiresUserAction = false;
+    _resetCaptureDiagnostics();
     notifyListeners();
   }
 
@@ -712,6 +713,12 @@ class CaptureProvider extends ChangeNotifier
   DateTime? _lastCaptureDiagnosticsNotificationAt;
 
   CaptureDiagnostics get captureDiagnostics => _captureDiagnostics;
+
+  void _resetCaptureDiagnostics({bool notify = false}) {
+    _captureDiagnostics = const CaptureDiagnostics();
+    _lastCaptureDiagnosticsNotificationAt = null;
+    if (notify) notifyListeners();
+  }
 
   void _beginCaptureDiagnostics(CaptureDiagnosticSource source, CaptureDiagnosticPhase phase) {
     final now = DateTime.now();
@@ -846,6 +853,16 @@ class CaptureProvider extends ChangeNotifier
 
   void updateRecordingDevice(BtDevice? device) {
     _updateRecordingDevice(device);
+  }
+
+  void _clearFailedDeviceCaptureOwner(_DeviceCaptureAttempt attempt, BtDevice targetDevice) {
+    if (!_isDeviceCaptureAttemptCurrent(attempt) ||
+        _deviceCaptureSession != null ||
+        recordingState == RecordingState.deviceRecord ||
+        _recordingDevice?.id != targetDevice.id) {
+      return;
+    }
+    _updateRecordingDevice(null);
   }
 
   bool _isDeviceCaptureAttemptCurrent(_DeviceCaptureAttempt attempt) =>
@@ -2064,6 +2081,7 @@ class CaptureProvider extends ChangeNotifier
     _captureGeneration++;
     _deviceCaptureGeneration++;
     _deviceCaptureAttempt?.cancel();
+    _resetCaptureDiagnostics(notify: true);
     final deviceStart = _deviceCaptureStartFuture;
     final pendingGeolocation = _captureGeolocationFutures.toList(growable: false);
     final pendingGeolocationStops = pendingGeolocation.map(
@@ -2175,6 +2193,7 @@ class CaptureProvider extends ChangeNotifier
     if (!consentCurrent) {
       updateRecordingState(RecordingState.error);
       _failCaptureDiagnostics(CaptureDiagnosticFailure.consentUnavailable);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       return;
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
@@ -2183,6 +2202,7 @@ class CaptureProvider extends ChangeNotifier
       if (_isDeviceCaptureAttemptCurrent(attempt)) {
         updateRecordingState(RecordingState.error);
         _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
+        _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       }
       return;
     }
@@ -2196,7 +2216,10 @@ class CaptureProvider extends ChangeNotifier
     bool wasPaused = _isPaused;
 
     await _resetStateVariables();
-    if (!_isDeviceCaptureAttemptCurrent(attempt) || !captureAuthority.isCurrent()) return;
+    if (!_isDeviceCaptureAttemptCurrent(attempt) || !captureAuthority.isCurrent()) {
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      return;
+    }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.connectingTranscription, clearFailure: true);
     TranscriptSegmentSocketService? socket;
     try {
@@ -2206,12 +2229,14 @@ class CaptureProvider extends ChangeNotifier
       if (_isDeviceCaptureAttemptCurrent(attempt)) {
         updateRecordingState(RecordingState.error);
         _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
+        _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       }
       return;
     }
     attempt.socket = socket;
     if (!_isDeviceCaptureAttemptCurrent(attempt) || !captureAuthority.isCurrent()) {
       await _stopAbandonedDeviceAttemptSocket(attempt);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       return;
     }
     if (socket == null || socket.state != SocketServiceState.connected) {
@@ -2219,6 +2244,7 @@ class CaptureProvider extends ChangeNotifier
       updateRecordingState(RecordingState.error);
       _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
       await _stopAbandonedDeviceAttemptSocket(attempt);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       return;
     }
     final session = _DeviceCaptureSession(
@@ -2244,6 +2270,7 @@ class CaptureProvider extends ChangeNotifier
         await _closeDeviceCaptureSession(session, stopSocket: false);
       }
       await _stopAbandonedDeviceAttemptSocket(attempt);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       return;
     }
     if (!started ||
@@ -2256,6 +2283,7 @@ class CaptureProvider extends ChangeNotifier
       if (identical(_deviceCaptureSession, session)) {
         await _closeDeviceCaptureSession(session, stopSocket: true);
       }
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       return;
     }
 

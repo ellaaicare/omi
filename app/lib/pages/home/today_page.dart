@@ -645,9 +645,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             if (capture.recordingState == RecordingState.deviceRecord) {
               return _finalizeHomeMoment(capture);
             }
-            if (capture.recordingState == RecordingState.record) {
-              await capture.stopStreamRecording();
-              return _finalizeHomeMoment(capture);
+            if (capture.phoneCaptureOwnsMobileAudio || capture.recordingState == RecordingState.record) {
+              return capture.stopStreamRecordingAndFinalize();
             }
             return false;
           },

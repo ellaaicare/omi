@@ -373,6 +373,31 @@ void main() {
     expect(provider.recordingState, RecordingState.stop);
   });
 
+  test('account transition clears content-bearing capture diagnostics synchronously', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneCaptureStarter: () async => PhoneCaptureStartResult.started,
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    );
+    addTearDown(provider.dispose);
+
+    expect(await provider.streamRecording(), PhoneCaptureStartResult.started);
+    provider.segments = [_segment('account-a', 'Private words from account A')];
+    provider.onSegmentReceived([_segment('account-a', 'Private words from account A')]);
+    await pumpEventQueue();
+    expect(provider.captureDiagnostics.latestTranscript, 'Private words from account A');
+
+    final transition = provider.stopForAccountTransition();
+
+    expect(provider.captureDiagnostics.source, CaptureDiagnosticSource.none);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.idle);
+    expect(provider.captureDiagnostics.latestTranscript, isEmpty);
+    expect(provider.captureDiagnostics.transcriptSegments, 0);
+    await transition;
+  });
+
   test('phone capture waits briefly for verified account authority after consent refresh', () async {
     final authority = _CaptureAuthority('uid-a');
     ActiveWalAuthority? activeAuthority;
@@ -704,6 +729,7 @@ void main() {
 
       expect(transportStarts, 0);
       expect(provider.recordingState, RecordingState.error);
+      expect(provider.recordingDevice, isNull);
       expect(provider.deviceCaptureSocketForTesting, isNull);
     }
   });
