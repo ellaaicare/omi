@@ -1124,7 +1124,7 @@ jobs:
           done
           test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 7
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 8
+          test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 9
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 19
           pytest tests/unit/test_ella_observer.py -v
