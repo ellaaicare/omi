@@ -68,7 +68,21 @@ async def _persist_agent_cluster(pool: asyncpg.Pool, user_db_id: str, cluster_ag
         )
         VALUES ($1::uuid, $2::uuid, $3::jsonb, 'ACTIVE', NOW(), 'Auto-provisioned')
         ON CONFLICT (user_id) DO UPDATE
-        SET agents = agent_clusters.agents || EXCLUDED.agents,
+        SET agents = agent_clusters.agents || EXCLUDED.agents || jsonb_strip_nulls(
+                jsonb_build_object(
+                    'provider', NULLIF(agent_clusters.agents->>'provider', ''),
+                    'gatewayUrl', NULLIF(agent_clusters.agents->>'gatewayUrl', ''),
+                    'scannerGatewayUrl', NULLIF(agent_clusters.agents->>'scannerGatewayUrl', ''),
+                    'workspace', NULLIF(agent_clusters.agents->>'workspace', ''),
+                    'userId', NULLIF(agent_clusters.agents->>'userId', ''),
+                    'userAgentId', NULLIF(agent_clusters.agents->>'userAgentId', ''),
+                    'caregiverAgentId', NULLIF(agent_clusters.agents->>'caregiverAgentId', ''),
+                    'scannerAgentId', NULLIF(agent_clusters.agents->>'scannerAgentId', ''),
+                    'summarizerAgentId', NULLIF(agent_clusters.agents->>'summarizerAgentId', ''),
+                    'gatewayToken', NULLIF(agent_clusters.agents->>'gatewayToken', ''),
+                    'provisionedAt', NULLIF(agent_clusters.agents->>'provisionedAt', '')
+                )
+            ),
             status = 'ACTIVE',
             last_health_check = NOW(),
             health_status = 'Auto-provisioned'

@@ -160,7 +160,7 @@ def test_legacy_auto_provision_uses_utc_fallback_without_shadowing_datetime_time
     assert provisioned_at.tzinfo == timezone.utc
 
 
-def test_legacy_cluster_persistence_uses_atomic_user_upsert_with_explicit_uuid():
+def test_legacy_cluster_persistence_uses_atomic_authority_preserving_upsert():
     captured = {}
 
     class FakePool:
@@ -183,6 +183,16 @@ def test_legacy_cluster_persistence_uses_atomic_user_upsert_with_explicit_uuid()
     assert json.loads(agents) == {"userAgentId": "synthetic-agent"}
     assert "ON CONFLICT (user_id) DO UPDATE" in captured["query"]
     assert "agent_clusters.agents || EXCLUDED.agents" in captured["query"]
+    for authority_key in (
+        "gatewayUrl",
+        "workspace",
+        "userAgentId",
+        "caregiverAgentId",
+        "scannerAgentId",
+        "gatewayToken",
+        "provisionedAt",
+    ):
+        assert f"'{authority_key}', NULLIF(agent_clusters.agents->>'{authority_key}', '')" in captured["query"]
     assert result == "00000000-0000-0000-0000-000000000099"
 
 
