@@ -140,6 +140,8 @@ void main() {
     expect(deleteTarget, findsOneWidget);
     expect(tester.getSize(deleteTarget).height, greaterThanOrEqualTo(48));
 
+    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -300));
+    await tester.pumpAndSettle();
     await tester.tap(deleteTarget);
     await tester.pumpAndSettle();
     expect(find.text('Are you sure you want to delete this memory? This action cannot be undone.'), findsOneWidget);

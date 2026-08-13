@@ -29,9 +29,13 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     IDeviceService? deviceService,
     DeviceConnectionResolver? connectionResolver,
     DeviceScanConnector? scanConnector,
+    @visibleForTesting Duration reconnectionInterval = const Duration(seconds: 15),
+    @visibleForTesting int maxAutomaticReconnectAttempts = 3,
   })  : _deviceService = deviceService ?? ServiceManager.instance().device,
         _connectionResolver = connectionResolver,
-        _scanConnector = scanConnector {
+        _scanConnector = scanConnector,
+        _reconnectionInterval = reconnectionInterval,
+        _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts {
     _deviceService.subscribe(this, this);
   }
 
@@ -52,7 +56,13 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   bool _hasLowBatteryAlerted = false;
   Timer? _reconnectionTimer;
   DateTime? _reconnectAt;
-  final int _connectionCheckSeconds = 15; // 10s periods, 5s for each scan
+  final Duration _reconnectionInterval;
+  final int _maxAutomaticReconnectAttempts;
+  int _automaticReconnectAttempts = 0;
+  bool _automaticReconnectExhausted = false;
+
+  int get automaticReconnectAttempts => _automaticReconnectAttempts;
+  bool get automaticReconnectExhausted => _automaticReconnectExhausted;
 
   bool _havingNewFirmware = false;
   bool get havingNewFirmware => _havingNewFirmware && pairedDevice != null && isConnected;
@@ -303,12 +313,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    _automaticReconnectAttempts = 0;
+    _automaticReconnectExhausted = false;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
         t.cancel();
         return;
       }
-      debugPrint("Period connect seconds: $_connectionCheckSeconds, triggered timer at ${DateTime.now()}");
+      debugPrint("Periodic connect triggered at ${DateTime.now()}");
 
       final deviceService = _deviceService;
       if (deviceService is DeviceService && deviceService.isWifiSyncInProgress) {
@@ -327,13 +339,28 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         if (isConnecting) {
           return;
         }
+        if (_automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
+          t.cancel();
+          isConnecting = false;
+          _automaticReconnectExhausted = true;
+          notifyListeners();
+          return;
+        }
+        _automaticReconnectAttempts++;
         await scanAndConnectToDevice(operationGeneration: generation);
+        if (!_isDeviceOperationCurrent(generation)) return;
+        if (!isConnected && connectedDevice == null && _automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
+          t.cancel();
+          isConnecting = false;
+          _automaticReconnectExhausted = true;
+          notifyListeners();
+        }
       } else {
         t.cancel();
       }
     }
 
-    _reconnectionTimer = Timer.periodic(Duration(seconds: _connectionCheckSeconds), scan);
+    _reconnectionTimer = Timer.periodic(_reconnectionInterval, scan);
     scan(_reconnectionTimer);
   }
 
@@ -435,6 +462,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     isConnected = value;
     if (isConnected) {
       _reconnectionTimer?.cancel();
+      _automaticReconnectAttempts = 0;
+      _automaticReconnectExhausted = false;
     }
     notifyListeners();
   }

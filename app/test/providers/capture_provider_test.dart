@@ -80,6 +80,9 @@ class _CaptureAuthority implements AccountCommitAuthority {
 }
 
 class _FakeMicRecorder implements IMicRecorderService {
+  _FakeMicRecorder({this.failuresBeforeStart = 0});
+
+  final int failuresBeforeStart;
   Function(Uint8List bytes)? _onByteReceived;
   Function()? _onRecording;
   Function()? _onStop;
@@ -95,6 +98,9 @@ class _FakeMicRecorder implements IMicRecorderService {
     Function()? onInitializing,
   }) async {
     starts++;
+    if (starts <= failuresBeforeStart) {
+      throw StateError('microphone is still owned by a prior session');
+    }
     _onByteReceived = onByteReceived;
     _onRecording = onRecording;
     _onStop = onStop;
@@ -255,6 +261,40 @@ void main() {
     expect(await start, PhoneCaptureStartResult.started);
     expect(transmittedFrames, 1);
     expect(provider.recordingState, RecordingState.record);
+    expect(provider.captureDiagnostics.source, CaptureDiagnosticSource.phone);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.streaming);
+    expect(provider.captureDiagnostics.physicalFrames, 1);
+    expect(provider.captureDiagnostics.physicalBytes, 3);
+    expect(provider.captureDiagnostics.transmittedFrames, 0);
+  });
+
+  test('production phone path clears one stale recorder owner and retries once', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder(failuresBeforeStart: 1);
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      captureStartProofTimeout: const Duration(milliseconds: 100),
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    while (mic.starts < 2) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    mic.confirmRecording();
+    mic.emit([4, 5, 6, 7]);
+
+    expect(await start, PhoneCaptureStartResult.started);
+    expect(mic.starts, 2);
+    expect(mic.stops, 1);
+    expect(provider.captureDiagnostics.hasPhysicalAudio, isTrue);
+    expect(provider.captureDiagnostics.hasTranscriptionDelivery, isTrue);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.none);
   });
 
   test('production phone path cancels a native start receipt after account drift', () async {
@@ -795,7 +835,7 @@ void main() {
     await start;
     expect(transportStarts, 0);
     expect(provider.recordingDevice, isNull);
-    expect(provider.recordingState, RecordingState.error);
+    expect(provider.recordingState, RecordingState.stop);
     expect(abandonedSocket.pure.stops, 1);
   });
 
@@ -975,7 +1015,7 @@ void main() {
 
     expect(await provider.handleRecordingDeviceDisconnected('necklace-1'), isTrue);
     expect(provider.recordingDevice, isNull);
-    expect(provider.recordingState, RecordingState.error);
+    expect(provider.recordingState, RecordingState.stop);
   });
 
   test('idle necklace disconnect cannot cancel active phone capture', () async {

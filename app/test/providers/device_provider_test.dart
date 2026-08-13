@@ -370,6 +370,31 @@ void main() {
     expect(provider.presentationIsConnected, isFalse);
   });
 
+  test('automatic reconnect stops after a bounded number of failed scans', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        return null;
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test bounded reconnect');
+    for (var attempt = 0; attempt < 20 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(provider.automaticReconnectAttempts, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+  });
+
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
