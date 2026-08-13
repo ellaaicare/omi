@@ -510,7 +510,7 @@ jobs:
           ella/utils/auto_provision.py ella/utils/identity_sync.py
           ella/utils/provision_authority.py
           utils/ella/__init__.py utils/ella/canonical_auth.py utils/ella/canonical_context.py
-          utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py
+          utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py utils/ella/postprocess.py
           utils/ella/scanner.py utils/ella/scanner_keyterms.py
           utils/other/endpoints.py
           utils/capture_buffer.py
