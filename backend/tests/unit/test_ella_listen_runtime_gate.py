@@ -183,6 +183,8 @@ def test_legacy_cluster_persistence_uses_atomic_authority_preserving_upsert():
     assert json.loads(agents) == {"userAgentId": "synthetic-agent"}
     assert "ON CONFLICT (user_id) DO UPDATE" in captured["query"]
     assert "agent_clusters.agents || EXCLUDED.agents" in captured["query"]
+    assert "WHEN NULLIF(agent_clusters.agents->>'userAgentId', '') IS NOT NULL" in captured["query"]
+    assert "ELSE '{}'::jsonb" in captured["query"]
     for authority_key in (
         "gatewayUrl",
         "workspace",
