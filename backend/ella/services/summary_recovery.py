@@ -24,6 +24,7 @@ from ella.services.summary_writeback import (
     CanonicalSummaryRepairExhaustedError,
     CanonicalSummaryRetryReceiptUnconfirmedError,
     CanonicalSummaryWriteUnconfirmedError,
+    is_current_summary_request_fingerprint_input,
     write_conversation_summary,
 )
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
@@ -484,6 +485,7 @@ async def invoke_hermes_recovery(
     client_context: Optional[str] = None,
     config: Optional[SummaryProviderConfig] = None,
     async_client_factory: Any = httpx.AsyncClient,
+    trace_id_override: Optional[str] = None,
 ) -> dict[str, Any]:
     """Generate and strictly apply enrichment through the canonical Hermes API session."""
 
@@ -493,11 +495,15 @@ async def invoke_hermes_recovery(
     conversation_id = str(conversation['id'])
     _, source_sha256 = build_hermes_recovery_source(conversation)
     source_summary_sha256 = _summary_content_sha256(conversation)
-    trace_id = f'summary-retry:{conversation_id}:{request_id}:hermes'
+    default_trace_id = f'summary-retry:{conversation_id}:{request_id}:hermes'
+    trace_id = str(trace_id_override or default_trace_id)
+    session_id = f'summary-recovery:{conversation_id}:{request_id}'
+    if trace_id != default_trace_id:
+        session_id = f'{session_id}:{hashlib.sha256(trace_id.encode("utf-8")).hexdigest()[:16]}'
     summary = await generate_summary_from_prompt(
         prompt=_build_recovery_prompt(conversation, client_context),
         fallback=_structured_summary(conversation),
-        session_id=f'summary-recovery:{conversation_id}:{request_id}',
+        session_id=session_id,
         session_key=canonical_omi_session_key(uid),
         trace_id=trace_id,
         required_tags=('omi', 'recovery'),
@@ -542,6 +548,21 @@ async def invoke_hermes_recovery(
         'source_sha256': source_sha256,
         'session_scope_sha256': hashlib.sha256(canonical_omi_session_key(uid).encode('utf-8')).hexdigest(),
     }
+
+
+def _pending_canonical_rerun_trace_id(
+    *,
+    conversation_id: str,
+    request_id: str,
+    active_summary_version_id: Any,
+    pending_state: dict[str, Any],
+) -> str:
+    prior_trace_id = str(pending_state.get('trace_id') or 'missing')
+    prior_fingerprint = str(pending_state.get('request_fingerprint') or 'missing')
+    digest = hashlib.sha256(
+        f'{prior_trace_id}|{prior_fingerprint}|{active_summary_version_id or "missing"}'.encode('utf-8')
+    ).hexdigest()
+    return f'summary-retry:{conversation_id}:{request_id}:hermes:pending-rerun:{digest[:16]}'
 
 
 def _existing_recovered_version_id(conversation: dict[str, Any]) -> Optional[str]:
@@ -902,6 +923,8 @@ async def recover_failed_conversation_summary(
             pending_state.get('status') == 'writeback_pending_canonical'
             and pending_state.get('kind') == 'recovered_enriched'
             and pending_state.get('trace_id')
+            and str(pending_state.get('request_fingerprint') or '').strip()
+            and is_current_summary_request_fingerprint_input(pending_state.get('request_fingerprint_input'))
             and latest.get('active_summary_version_id')
         ):
             stored_request_input = pending_state.get('request_fingerprint_input')
@@ -913,9 +936,7 @@ async def recover_failed_conversation_summary(
                 summary={},
                 summary_kind='recovered_enriched',
                 require_canonical=True,
-                replay_request_fingerprint_input=(
-                    stored_request_input if isinstance(stored_request_input, dict) else None
-                ),
+                replay_request_fingerprint_input=stored_request_input,
                 canonical_retry_recorder=_processing_retry_canonical_recorder(
                     uid=uid,
                     conversation_id=conversation_id,
@@ -928,6 +949,18 @@ async def recover_failed_conversation_summary(
                 raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed')
         else:
             isolated_config = await summary_provider_config_for_uid(uid, config)
+            rerun_trace_id = None
+            if (
+                pending_state.get('status') == 'writeback_pending_canonical'
+                and pending_state.get('kind') == 'recovered_enriched'
+                and pending_state.get('trace_id')
+            ):
+                rerun_trace_id = _pending_canonical_rerun_trace_id(
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                    active_summary_version_id=latest.get('active_summary_version_id'),
+                    pending_state=pending_state,
+                )
             apply_result = await invoke_hermes_recovery(
                 uid=uid,
                 conversation=latest,
@@ -935,6 +968,7 @@ async def recover_failed_conversation_summary(
                 attempt_count=attempt_count,
                 client_context=client_context,
                 config=isolated_config,
+                trace_id_override=rerun_trace_id,
             )
             enriched_version_id = apply_result.get('active_summary_version_id')
             if not enriched_version_id:

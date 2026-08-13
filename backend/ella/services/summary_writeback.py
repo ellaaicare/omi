@@ -1,6 +1,7 @@
 """Shared direct conversation-summary writeback with version and ledger provenance."""
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -21,6 +22,27 @@ from utils.ella.canonical_omi import (
 )
 
 logger = logging.getLogger(__name__)
+
+_REQUEST_VALUE_UNSET = object()
+_SUMMARY_ENRICHMENT_AUTHORITY_FIELDS = (
+    'trace_id',
+    'request_fingerprint',
+    'status',
+    'canonical_status',
+    'source',
+    'kind',
+)
+_CURRENT_REQUEST_FINGERPRINT_KEYS = frozenset(
+    {
+        'submitted_structured',
+        'result_structured',
+        'submitted_ella_tags',
+        'result_ella_tags',
+        'submitted_ella_signal',
+        'result_ella_signal',
+    }
+)
+_LEGACY_REQUEST_FINGERPRINT_KEYS = frozenset({'structured', 'ella_tags', 'ella_signal'})
 
 
 class ConversationSummaryNotFoundError(Exception):
@@ -98,7 +120,58 @@ def _summary_request_fingerprint_input(
     today_card_grounding_evidence: Any,
     expected_transcript_hash: Optional[str] = None,
     require_source_match: bool = False,
+    submitted_structured: Optional[dict[str, Any]] = None,
+    submitted_ella_tags: Any = _REQUEST_VALUE_UNSET,
+    submitted_ella_signal: Any = _REQUEST_VALUE_UNSET,
 ) -> dict[str, Any]:
+    exact_submitted_structured = (
+        submitted_structured
+        if submitted_structured is not None
+        else {key: structured.get(key) for key in ('title', 'overview', 'emoji', 'category')}
+    )
+    exact_submitted_tags = ella_tags if submitted_ella_tags is _REQUEST_VALUE_UNSET else submitted_ella_tags
+    exact_submitted_signal = ella_signal if submitted_ella_signal is _REQUEST_VALUE_UNSET else submitted_ella_signal
+    return {
+        'submitted_structured': exact_submitted_structured,
+        'result_structured': {key: structured.get(key) for key in ('title', 'overview', 'emoji', 'category')},
+        'summary_source': summary_source,
+        'summary_kind': summary_kind,
+        'correction_id': correction_id,
+        'based_on_version_id': based_on_version_id,
+        'set_active': bool(set_active),
+        'require_canonical': bool(require_canonical),
+        'require_based_on_match': bool(require_based_on_match),
+        'preserve_generated_results': bool(preserve_generated_results),
+        'submitted_ella_tags': exact_submitted_tags,
+        'result_ella_tags': ella_tags,
+        'submitted_ella_signal': exact_submitted_signal,
+        'result_ella_signal': ella_signal,
+        'today_card_grounding_sha256': _optional_json_fingerprint(today_card_grounding),
+        'today_card_grounding_evidence_sha256': _optional_json_fingerprint(today_card_grounding_evidence),
+        'expected_transcript_hash': expected_transcript_hash,
+        'require_source_match': bool(require_source_match),
+    }
+
+
+def _legacy_summary_request_fingerprint_input(
+    *,
+    structured: dict[str, Any],
+    summary_source: str,
+    summary_kind: str,
+    correction_id: Optional[str],
+    based_on_version_id: Optional[str],
+    set_active: bool,
+    require_canonical: bool,
+    require_based_on_match: bool,
+    preserve_generated_results: bool,
+    ella_tags: list[str],
+    ella_signal: Any,
+    today_card_grounding: Any,
+    today_card_grounding_evidence: Any,
+    expected_transcript_hash: Optional[str] = None,
+    require_source_match: bool = False,
+) -> dict[str, Any]:
+    """Reconstruct the pre-migration receipt only for validating existing records."""
     return {
         'structured': {key: structured.get(key) for key in ('title', 'overview', 'emoji', 'category')},
         'summary_source': summary_source,
@@ -118,8 +191,46 @@ def _summary_request_fingerprint_input(
     }
 
 
+def is_current_summary_request_fingerprint_input(value: Any) -> bool:
+    return isinstance(value, dict) and _CURRENT_REQUEST_FINGERPRINT_KEYS.issubset(value)
+
+
+def _is_legacy_summary_request_fingerprint_input(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and _LEGACY_REQUEST_FINGERPRINT_KEYS.issubset(value)
+        and not _CURRENT_REQUEST_FINGERPRINT_KEYS.intersection(value)
+    )
+
+
 def _summary_request_fingerprint(request_input: dict[str, Any]) -> str:
     return _json_fingerprint(request_input)
+
+
+def _active_summary_authority(conversation: dict[str, Any]) -> dict[str, Any]:
+    active_version = _active_summary_version(conversation)
+    enrichment_state = conversation.get('enrichment_state') or {}
+    return {
+        'active_summary_version_id': str(conversation.get('active_summary_version_id') or '').strip(),
+        'structured': {key: active_version.get(key) for key in ('title', 'overview', 'emoji', 'category')},
+        'source': str(active_version.get('source') or enrichment_state.get('source') or ''),
+        'kind': str(active_version.get('kind') or enrichment_state.get('kind') or ''),
+    }
+
+
+def _summary_enrichment_authority(conversation: dict[str, Any]) -> dict[str, Any]:
+    enrichment_state = conversation.get('enrichment_state') or {}
+    return {field: enrichment_state.get(field) for field in _SUMMARY_ENRICHMENT_AUTHORITY_FIELDS}
+
+
+def _conversation_projected_to_active_summary(conversation: dict[str, Any]) -> dict[str, Any]:
+    authority = _active_summary_authority(conversation)
+    if not authority['active_summary_version_id'] or not _active_summary_version(conversation):
+        raise ConcurrentConversationSummaryChangeError('active_summary_version_missing')
+    return {
+        **conversation,
+        'structured': authority['structured'],
+    }
 
 
 def _assert_replay_binding_matches_active(
@@ -130,7 +241,16 @@ def _assert_replay_binding_matches_active(
 ) -> None:
     if not active_version:
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
-    bound_structured = request_input.get('structured')
+    if is_current_summary_request_fingerprint_input(request_input):
+        bound_structured = request_input.get('result_structured')
+        bound_tags = request_input.get('result_ella_tags')
+        bound_signal = request_input.get('result_ella_signal')
+    elif _is_legacy_summary_request_fingerprint_input(request_input):
+        bound_structured = request_input.get('structured')
+        bound_tags = request_input.get('ella_tags')
+        bound_signal = request_input.get('ella_signal')
+    else:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
     if not isinstance(bound_structured, dict):
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
     current_structured = {
@@ -138,6 +258,10 @@ def _assert_replay_binding_matches_active(
         for key in ('title', 'overview', 'emoji', 'category')
     }
     if bound_structured != current_structured:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+    if bound_tags != _normalized_tags(None, conversation.get('ella_tags')):
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+    if bound_signal != conversation.get('ella_signal'):
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
     enrichment_state = conversation.get('enrichment_state') or {}
     if str(request_input.get('summary_source') or '') != str(
@@ -151,15 +275,12 @@ def _assert_replay_binding_matches_active(
 def _assert_replay_authority_unchanged(
     *,
     conversation: dict[str, Any],
-    expected_version_id: str,
-    expected_trace_id: str,
-    expected_fingerprint: str,
+    expected_active_authority: dict[str, Any],
+    expected_enrichment_authority: dict[str, Any],
 ) -> None:
-    enrichment_state = conversation.get('enrichment_state') or {}
     if (
-        str(conversation.get('active_summary_version_id') or '').strip() != expected_version_id
-        or str(enrichment_state.get('trace_id') or '') != expected_trace_id
-        or str(enrichment_state.get('request_fingerprint') or '') != expected_fingerprint
+        _active_summary_authority(conversation) != expected_active_authority
+        or _summary_enrichment_authority(conversation) != expected_enrichment_authority
     ):
         raise ConcurrentConversationSummaryChangeError('idempotency_authority_changed')
 
@@ -192,7 +313,10 @@ def _assert_legacy_same_trace_payload_matches(
     correction_id: Optional[str],
     based_on_version_id: Optional[str],
     set_active: bool,
+    require_canonical: bool,
 ) -> None:
+    if require_canonical:
+        raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
     if not active_version or not set_active:
         raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
     if (
@@ -223,15 +347,17 @@ async def _repair_canonical_to_latest_summary(
         latest = conversations_db.get_conversation(uid, conversation_id)
         if latest is None:
             raise ConversationSummaryNotFoundError(conversation_id)
-        expected_version_id = str(latest.get('active_summary_version_id') or '').strip()
-        if not expected_version_id:
+        expected_active_authority = _active_summary_authority(latest)
+        if not expected_active_authority['active_summary_version_id']:
             raise ConcurrentConversationSummaryChangeError('active_summary_version_missing')
         active_version = _active_summary_version(latest)
         enrichment_state = latest.get('enrichment_state') or {}
+        expected_enrichment_authority = _summary_enrichment_authority(latest)
+        canonical_conversation = _conversation_projected_to_active_summary({**latest, 'id': conversation_id})
         canonical_result = await asyncio.to_thread(
             canonical_writer,
             uid,
-            {**latest, 'id': conversation_id},
+            canonical_conversation,
             summary_source=str(active_version.get('source') or enrichment_state.get('source') or 'observer'),
             summary_kind=str(active_version.get('kind') or enrichment_state.get('kind') or 'observer_enriched'),
             trace_id=enrichment_state.get('trace_id'),
@@ -239,11 +365,17 @@ async def _repair_canonical_to_latest_summary(
         if not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True:
             raise CanonicalSummaryWriteUnconfirmedError('canonical_repair_unconfirmed')
         refreshed = conversations_db.get_conversation(uid, conversation_id)
-        if (
-            refreshed is not None
-            and str(refreshed.get('active_summary_version_id') or '').strip() == expected_version_id
-        ):
-            return
+        if refreshed is None:
+            raise ConversationSummaryNotFoundError(conversation_id)
+        try:
+            _assert_replay_authority_unchanged(
+                conversation=refreshed,
+                expected_active_authority=expected_active_authority,
+                expected_enrichment_authority=expected_enrichment_authority,
+            )
+        except ConcurrentConversationSummaryChangeError:
+            continue
+        return
     try:
         await _mark_latest_summary_pending_canonical(
             uid=uid,
@@ -283,10 +415,11 @@ async def _mark_latest_summary_pending_canonical(
             'error': error,
             'updated_at': datetime.now(timezone.utc),
         }
-        if conversations_db.update_conversation_if_active_summary_version(
+        if conversations_db.update_conversation_if_summary_authority(
             uid,
             conversation_id,
             expected_version_id,
+            enrichment_state,
             {'enrichment_state': pending_state},
         ):
             return
@@ -298,14 +431,16 @@ async def _confirm_canonical_if_result_is_active(
     uid: str,
     conversation_id: str,
     expected_result_version_id: str,
+    expected_state: dict[str, Any],
     confirmed_state: dict[str, Any],
     canonical_writer: Callable[..., dict],
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
 ) -> None:
-    confirmed = conversations_db.update_conversation_if_active_summary_version(
+    confirmed = conversations_db.update_conversation_if_summary_authority(
         uid,
         conversation_id,
         expected_result_version_id,
+        expected_state,
         {'enrichment_state': confirmed_state},
     )
     if confirmed:
@@ -426,6 +561,16 @@ async def write_conversation_summary(
     replay_request_fingerprint_input: Optional[dict[str, Any]] = None,
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
 ) -> dict[str, Any]:
+    submitted_structured = {
+        'title': title,
+        'overview': overview,
+        'emoji': emoji,
+        'category': category,
+    }
+    submitted_ella_tags = copy.deepcopy(ella_tags)
+    submitted_ella_signal = copy.deepcopy(ella_signal)
+    submitted_today_card_grounding = copy.deepcopy(today_card_grounding)
+    submitted_today_card_grounding_evidence = copy.deepcopy(today_card_grounding_evidence)
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
         raise ConversationSummaryNotFoundError(conversation_id)
@@ -482,8 +627,11 @@ async def write_conversation_summary(
             preserve_generated_results=preserve_generated_results,
             ella_tags=effective_tags,
             ella_signal=effective_signal,
-            today_card_grounding=today_card_grounding,
-            today_card_grounding_evidence=today_card_grounding_evidence,
+            today_card_grounding=submitted_today_card_grounding,
+            today_card_grounding_evidence=submitted_today_card_grounding_evidence,
+            submitted_structured=submitted_structured,
+            submitted_ella_tags=submitted_ella_tags,
+            submitted_ella_signal=submitted_ella_signal,
             expected_transcript_hash=expected_transcript_hash,
             require_source_match=require_source_match,
         )
@@ -505,7 +653,7 @@ async def write_conversation_summary(
             if replay_request_fingerprint_input is not None:
                 if (
                     enrichment_state.get('status') != 'writeback_pending_canonical'
-                    or not isinstance(stored_request_input, dict)
+                    or not is_current_summary_request_fingerprint_input(stored_request_input)
                     or stored_request_input != request_input
                 ):
                     raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
@@ -514,6 +662,34 @@ async def write_conversation_summary(
                     active_version=active_version,
                     request_input=request_input,
                 )
+            elif _is_legacy_summary_request_fingerprint_input(stored_request_input):
+                legacy_request_input = _legacy_summary_request_fingerprint_input(
+                    structured=candidate_structured,
+                    summary_source=summary_source,
+                    summary_kind=summary_kind,
+                    correction_id=correction_id,
+                    based_on_version_id=based_on_version_id,
+                    set_active=set_active,
+                    require_canonical=require_canonical,
+                    require_based_on_match=require_based_on_match,
+                    preserve_generated_results=preserve_generated_results,
+                    ella_tags=effective_tags,
+                    ella_signal=effective_signal,
+                    today_card_grounding=submitted_today_card_grounding,
+                    today_card_grounding_evidence=submitted_today_card_grounding_evidence,
+                    expected_transcript_hash=expected_transcript_hash,
+                    require_source_match=require_source_match,
+                )
+                if stored_request_input != legacy_request_input:
+                    raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
+                request_fingerprint = _summary_request_fingerprint(legacy_request_input)
+                _assert_replay_binding_matches_active(
+                    conversation=conversation,
+                    active_version=active_version,
+                    request_input=legacy_request_input,
+                )
+            elif not is_current_summary_request_fingerprint_input(stored_request_input):
+                raise ConcurrentConversationSummaryChangeError('idempotency_payload_unverifiable')
             if stored_fingerprint != request_fingerprint:
                 raise ConcurrentConversationSummaryChangeError('idempotency_payload_changed')
         else:
@@ -527,15 +703,15 @@ async def write_conversation_summary(
                 correction_id=correction_id,
                 based_on_version_id=based_on_version_id,
                 set_active=set_active,
+                require_canonical=require_canonical,
             )
     if (
         same_trace
         and enrichment_state.get('status') == 'writeback_applied'
         and (not require_canonical or enrichment_state.get('canonical_status') == 'completed')
     ):
-        expected_version_id = str(conversation.get('active_summary_version_id') or '').strip()
-        expected_trace_id = str(enrichment_state.get('trace_id') or '')
-        expected_fingerprint = str(enrichment_state.get('request_fingerprint') or '')
+        expected_active_authority = _active_summary_authority(conversation)
+        expected_enrichment_authority = _summary_enrichment_authority(conversation)
         if require_canonical:
             await _repair_canonical_to_latest_summary(
                 uid=uid,
@@ -548,9 +724,8 @@ async def write_conversation_summary(
                 raise ConversationSummaryNotFoundError(conversation_id)
             _assert_replay_authority_unchanged(
                 conversation=refreshed,
-                expected_version_id=expected_version_id,
-                expected_trace_id=expected_trace_id,
-                expected_fingerprint=expected_fingerprint,
+                expected_active_authority=expected_active_authority,
+                expected_enrichment_authority=expected_enrichment_authority,
             )
             conversation = refreshed
             enrichment_state = conversation.get('enrichment_state') or {}
@@ -576,11 +751,13 @@ async def write_conversation_summary(
             'error': None,
             'updated_at': datetime.now(timezone.utc),
         }
-        canonical_conversation = {
-            **conversation,
-            'id': conversation_id,
-            'enrichment_state': confirmed_state,
-        }
+        canonical_conversation = _conversation_projected_to_active_summary(
+            {
+                **conversation,
+                'id': conversation_id,
+                'enrichment_state': confirmed_state,
+            }
+        )
         try:
             canonical_result = await asyncio.to_thread(
                 canonical_writer,
@@ -602,6 +779,7 @@ async def write_conversation_summary(
             uid=uid,
             conversation_id=conversation_id,
             expected_result_version_id=result_summary_version_id,
+            expected_state=enrichment_state,
             confirmed_state=confirmed_state,
             canonical_writer=canonical_writer,
             canonical_retry_recorder=canonical_retry_recorder,
@@ -732,8 +910,11 @@ async def write_conversation_summary(
         preserve_generated_results=preserve_generated_results,
         ella_tags=written_tags,
         ella_signal=written_signal,
-        today_card_grounding=today_card_grounding if today_card_grounding_evidence is None else None,
-        today_card_grounding_evidence=today_card_grounding_evidence,
+        today_card_grounding=submitted_today_card_grounding,
+        today_card_grounding_evidence=submitted_today_card_grounding_evidence,
+        submitted_structured=submitted_structured,
+        submitted_ella_tags=submitted_ella_tags,
+        submitted_ella_signal=submitted_ella_signal,
         expected_transcript_hash=expected_transcript_hash,
         require_source_match=require_source_match,
     )
@@ -803,14 +984,16 @@ async def write_conversation_summary(
             bound_today_card_grounding['transcript_hash'],
             update_data,
             expected_active_summary_version_id=(based_on_version_id if require_based_on_match else None),
+            expected_enrichment_state=enrichment_state,
         )
         if not updated:
             raise ConcurrentConversationSummaryChangeError('transcript_changed')
     elif require_based_on_match:
-        updated = conversations_db.update_conversation_if_active_summary_version(
+        updated = conversations_db.update_conversation_if_summary_authority(
             uid,
             conversation_id,
             based_on_version_id,
+            enrichment_state,
             update_data,
         )
         if not updated:
@@ -865,10 +1048,11 @@ async def write_conversation_summary(
                 'error': 'canonical_write_unconfirmed',
                 'updated_at': datetime.now(timezone.utc),
             }
-            if not conversations_db.update_conversation_if_active_summary_version(
+            if not conversations_db.update_conversation_if_summary_authority(
                 uid,
                 conversation_id,
                 version_update['active_summary_version_id'],
+                update_data['enrichment_state'],
                 {'enrichment_state': failed_state},
             ):
                 raise ConcurrentConversationSummaryChangeError('summary_result_version_changed') from canonical_error
@@ -877,6 +1061,7 @@ async def write_conversation_summary(
             uid=uid,
             conversation_id=conversation_id,
             expected_result_version_id=version_update['active_summary_version_id'],
+            expected_state=update_data['enrichment_state'],
             confirmed_state=confirmed_state,
             canonical_writer=canonical_writer,
             canonical_retry_recorder=canonical_retry_recorder,

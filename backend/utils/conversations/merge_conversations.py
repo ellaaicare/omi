@@ -9,6 +9,7 @@ This module provides functions for merging multiple conversations into one.
 """
 
 import copy
+import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -21,6 +22,8 @@ from models.conversation import (
     ConversationStatus,
     Structured,
 )
+from utils.conversations.process_conversation import process_conversation_with_outcome
+from utils.notifications import send_merge_completed_message
 from utils.other.storage import (
     delete_conversation_audio_files,
     list_audio_chunks,
@@ -101,9 +104,6 @@ def perform_merge_async(
         conversation_ids: List of conversation IDs to merge
         reprocess: Whether to process merged conversation (generate summary, etc.)
     """
-    from utils.conversations.process_conversation import process_conversation
-    from utils.notifications import send_merge_completed_message
-
     try:
         # 1. Fetch all source conversations
         conversations = []
@@ -193,18 +193,20 @@ def perform_merge_async(
         # 8. Process conversation to generate title, summary, action items, memories, etc.
         if reprocess:
             try:
-                processed_conversation = process_conversation(
+                processing_outcome = process_conversation_with_outcome(
                     uid,
                     new_conversation.language or 'en',
                     new_conversation,
                     force_process=True,
                     is_reprocess=False,  # Not a reprocess - this is a new conversation
                 )
+                if not processing_outcome.dispatched:
+                    raise RuntimeError(f"merged conversation processing not committed: {processing_outcome.status}")
+                processed_conversation = processing_outcome.conversation
             except Exception as e:
                 print(f"Error processing merged conversation: {e}")
-                # Even if processing fails, continue with cleanup
-                # Mark conversation as completed
-                conversations_db.update_conversation_status(uid, new_conversation_id, ConversationStatus.completed)
+                _handle_merge_failure(uid, conversation_ids)
+                return
         else:
             # If not reprocessing, just mark as completed
             conversations_db.update_conversation_status(uid, new_conversation_id, ConversationStatus.completed)
@@ -220,8 +222,6 @@ def perform_merge_async(
 
     except Exception as e:
         print(f"Merge failed with exception: {e}")
-        import traceback
-
         traceback.print_exc()
         _handle_merge_failure(uid, conversation_ids)
 

@@ -30,7 +30,11 @@ from models.conversation import (
 from models.transcript_segment import TranscriptSegment
 from models.other import Person
 
-from utils.conversations.process_conversation import process_conversation, retrieve_in_progress_conversation
+from utils.conversations.process_conversation import (
+    process_conversation,
+    process_conversation_with_outcome,
+    retrieve_in_progress_conversation,
+)
 from utils.conversations.search import search_conversations
 from utils.llm.conversation_processing import generate_summary_with_prompt
 from utils.speaker_identification import extract_speaker_samples
@@ -87,9 +91,9 @@ def process_in_progress_conversation(
         geolocation = Geolocation(**geolocation)
         conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-    conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
-    conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
-    messages = trigger_external_integrations(uid, conversation)
+    outcome = process_conversation_with_outcome(uid, conversation.language, conversation, force_process=True)
+    conversation = outcome.conversation
+    messages = trigger_external_integrations(uid, conversation) if outcome.dispatched else []
 
     return CreateConversationResponse(conversation=conversation, messages=messages)
 

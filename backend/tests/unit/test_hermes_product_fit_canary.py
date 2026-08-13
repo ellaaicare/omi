@@ -54,6 +54,7 @@ def _config_mapping():
         },
         "enrichment": {
             "conversation_id": "synthetic-enrichment-conversation",
+            "active_summary_version_id": "synthetic-enrichment-summary-version",
             "transcript_sha256": "b" * 64,
         },
         "max_latency_ms": 120_000,
@@ -355,6 +356,7 @@ def test_enrichment_requires_one_correlated_duplicate_safe_result_without_chat_i
         config.uid,
         config.enrichment_conversation_id,
         config.enrichment_transcript_sha256,
+        config.enrichment_active_summary_version_id,
     )
     old_run_id_digest = canary._sha256(f"{config.run_id}|{config.uid}|{config.enrichment_conversation_id}|enrichment")
     assert expected_interaction_id != f"omi-enrichment:{old_run_id_digest}"
@@ -522,6 +524,21 @@ def test_config_rejects_real_identity_session_drift_urls_and_literal_secrets():
         raw = _config_mapping()
         mutator(raw)
         with pytest.raises((canary.HarnessRefusal, canary.ProvisioningError), match=code):
+            canary.CanaryConfig.from_mapping(raw)
+
+
+def test_config_requires_safe_enrichment_summary_version_pin():
+    cases = (
+        lambda raw: raw["enrichment"].pop("active_summary_version_id"),
+        lambda raw: raw["enrichment"].update(active_summary_version_id=""),
+        lambda raw: raw["enrichment"].update(active_summary_version_id="unsafe version id"),
+    )
+
+    for index, mutator in enumerate(cases):
+        raw = _config_mapping()
+        mutator(raw)
+        expected_code = "enrichment_shape_invalid" if index == 0 else "enrichment_active_summary_version_id_invalid"
+        with pytest.raises(canary.HarnessRefusal, match=expected_code):
             canary.CanaryConfig.from_mapping(raw)
 
 

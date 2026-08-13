@@ -68,7 +68,7 @@ from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
     mark_unexpected_conversation_processing_failed,
-    process_conversation,
+    process_conversation_with_outcome,
     retrieve_in_progress_conversation,
 )
 from utils.capture_buffer import (
@@ -676,10 +676,8 @@ async def _stream_handler(
     # Fallback for when pusher is not available
     async def _create_conversation_fallback(conversation_data: dict):
         conversation = Conversation(**conversation_data)
-        if conversation.status != ConversationStatus.processing:
+        if conversation.status not in {ConversationStatus.processing, ConversationStatus.completed}:
             _send_message_event(ConversationEvent(event_type="memory_processing_started", memory=conversation))
-            conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
-            conversation.status = ConversationStatus.processing
 
         try:
             # Geolocation
@@ -688,17 +686,19 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            conversation = process_conversation(uid, language, conversation)
+            outcome = process_conversation_with_outcome(uid, language, conversation)
+            conversation = outcome.conversation
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
             mark_unexpected_conversation_processing_failed(uid, conversation)
             messages = []
         else:
-            try:
-                messages = trigger_external_integrations(uid, conversation)
-            except Exception as e:
-                print(f"External integrations failed after conversation processing: {e}", uid, session_id)
-                messages = []
+            messages = []
+            if outcome.dispatched:
+                try:
+                    messages = trigger_external_integrations(uid, conversation)
+                except Exception as e:
+                    print(f"External integrations failed after conversation processing: {e}", uid, session_id)
 
         _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=messages))
 

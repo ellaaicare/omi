@@ -365,6 +365,7 @@ class Conversation(BaseModel):
 
     external_data: Optional[Dict] = None
     app_id: Optional[str] = None
+    postprocessing: Optional[ConversationPostProcessing] = None
 
     discarded: bool = False
     visibility: ConversationVisibility = ConversationVisibility.private

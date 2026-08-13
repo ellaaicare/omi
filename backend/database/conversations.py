@@ -11,12 +11,18 @@ from google.cloud.firestore_v1 import FieldFilter, transactional
 
 import utils.other.hume as hume
 from database import users as users_db
+from database.hermes_cloud_enrichment_outbox import COLLECTION as hermes_cloud_enrichment_outbox_collection
 from models.conversation import (
     ConversationPhoto,
     PostProcessingStatus,
     PostProcessingModel,
     ConversationStatus,
     AudioFile,
+)
+from models.conversation_integrity import transcript_grounding_hash
+from models.hermes_cloud_enrichment_contract import (
+    HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+    build_enrichment_identity,
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
@@ -38,6 +44,23 @@ conversation_enriched_summary_kinds = {
     'recovered_enriched',
 }
 conversation_processing_retry_lease_seconds = 900
+conversation_stock_summary_cas_lost = 'stock_summary_cas_lost'
+conversation_stock_summary_malformed = 'stock_summary_authority_malformed'
+conversation_stock_summary_deleted = 'stock_summary_conversation_deleted'
+
+_STOCK_SUMMARY_RESULT_UPDATE_FIELDS = {
+    'discarded',
+    'external_data',
+    'geolocation',
+    'processing_error',
+    'processing_error_at',
+    'status',
+    'structured',
+}
+_STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS = {
+    'external_data',
+    'geolocation',
+}
 
 
 def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -48,6 +71,75 @@ def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, 
             if str(version.get('id') or '') == str(active_id):
                 return version
     return next((version for version in reversed(versions) if version.get('is_active')), None)
+
+
+def _summary_version_id(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _stock_summary_version_id(conversation: Dict[str, Any], structured: Dict[str, Any]) -> str:
+    created_at = conversation.get('created_at')
+    if isinstance(created_at, datetime):
+        created_at_value = _ensure_timezone_aware(created_at).isoformat()
+    else:
+        created_at_value = str(created_at or '')
+    basis = json.dumps(
+        {
+            'conversation_id': conversation.get('id') or '',
+            'created_at': created_at_value,
+            'title': structured.get('title') or '',
+            'overview': structured.get('overview') or '',
+            'emoji': structured.get('emoji') or '',
+            'category': _category_value(structured.get('category')),
+        },
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f'omi-stock-summary:{basis}'))
+
+
+def _validate_summary_authority(conversation: Dict[str, Any]) -> Dict[str, Any]:
+    raw_versions = conversation.get('summary_versions')
+    if raw_versions is None:
+        raw_versions = []
+    if not isinstance(raw_versions, list):
+        return {'status': conversation_stock_summary_malformed, 'reason': 'versions_not_list'}
+
+    versions = [version for version in raw_versions if isinstance(version, dict)]
+    if len(versions) != len(raw_versions):
+        return {'status': conversation_stock_summary_malformed, 'reason': 'version_not_object'}
+
+    raw_active_id = conversation.get('active_summary_version_id')
+    if raw_active_id is not None and not isinstance(raw_active_id, str):
+        return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_not_string'}
+    active_id = _summary_version_id(raw_active_id)
+    active_versions = [version for version in versions if bool(version.get('is_active'))]
+    if len(active_versions) > 1:
+        return {'status': conversation_stock_summary_malformed, 'reason': 'multiple_active_versions'}
+
+    if not versions and not active_id:
+        return {'status': 'empty'}
+
+    matching_versions = [version for version in versions if _summary_version_id(version.get('id')) == active_id]
+    if active_id:
+        if len(matching_versions) != 1:
+            return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_missing_or_duplicate'}
+        active_version = matching_versions[0]
+        if not active_version.get('is_active'):
+            return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_points_inactive'}
+        if active_versions and _summary_version_id(active_versions[0].get('id')) != active_id:
+            return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_mismatch'}
+        return {
+            'status': 'ready',
+            'active_summary_version_id': active_id,
+            'active_version': active_version,
+        }
+
+    if versions or active_versions:
+        return {'status': conversation_stock_summary_malformed, 'reason': 'active_id_missing'}
+
+    return {'status': 'empty'}
 
 
 def has_usable_conversation_summary(conversation: Dict[str, Any]) -> bool:
@@ -333,56 +425,6 @@ def build_summary_version_update(
     }
 
 
-def generated_summary_versioning_update(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure a stock-generated summary has one durable active CAS version."""
-    if not conversation_data:
-        return {}
-
-    versions = copy.deepcopy(conversation_data.get('summary_versions') or [])
-    active_version = _active_summary_version(conversation_data)
-    if active_version:
-        active_id = str(active_version.get('id') or '').strip()
-        if not active_id or str(conversation_data.get('active_summary_version_id') or '').strip() == active_id:
-            return {}
-        return {'active_summary_version_id': active_id}
-
-    if versions:
-        latest = next(
-            (
-                version
-                for version in reversed(versions)
-                if isinstance(version, dict) and str(version.get('id') or '').strip()
-            ),
-            None,
-        )
-        if not latest:
-            return {}
-        active_id = str(latest['id'])
-        for version in versions:
-            if isinstance(version, dict):
-                version['is_active'] = str(version.get('id') or '') == active_id
-        return {
-            'summary_versions': versions,
-            'active_summary_version_id': active_id,
-        }
-
-    structured = conversation_data.get('structured') or {}
-    if not _has_summary_content(structured):
-        return {}
-    created_at = conversation_data.get('created_at') or datetime.now(timezone.utc)
-    version = _build_summary_version_payload(
-        structured=structured,
-        created_at=_ensure_timezone_aware(created_at),
-        source='omi',
-        kind='generated',
-        is_active=True,
-    )
-    return {
-        'summary_versions': [version],
-        'active_summary_version_id': version['id'],
-    }
-
-
 # *********************************
 # ******* ENCRYPTION HELPERS ******
 # *********************************
@@ -645,6 +687,396 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+def _processing_result_update_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in conversation_data.items()
+        if key in _STOCK_SUMMARY_RESULT_UPDATE_FIELDS and key != 'photos'
+        if key not in _STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS or value is not None
+    }
+
+
+def _parent_conversation_write_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    parent_data = copy.deepcopy(conversation_data)
+    if 'audio_base64_url' in parent_data:
+        del parent_data['audio_base64_url']
+    if 'photos' in parent_data:
+        del parent_data['photos']
+    return parent_data
+
+
+def _build_stock_summary_version(
+    conversation_data: Dict[str, Any],
+    structured: Dict[str, Any],
+    *,
+    based_on_version_id: Optional[str] = None,
+    deterministic: bool = False,
+) -> Dict[str, Any]:
+    created_at = conversation_data.get('created_at') if deterministic else datetime.now(timezone.utc)
+    created_at = created_at or datetime.now(timezone.utc)
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at)
+        except ValueError:
+            created_at = datetime.now(timezone.utc)
+    version_id = _stock_summary_version_id(conversation_data, structured) if deterministic else None
+    return _build_summary_version_payload(
+        structured=structured,
+        created_at=_ensure_timezone_aware(created_at),
+        source='omi',
+        kind='generated',
+        is_active=True,
+        based_on_version_id=based_on_version_id,
+        version_id=version_id,
+    )
+
+
+def _enqueue_hermes_enrichment_in_transaction(
+    transaction,
+    uid: str,
+    conversation: Dict[str, Any],
+    *,
+    now: datetime,
+) -> Dict[str, Any]:
+    conversation_id = str(conversation.get('id') or '')
+    identity = build_enrichment_identity(
+        uid=uid,
+        conversation_id=conversation_id,
+        conversation=conversation,
+    )
+    payload = {
+        'job_id': identity.job_id,
+        'uid': uid,
+        'conversation_id': conversation_id,
+        'client_interaction_id': identity.client_interaction_id,
+        'transcript_sha256': identity.transcript_sha256,
+        'policy_version': HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+        'status': 'pending',
+        'attempt_count': 0,
+        'next_attempt_at': now,
+        'lease_token': None,
+        'lease_expires_at': None,
+        'last_error_code': None,
+        'receipt': None,
+        'created_at': now,
+        'updated_at': now,
+    }
+    outbox_ref = db.collection(hermes_cloud_enrichment_outbox_collection).document(identity.job_id)
+    snapshot = outbox_ref.get(transaction=transaction)
+    if snapshot.exists:
+        existing = snapshot.to_dict() or {}
+        immutable_fields = ('uid', 'conversation_id', 'client_interaction_id', 'transcript_sha256')
+        if any(existing.get(field) != payload[field] for field in immutable_fields):
+            raise ValueError('hermes_cloud_enrichment_outbox_identity_conflict')
+        return existing
+    transaction.set(outbox_ref, payload)
+    return payload
+
+
+def _stock_summary_authority_update(
+    durable_conversation: Dict[str, Any],
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str],
+) -> Dict[str, Any]:
+    authority = _validate_summary_authority(durable_conversation)
+    if authority['status'] == conversation_stock_summary_malformed:
+        return authority
+
+    current_active_id = _summary_version_id(authority.get('active_summary_version_id'))
+    expected_active_id = _summary_version_id(expected_active_summary_version_id)
+    if current_active_id != expected_active_id:
+        return {
+            'status': conversation_stock_summary_cas_lost,
+            'active_summary_version_id': current_active_id,
+        }
+
+    update_data = _processing_result_update_data(processing_conversation)
+    processing_external_data = update_data.get('external_data')
+    if isinstance(processing_external_data, dict):
+        durable_external_data = durable_conversation.get('external_data')
+        update_data['external_data'] = {
+            **(copy.deepcopy(durable_external_data) if isinstance(durable_external_data, dict) else {}),
+            **processing_external_data,
+        }
+    elif 'external_data' in update_data:
+        del update_data['external_data']
+    if processing_conversation.get('discarded'):
+        return {
+            'status': 'committed',
+            'update_data': update_data,
+            'active_summary_version_id': current_active_id,
+        }
+
+    structured = copy.deepcopy(processing_conversation.get('structured') or {})
+    if not _has_summary_content(structured):
+        return {'status': 'version_unavailable', 'reason': 'summary_content_missing'}
+
+    versions = copy.deepcopy(durable_conversation.get('summary_versions') or [])
+    for version in versions:
+        version['is_active'] = False
+
+    if authority['status'] == 'empty':
+        new_version = _build_stock_summary_version(
+            durable_conversation or processing_conversation,
+            structured,
+            deterministic=True,
+        )
+    else:
+        new_version = _build_stock_summary_version(
+            durable_conversation,
+            structured,
+            based_on_version_id=current_active_id,
+        )
+    versions.append(new_version)
+    update_data['summary_versions'] = versions
+    update_data['active_summary_version_id'] = new_version['id']
+    return {
+        'status': 'committed',
+        'update_data': update_data,
+        'active_summary_version_id': new_version['id'],
+    }
+
+
+def _commit_stock_summary_processing_result_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str] = None,
+    allow_create: bool = False,
+    enqueue_hermes_cloud_enrichment: bool = False,
+    enrichment_enqueued_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        if not allow_create:
+            return {
+                'status': conversation_stock_summary_deleted,
+                'dispatched': False,
+            }
+        expected_active_id = _summary_version_id(expected_active_summary_version_id)
+        if expected_active_id:
+            return {'status': conversation_stock_summary_cas_lost}
+        durable_conversation = copy.deepcopy(processing_conversation)
+        update_result = _stock_summary_authority_update(durable_conversation, durable_conversation, None)
+        if update_result['status'] != 'committed':
+            return update_result
+        created = {**durable_conversation, **update_result['update_data']}
+        doc_level = created.get('data_protection_level', 'standard')
+        parent_data = _parent_conversation_write_data(created)
+        outbox_job = None
+        if enqueue_hermes_cloud_enrichment and not created.get('discarded'):
+            outbox_job = _enqueue_hermes_enrichment_in_transaction(
+                transaction,
+                uid,
+                created,
+                now=enrichment_enqueued_at or datetime.now(timezone.utc),
+            )
+        transaction.set(conversation_ref, _prepare_conversation_for_write(parent_data, uid, doc_level))
+        return {
+            'status': 'committed',
+            'active_summary_version_id': update_result.get('active_summary_version_id'),
+            'conversation': created,
+            'dispatched': True,
+            'hermes_enrichment_job_id': outbox_job.get('job_id') if outbox_job else None,
+        }
+
+    durable_conversation = snapshot.to_dict() or {}
+    update_result = _stock_summary_authority_update(
+        durable_conversation,
+        processing_conversation,
+        expected_active_summary_version_id,
+    )
+    if update_result['status'] != 'committed':
+        return {
+            **update_result,
+            'conversation': durable_conversation,
+            'dispatched': False,
+        }
+
+    update_data = update_result['update_data']
+    merged_conversation = {**durable_conversation, **update_data}
+    doc_level = durable_conversation.get('data_protection_level', 'standard')
+    parent_update_data = _parent_conversation_write_data(update_data)
+    outbox_job = None
+    if enqueue_hermes_cloud_enrichment and not merged_conversation.get('discarded'):
+        readable_conversation = _prepare_conversation_for_read(merged_conversation, uid) or merged_conversation
+        outbox_job = _enqueue_hermes_enrichment_in_transaction(
+            transaction,
+            uid,
+            readable_conversation,
+            now=enrichment_enqueued_at or datetime.now(timezone.utc),
+        )
+    transaction.update(conversation_ref, _prepare_conversation_for_write(parent_update_data, uid, doc_level))
+    return {
+        'status': 'committed',
+        'active_summary_version_id': update_result.get('active_summary_version_id'),
+        'conversation': merged_conversation,
+        'dispatched': True,
+        'hermes_enrichment_job_id': outbox_job.get('job_id') if outbox_job else None,
+    }
+
+
+@transactional
+def _commit_stock_summary_processing_result(
+    transaction,
+    conversation_ref,
+    uid: str,
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str] = None,
+    allow_create: bool = False,
+    enqueue_hermes_cloud_enrichment: bool = False,
+    enrichment_enqueued_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    return _commit_stock_summary_processing_result_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        processing_conversation,
+        expected_active_summary_version_id,
+        allow_create,
+        enqueue_hermes_cloud_enrichment,
+        enrichment_enqueued_at,
+    )
+
+
+@set_data_protection_level(data_arg_name='processing_conversation')
+def commit_stock_summary_processing_result(
+    uid: str,
+    conversation_id: str,
+    processing_conversation: Dict[str, Any],
+    expected_active_summary_version_id: Optional[str] = None,
+    allow_create: bool = False,
+    enqueue_hermes_cloud_enrichment: bool = False,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    result = _commit_stock_summary_processing_result(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        processing_conversation,
+        expected_active_summary_version_id,
+        allow_create,
+        enqueue_hermes_cloud_enrichment,
+        datetime.now(timezone.utc) if enqueue_hermes_cloud_enrichment else None,
+    )
+    conversation = result.get('conversation')
+    if isinstance(conversation, dict):
+        result = {**result, 'conversation': _prepare_conversation_for_read(conversation, uid)}
+    return result
+
+
+def _mark_conversation_processing_failed_if_unfinished_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    error_code: str,
+    failed_at: datetime,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'updated': False, 'reason': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status == ConversationStatus.completed.value:
+        return {'updated': False, 'reason': 'already_completed'}
+    if status == ConversationStatus.failed.value and conversation.get('processing_error'):
+        return {'updated': False, 'reason': 'already_failed'}
+    update_data = {
+        'status': ConversationStatus.failed.value,
+        'discarded': False,
+        'processing_error': error_code,
+        'processing_error_at': _ensure_timezone_aware(failed_at),
+    }
+    transaction.update(conversation_ref, update_data)
+    return {'updated': True, 'reason': 'marked_failed', **update_data}
+
+
+@transactional
+def _mark_conversation_processing_failed_if_unfinished(
+    transaction,
+    conversation_ref,
+    uid: str,
+    error_code: str,
+    failed_at: datetime,
+) -> Dict[str, Any]:
+    return _mark_conversation_processing_failed_if_unfinished_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        error_code,
+        failed_at,
+    )
+
+
+def mark_conversation_processing_failed_if_unfinished(
+    uid: str,
+    conversation_id: str,
+    error_code: str,
+    failed_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _mark_conversation_processing_failed_if_unfinished(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        error_code,
+        failed_at or datetime.now(timezone.utc),
+    )
+
+
+def _assign_conversation_folder_if_unset_transaction(transaction, conversation_ref, folder_id: str) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if conversation.get('folder_id'):
+        return False
+    transaction.update(conversation_ref, {'folder_id': folder_id})
+    return True
+
+
+@transactional
+def _assign_conversation_folder_if_unset(transaction, conversation_ref, folder_id: str) -> bool:
+    return _assign_conversation_folder_if_unset_transaction(transaction, conversation_ref, folder_id)
+
+
+def assign_conversation_folder_if_unset(uid: str, conversation_id: str, folder_id: str) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _assign_conversation_folder_if_unset(db.transaction(), conversation_ref, folder_id)
+
+
+def _claim_initial_conversation_processing_transaction(transaction, conversation_ref) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'status': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status == ConversationStatus.completed.value:
+        return {'status': 'already_completed'}
+    if status != ConversationStatus.processing.value:
+        transaction.update(conversation_ref, {'status': ConversationStatus.processing.value})
+    return {'status': 'processing_claimed'}
+
+
+@transactional
+def _claim_initial_conversation_processing(transaction, conversation_ref) -> Dict[str, Any]:
+    return _claim_initial_conversation_processing_transaction(transaction, conversation_ref)
+
+
+def claim_initial_conversation_processing(uid: str, conversation_id: str) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_initial_conversation_processing(db.transaction(), conversation_ref)
+
+
 def _update_conversation_if_active_summary_version_transaction(
     transaction,
     conversation_ref,
@@ -699,6 +1131,91 @@ def update_conversation_if_active_summary_version(
     )
 
 
+_SUMMARY_ENRICHMENT_AUTHORITY_FIELDS = (
+    'trace_id',
+    'request_fingerprint',
+    'status',
+    'canonical_status',
+    'source',
+    'kind',
+)
+
+
+def _summary_enrichment_authority_matches(
+    conversation: dict,
+    expected_enrichment_state: dict,
+) -> bool:
+    current_state = conversation.get('enrichment_state') or {}
+    return all(
+        current_state.get(field) == expected_enrichment_state.get(field)
+        for field in _SUMMARY_ENRICHMENT_AUTHORITY_FIELDS
+    )
+
+
+def _update_conversation_if_summary_authority_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
+        return False
+    if not _summary_enrichment_authority_matches(
+        conversation,
+        expected_enrichment_state,
+    ):
+        return False
+    doc_level = conversation.get('data_protection_level', 'standard')
+    prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    return True
+
+
+@transactional
+def _update_conversation_if_summary_authority(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    return _update_conversation_if_summary_authority_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        expected_enrichment_state,
+        update_data,
+    )
+
+
+def update_conversation_if_summary_authority(
+    uid: str,
+    conversation_id: str,
+    expected_active_summary_version_id: Optional[str],
+    expected_enrichment_state: dict,
+    update_data: dict,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_if_summary_authority(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        expected_enrichment_state,
+        update_data,
+    )
+
+
 def _update_conversation_if_transcript_hash_transaction(
     transaction,
     conversation_ref,
@@ -708,9 +1225,8 @@ def _update_conversation_if_transcript_hash_transaction(
     *,
     expected_active_summary_version_id: Optional[str] = None,
     match_active_summary_version: bool = False,
+    expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
-    from utils.ella.canonical_omi import transcript_grounding_hash
-
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
         return False
@@ -723,6 +1239,11 @@ def _update_conversation_if_transcript_hash_transaction(
     if (match_active_summary_version or expected_active_summary_version_id is not None) and str(
         conversation.get('active_summary_version_id') or ''
     ) != str(expected_active_summary_version_id or ''):
+        return False
+    if expected_enrichment_state is not None and not _summary_enrichment_authority_matches(
+        conversation,
+        expected_enrichment_state,
+    ):
         return False
     doc_level = conversation.get('data_protection_level', 'standard')
     prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
@@ -740,6 +1261,7 @@ def _update_conversation_if_transcript_hash(
     *,
     expected_active_summary_version_id: Optional[str] = None,
     match_active_summary_version: bool = False,
+    expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
     return _update_conversation_if_transcript_hash_transaction(
         transaction,
@@ -749,6 +1271,7 @@ def _update_conversation_if_transcript_hash(
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
         match_active_summary_version=match_active_summary_version,
+        expected_enrichment_state=expected_enrichment_state,
     )
 
 
@@ -760,6 +1283,7 @@ def update_conversation_if_transcript_hash(
     *,
     expected_active_summary_version_id: Optional[str] = None,
     match_active_summary_version: bool = False,
+    expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -772,6 +1296,7 @@ def update_conversation_if_transcript_hash(
         update_data,
         expected_active_summary_version_id=expected_active_summary_version_id,
         match_active_summary_version=match_active_summary_version,
+        expected_enrichment_state=expected_enrichment_state,
     )
 
 

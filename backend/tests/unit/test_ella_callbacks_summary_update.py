@@ -9,18 +9,44 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from utils.ella.canonical_omi import transcript_grounding_hash
 
-sys.modules.setdefault("database._client", MagicMock())
-sys.modules.setdefault("database.conversations", MagicMock())
-sys.modules.setdefault("database.memories", MagicMock())
-sys.modules.setdefault("database.users", MagicMock())
-sys.modules.setdefault("httpx", MagicMock())
-sys.modules.setdefault("asyncpg", MagicMock())
-sys.modules.setdefault("firebase_admin", MagicMock())
-sys.modules.setdefault("utils.other.endpoints", MagicMock())
-sys.modules.setdefault("utils.notifications", MagicMock())
-sys.modules.setdefault("utils.other.storage", MagicMock())
-sys.modules.pop("ella.config", None)
-sys.modules.setdefault("database.ella_contacts", MagicMock())
+_MISSING_MODULE = object()
+_STUBBED_IMPORT_MODULES = {
+    "database._client": MagicMock(),
+    "database.conversations": MagicMock(),
+    "database.memories": MagicMock(),
+    "database.users": MagicMock(),
+    "httpx": MagicMock(),
+    "asyncpg": MagicMock(),
+    "firebase_admin": MagicMock(),
+    "utils.other.endpoints": MagicMock(),
+    "utils.notifications": MagicMock(),
+    "utils.other.storage": MagicMock(),
+    "database.ella_contacts": MagicMock(),
+}
+_RELOADED_IMPORT_MODULES = (
+    "ella.config",
+    "ella.services.provisioning",
+    "ella.services.runtime_resolver",
+    "ella.services.summary_writeback",
+)
+_ISOLATED_IMPORT_MODULES = (*_STUBBED_IMPORT_MODULES, *_RELOADED_IMPORT_MODULES)
+_ORIGINAL_MODULES = {name: sys.modules.get(name, _MISSING_MODULE) for name in _ISOLATED_IMPORT_MODULES}
+for _module_name, _stub_module in _STUBBED_IMPORT_MODULES.items():
+    sys.modules[_module_name] = _stub_module
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if _parent_module is not None:
+        setattr(_parent_module, _attribute_name, _stub_module)
+for _module_name in _RELOADED_IMPORT_MODULES:
+    _removed_module = sys.modules.pop(_module_name, None)
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if (
+        _parent_module is not None
+        and hasattr(_parent_module, _attribute_name)
+        and getattr(_parent_module, _attribute_name) is _removed_module
+    ):
+        delattr(_parent_module, _attribute_name)
 
 _backend_path = Path(__file__).resolve().parents[2]
 if str(_backend_path) not in sys.path:
@@ -32,6 +58,22 @@ callbacks = importlib.util.module_from_spec(_callbacks_spec)
 assert _callbacks_spec is not None and _callbacks_spec.loader is not None
 _callbacks_spec.loader.exec_module(callbacks)
 from ella.services import summary_writeback
+
+for _module_name, _original_module in _ORIGINAL_MODULES.items():
+    _loaded_module = sys.modules.get(_module_name)
+    if _original_module is _MISSING_MODULE:
+        sys.modules.pop(_module_name, None)
+    else:
+        sys.modules[_module_name] = _original_module
+    _parent_name, _, _attribute_name = _module_name.rpartition(".")
+    _parent_module = sys.modules.get(_parent_name)
+    if _parent_module is None:
+        continue
+    if _original_module is _MISSING_MODULE:
+        if getattr(_parent_module, _attribute_name, None) is _loaded_module:
+            delattr(_parent_module, _attribute_name)
+    else:
+        setattr(_parent_module, _attribute_name, _original_module)
 
 
 def _service_authority(uid: str):
@@ -709,19 +751,27 @@ def _configure_parallel_grounding_write(monkeypatch):
         "update_conversation",
         lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
     )
-    monkeypatch.setattr(
-        callbacks.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda uid, conversation_id, expected_version, update_data: captured.setdefault(
+
+    def update_if_authoritative(uid, conversation_id, expected_version, expected_state, update_data):
+        captured.setdefault(
             "terminal_cas",
             {
                 "uid": uid,
                 "conversation_id": conversation_id,
                 "expected_version": expected_version,
+                "expected_state": expected_state,
                 "update_data": update_data,
             },
         )
-        or True,
+        captured.setdefault("confirmation_expected_version", expected_version)
+        captured.setdefault("confirmation_expected_state", expected_state)
+        captured.setdefault("confirmed_state", update_data)
+        return True
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_summary_authority",
+        update_if_authoritative,
     )
 
     def write_canonical(uid, conversation, **kwargs):
@@ -764,6 +814,89 @@ def test_parallel_enrichment_binds_independent_grounding_to_canonical_version(mo
     assert canonical_receipt == receipt
     assert captured["terminal_cas"]["expected_version"] == "parallel-v2"
     assert captured["terminal_cas"]["update_data"]["enrichment_state"]["canonical_status"] == "completed"
+
+
+def test_parallel_canonical_confirmation_repairs_latest_summary_after_race(monkeypatch):
+    captured = _configure_parallel_grounding_write(monkeypatch)
+    correction = {
+        "id": "cafe-123",
+        "active_summary_version_id": "correction-v3",
+        "summary_versions": [
+            {
+                "id": "correction-v3",
+                "source": "ios_correction",
+                "kind": "corrected_enriched",
+                "is_active": True,
+            }
+        ],
+        "structured": {
+            "title": "Corrected cafe title",
+            "overview": "[Ella] Corrected cafe overview with enough detail.",
+            "emoji": "☕",
+            "category": callbacks.CategoryEnum.other,
+        },
+        "transcript_segments": [{"is_user": True, "text": "I ordered a waffle with oat milk after our morning walk."}],
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "source": "ios_correction",
+            "kind": "corrected_enriched",
+            "trace_id": "correction:cafe-123",
+            "canonical_status": "completed",
+        },
+    }
+    get_calls = 0
+
+    def get_conversation(uid, conversation_id):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            return {
+                "id": conversation_id,
+                "structured": {
+                    "title": "Original cafe title",
+                    "overview": "[Ella] Original cafe overview with enough detail.",
+                    "emoji": "☕",
+                    "category": callbacks.CategoryEnum.other,
+                },
+                "transcript_segments": correction["transcript_segments"],
+            }
+        return correction
+
+    canonical_versions = []
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversation", get_conversation)
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_summary_authority",
+        lambda *args, **kwargs: False,
+    )
+
+    def write_canonical(uid, conversation, **kwargs):
+        canonical_versions.append(conversation["active_summary_version_id"])
+        return {"ok": True}
+
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", write_canonical)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "cafe-123",
+                callbacks.ConversationSummaryUpdate(
+                    title="Cafe Coffee and Waffle Stop",
+                    overview="[Ella] You ordered a waffle with oat milk after your morning walk.",
+                    summary_source="hermes_parallel",
+                    summary_kind="hermes_enriched",
+                    trace_id="parallel-grounding:cafe-123",
+                    require_canonical=True,
+                    today_card_grounding_evidence=_parallel_grounding_evidence(),
+                ),
+                uid="user-123",
+                service=_service_authority("user-123"),
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "active_summary_version_changed"
+    assert canonical_versions == ["parallel-v2", "correction-v3"]
 
 
 @pytest.mark.parametrize(
@@ -915,13 +1048,13 @@ def test_parallel_grounding_transcript_compare_and_set_loses_race_without_public
             monkeypatch.setattr(callbacks, "write_omi_canonical_event", fail_canonical)
         terminal_updates = []
 
-        def reject_stale_terminal_state(uid, conversation_id, expected_version, update_data):
-            terminal_updates.append((uid, conversation_id, expected_version, update_data))
+        def reject_stale_terminal_state(uid, conversation_id, expected_version, expected_state, update_data):
+            terminal_updates.append((uid, conversation_id, expected_version, expected_state, update_data))
             return False
 
         monkeypatch.setattr(
             callbacks.conversations_db,
-            "update_conversation_if_active_summary_version",
+            "update_conversation_if_summary_authority",
             reject_stale_terminal_state,
         )
 
