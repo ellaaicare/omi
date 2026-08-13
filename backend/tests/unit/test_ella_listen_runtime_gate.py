@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -103,21 +104,21 @@ def test_legacy_auto_provision_uses_utc_fallback_without_shadowing_datetime_time
     captured = {}
 
     class FakePool:
-        async def fetchrow(self, _query, uid):
-            assert uid == "synthetic-user"
-            return {
-                "id": "00000000-0000-0000-0000-000000000001",
-                "cluster_id": None,
-                "name": "Synthetic",
-                "email": "synthetic@example.invalid",
-                "identities": {},
-                "timezone": "UTC",
-                "conditions": [],
-                "medications": [],
-            }
-
-        async def execute(self, _query, _user_id, cluster_agents):
-            captured["cluster"] = json.loads(cluster_agents)
+        async def fetchrow(self, query, *args):
+            if "FROM users u" in query:
+                assert args == ("synthetic-user",)
+                return {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "name": "Synthetic",
+                    "email": "synthetic@example.invalid",
+                    "identities": {},
+                    "timezone": "UTC",
+                    "conditions": [],
+                    "medications": [],
+                }
+            assert "INSERT INTO agent_clusters" in query
+            captured["cluster"] = json.loads(args[2])
+            return {"id": args[0]}
 
     async def get_pool():
         return FakePool()
@@ -157,6 +158,44 @@ def test_legacy_auto_provision_uses_utc_fallback_without_shadowing_datetime_time
     assert captured["payload"]["profile"]["timezone"] == "UTC"
     provisioned_at = datetime.fromisoformat(captured["cluster"]["provisionedAt"])
     assert provisioned_at.tzinfo == timezone.utc
+
+
+def test_legacy_cluster_persistence_uses_atomic_authority_preserving_upsert():
+    captured = {}
+
+    class FakePool:
+        async def fetchrow(self, query, *args):
+            captured["query"] = " ".join(query.split())
+            captured["args"] = args
+            return {"id": "00000000-0000-0000-0000-000000000099"}
+
+    result = asyncio.run(
+        auto_provision._persist_agent_cluster(
+            FakePool(),
+            "00000000-0000-0000-0000-000000000001",
+            json.dumps({"userAgentId": "synthetic-agent"}),
+        )
+    )
+
+    candidate_id, user_id, agents = captured["args"]
+    assert uuid.UUID(candidate_id)
+    assert user_id == "00000000-0000-0000-0000-000000000001"
+    assert json.loads(agents) == {"userAgentId": "synthetic-agent"}
+    assert "ON CONFLICT (user_id) DO UPDATE" in captured["query"]
+    assert "agent_clusters.agents || EXCLUDED.agents" in captured["query"]
+    assert "WHEN NULLIF(agent_clusters.agents->>'userAgentId', '') IS NOT NULL" in captured["query"]
+    assert "ELSE '{}'::jsonb" in captured["query"]
+    for authority_key in (
+        "gatewayUrl",
+        "workspace",
+        "userAgentId",
+        "caregiverAgentId",
+        "scannerAgentId",
+        "gatewayToken",
+        "provisionedAt",
+    ):
+        assert f"'{authority_key}', NULLIF(agent_clusters.agents->>'{authority_key}', '')" in captured["query"]
+    assert result == "00000000-0000-0000-0000-000000000099"
 
 
 def test_legacy_firestore_repair_requests_historical_cloud_sync_default(monkeypatch):

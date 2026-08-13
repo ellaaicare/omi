@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -55,6 +56,48 @@ async def _get_pool() -> asyncpg.Pool:
             max_size=10,
         )
     return _pool
+
+
+async def _persist_agent_cluster(pool: asyncpg.Pool, user_db_id: str, cluster_agents: str) -> str:
+    """Atomically create or refresh the single cluster owned by a user."""
+    candidate_cluster_id = str(uuid.uuid4())
+    row = await pool.fetchrow(
+        """
+        INSERT INTO agent_clusters (
+            id, user_id, agents, status, last_health_check, health_status
+        )
+        VALUES ($1::uuid, $2::uuid, $3::jsonb, 'ACTIVE', NOW(), 'Auto-provisioned')
+        ON CONFLICT (user_id) DO UPDATE
+        SET agents = agent_clusters.agents || EXCLUDED.agents ||
+            CASE
+                WHEN NULLIF(agent_clusters.agents->>'userAgentId', '') IS NOT NULL
+                THEN jsonb_strip_nulls(jsonb_build_object(
+                    'provider', NULLIF(agent_clusters.agents->>'provider', ''),
+                    'gatewayUrl', NULLIF(agent_clusters.agents->>'gatewayUrl', ''),
+                    'scannerGatewayUrl', NULLIF(agent_clusters.agents->>'scannerGatewayUrl', ''),
+                    'workspace', NULLIF(agent_clusters.agents->>'workspace', ''),
+                    'userId', NULLIF(agent_clusters.agents->>'userId', ''),
+                    'userAgentId', NULLIF(agent_clusters.agents->>'userAgentId', ''),
+                    'caregiverAgentId', NULLIF(agent_clusters.agents->>'caregiverAgentId', ''),
+                    'scannerAgentId', NULLIF(agent_clusters.agents->>'scannerAgentId', ''),
+                    'summarizerAgentId', NULLIF(agent_clusters.agents->>'summarizerAgentId', ''),
+                    'gatewayToken', NULLIF(agent_clusters.agents->>'gatewayToken', ''),
+                    'provisionedAt', NULLIF(agent_clusters.agents->>'provisionedAt', '')
+                ))
+                ELSE '{}'::jsonb
+            END,
+            status = 'ACTIVE',
+            last_health_check = NOW(),
+            health_status = 'Auto-provisioned'
+        RETURNING id
+        """,
+        candidate_cluster_id,
+        user_db_id,
+        cluster_agents,
+    )
+    if not row or not row["id"]:
+        raise RuntimeError("Agent cluster upsert did not return an id")
+    return str(row["id"])
 
 
 async def get_agent_cluster(uid: str) -> Optional[dict]:
@@ -196,10 +239,8 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         user_row = await pool.fetchrow(
             """
             SELECT u.id, u.name, u.email, u.identities, u.timezone,
-                   u.conditions, u.medications,
-                   ac.id AS cluster_id
+                   u.conditions, u.medications
             FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
             WHERE u.omi_uid = $1
             """,
             uid,
@@ -209,14 +250,12 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         user_email = None
         user_phone = None
         user_db_id = None
-        cluster_id = None
         timezone_name = "America/Los_Angeles"
         conditions = []
         medications = []
 
         if user_row:
             user_db_id = str(user_row["id"])
-            cluster_id = str(user_row["cluster_id"]) if user_row["cluster_id"] else None
             user_name = user_row["name"] or name
             user_email = user_row["email"]
             timezone_name = user_row["timezone"] or timezone_name
@@ -304,33 +343,8 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         cluster_agents = json.dumps(cluster_agents_dict)
 
         if user_db_id:
-            if cluster_id:
-                # Update existing cluster
-                await pool.execute(
-                    """
-                    UPDATE agent_clusters
-                    -- IMPORTANT: Use || merge, NOT plain assignment.
-                    -- Plain SET agents = $1 wipes userAgentId/scannerAgentId/gatewayToken on
-                    -- re-authentication (sign-out → sign-in). Incident: ella-ai#501 (Apr 2026).
-                    SET agents = agents || $1::jsonb, status = 'ACTIVE',
-                        last_health_check = NOW(), health_status = 'Auto-provisioned'
-                    WHERE id = $2::uuid
-                    """,
-                    cluster_agents,
-                    cluster_id,
-                )
-                logger.info(f"Updated cluster {cluster_id} with agent IDs for uid={uid}")
-            else:
-                # Create new cluster
-                await pool.execute(
-                    """
-                    INSERT INTO agent_clusters (user_id, agents, status, last_health_check, health_status)
-                    VALUES ($1::uuid, $2::jsonb, 'ACTIVE', NOW(), 'Auto-provisioned')
-                    """,
-                    user_db_id,
-                    cluster_agents,
-                )
-                logger.info(f"Created new cluster for user {user_db_id} uid={uid}")
+            cluster_id = await _persist_agent_cluster(pool, user_db_id, cluster_agents)
+            logger.info(f"Persisted cluster {cluster_id} with agent IDs for uid={uid}")
         else:
             logger.warning(f"No user record found for uid={uid} — agents provisioned on Mac Mini but not stored in DB")
 

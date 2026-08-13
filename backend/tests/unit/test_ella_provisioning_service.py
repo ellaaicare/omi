@@ -1298,10 +1298,12 @@ elif mode == "profile-map":
     would_send_retained = captured.get("authorization") == f"Bearer {retained}"
 elif mode in {"auto-provision", "auto-gateway"}:
     class SyntheticPool:
-        async def fetchrow(self, *args):
+        async def fetchrow(self, query, *args):
+            if "INSERT INTO agent_clusters" in query:
+                captured["cluster"] = json.loads(args[2])
+                return {"id": args[0]}
             return {
                 "id": "00000000-0000-0000-0000-000000000001",
-                "cluster_id": None,
                 "name": "Synthetic",
                 "email": None,
                 "timezone": "UTC",
@@ -1309,9 +1311,6 @@ elif mode in {"auto-provision", "auto-gateway"}:
                 "medications": [],
                 "identities": {},
             }
-
-        async def execute(self, query, *args):
-            captured["cluster"] = json.loads(args[1])
 
     async def synthetic_pool():
         return SyntheticPool()
