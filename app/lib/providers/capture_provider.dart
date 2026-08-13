@@ -457,6 +457,7 @@ class CaptureProvider extends ChangeNotifier
   bool _systemAudioCaching = true;
   Future<PhoneCaptureStartResult>? _micStartFuture;
   int _phoneCaptureReleaseOperations = 0;
+  Future<void>? _phoneCaptureTransportStopFuture;
   Future<PhoneCaptureStopResult>? _phoneCaptureStopFuture;
   Future<bool>? _deviceCaptureFinalizationFuture;
   Future<bool>? _systemAudioStartFuture;
@@ -2081,7 +2082,24 @@ class CaptureProvider extends ChangeNotifier
     return null;
   }
 
-  stopStreamRecording() async {
+  Future<void> stopStreamRecording() {
+    final activeFinalization = _phoneCaptureStopFuture;
+    if (activeFinalization != null) return activeFinalization.then<void>((_) {});
+
+    final activeTransportStop = _phoneCaptureTransportStopFuture;
+    if (activeTransportStop != null) return activeTransportStop;
+
+    late final Future<void> trackedStop;
+    trackedStop = _stopPhoneCaptureTransport().whenComplete(() {
+      if (identical(_phoneCaptureTransportStopFuture, trackedStop)) {
+        _phoneCaptureTransportStopFuture = null;
+      }
+    });
+    _phoneCaptureTransportStopFuture = trackedStop;
+    return trackedStop;
+  }
+
+  Future<void> _stopPhoneCaptureTransport() async {
     final pendingStart = _micStartFuture;
     _captureGeneration++;
     _beginPhoneCaptureRelease();
@@ -2121,8 +2139,12 @@ class CaptureProvider extends ChangeNotifier
     final activeStop = _phoneCaptureStopFuture;
     if (activeStop != null) return activeStop;
 
+    final activeTransportStop = _phoneCaptureTransportStopFuture;
     late final Future<PhoneCaptureStopResult> trackedStop;
-    trackedStop = _stopPhoneCaptureAndFinalize().whenComplete(() {
+    trackedStop = Future<PhoneCaptureStopResult>.sync(() async {
+      if (activeTransportStop != null) await activeTransportStop;
+      return _stopPhoneCaptureAndFinalize();
+    }).whenComplete(() {
       if (identical(_phoneCaptureStopFuture, trackedStop)) {
         _phoneCaptureStopFuture = null;
       }
