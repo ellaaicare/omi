@@ -1445,7 +1445,6 @@ class V2VClient {
     final pcmBytes = _pcmBuffer.toBytes();
     final stats = '$_chunkCount chunks, ${(pcmBytes.length / 1024).toStringAsFixed(1)}KB';
     Logger.debug('[V2V] Audio buffer done: reason=$reason $stats');
-    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Finishing audio: $stats'));
 
     _pcmBuffer.clear();
     _chunkCount = 0;
@@ -1473,7 +1472,6 @@ class V2VClient {
       final totalAudioMs = (pcmBytes.length / (_pcmSampleRate * _pcmBytesPerSample * _pcmChannels) * 1000).ceil();
       final timeoutMs = (totalAudioMs + 8000).clamp(8000, 180000);
       Logger.debug('[V2V] WAV ready: ${wavBytes.length}B, ${totalAudioMs}ms');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playing audio: ${(totalAudioMs / 1000).toStringAsFixed(1)}s'));
       _isPlaying = true;
       _playbackFuture = _playWav(wavBytes, generation).timeout(Duration(milliseconds: timeoutMs));
       await _playbackFuture;

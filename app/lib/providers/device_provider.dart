@@ -347,7 +347,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
           return;
         }
         _automaticReconnectAttempts++;
-        await scanAndConnectToDevice(operationGeneration: generation);
+        try {
+          await scanAndConnectToDevice(operationGeneration: generation);
+        } catch (error) {
+          Logger.debug('Automatic BLE reconnect failed: $error');
+          if (_isDeviceOperationCurrent(generation)) {
+            updateConnectingStatus(false);
+          }
+        }
         if (!_isDeviceOperationCurrent(generation)) return;
         if (!isConnected && connectedDevice == null && _automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
           t.cancel();

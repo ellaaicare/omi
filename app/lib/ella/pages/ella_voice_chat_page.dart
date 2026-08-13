@@ -955,7 +955,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         // Audio is now being played via just_audio — wait for playback_complete
         setState(() {
-          _statusText = 'Playing audio...';
+          _statusText = context.l10n.voiceEllaSpeaking;
         });
         break;
       case 'playback_complete':
