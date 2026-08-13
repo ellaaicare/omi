@@ -797,7 +797,6 @@ def test_stock_summary_missing_doc_honors_enhanced_data_protection(monkeypatch):
 
 def test_stock_summary_public_wrapper_backfills_enhanced_data_protection(monkeypatch):
     conversations = _load_conversations_module(monkeypatch)
-    import database.helpers as helpers
 
     captured = {}
 
@@ -814,7 +813,8 @@ def test_stock_summary_public_wrapper_backfills_enhanced_data_protection(monkeyp
         captured["processing_conversation"] = dict(processing_conversation)
         return {"status": "committed", "conversation": processing_conversation, "dispatched": True}
 
-    monkeypatch.setattr(helpers.redis_db, "get_user_data_protection_level", lambda uid: "enhanced")
+    data_protection_redis = conversations.commit_stock_summary_processing_result.__globals__["redis_db"]
+    monkeypatch.setattr(data_protection_redis, "get_user_data_protection_level", lambda uid: "enhanced")
     monkeypatch.setattr(conversations, "_commit_stock_summary_processing_result", commit_inner)
 
     conversations.commit_stock_summary_processing_result(
