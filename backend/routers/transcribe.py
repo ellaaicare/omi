@@ -69,6 +69,7 @@ from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
     mark_unexpected_conversation_processing_failed,
     process_conversation_with_outcome,
+    process_conversation_with_transcript_redelivery,
     retrieve_in_progress_conversation,
 )
 from utils.capture_buffer import (
@@ -704,7 +705,12 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            outcome = await asyncio.to_thread(process_conversation_with_outcome, uid, language, conversation)
+            outcome = await asyncio.to_thread(
+                process_conversation_with_transcript_redelivery,
+                uid,
+                language,
+                conversation,
+            )
             conversation = outcome.conversation
             if not outcome.dispatched and outcome.status in {
                 'processing_in_progress',
@@ -838,8 +844,12 @@ async def _stream_handler(
                 new_owner_id,
             )
             if not transferred:
-                conversations_db.delete_conversation(uid, new_conversation_id)
-                if detected_meeting_id:
+                abandoned = conversations_db.abandon_capture_conversation_if_owned(
+                    uid,
+                    new_conversation_id,
+                    new_owner_id or '',
+                )
+                if detected_meeting_id and abandoned:
                     redis_db.remove_conversation_meeting_id(new_conversation_id)
                 return False
             published = redis_db.rotate_in_progress_conversation_id(
@@ -873,10 +883,15 @@ async def _stream_handler(
                     new_conversation_id,
                     new_owner_id,
                 )
-            stub_adopted_by_another_socket = redis_db.get_in_progress_conversation_id(uid) == new_conversation_id
-            if (rolled_back or expected_conversation_id is None) and not stub_adopted_by_another_socket:
-                conversations_db.delete_conversation(uid, new_conversation_id)
-            if detected_meeting_id and not stub_adopted_by_another_socket:
+            abandoned = False
+            if expected_conversation_id is None:
+                abandoned = conversations_db.abandon_capture_conversation_if_owned(
+                    uid,
+                    new_conversation_id,
+                    new_owner_id or '',
+                )
+            cleanup_succeeded = rolled_back if expected_conversation_id is not None else abandoned
+            if detected_meeting_id and cleanup_succeeded:
                 redis_db.remove_conversation_meeting_id(new_conversation_id)
             return False
 

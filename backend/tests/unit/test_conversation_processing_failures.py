@@ -576,6 +576,11 @@ def test_process_retries_latest_transcript_after_capture_cas_loss(monkeypatch):
         "commit_stock_summary_processing_result",
         commit,
     )
+    monkeypatch.setattr(
+        conversation_processor.folders_db,
+        "get_folders",
+        lambda *_args, **_kwargs: [{"id": "existing-folder", "name": "Existing"}],
+    )
     monkeypatch.setattr(conversation_processor, "fire_postprocess_webhook", None)
 
     outcome = conversation_processor.process_conversation_with_outcome("uid-1", "en", conversation)
@@ -707,6 +712,111 @@ def test_explicit_reprocess_of_completed_conversation_remains_authorized(monkeyp
     assert recovery_updates == []
 
 
+def test_transcript_cas_exhaustion_redelivers_a_fresh_processing_invocation(monkeypatch):
+    conversation = _long_conversation()
+    calls = []
+    outcomes = [
+        conversation_processor.ConversationProcessingOutcome(
+            conversation=conversation,
+            dispatched=False,
+            status=conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+        ),
+        conversation_processor.ConversationProcessingOutcome(
+            conversation=conversation,
+            dispatched=True,
+            status="committed",
+        ),
+    ]
+    monkeypatch.setattr(
+        conversation_processor,
+        "process_conversation_with_outcome",
+        lambda *_args, **_kwargs: calls.append((_args, _kwargs)) or outcomes.pop(0),
+    )
+
+    outcome = conversation_processor.process_conversation_with_transcript_redelivery(
+        "uid-1",
+        "en",
+        conversation,
+    )
+
+    assert outcome.status == "committed"
+    assert outcome.dispatched is True
+    assert len(calls) == 2
+
+
+def test_transcript_redelivery_exhaustion_is_failed_instead_of_left_unowned(monkeypatch):
+    conversation = _long_conversation()
+    calls = []
+    failed = []
+    monkeypatch.setattr(
+        conversation_processor,
+        "process_conversation_with_outcome",
+        lambda *_args, **_kwargs: calls.append((_args, _kwargs))
+        or conversation_processor.ConversationProcessingOutcome(
+            conversation=conversation,
+            dispatched=False,
+            status=conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+        ),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "mark_unexpected_conversation_processing_failed",
+        lambda uid, durable: failed.append((uid, durable.id)) or True,
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "get_conversation",
+        lambda *_args: {**conversation.model_dump(), "status": ConversationStatus.failed.value},
+    )
+
+    outcome = conversation_processor.process_conversation_with_transcript_redelivery(
+        "uid-1",
+        "en",
+        conversation,
+    )
+
+    assert len(calls) == 2
+    assert failed == [("uid-1", conversation.id)]
+    assert outcome.status == conversation_processor.CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED
+    assert outcome.conversation.status == ConversationStatus.failed
+    assert outcome.dispatched is False
+
+
+def test_transcript_redelivery_exhaustion_accepts_a_concurrent_completed_winner(monkeypatch):
+    conversation = _long_conversation()
+    completed = {**conversation.model_dump(), "status": ConversationStatus.completed.value}
+    monkeypatch.setattr(
+        conversation_processor,
+        "process_conversation_with_outcome",
+        lambda *_args, **_kwargs: conversation_processor.ConversationProcessingOutcome(
+            conversation=conversation,
+            dispatched=False,
+            status=conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+        ),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "mark_unexpected_conversation_processing_failed",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "get_conversation",
+        lambda *_args: completed,
+    )
+
+    outcome = conversation_processor.process_conversation_with_transcript_redelivery(
+        "uid-1",
+        "en",
+        conversation,
+        max_redeliveries=0,
+    )
+
+    assert outcome.status == "already_completed"
+    assert outcome.conversation.status == ConversationStatus.completed
+    assert outcome.dispatched is False
+
+
 def test_post_commit_app_failure_does_not_rollback_or_suppress_hermes_dispatch(monkeypatch):
     conversation = _long_conversation()
     order = []
@@ -824,7 +934,7 @@ def test_unexpected_failure_after_durable_completion_is_a_noop(monkeypatch):
 def test_live_recording_callers_gate_external_integrations_on_dispatch_outcome(relative_path):
     source = (Path(__file__).resolve().parents[2] / relative_path).read_text()
 
-    assert "process_conversation_with_outcome" in source
+    assert "process_conversation_with_transcript_redelivery" in source
     assert "if outcome.dispatched:" in source
     guarded_block = source.split("if outcome.dispatched:", 1)[1].split("except Exception", 1)[0]
     assert "trigger_external_integrations" in guarded_block

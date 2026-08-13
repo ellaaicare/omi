@@ -153,6 +153,7 @@ def caller_modules(monkeypatch):
         "utils.conversations.process_conversation",
         mark_unexpected_conversation_processing_failed=_noop,
         process_conversation_with_outcome=lambda *_args, **_kwargs: None,
+        process_conversation_with_transcript_redelivery=lambda *_args, **_kwargs: None,
         retrieve_in_progress_conversation=lambda *_args, **_kwargs: None,
     )
     _stub_module(monkeypatch, "utils.conversations.location", get_google_maps_location=lambda *_args: None)
@@ -314,7 +315,7 @@ def test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcome
     conversation = _conversation()
     monkeypatch.setattr(
         caller_modules.pusher,
-        "process_conversation_with_outcome",
+        "process_conversation_with_transcript_redelivery",
         lambda *_args, **_kwargs: SimpleNamespace(
             conversation=conversation,
             dispatched=False,
@@ -429,7 +430,7 @@ def test_pusher_dispatches_external_integrations_once_for_winning_outcome(monkey
     conversation = _conversation()
     monkeypatch.setattr(
         caller_modules.pusher,
-        "process_conversation_with_outcome",
+        "process_conversation_with_transcript_redelivery",
         lambda *_args, **_kwargs: SimpleNamespace(
             conversation=conversation,
             dispatched=True,
@@ -507,7 +508,7 @@ def test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dis
     websocket = _FakeWebSocket()
     monkeypatch.setattr(
         caller_modules.transcribe,
-        "process_conversation_with_outcome",
+        "process_conversation_with_transcript_redelivery",
         lambda *_args, **_kwargs: SimpleNamespace(
             conversation=conversation,
             dispatched=False,

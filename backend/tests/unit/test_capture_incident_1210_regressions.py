@@ -427,7 +427,7 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
         def dict(self):
             return dict(self.values)
 
-    deleted = []
+    abandoned = []
     upserted = []
 
     class AdoptingRedis:
@@ -454,7 +454,10 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
             "calendar_db": SimpleNamespace(get_meetings_in_time_range=lambda *_args: []),
             "conversations_db": SimpleNamespace(
                 upsert_conversation=lambda _uid, conversation_data: upserted.append(conversation_data),
-                delete_conversation=lambda _uid, conversation_id: deleted.append(conversation_id),
+                abandon_capture_conversation_if_owned=lambda _uid, conversation_id, owner_id: abandoned.append(
+                    (conversation_id, owner_id)
+                )
+                or False,
             ),
             "datetime": datetime,
             "redis_db": AdoptingRedis(),
@@ -485,7 +488,44 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
         is False
     )
     assert upserted[0]["id"] == "stub-adopted"
-    assert deleted == []
+    assert abandoned == [("stub-adopted", "socket-a")]
+
+
+def test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation():
+    conversations = _load_conversations_module()
+
+    class Ref:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: self.data)
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    owned_ref = Ref({"status": "in_progress", "capture_owner_id": "socket-old"})
+    owned_transaction = Transaction()
+    assert conversations._abandon_capture_conversation_if_owned_transaction(
+        owned_transaction,
+        owned_ref,
+        "socket-old",
+    )
+    assert owned_transaction.updates[0][1]["status"] == "failed"
+    assert owned_transaction.updates[0][1]["capture_owner_id"] is None
+
+    adopted_ref = Ref({"status": "in_progress", "capture_owner_id": "socket-new"})
+    adopted_transaction = Transaction()
+    assert not conversations._abandon_capture_conversation_if_owned_transaction(
+        adopted_transaction,
+        adopted_ref,
+        "socket-old",
+    )
+    assert adopted_transaction.updates == []
 
 
 def test_duplicate_processing_claim_is_a_no_write_inflight_result():

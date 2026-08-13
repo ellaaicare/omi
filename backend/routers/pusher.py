@@ -22,7 +22,7 @@ from utils.app_integrations import (
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
     mark_unexpected_conversation_processing_failed,
-    process_conversation_with_outcome,
+    process_conversation_with_transcript_redelivery,
 )
 from utils.webhooks import (
     send_audio_bytes_developer_webhook,
@@ -79,7 +79,12 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             # Run blocking operations in thread pool to avoid blocking event loop
-            outcome = await asyncio.to_thread(process_conversation_with_outcome, uid, language, conversation)
+            outcome = await asyncio.to_thread(
+                process_conversation_with_transcript_redelivery,
+                uid,
+                language,
+                conversation,
+            )
             conversation = outcome.conversation
             if not outcome.dispatched and outcome.status not in {'already_completed'}:
                 response = {"conversation_id": conversation_id, "error": outcome.status}

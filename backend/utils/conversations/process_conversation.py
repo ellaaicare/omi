@@ -90,6 +90,9 @@ class ConversationProcessingOutcome:
     status: str
 
 
+CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED = 'transcript_redelivery_exhausted'
+
+
 def _run_post_commit_effect(name: str, effect):
     try:
         return effect()
@@ -891,6 +894,43 @@ def process_conversation_with_outcome(
         dispatched=should_dispatch_processing_side_effects,
         status='committed',
     )
+
+
+def process_conversation_with_transcript_redelivery(
+    uid: str,
+    language_code: str,
+    conversation: Conversation,
+    *,
+    max_redeliveries: int = 1,
+) -> ConversationProcessingOutcome:
+    """Run a fresh claimed processing invocation after transcript CAS exhaustion."""
+    redeliveries = 0
+    while True:
+        outcome = process_conversation_with_outcome(uid, language_code, conversation)
+        if outcome.status != conversations_db.conversation_stock_summary_transcript_changed:
+            return outcome
+        if redeliveries >= max_redeliveries:
+            marked_failed = mark_unexpected_conversation_processing_failed(uid, outcome.conversation)
+            durable_conversation = conversations_db.get_conversation(uid, outcome.conversation.id)
+            durable = Conversation(**(durable_conversation or outcome.conversation.dict()))
+            if not marked_failed and durable.status == ConversationStatus.completed:
+                return ConversationProcessingOutcome(
+                    conversation=durable,
+                    dispatched=False,
+                    status='already_completed',
+                )
+            return ConversationProcessingOutcome(
+                conversation=durable,
+                dispatched=False,
+                status=CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED,
+            )
+        redeliveries += 1
+        conversation = outcome.conversation
+        print(
+            f"re-dispatching conversation.id={conversation.id} after transcript CAS exhaustion "
+            f"({redeliveries}/{max_redeliveries})",
+            flush=True,
+        )
 
 
 def process_conversation(

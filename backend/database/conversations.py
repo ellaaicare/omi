@@ -2939,6 +2939,47 @@ def bind_capture_conversation_owner(uid: str, conversation_id: str, owner_id: Op
     return _bind_capture_conversation_owner(db.transaction(), conversation_ref, owner_id)
 
 
+def _abandon_capture_conversation_if_owned_transaction(
+    transaction,
+    conversation_ref,
+    expected_owner_id: str,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get("status"), "value", conversation.get("status"))
+    owner_id = str(conversation.get("capture_owner_id") or "").strip()
+    if status != ConversationStatus.in_progress.value or owner_id != str(expected_owner_id or "").strip():
+        return False
+    transaction.update(
+        conversation_ref,
+        {
+            "status": ConversationStatus.failed.value,
+            "capture_owner_id": None,
+            "processing_error": "capture_stub_publication_failed",
+            "processing_error_at": datetime.now(timezone.utc),
+        },
+    )
+    return True
+
+
+@transactional
+def _abandon_capture_conversation_if_owned(transaction, conversation_ref, expected_owner_id: str) -> bool:
+    return _abandon_capture_conversation_if_owned_transaction(transaction, conversation_ref, expected_owner_id)
+
+
+def abandon_capture_conversation_if_owned(uid: str, conversation_id: str, expected_owner_id: str) -> bool:
+    conversation_ref = (
+        db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _abandon_capture_conversation_if_owned(
+        db.transaction(),
+        conversation_ref,
+        expected_owner_id,
+    )
+
+
 def _transfer_capture_conversation_owner_transaction(
     transaction,
     previous_ref,

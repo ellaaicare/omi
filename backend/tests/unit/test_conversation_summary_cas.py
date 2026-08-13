@@ -1202,7 +1202,12 @@ def test_initial_processing_claim_promotes_in_progress_once_with_partial_update(
     result = conversations._claim_initial_conversation_processing_transaction(transaction, ref)
 
     assert result == {"status": "processing_claimed"}
-    assert transaction.updates == [(ref, {"status": "processing"})]
+    assert len(transaction.updates) == 1
+    updated_ref, update = transaction.updates[0]
+    assert updated_ref is ref
+    assert update["status"] == "processing"
+    assert isinstance(update["initial_processing_claimed_at"], datetime)
+    assert update["initial_processing_claimed_at"].tzinfo is not None
     assert ref.data["transcript_segments"] == [{"text": "durable capture"}]
 
 
