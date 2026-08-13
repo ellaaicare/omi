@@ -1091,6 +1091,62 @@ void main() {
     expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
+  test('continuous necklace boundary replaces the socket before exact processing', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    var transportStarts = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        transportStarts++;
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('pre-boundary-necklace', 'Words before the Home moment')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'pre-boundary-necklace');
+        expect(socketPreparations, 2, reason: 'the replacement socket must own capture before processing');
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'completed-pre-boundary-necklace',
+            'Words before the Home moment',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(device: necklace);
+    provider.segments = [_segment('local-pre-boundary', 'Local words before the boundary')];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(processCalls, 1);
+    expect(socketPreparations, 2);
+    expect(transportStarts, 1, reason: 'BLE capture must continue without a physical restart');
+    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(provider.segments, isEmpty, reason: 'the replacement socket starts a fresh local moment');
+  });
+
   test('necklace cannot become active with a null or disconnected transcription socket', () async {
     final authority = _CaptureAuthority('uid-a');
     final disconnected = _FakeTranscriptSocket(status: PureSocketStatus.disconnected);

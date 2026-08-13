@@ -460,6 +460,7 @@ class CaptureProvider extends ChangeNotifier
   Future<void>? _phoneCaptureTransportStopFuture;
   Future<PhoneCaptureStopResult>? _phoneCaptureStopFuture;
   Future<bool>? _deviceCaptureFinalizationFuture;
+  Future<bool>? _deviceCaptureBoundaryFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
@@ -1502,6 +1503,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _replaceDeviceCaptureSocket(
     _DeviceCaptureSession session, {
     required String reason,
+    Future<void> Function()? afterOldSocketStopped,
   }) async {
     if (!_isDeviceCaptureCurrent(session)) return false;
     final device = _recordingDevice;
@@ -1512,6 +1514,7 @@ class CaptureProvider extends ChangeNotifier
 
     final oldSocket = session.socket;
     await oldSocket.stop(reason: reason);
+    await afterOldSocketStopped?.call();
     if (!_isDeviceCaptureCurrent(session)) return false;
     final replacement = await _ensureDeviceSocketConnection(device, force: true);
     if (!_isDeviceCaptureCurrent(session)) {
@@ -2240,6 +2243,9 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> streamDeviceRecording({BtDevice? device}) async {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) await activeBoundary;
+
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) await activeFinalization;
 
@@ -2427,6 +2433,9 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future stopStreamDeviceRecording({bool cleanDevice = false}) async {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) await activeBoundary;
+
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
     await _cleanupCurrentState();
     if (cleanDevice) {
@@ -2440,6 +2449,9 @@ class CaptureProvider extends ChangeNotifier
   /// then processes that exact conversation. The disconnect path remains a
   /// fallback for crashes and transport loss.
   Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) await activeBoundary;
+
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) return activeFinalization;
 
@@ -2477,6 +2489,65 @@ class CaptureProvider extends ChangeNotifier
     });
     _deviceCaptureFinalizationFuture = trackedFinalization;
     return trackedFinalization;
+  }
+
+  /// Finalizes the exact conversation owned by the current necklace socket,
+  /// then binds the still-running BLE stream to a replacement socket.
+  Future<bool> finalizeCurrentDeviceConversationAndContinue() {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) return activeBoundary;
+
+    late final Future<bool> trackedBoundary;
+    trackedBoundary = _finalizeCurrentDeviceConversationAndContinue().whenComplete(() {
+      if (identical(_deviceCaptureBoundaryFuture, trackedBoundary)) {
+        _deviceCaptureBoundaryFuture = null;
+      }
+    });
+    _deviceCaptureBoundaryFuture = trackedBoundary;
+    return trackedBoundary;
+  }
+
+  Future<bool> _finalizeCurrentDeviceConversationAndContinue() async {
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) await activeFinalization;
+
+    final session = _deviceCaptureSession;
+    if (session == null || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) {
+      return false;
+    }
+    final operation = _beginFinalizationOperation();
+    if (operation == null) return false;
+    try {
+      final hasContent = await _awaitFinalCapturableContent(
+        operation,
+        maxAttempts: 12,
+        retryDelay: const Duration(milliseconds: 500),
+      );
+      final conversationId = (_conversation?.id ?? '').trim();
+      if (!hasContent || conversationId.isEmpty || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) {
+        return false;
+      }
+
+      _replacingTranscriptionSocket = true;
+      try {
+        final replaced = await _replaceDeviceCaptureSocket(
+          session,
+          reason: 'continuous necklace moment boundary',
+          afterOldSocketStopped: _resetStateVariables,
+        );
+        if (!replaced || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
+      } finally {
+        _replacingTranscriptionSocket = false;
+      }
+
+      final finalized = await _forceProcessingConversationId(conversationId, operation);
+      if (finalized && _isDeviceCaptureCurrent(session)) {
+        _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
+      }
+      return finalized;
+    } finally {
+      operation.close();
+    }
   }
 
   Future<bool> streamSystemAudioRecording() {
@@ -3254,7 +3325,21 @@ class CaptureProvider extends ChangeNotifier
       final conversationId = (_conversation?.id ?? '').trim();
       if (conversationId.isEmpty) return false;
       await _resetStateVariables();
-      if (!activeOperation.isCurrent) return false;
+      return _forceProcessingConversationId(conversationId, activeOperation);
+    } on ExactAccountAuthorityChangedException {
+      return false;
+    } finally {
+      if (ownsOperation) activeOperation.close();
+    }
+  }
+
+  Future<bool> _forceProcessingConversationId(
+    String conversationId,
+    CaptureFinalizationOperation activeOperation,
+  ) async {
+    final conversations = conversationProvider;
+    if (conversations == null || !activeOperation.isCurrent) return false;
+    try {
       conversations.addProcessingConversation(
         ServerConversation(
           id: '0',
@@ -3282,8 +3367,6 @@ class CaptureProvider extends ChangeNotifier
       );
     } on ExactAccountAuthorityChangedException {
       return false;
-    } finally {
-      if (ownsOperation) activeOperation.close();
     }
   }
 

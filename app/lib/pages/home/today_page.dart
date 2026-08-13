@@ -487,7 +487,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     CaptureProvider capture, {
     bool Function()? isCurrent,
   }) async {
-    final finalized = await capture.finalizeCurrentConversation();
+    final finalized = capture.recordingState == RecordingState.deviceRecord
+        ? await capture.finalizeCurrentDeviceConversationAndContinue()
+        : await capture.finalizeCurrentConversation();
     if (isCurrent != null && !isCurrent()) return false;
     if (finalized) return true;
     if (!mounted) return false;
@@ -700,7 +702,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           // pre-tap audio so this intentional moment starts at an exact boundary
           // without stopping the user's ambient capture.
           if (capture.hasCapturableContent) {
-            await capture.finalizeCurrentConversation();
+            if (!await _finalizeHomeMoment(capture)) return;
           }
         }
         if (!mounted) return;

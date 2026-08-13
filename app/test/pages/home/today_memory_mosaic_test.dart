@@ -562,11 +562,13 @@ void main() {
     expect(harness.capture.deviceStarts, 0);
     expect(harness.capture.deviceStops, 0);
     expect(harness.capture.finishes, 1, reason: 'the start tap must exclude pre-tap necklace audio');
+    expect(harness.capture.deviceBoundaries, 1);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
     expect(harness.capture.deviceStops, 0, reason: 'Home must preserve a stream it did not start');
     expect(harness.capture.finishes, 2, reason: 'the finish tap closes only the intentional moment');
+    expect(harness.capture.deviceBoundaries, 2);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
@@ -875,6 +877,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   int phoneStops = 0;
   int deviceStarts = 0;
   int deviceStops = 0;
+  int deviceBoundaries = 0;
   int finishes = 0;
   int finalizationCalls = 0;
   int finalContentChecks = 0;
@@ -905,6 +908,12 @@ class _FakeCaptureProvider extends CaptureProvider {
     if (!result) return false;
     finishes++;
     return true;
+  }
+
+  @override
+  Future<bool> finalizeCurrentDeviceConversationAndContinue() async {
+    deviceBoundaries++;
+    return finalizeCurrentConversation();
   }
 
   @override
