@@ -941,7 +941,7 @@ jobs:
           for required_id in "${required_today_card_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$today_card_ids"
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 211
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 214
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
