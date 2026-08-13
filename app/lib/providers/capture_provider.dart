@@ -716,6 +716,11 @@ class CaptureProvider extends ChangeNotifier
 
   CaptureDiagnostics get captureDiagnostics => _captureDiagnostics;
 
+  bool get hasUnfinalizedPhoneCaptureContent =>
+      _captureDiagnostics.source == CaptureDiagnosticSource.phone &&
+      _captureDiagnostics.phase != CaptureDiagnosticPhase.completed &&
+      (_captureDiagnostics.hasPhysicalAudio || hasCapturableContent);
+
   void _resetCaptureDiagnostics({bool notify = false}) {
     _captureDiagnostics = const CaptureDiagnostics();
     _lastCaptureDiagnosticsNotificationAt = null;

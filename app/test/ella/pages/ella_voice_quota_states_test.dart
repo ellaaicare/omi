@@ -158,8 +158,8 @@ void main() {
       RegExp(r'stopAndFinalizePhoneCapture: captureProvider\.stopPhoneCaptureForVoiceTakeover').allMatches(source),
       hasLength(2),
     );
-    expect(source, contains('captureDiagnostics.source == CaptureDiagnosticSource.phone'));
-    expect(source, contains('captureDiagnostics.hasPhysicalAudio || captureProvider.hasCapturableContent'));
+    expect(source, contains('captureProvider.hasUnfinalizedPhoneCaptureContent'));
+    expect(source, isNot(contains('captureDiagnostics.source == CaptureDiagnosticSource.phone')));
     expect(source, isNot(contains('captureProvider.stopStreamRecording()')));
   });
 

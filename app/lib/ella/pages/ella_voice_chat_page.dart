@@ -872,9 +872,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
     final phoneCaptureActive =
         captureProvider.phoneCaptureOwnsMobileAudio || captureProvider.recordingState == RecordingState.record;
-    final captureDiagnostics = captureProvider.captureDiagnostics;
-    final phoneCaptureContentful = captureDiagnostics.source == CaptureDiagnosticSource.phone &&
-        (captureDiagnostics.hasPhysicalAudio || captureProvider.hasCapturableContent);
+    final phoneCaptureContentful = captureProvider.hasUnfinalizedPhoneCaptureContent;
     if (phoneCaptureActive || phoneCaptureContentful) {
       debugPrint('[VoiceChat] Finalizing phone capture before ${v2v ? 'V2V' : 'standard'} voice');
     }

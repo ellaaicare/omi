@@ -670,12 +670,14 @@ void main() {
     mic.confirmRecording();
     mic.emit([1, 2, 3, 4]);
     expect(await start, PhoneCaptureStartResult.started);
+    expect(provider.hasUnfinalizedPhoneCaptureContent, isTrue);
 
     expect(await provider.stopStreamRecordingAndFinalize(), isTrue);
     expect(processCalls, 1);
     expect(transcriptSocket.pure.stops, 1);
     expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+    expect(provider.hasUnfinalizedPhoneCaptureContent, isFalse);
   });
 
   test('voice takeover observes transcript content that arrives while the recorder stops', () async {
