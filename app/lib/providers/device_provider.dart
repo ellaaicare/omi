@@ -23,17 +23,20 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 
 typedef DeviceConnectionResolver = Future<BtDevice?> Function(String deviceId);
 typedef DeviceScanConnector = Future<BtDevice?> Function();
+typedef DeviceStorageListResolver = Future<List<int>> Function(String deviceId);
 
 class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption {
   DeviceProvider({
     IDeviceService? deviceService,
     DeviceConnectionResolver? connectionResolver,
     DeviceScanConnector? scanConnector,
+    @visibleForTesting DeviceStorageListResolver? storageListResolver,
     @visibleForTesting Duration reconnectionInterval = const Duration(seconds: 15),
     @visibleForTesting int maxAutomaticReconnectAttempts = 3,
   })  : _deviceService = deviceService ?? ServiceManager.instance().device,
         _connectionResolver = connectionResolver,
         _scanConnector = scanConnector,
+        _storageListResolver = storageListResolver,
         _reconnectionInterval = reconnectionInterval,
         _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts {
     _deviceService.subscribe(this, this);
@@ -42,6 +45,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   final IDeviceService _deviceService;
   final DeviceConnectionResolver? _connectionResolver;
   final DeviceScanConnector? _scanConnector;
+  final DeviceStorageListResolver? _storageListResolver;
   CaptureProvider? captureProvider;
 
   bool isConnecting = false;
@@ -211,6 +215,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   Future<List<int>> _getStorageList(String deviceId) async {
+    final resolver = _storageListResolver;
+    if (resolver != null) return resolver(deviceId);
     var connection = await _deviceService.ensureConnection(deviceId);
     if (connection == null) {
       return [];
@@ -335,7 +341,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         return;
       }
       Logger.debug("isConnected: $isConnected, isConnecting: $isConnecting, connectedDevice: $connectedDevice");
-      if ((!isConnected && connectedDevice == null)) {
+      if (!isConnected) {
         if (isConnecting) {
           return;
         }
@@ -352,11 +358,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         } catch (error) {
           Logger.debug('Automatic BLE reconnect failed: $error');
           if (_isDeviceOperationCurrent(generation)) {
+            connectedDevice = null;
+            isConnected = false;
+            isDeviceStorageSupport = false;
             updateConnectingStatus(false);
           }
         }
         if (!_isDeviceOperationCurrent(generation)) return;
-        if (!isConnected && connectedDevice == null && _automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
+        if (!isConnected && _automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
           t.cancel();
           isConnecting = false;
           _automaticReconnectExhausted = true;

@@ -420,6 +420,41 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
+  test('automatic reconnect clears a partially assigned device and exhausts after storage failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    var scanCalls = 0;
+    var storageCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async {
+        storageCalls++;
+        throw StateError('synthetic storage probe failure');
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test partial reconnect rollback');
+    for (var attempt = 0; attempt < 20 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(storageCalls, 3);
+    expect(provider.connectedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.automaticReconnectAttempts, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+  });
+
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
