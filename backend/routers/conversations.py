@@ -61,6 +61,7 @@ def _get_valid_conversation_by_id(uid: str, conversation_id: str) -> dict:
 
 class ProcessConversationRequest(BaseModel):
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
+    conversation_id: Optional[str] = None
 
 
 @router.post(
@@ -72,10 +73,28 @@ class ProcessConversationRequest(BaseModel):
 def process_in_progress_conversation(
     request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
 ):
-    conversation = retrieve_in_progress_conversation(uid)
+    requested_conversation_id = str(request.conversation_id or '').strip() if request else ''
+    conversation = (
+        conversations_db.get_conversation(uid, requested_conversation_id)
+        if requested_conversation_id
+        else retrieve_in_progress_conversation(uid)
+    )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation in progress not found")
-    redis_db.remove_in_progress_conversation_id(uid)
+
+    conversation_id = str(conversation.get('id') or '').strip()
+    active_conversation_id = redis_db.get_in_progress_conversation_id(uid)
+    if active_conversation_id == conversation_id:
+        if redis_db.get_in_progress_conversation_owner(uid):
+            raise HTTPException(
+                status_code=409,
+                detail="Capture transport is still active; close it before processing",
+            )
+        if not redis_db.release_unowned_in_progress_conversation_id(uid, conversation_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Capture finalization state changed; retry processing",
+            )
 
     conversation = Conversation(**conversation)
 

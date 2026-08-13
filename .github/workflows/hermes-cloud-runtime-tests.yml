@@ -602,6 +602,7 @@ jobs:
             "tests/unit/test_capture_buffer_retention.py::test_capture_commit_rejects_conversation_rotation_before_write"
             "tests/unit/test_capture_buffer_retention.py::test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired_id"
             "tests/unit/test_capture_buffer_retention.py::test_capture_commit_lease_blocks_ownership_transfer_until_release"
+            "tests/unit/test_capture_buffer_retention.py::test_manual_processing_cannot_release_active_or_committing_capture"
             "tests/unit/test_capture_buffer_retention.py::test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_waits_for_terminal_response"
@@ -618,7 +619,7 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 24
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 25
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
@@ -930,6 +931,8 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_merge_preserves_sources_when_new_conversation_processing_does_not_dispatch"
             "tests/unit/test_conversation_processing_failures.py::test_postprocessing_marks_failed_when_summary_reprocess_does_not_dispatch"
             "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_suppresses_integrations_for_non_dispatch_outcome"
+            "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_rejects_live_capture_owner"
+            "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_targets_exact_closed_conversation"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
@@ -948,7 +951,7 @@ jobs:
           for required_id in "${required_today_card_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$today_card_ids"
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 218
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 220
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \

@@ -476,6 +476,17 @@ redis.call('DEL', KEYS[1])
 return 1
 """
 
+_RELEASE_UNOWNED_IN_PROGRESS_CONVERSATION_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1 then
+    return 0
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
 
 def _in_progress_conversation_keys(uid: str) -> tuple[str, str]:
     return (
@@ -630,8 +641,25 @@ def release_capture_commit_lease(uid: str, owner_id: str) -> bool:
     )
 
 
-def remove_in_progress_conversation_id(uid: str):
-    r.delete(*_in_progress_conversation_keys(uid), _capture_commit_lease_key(uid))
+def get_in_progress_conversation_owner(uid: str) -> str:
+    _, owner_key = _in_progress_conversation_keys(uid)
+    owner_id = r.get(owner_key)
+    return owner_id.decode() if owner_id else ''
+
+
+def release_unowned_in_progress_conversation_id(uid: str, expected_conversation_id: str) -> bool:
+    """Release only an exact active ID with no socket owner or capture commit."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _RELEASE_UNOWNED_IN_PROGRESS_CONVERSATION_SCRIPT,
+            3,
+            active_key,
+            owner_key,
+            _capture_commit_lease_key(uid),
+            expected_conversation_id,
+        )
+    )
 
 
 def get_in_progress_conversation_id(uid: str) -> str:

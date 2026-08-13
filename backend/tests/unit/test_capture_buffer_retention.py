@@ -38,6 +38,15 @@ class InMemoryOwnershipRedis:
         self.ttls = {}
 
     def eval(self, script, key_count, *args):
+        if "redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1" in script:
+            assert key_count == 3
+            active_key, owner_key, lease_key = args[:key_count]
+            (expected_id,) = args[key_count:]
+            if self.values.get(active_key) != expected_id or owner_key in self.values or lease_key in self.values:
+                return 0
+            self.delete(active_key)
+            return 1
+
         if "redis.call('SET', KEYS[3], ARGV[2]" in script:
             assert key_count == 3
             active_key, owner_key, lease_key = args[:key_count]
@@ -664,7 +673,9 @@ def test_active_conversation_lease_fences_reconnect_overlap_and_restores_expired
     assert not redis_db.refresh_in_progress_conversation_id("uid-a", "conversation-a", "socket-old")
     assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-b", "socket-next")
 
-    redis_db.remove_in_progress_conversation_id("uid-a")
+    assert not redis_db.release_unowned_in_progress_conversation_id("uid-a", "conversation-b")
+    redis_db.r.delete("users:uid-a:in_progress_memory_owner")
+    assert redis_db.release_unowned_in_progress_conversation_id("uid-a", "conversation-b")
     assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-recovered", "socket-recovered")
     assert not redis_db.claim_in_progress_conversation_id("uid-a", "conversation-stale", "socket-stale")
     assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-recovered"
@@ -685,6 +696,21 @@ def test_capture_commit_lease_blocks_ownership_transfer_until_release():
     assert redis_db.release_capture_commit_lease("uid-a", "socket-old")
     assert redis_db.claim_in_progress_conversation_id("uid-a", "conversation-a", "socket-new")
     assert not redis_db.acquire_capture_commit_lease("uid-a", "conversation-a", "socket-old")
+
+
+def test_manual_processing_cannot_release_active_or_committing_capture():
+    redis_db = load_ownership_redis_db()
+    redis_db.set_in_progress_conversation_id("uid-a", "conversation-a", owner_id="socket-old")
+
+    assert redis_db.get_in_progress_conversation_owner("uid-a") == "socket-old"
+    assert not redis_db.release_unowned_in_progress_conversation_id("uid-a", "conversation-a")
+
+    redis_db.r.delete("users:uid-a:in_progress_memory_owner")
+    redis_db.r._set("users:uid-a:in_progress_memory_id:capture_commit", "socket-old", 120)
+    assert not redis_db.release_unowned_in_progress_conversation_id("uid-a", "conversation-a")
+
+    redis_db.r.delete("users:uid-a:in_progress_memory_id:capture_commit")
+    assert redis_db.release_unowned_in_progress_conversation_id("uid-a", "conversation-a")
 
 
 def test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas():

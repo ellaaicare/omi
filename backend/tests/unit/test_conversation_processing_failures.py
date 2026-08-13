@@ -1139,7 +1139,7 @@ def test_manual_conversation_processing_suppresses_integrations_for_non_dispatch
         "retrieve_in_progress_conversation",
         lambda _uid: conversation.model_dump(),
     )
-    monkeypatch.setattr(conversations_router.redis_db, "remove_in_progress_conversation_id", lambda _uid: None)
+    monkeypatch.setattr(conversations_router.redis_db, "get_in_progress_conversation_id", lambda _uid: "")
     monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
     monkeypatch.setattr(
         conversations_router,
@@ -1161,6 +1161,65 @@ def test_manual_conversation_processing_suppresses_integrations_for_non_dispatch
     assert response.conversation.id == conversation.id
     assert response.messages == []
     assert integration_calls == []
+
+
+def test_manual_conversation_processing_rejects_live_capture_owner(monkeypatch):
+    conversation = _long_conversation()
+    monkeypatch.setattr(
+        conversations_router,
+        "retrieve_in_progress_conversation",
+        lambda _uid: conversation.model_dump(),
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "get_in_progress_conversation_id",
+        lambda _uid: conversation.id,
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "get_in_progress_conversation_owner",
+        lambda _uid: "socket-active",
+    )
+
+    with pytest.raises(conversations_router.HTTPException) as raised:
+        conversations_router.process_in_progress_conversation(uid="uid-1")
+
+    assert raised.value.status_code == 409
+    assert "still active" in raised.value.detail
+
+
+def test_manual_conversation_processing_targets_exact_closed_conversation(monkeypatch):
+    conversation = _long_conversation()
+    processed = []
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: (
+            conversation.model_dump() if (uid, conversation_id) == ("uid-1", conversation.id) else None
+        ),
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "get_in_progress_conversation_id",
+        lambda _uid: "replacement-conversation",
+    )
+    monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
+    monkeypatch.setattr(
+        conversations_router,
+        "process_conversation_with_outcome",
+        lambda uid, language, target, force_process: (
+            processed.append((uid, target.id, force_process))
+            or types.SimpleNamespace(conversation=target, dispatched=False, status="already_completed")
+        ),
+    )
+
+    response = conversations_router.process_in_progress_conversation(
+        request=conversations_router.ProcessConversationRequest(conversation_id=conversation.id),
+        uid="uid-1",
+    )
+
+    assert response.conversation.id == conversation.id
+    assert processed == [("uid-1", conversation.id, True)]
 
 
 class _FakeSnapshot:
