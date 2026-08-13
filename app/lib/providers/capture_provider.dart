@@ -2239,16 +2239,19 @@ class CaptureProvider extends ChangeNotifier
     reset();
   }
 
-  Future<void> streamDeviceRecording({BtDevice? device}) {
+  Future<void> streamDeviceRecording({BtDevice? device}) async {
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) await activeFinalization;
+
     final targetDevice = device ?? _recordingDevice;
     if (targetDevice == null || targetDevice.id.isEmpty) {
       if (recordingState != RecordingState.record && _micStartFuture == null) {
         updateRecordingState(RecordingState.error);
       }
-      return Future.value();
+      return;
     }
     if (phoneCaptureOwnsMobileAudio) {
-      return Future.value();
+      return;
     }
     final activeSession = _deviceCaptureSession;
     if (activeSession != null &&
@@ -2256,7 +2259,7 @@ class CaptureProvider extends ChangeNotifier
         _isDeviceCaptureCurrent(activeSession) &&
         activeSession.socket.state == SocketServiceState.connected &&
         recordingState == RecordingState.deviceRecord) {
-      return Future.value();
+      return;
     }
 
     _deviceCaptureAttempt?.cancel();
@@ -2285,7 +2288,7 @@ class CaptureProvider extends ChangeNotifier
       if (identical(_deviceCaptureAttempt, attempt)) _deviceCaptureAttempt = null;
     });
     _deviceCaptureStartFuture = trackedStart;
-    return trackedStart;
+    await trackedStart;
   }
 
   Future<void> _streamDeviceRecording(_DeviceCaptureAttempt attempt, BtDevice targetDevice) async {
@@ -2454,12 +2457,20 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  Future<bool> _serializedDeviceCaptureFinalization() {
+  Future<bool> _serializedDeviceCaptureFinalization({
+    bool closeBleTransport = false,
+    bool finalize = true,
+  }) {
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) return activeFinalization;
 
     late final Future<bool> trackedFinalization;
-    trackedFinalization = finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true).whenComplete(() {
+    trackedFinalization = (() async {
+      if (closeBleTransport) await _closeBleStream();
+      if (!finalize) return false;
+      return finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true);
+    })()
+        .whenComplete(() {
       if (identical(_deviceCaptureFinalizationFuture, trackedFinalization)) {
         _deviceCaptureFinalizationFuture = null;
       }
@@ -2931,25 +2942,38 @@ class CaptureProvider extends ChangeNotifier
     Logger.error('Capture stopped because $reason');
     _keepAliveTimer?.cancel();
     _keepAliveTimer = null;
-    if (state == RecordingState.record && ServiceManager.isInitialized) {
-      unawaited(ServiceManager.instance().mic.stop());
-    }
-    if (state == RecordingState.deviceRecord) {
-      unawaited(_closeBleStream());
-    }
     updateRecordingState(RecordingState.error);
     final failure =
         reason.contains('closed') ? CaptureDiagnosticFailure.socketClosed : CaptureDiagnosticFailure.socketError;
     _failCaptureDiagnostics(failure);
-    if (_captureDiagnostics.hasPhysicalAudio) unawaited(_finalizeAfterUnexpectedCaptureStop(failure));
+    unawaited(_finalizeAfterUnexpectedCaptureStop(failure, state));
     return true;
   }
 
-  Future<void> _finalizeAfterUnexpectedCaptureStop(CaptureDiagnosticFailure failure) async {
+  Future<void> _finalizeAfterUnexpectedCaptureStop(
+    CaptureDiagnosticFailure failure,
+    RecordingState stoppedState,
+  ) async {
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing, failure: failure);
-    final finalized = await finalizeCurrentConversation();
+    final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+    var empty = false;
+    final finalized = switch (stoppedState) {
+      RecordingState.record => await (() async {
+          final result = await _serializedPhoneCaptureStopAndFinalize();
+          empty = result == PhoneCaptureStopResult.empty;
+          return result == PhoneCaptureStopResult.finalized;
+        })(),
+      RecordingState.deviceRecord => await _serializedDeviceCaptureFinalization(
+          closeBleTransport: true,
+          finalize: shouldFinalize,
+        ),
+      _ => false,
+    };
+    empty = empty || !shouldFinalize;
     if (finalized) {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.completed, clearFailure: true);
+    } else if (empty) {
+      _failCaptureDiagnostics(failure);
     } else {
       _failCaptureDiagnostics(
         _captureDiagnostics.hasTranscript

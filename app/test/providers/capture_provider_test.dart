@@ -932,13 +932,16 @@ void main() {
   });
 
   test('phone capture becomes visibly unavailable when transcription closes', () async {
-    final provider = CaptureProvider()..updateRecordingState(RecordingState.record);
+    final mic = _FakeMicRecorder();
+    final provider = CaptureProvider(phoneMicRecorder: mic)..updateRecordingState(RecordingState.record);
     addTearDown(provider.dispose);
 
     provider.onClosed();
 
     expect(provider.recordingState, RecordingState.error);
     await pumpEventQueue();
+    expect(mic.stops, 1);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.socketClosed);
   });
 
   test('necklace capture becomes visibly unavailable when transcription errors', () async {
@@ -951,6 +954,141 @@ void main() {
     provider.onClosed();
     expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
     await pumpEventQueue();
+  });
+
+  test('unexpected phone socket loss and Home stop share one finalization', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final transcriptSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('socket-loss-phone', 'Phone words before socket loss')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'socket-loss-phone');
+        processCalls++;
+        if (!processEntered.isCompleted) processEntered.complete();
+        await processGate.future;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'completed-phone-loss',
+            'Phone words before socket loss',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..reconnectDeviceCaptureSocketForTesting(transcriptSocket.service);
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+
+    provider.onClosed();
+    await processEntered.future;
+    var homeCompleted = false;
+    final homeStop = provider.stopStreamRecordingAndFinalize().whenComplete(() => homeCompleted = true);
+    await pumpEventQueue();
+
+    expect(homeCompleted, isFalse);
+    expect(processCalls, 1);
+    expect(mic.stops, 1);
+
+    processGate.complete();
+    expect(await homeStop, isTrue);
+    expect(processCalls, 1);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+  });
+
+  test('unexpected necklace socket loss serializes finalization and restart', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final transcriptSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    var processCalls = 0;
+    var transportStarts = 0;
+    var socketPreparations = 0;
+    late CaptureProvider provider;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? transcriptSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        transportStarts++;
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('socket-loss-necklace', 'Necklace words before socket loss')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'socket-loss-necklace');
+        processCalls++;
+        if (!processEntered.isCompleted) processEntered.complete();
+        await processGate.future;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'completed-necklace-loss',
+            'Necklace words before socket loss',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(device: necklace);
+    provider.segments = [_segment('local-necklace-loss', 'Local necklace proof')];
+    expect(transportStarts, 1);
+
+    provider.onError(StateError('socket unavailable'));
+    await processEntered.future;
+    var homeCompleted = false;
+    var restartCompleted = false;
+    final homeStop = provider.stopStreamDeviceRecordingAndFinalize().whenComplete(() => homeCompleted = true);
+    final restart = provider.streamDeviceRecording(device: necklace).whenComplete(() => restartCompleted = true);
+    await pumpEventQueue();
+
+    expect(homeCompleted, isFalse);
+    expect(restartCompleted, isFalse);
+    expect(processCalls, 1);
+    expect(transportStarts, 1);
+
+    processGate.complete();
+    expect(await homeStop, isTrue);
+    await restart;
+    expect(processCalls, 1);
+    expect(transportStarts, 2);
+    expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
   test('necklace cannot become active with a null or disconnected transcription socket', () async {
