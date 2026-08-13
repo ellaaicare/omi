@@ -637,6 +637,8 @@ void main() {
     final conversations = ConversationProvider();
     addTearDown(conversations.dispose);
     var processCalls = 0;
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
     final provider = CaptureProvider(
       activeAccountAuthority: () => authority,
       activeWalAuthority: () => _activeCaptureAuthority(authority),
@@ -654,6 +656,8 @@ void main() {
         expect(transcriptSocket.pure.status, PureSocketStatus.connected);
         expect(transcriptSocket.pure.stops, 0);
         processCalls++;
+        processEntered.complete();
+        await processGate.future;
         return CreateConversationResponse(
           messages: const [],
           conversation:
@@ -672,7 +676,14 @@ void main() {
     expect(await start, PhoneCaptureStartResult.started);
     expect(provider.hasUnfinalizedPhoneCaptureContent, isTrue);
 
-    expect(await provider.stopStreamRecordingAndFinalize(), isTrue);
+    final stopping = provider.stopStreamRecordingAndFinalize();
+    await processEntered.future;
+    expect(provider.phoneCaptureOwnsMobileAudio, isTrue);
+    expect(transcriptSocket.pure.stops, 0);
+
+    processGate.complete();
+    expect(await stopping, isTrue);
+    expect(provider.phoneCaptureOwnsMobileAudio, isFalse);
     expect(processCalls, 1);
     expect(transcriptSocket.pure.stops, 1);
     expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);

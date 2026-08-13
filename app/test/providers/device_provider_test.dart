@@ -322,6 +322,31 @@ void main() {
     expect(provider.connectedDevice?.id, necklace.id);
   });
 
+  test('necklace capture resumes when phone releases audio without reconnecting', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(capture.deviceStarts, 0);
+
+    capture.updateRecordingState(RecordingState.stop);
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.connectedDevice?.id, necklace.id);
+  });
+
   test('in-flight connected resolution cannot repopulate after stop', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final resolution = Completer<BtDevice?>();

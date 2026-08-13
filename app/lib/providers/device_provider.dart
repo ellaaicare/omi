@@ -114,6 +114,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   int _deviceOperationGeneration = 0;
   bool _deviceServiceReady = false;
   Future<void>? _captureTeardown;
+  int? _deferredDeviceCaptureGeneration;
+  String? _deferredDeviceCaptureId;
+  Future<void>? _deferredDeviceCaptureStart;
 
   void Function(BtDevice device)? onDeviceConnected;
 
@@ -153,8 +156,49 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   void setProviders(CaptureProvider provider) {
+    if (identical(captureProvider, provider)) return;
+    captureProvider?.removeListener(_onCaptureProviderChanged);
     captureProvider = provider;
+    provider.addListener(_onCaptureProviderChanged);
+    _onCaptureProviderChanged();
     notifyListeners();
+  }
+
+  void _deferDeviceCaptureUntilPhoneReleases(BtDevice device, int operationGeneration) {
+    _deferredDeviceCaptureGeneration = operationGeneration;
+    _deferredDeviceCaptureId = device.id;
+    _onCaptureProviderChanged();
+  }
+
+  void _clearDeferredDeviceCapture() {
+    _deferredDeviceCaptureGeneration = null;
+    _deferredDeviceCaptureId = null;
+  }
+
+  void _onCaptureProviderChanged() {
+    if (_deferredDeviceCaptureStart != null) return;
+    final capture = captureProvider;
+    final generation = _deferredDeviceCaptureGeneration;
+    final deviceId = _deferredDeviceCaptureId;
+    final device = connectedDevice;
+    if (capture == null ||
+        capture.phoneCaptureOwnsMobileAudio ||
+        generation == null ||
+        deviceId == null ||
+        device?.id != deviceId ||
+        !_isDeviceOperationCurrent(generation)) {
+      return;
+    }
+
+    _clearDeferredDeviceCapture();
+    late final Future<void> resume;
+    resume = _startDeviceCaptureWithRetry(device!, generation).then<void>((_) {}).whenComplete(() {
+      if (identical(_deferredDeviceCaptureStart, resume)) {
+        _deferredDeviceCaptureStart = null;
+        _onCaptureProviderChanged();
+      }
+    });
+    _deferredDeviceCaptureStart = resume;
   }
 
   Future<void> setConnectedDevice(BtDevice? device, {int? operationGeneration}) async {
@@ -494,6 +538,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   @override
   void dispose() {
+    captureProvider?.removeListener(_onCaptureProviderChanged);
+    _clearDeferredDeviceCapture();
     _bleBatteryLevelListener?.cancel();
     _reconnectionTimer?.cancel();
     _disconnectDebouncer.cancel();
@@ -510,6 +556,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _deviceOperationGeneration++;
     _havingNewFirmware = false;
     connectedDevice = null;
+    _clearDeferredDeviceCapture();
     final storedDevice = SharedPreferencesUtil().btDevice;
     pairedDevice = storedDevice.id.isEmpty ? null : storedDevice;
     isConnected = false;
@@ -585,7 +632,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     try {
       // Capture is the critical post-connect path. Metadata, storage, and
       // battery probes are useful but must never prevent necklace recording.
-      if (capture?.phoneCaptureOwnsMobileAudio != true) {
+      if (capture?.phoneCaptureOwnsMobileAudio == true) {
+        _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+      } else {
         await _startDeviceCaptureWithRetry(device, operationGeneration);
       }
       if (!_isDeviceOperationCurrent(operationGeneration)) return;
@@ -844,6 +893,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
         _deviceOperationGeneration++;
         _deviceServiceReady = false;
+        _clearDeferredDeviceCapture();
         _reconnectionTimer?.cancel();
         _disconnectDebouncer.cancel();
         _connectDebouncer.cancel();

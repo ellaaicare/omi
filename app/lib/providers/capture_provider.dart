@@ -453,6 +453,7 @@ class CaptureProvider extends ChangeNotifier
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
   Future<PhoneCaptureStartResult>? _micStartFuture;
+  int _phoneCaptureReleaseOperations = 0;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
@@ -799,7 +800,19 @@ class CaptureProvider extends ChangeNotifier
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.failed, failure: failure);
   }
 
-  bool get phoneCaptureOwnsMobileAudio => _micStartFuture != null || recordingState == RecordingState.record;
+  bool get phoneCaptureOwnsMobileAudio =>
+      _micStartFuture != null || _phoneCaptureReleaseOperations > 0 || recordingState == RecordingState.record;
+
+  void _beginPhoneCaptureRelease() {
+    _phoneCaptureReleaseOperations++;
+    notifyListeners();
+  }
+
+  void _endPhoneCaptureRelease() {
+    if (_phoneCaptureReleaseOperations == 0) return;
+    _phoneCaptureReleaseOperations--;
+    notifyListeners();
+  }
 
   bool _isPaused = false;
   bool get isPaused => _isPaused;
@@ -1865,7 +1878,8 @@ class CaptureProvider extends ChangeNotifier
   Future<PhoneCaptureStartResult> streamRecording() {
     final activeStart = _micStartFuture;
     if (activeStart != null) return activeStart;
-    if (_deviceCaptureAttempt != null ||
+    if (_phoneCaptureReleaseOperations > 0 ||
+        _deviceCaptureAttempt != null ||
         _deviceCaptureSession != null ||
         recordingState == RecordingState.deviceRecord ||
         recordingState == RecordingState.pause) {
@@ -1874,7 +1888,10 @@ class CaptureProvider extends ChangeNotifier
 
     late final Future<PhoneCaptureStartResult> trackedStart;
     trackedStart = _streamRecording().whenComplete(() {
-      if (identical(_micStartFuture, trackedStart)) _micStartFuture = null;
+      if (identical(_micStartFuture, trackedStart)) {
+        _micStartFuture = null;
+        notifyListeners();
+      }
     });
     _micStartFuture = trackedStart;
     return trackedStart;
@@ -2060,11 +2077,16 @@ class CaptureProvider extends ChangeNotifier
   }
 
   stopStreamRecording() async {
-    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
-    await _cleanupCurrentState();
-    await (_phoneMicRecorder ?? ServiceManager.instance().mic).stop();
-    updateRecordingState(RecordingState.stop);
-    await _socket?.stop(reason: 'stop stream recording');
+    _beginPhoneCaptureRelease();
+    try {
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+      await _cleanupCurrentState();
+      await (_phoneMicRecorder ?? ServiceManager.instance().mic).stop();
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'stop stream recording');
+    } finally {
+      _endPhoneCaptureRelease();
+    }
   }
 
   /// Stops phone audio, processes any proven capture while its transcript
@@ -2081,29 +2103,34 @@ class CaptureProvider extends ChangeNotifier
   Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() => _stopPhoneCaptureAndFinalize();
 
   Future<PhoneCaptureStopResult> _stopPhoneCaptureAndFinalize() async {
-    final pendingStart = _micStartFuture;
-    _captureGeneration++;
-    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
-    await _cleanupCurrentState();
-    final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
-    await mic.stop();
-    if (pendingStart != null) {
-      try {
-        await pendingStart;
-      } catch (error) {
-        Logger.error('Pending phone capture start failed during microphone takeover: $error');
-      }
-      // A native/injected start can finish after the first stop. Reassert the
-      // stop only after the generation-fenced start future has settled.
-      await mic.stop();
-    }
-    updateRecordingState(RecordingState.stop);
-    final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+    _beginPhoneCaptureRelease();
     try {
-      if (!shouldFinalize) return PhoneCaptureStopResult.empty;
-      return await finalizeCurrentConversation() ? PhoneCaptureStopResult.finalized : PhoneCaptureStopResult.failed;
+      final pendingStart = _micStartFuture;
+      _captureGeneration++;
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+      await _cleanupCurrentState();
+      final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+      await mic.stop();
+      if (pendingStart != null) {
+        try {
+          await pendingStart;
+        } catch (error) {
+          Logger.error('Pending phone capture start failed during microphone takeover: $error');
+        }
+        // A native/injected start can finish after the first stop. Reassert the
+        // stop only after the generation-fenced start future has settled.
+        await mic.stop();
+      }
+      updateRecordingState(RecordingState.stop);
+      final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+      try {
+        if (!shouldFinalize) return PhoneCaptureStopResult.empty;
+        return await finalizeCurrentConversation() ? PhoneCaptureStopResult.finalized : PhoneCaptureStopResult.failed;
+      } finally {
+        await _socket?.stop(reason: 'phone capture finalized');
+      }
     } finally {
-      await _socket?.stop(reason: 'phone capture finalized');
+      _endPhoneCaptureRelease();
     }
   }
 
@@ -2165,7 +2192,7 @@ class CaptureProvider extends ChangeNotifier
       }
       return Future.value();
     }
-    if (_micStartFuture != null || recordingState == RecordingState.record) {
+    if (phoneCaptureOwnsMobileAudio) {
       return Future.value();
     }
     final activeSession = _deviceCaptureSession;
