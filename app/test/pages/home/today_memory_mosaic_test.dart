@@ -895,6 +895,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<bool> finalizeCurrentConversation({
     int maxTranscriptAttempts = 3,
     Duration transcriptRetryDelay = const Duration(milliseconds: 250),
+    bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
     finalContentChecks++;
     if (!hasContent && !hasFinalContent) return false;

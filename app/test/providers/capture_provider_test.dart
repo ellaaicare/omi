@@ -516,7 +516,8 @@ void main() {
         requestAuthority = exactAuthority;
         return response.future;
       },
-      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         processCalls++;
         return null;
       },
@@ -555,8 +556,10 @@ void main() {
         fetchAuthority = exactAuthority;
         return [_conversation('account-a', 'Account A final words')];
       },
-      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) {
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) {
         expect(expectedAuthenticatedUid, 'uid-a');
+        expect(conversationId, 'account-a');
         processAuthority = exactAuthority;
         return response.future;
       },
@@ -606,8 +609,10 @@ void main() {
         fetchAuthority = exactAuthority;
         return [_conversation('authoritative', 'Authoritative final words')];
       },
-      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(expectedAuthenticatedUid, 'uid-a');
+        expect(conversationId, 'authoritative');
         processes++;
         processAuthority = exactAuthority;
         return CreateConversationResponse(
@@ -630,7 +635,7 @@ void main() {
     expect(conversations.conversations.single.id, 'processed');
   });
 
-  test('contentful phone stop finalizes before closing its transcript socket', () async {
+  test('contentful phone stop closes its transcript socket before exact processing', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();
     final transcriptSocket = _FakeTranscriptSocket();
@@ -651,10 +656,12 @@ void main() {
         expect(expectedAuthenticatedUid, 'uid-a');
         return [_conversation('active-phone', 'Phone words before stop')];
       },
-      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(expectedAuthenticatedUid, 'uid-a');
-        expect(transcriptSocket.pure.status, PureSocketStatus.connected);
-        expect(transcriptSocket.pure.stops, 0);
+        expect(conversationId, 'active-phone');
+        expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);
+        expect(transcriptSocket.pure.stops, 1);
         processCalls++;
         processEntered.complete();
         await processGate.future;
@@ -679,7 +686,7 @@ void main() {
     final stopping = provider.stopStreamRecordingAndFinalize();
     await processEntered.future;
     expect(provider.phoneCaptureOwnsMobileAudio, isTrue);
-    expect(transcriptSocket.pure.stops, 0);
+    expect(transcriptSocket.pure.stops, 1);
 
     processGate.complete();
     expect(await stopping, isTrue);
@@ -711,7 +718,9 @@ void main() {
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         return [_conversation('active-phone', 'One shared phone capture')];
       },
-      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'active-phone');
         processCalls++;
         if (!processEntered.isCompleted) processEntered.complete();
         await processGate.future;
@@ -744,7 +753,7 @@ void main() {
     expect(takeoverCompleted, isFalse);
     expect(processCalls, 1);
     expect(mic.stops, 1);
-    expect(transcriptSocket.pure.stops, 0);
+    expect(transcriptSocket.pure.stops, 1);
 
     processGate.complete();
     expect(await homeStop, isTrue);
@@ -805,6 +814,40 @@ void main() {
     expect(await start, PhoneCaptureStartResult.cancelled);
     expect(await takeover, PhoneCaptureStopResult.empty);
     expect(takeoverCompleted, isTrue);
+    expect(provider.recordingState, RecordingState.stop);
+    expect(mic.stops, 2);
+  });
+
+  test('regular stop fences and joins a pending phone capture start', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final startEntered = Completer<void>();
+    final startGate = Completer<void>();
+    final mic = _FakeMicRecorder();
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneCaptureStarter: () async {
+        startEntered.complete();
+        await startGate.future;
+        return PhoneCaptureStartResult.started;
+      },
+      phoneMicRecorder: mic,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await startEntered.future;
+    var stopCompleted = false;
+    final stop = provider.stopStreamRecording().whenComplete(() => stopCompleted = true);
+    await pumpEventQueue();
+
+    expect(stopCompleted, isFalse);
+    expect(provider.recordingState, isNot(RecordingState.record));
+
+    startGate.complete();
+    expect(await start, PhoneCaptureStartResult.cancelled);
+    await stop;
+    expect(stopCompleted, isTrue);
     expect(provider.recordingState, RecordingState.stop);
     expect(mic.stops, 2);
   });
@@ -1233,7 +1276,7 @@ void main() {
     expect(provider.recordingState, RecordingState.stop);
   });
 
-  test('contentful necklace disconnect finalizes before closing its transcript socket', () async {
+  test('contentful necklace disconnect closes its socket before exact processing', () async {
     final authority = _CaptureAuthority('uid-a');
     final transcriptSocket = _FakeTranscriptSocket();
     final conversations = ConversationProvider();
@@ -1253,10 +1296,12 @@ void main() {
         expect(expectedAuthenticatedUid, 'uid-a');
         return [_conversation('active', 'Words captured before disconnect')];
       },
-      inProgressConversationProcess: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(expectedAuthenticatedUid, 'uid-a');
-        expect(transcriptSocket.pure.status, PureSocketStatus.connected);
-        expect(transcriptSocket.pure.stops, 0);
+        expect(conversationId, 'active');
+        expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);
+        expect(transcriptSocket.pure.stops, 1);
         processCalls++;
         return CreateConversationResponse(
           messages: const [],
@@ -1278,6 +1323,68 @@ void main() {
     expect(transcriptSocket.pure.stops, 1);
     expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+  });
+
+  test('necklace disconnect and Home stop share one exact finalization', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final transcriptSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => transcriptSocket.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('active-necklace', 'One necklace memory')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'active-necklace');
+        processCalls++;
+        if (!processEntered.isCompleted) processEntered.complete();
+        await processGate.future;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'completed-necklace',
+            'One necklace memory',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.segments = [_segment('local', 'Local necklace proof')];
+
+    final disconnect = provider.handleRecordingDeviceDisconnected('necklace-1');
+    await processEntered.future;
+    var homeCompleted = false;
+    final homeStop = provider.stopStreamDeviceRecordingAndFinalize().whenComplete(() => homeCompleted = true);
+    await pumpEventQueue();
+
+    expect(homeCompleted, isFalse);
+    expect(processCalls, 1);
+    expect(transcriptSocket.pure.stops, 1);
+
+    processGate.complete();
+    expect(await disconnect, isTrue);
+    expect(await homeStop, isTrue);
+    expect(processCalls, 1);
+    expect(transcriptSocket.pure.stops, 1);
   });
 
   test('idle necklace disconnect cannot cancel active phone capture', () async {

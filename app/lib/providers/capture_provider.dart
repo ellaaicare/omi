@@ -260,6 +260,7 @@ typedef InProgressConversationFetchCall = Future<List<ServerConversation>> Funct
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 typedef InProgressConversationProcessCall = Future<CreateConversationResponse?> Function({
+  required String conversationId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
@@ -334,10 +335,12 @@ Future<List<ServerConversation>> _fetchInProgressConversation({
     );
 
 Future<CreateConversationResponse?> _processInProgressConversation({
+  required String conversationId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 }) =>
     processInProgressConversation(
+      conversationId: conversationId,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );
@@ -455,6 +458,7 @@ class CaptureProvider extends ChangeNotifier
   Future<PhoneCaptureStartResult>? _micStartFuture;
   int _phoneCaptureReleaseOperations = 0;
   Future<PhoneCaptureStopResult>? _phoneCaptureStopFuture;
+  Future<bool>? _deviceCaptureFinalizationFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
@@ -954,7 +958,7 @@ class CaptureProvider extends ChangeNotifier
     final replacementUsesSocket = _deviceCaptureSession != null &&
         !identical(_deviceCaptureSession, session) &&
         identical(_deviceCaptureSession?.socket, session.socket);
-    if (stopSocket && !replacementUsesSocket) {
+    if (stopSocket && !replacementUsesSocket && session.socket.state == SocketServiceState.connected) {
       try {
         await session.socket.stop(reason: 'necklace capture session stopped');
       } catch (error) {
@@ -1002,7 +1006,7 @@ class CaptureProvider extends ChangeNotifier
     }
     if (shouldFinalize) {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing);
-      final finalized = await finalizeCurrentConversation();
+      final finalized = await _serializedDeviceCaptureFinalization();
       if (finalized) {
         _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.completed, clearFailure: true);
       } else {
@@ -2078,11 +2082,22 @@ class CaptureProvider extends ChangeNotifier
   }
 
   stopStreamRecording() async {
+    final pendingStart = _micStartFuture;
+    _captureGeneration++;
     _beginPhoneCaptureRelease();
     try {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
       await _cleanupCurrentState();
-      await (_phoneMicRecorder ?? ServiceManager.instance().mic).stop();
+      final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+      await mic.stop();
+      if (pendingStart != null) {
+        try {
+          await pendingStart;
+        } catch (error) {
+          Logger.error('Pending phone capture start failed during regular stop: $error');
+        }
+        await mic.stop();
+      }
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'stop stream recording');
     } finally {
@@ -2090,10 +2105,9 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  /// Stops phone audio, processes any proven capture while its transcript
-  /// socket is still authoritative, then closes the socket. Closing first can
-  /// race the server disconnect finalizer and make a successful memory look
-  /// like an empty capture in the app.
+  /// Stops phone audio, closes the exact transcript owner so the backend can
+  /// drain it, then processes the exact conversation that was observed before
+  /// transport shutdown.
   Future<bool> stopStreamRecordingAndFinalize() async {
     return await _serializedPhoneCaptureStopAndFinalize() == PhoneCaptureStopResult.finalized;
   }
@@ -2140,9 +2154,13 @@ class CaptureProvider extends ChangeNotifier
       final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
       try {
         if (!shouldFinalize) return PhoneCaptureStopResult.empty;
-        return await finalizeCurrentConversation() ? PhoneCaptureStopResult.finalized : PhoneCaptureStopResult.failed;
+        return await finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true)
+            ? PhoneCaptureStopResult.finalized
+            : PhoneCaptureStopResult.failed;
       } finally {
-        await _socket?.stop(reason: 'phone capture finalized');
+        if (_socket?.state == SocketServiceState.connected) {
+          await _socket?.stop(reason: 'phone capture finalized');
+        }
       }
     } finally {
       _endPhoneCaptureRelease();
@@ -2393,20 +2411,39 @@ class CaptureProvider extends ChangeNotifier
     await _socket?.stop(reason: 'stop stream device recording');
   }
 
-  /// Stops necklace transport and processes the exact active transcript before
-  /// closing its socket. The server-side disconnect path remains a fallback for
-  /// crashes and transport loss.
+  /// Stops necklace transport, lets the server drain the exact socket owner,
+  /// then processes that exact conversation. The disconnect path remains a
+  /// fallback for crashes and transport loss.
   Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) return activeFinalization;
+
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
     await _cleanupCurrentState();
     if (cleanDevice) _updateRecordingDevice(null);
     updateRecordingState(RecordingState.stop);
     final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
     try {
-      return shouldFinalize ? await finalizeCurrentConversation() : false;
+      return shouldFinalize ? await _serializedDeviceCaptureFinalization() : false;
     } finally {
-      await _socket?.stop(reason: 'necklace capture finalized');
+      if (_socket?.state == SocketServiceState.connected) {
+        await _socket?.stop(reason: 'necklace capture finalized');
+      }
     }
+  }
+
+  Future<bool> _serializedDeviceCaptureFinalization() {
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) return activeFinalization;
+
+    late final Future<bool> trackedFinalization;
+    trackedFinalization = finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true).whenComplete(() {
+      if (identical(_deviceCaptureFinalizationFuture, trackedFinalization)) {
+        _deviceCaptureFinalizationFuture = null;
+      }
+    });
+    _deviceCaptureFinalizationFuture = trackedFinalization;
+    return trackedFinalization;
   }
 
   Future<bool> streamSystemAudioRecording() {
@@ -3115,6 +3152,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> finalizeCurrentConversation({
     int maxTranscriptAttempts = 12,
     Duration transcriptRetryDelay = const Duration(milliseconds: 500),
+    bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
     if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing);
@@ -3137,6 +3175,10 @@ class CaptureProvider extends ChangeNotifier
           _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
         }
         return false;
+      }
+      if (closeTranscriptTransportBeforeProcessing) {
+        await _socket?.stop(reason: 'capture transport drained before exact processing');
+        if (!operation.isCurrent) return false;
       }
       final finalized = await forceProcessingCurrentConversation(operation: operation);
       if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
@@ -3163,6 +3205,8 @@ class CaptureProvider extends ChangeNotifier
     }
     try {
       if (!activeOperation.isCurrent) return false;
+      final conversationId = (_conversation?.id ?? '').trim();
+      if (conversationId.isEmpty) return false;
       await _resetStateVariables();
       if (!activeOperation.isCurrent) return false;
       conversations.addProcessingConversation(
@@ -3174,6 +3218,7 @@ class CaptureProvider extends ChangeNotifier
         ),
       );
       final result = await _inProgressConversationProcess(
+        conversationId: conversationId,
         expectedAuthenticatedUid: activeOperation.uid,
         exactAuthority: activeOperation,
       );
