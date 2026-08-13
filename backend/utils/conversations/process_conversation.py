@@ -611,6 +611,13 @@ def process_conversation_with_outcome(
                 dispatched=False,
                 status=claim_status,
             )
+        if claim_status == 'processing_in_progress':
+            durable_conversation = conversations_db.get_conversation(uid, conversation.id) or conversation.dict()
+            return ConversationProcessingOutcome(
+                conversation=Conversation(**durable_conversation),
+                dispatched=False,
+                status=claim_status,
+            )
         if claim_status == 'conversation_missing':
             return ConversationProcessingOutcome(
                 conversation=conversation,

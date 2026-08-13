@@ -347,15 +347,15 @@ def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_
     assert "task.add_done_callback(photo_processing_done)" in image_source
     assert "image_chunks.clear()" in receive_finally
     assert "capture_buffers_changed.set()" in receive_finally
-    photo_block = stream_source.split("if photos_to_process:", maxsplit=1)[1].split("if removed_ids:", maxsplit=1)[0]
+    atomic_capture_block = stream_source.split("if transcript_segments or photos_to_process:", maxsplit=1)[1].split(
+        "if removed_ids:", maxsplit=1
+    )[0]
 
-    assert "except Exception:" in photo_block
-    assert "continue" not in photo_block
-    assert "else:" in photo_block
-    assert "segments=True" in stream_source.split("if photos_to_process:", maxsplit=1)[0]
-    assert stream_source.index("if transcript_segments:", stream_source.index("if removed_ids:")) > stream_source.index(
-        "if photos_to_process:"
-    )
+    assert "photos=photos_to_process" in atomic_capture_block
+    assert "store_conversation_photos" not in stream_source
+    assert "segments=bool(transcript_segments)" in atomic_capture_block
+    assert "photos=bool(photos_to_process)" in atomic_capture_block
+    assert 'phase="live"' in atomic_capture_block
 
 
 def test_photo_only_capture_does_not_require_audio_timestamp():
@@ -435,13 +435,16 @@ def test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch(mon
     }
     conversation = {
         "id": "conversation-a",
+        "capture_owner_id": "socket-a",
         "data_protection_level": "standard",
         "transcript_segments": [segment],
     }
     payload = {
         "conversation_id": "conversation-a",
         "segments": [segment],
+        "photos": [],
         "finished_at": datetime.now(timezone.utc).isoformat(),
+        "capture_owner_id": "socket-a",
     }
 
     class Snapshot:
@@ -496,11 +499,12 @@ def test_atomic_capture_commit_deduplicates_replay_and_deletes_durable_batch(mon
         batch_ref,
         "uid-a",
         "conversation-a",
+        "socket-a",
     )
 
     assert result["status"] == "committed"
     assert result["updated_segments"] == []
-    assert len(transaction.updates[0]["transcript_segments"]) == 1
+    assert "transcript_segments" not in transaction.updates[0]
     assert transaction.updates[0]["capture_persistence_applied_batch_ids"] == ["batch-a"]
     assert transaction.deletes == [batch_ref]
 

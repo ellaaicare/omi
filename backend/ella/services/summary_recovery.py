@@ -28,6 +28,7 @@ from ella.services.summary_writeback import (
     write_conversation_summary,
 )
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
+from models.conversation_integrity import transcript_grounding_hash
 from utils.conversations.generic_summary import generate_stock_conversation_summary
 from utils.conversations.vector import refresh_structured_summary_vector
 
@@ -498,6 +499,7 @@ async def invoke_hermes_recovery(
         raise RuntimeError('Hermes API is required for historical enrichment recovery')
     conversation_id = str(conversation['id'])
     _, source_sha256 = build_hermes_recovery_source(conversation)
+    expected_transcript_hash = transcript_grounding_hash(conversation.get('transcript_segments') or [])
     source_summary_sha256 = _summary_content_sha256(conversation)
     default_trace_id = f'summary-retry:{conversation_id}:{request_id}:hermes'
     trace_id = str(trace_id_override or default_trace_id)
@@ -535,6 +537,8 @@ async def invoke_hermes_recovery(
         summary_kind='recovered_enriched',
         require_canonical=True,
         require_based_on_match=True,
+        expected_transcript_hash=expected_transcript_hash,
+        require_source_match=True,
         preserve_generated_results=True,
         canonical_retry_recorder=_processing_retry_canonical_recorder(
             uid=uid,
@@ -733,6 +737,7 @@ async def recover_failed_conversation_summary(
         return status or 'superseded'
 
     _, transcript_sha256 = build_hermes_recovery_source(conversation)
+    expected_transcript_hash = transcript_grounding_hash(conversation.get('transcript_segments') or [])
     legacy_generic_summary_sha256 = (
         _summary_content_sha256(conversation)
         if conversation.get('processing_retry_mode') == 'enrichment_only'
@@ -801,6 +806,8 @@ async def recover_failed_conversation_summary(
                 summary_kind='generic_recovered',
                 summary_source='omi',
                 require_based_on_match=True,
+                expected_transcript_hash=expected_transcript_hash,
+                require_source_match=True,
             )
             generic_version_id = apply_result.get('active_summary_version_id')
             if not generic_version_id:
@@ -940,6 +947,8 @@ async def recover_failed_conversation_summary(
                 summary={},
                 summary_kind='recovered_enriched',
                 require_canonical=True,
+                expected_transcript_hash=expected_transcript_hash,
+                require_source_match=True,
                 replay_request_fingerprint_input=stored_request_input,
                 canonical_retry_recorder=_processing_retry_canonical_recorder(
                     uid=uid,

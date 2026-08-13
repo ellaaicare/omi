@@ -568,6 +568,36 @@ def test_completed_duplicate_initial_processing_returns_explicit_no_dispatch(mon
     assert calls == []
 
 
+def test_inflight_duplicate_initial_processing_returns_explicit_no_dispatch(monkeypatch):
+    conversation = _long_conversation()
+    conversation.status = ConversationStatus.processing
+    calls = []
+    monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda _uid: None)
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "claim_initial_conversation_processing",
+        lambda uid, conversation_id: {"status": "processing_in_progress"},
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: conversation.dict(),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "_get_structured",
+        lambda *args, **kwargs: calls.append("summary") or (Structured(), False),
+    )
+
+    outcome = conversation_processor.process_conversation_with_outcome("uid-1", "en", conversation)
+
+    assert outcome.conversation.id == conversation.id
+    assert outcome.conversation.status == ConversationStatus.processing
+    assert outcome.status == "processing_in_progress"
+    assert outcome.dispatched is False
+    assert calls == []
+
+
 def test_explicit_reprocess_of_completed_conversation_remains_authorized(monkeypatch):
     conversation = _long_conversation()
     conversation.status = ConversationStatus.completed

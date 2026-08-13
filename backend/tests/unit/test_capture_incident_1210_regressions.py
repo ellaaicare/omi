@@ -336,6 +336,7 @@ def test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership(mon
     conversation_ref = Ref(
         {
             "id": "conversation-a",
+            "capture_owner_id": "socket-new",
             "status": "in_progress",
             "data_protection_level": "standard",
             "transcript_segments": [],
@@ -348,6 +349,7 @@ def test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership(mon
         lambda _uid, _data: {
             "conversation_id": "conversation-a",
             "segments": [segment],
+            "photos": [],
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "capture_owner_id": "socket-old",
         },
@@ -366,6 +368,216 @@ def test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership(mon
     assert result["status"] != "committed"
     assert transaction.updates == []
     assert transaction.deletes == []
+
+
+def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
+    source = (BACKEND / "routers" / "transcribe.py").read_text()
+
+    initialization = source.index("capture_recovery_conversation_ids: set[str] = set()")
+    preparation_call = source.index("timed_out_conversation_id = await _prepare_in_progess_conversations()")
+    recovery_update = source.index("capture_recovery_conversation_ids.update(", preparation_call)
+
+    assert initialization < preparation_call < recovery_update
+
+
+def test_duplicate_processing_claim_is_a_no_write_inflight_result():
+    conversations = _load_conversations_module()
+
+    class Ref:
+        def get(self, transaction=None):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "status": "processing",
+                    "initial_processing_claimed_at": datetime.now(timezone.utc),
+                },
+            )
+
+    class Transaction:
+        def update(self, *_args):
+            raise AssertionError("an inflight processor must retain exclusive processing authority")
+
+    result = conversations._claim_initial_conversation_processing_transaction(Transaction(), Ref())
+
+    assert result == {"status": "processing_in_progress"}
+
+
+def test_stale_processing_claim_without_a_lease_can_be_recovered():
+    conversations = _load_conversations_module()
+
+    class Ref:
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: {"status": "processing"})
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, _ref, payload):
+            self.updates.append(payload)
+
+    transaction = Transaction()
+    result = conversations._claim_initial_conversation_processing_transaction(transaction, Ref())
+
+    assert result == {"status": "processing_claimed"}
+    assert transaction.updates[0]["status"] == "processing"
+    assert isinstance(transaction.updates[0]["initial_processing_claimed_at"], datetime)
+
+
+def test_capture_photo_commit_uses_the_same_durable_owner_fence(monkeypatch):
+    conversations = _load_conversations_module()
+    photo = {"id": "photo-a", "base64": "synthetic"}
+
+    class Snapshot:
+        exists = True
+
+        def __init__(self, data):
+            self.data = data
+
+        def to_dict(self):
+            return self.data
+
+    class ChildRef:
+        def __init__(self, ref_id):
+            self.id = ref_id
+
+    class Collection:
+        def document(self, ref_id):
+            return ChildRef(ref_id)
+
+    class Ref:
+        id = "ref"
+
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return Snapshot(self.data)
+
+        def collection(self, name):
+            assert name == "photos"
+            return Collection()
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+            self.sets = []
+            self.deletes = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def set(self, ref, payload):
+            self.sets.append((ref, payload))
+
+        def delete(self, ref):
+            self.deletes.append(ref)
+
+    conversation_ref = Ref(
+        {
+            "id": "conversation-a",
+            "capture_owner_id": "socket-current",
+            "status": "in_progress",
+            "data_protection_level": "standard",
+            "transcript_segments": [],
+        }
+    )
+    batch_ref = Ref({"batch_id": "batch-photo", "payload": "encrypted"})
+    batch_ref.id = "batch-photo"
+    monkeypatch.setattr(
+        conversations,
+        "_decode_capture_persistence_batch",
+        lambda _uid, _data: {
+            "conversation_id": "conversation-a",
+            "segments": [],
+            "photos": [photo],
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "capture_owner_id": "socket-old",
+        },
+    )
+    monkeypatch.setattr(conversations, "_prepare_conversation_for_read", lambda data, _uid: data)
+    monkeypatch.setattr(conversations, "_prepare_conversation_for_write", lambda data, _uid, _level: data)
+    monkeypatch.setattr(conversations, "_prepare_photo_for_write", lambda data, _uid, _level: data)
+
+    stale_transaction = Transaction()
+    stale_result = conversations._commit_capture_persistence_batch_transaction(
+        stale_transaction,
+        conversation_ref,
+        batch_ref,
+        "uid-a",
+        "conversation-a",
+        "socket-old",
+    )
+    assert stale_result["status"] == "ownership_lost"
+    assert stale_transaction.updates == []
+    assert stale_transaction.sets == []
+
+    current_transaction = Transaction()
+    current_result = conversations._commit_capture_persistence_batch_transaction(
+        current_transaction,
+        conversation_ref,
+        batch_ref,
+        "uid-a",
+        "conversation-a",
+        "socket-current",
+    )
+    assert current_result["status"] == "committed"
+    assert current_transaction.sets[0][0].id == "photo-a"
+    assert current_transaction.updates[0][1]["source"] == "openglass"
+    assert current_transaction.deletes == [batch_ref]
+
+
+def test_capture_owner_transfer_fences_the_previous_firestore_generation():
+    conversations = _load_conversations_module()
+
+    class Ref:
+        def __init__(self, ref_id, data):
+            self.id = ref_id
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: self.data)
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref.id, payload))
+
+    transaction = Transaction()
+    transferred = conversations._transfer_capture_conversation_owner_transaction(
+        transaction,
+        Ref("old", {"status": "in_progress", "capture_owner_id": "socket-old"}),
+        Ref("new", {"status": "in_progress", "capture_owner_id": "socket-new"}),
+        "socket-old",
+        "socket-new",
+    )
+
+    assert transferred is True
+    assert transaction.updates == [
+        ("old", {"capture_owner_id": None}),
+        ("new", {"capture_owner_id": "socket-new"}),
+    ]
+
+
+def test_ownership_loss_exits_old_stream_and_photos_have_no_unfenced_write_path():
+    source = (BACKEND / "routers" / "transcribe.py").read_text()
+    stream_source = source.split("async def stream_transcript_process():", maxsplit=1)[1].split(
+        "async def conversation_timeout_task():", maxsplit=1
+    )[0]
+
+    assert 'phase="recovery"' in stream_source
+    assert 'phase="live"' in stream_source
+    assert stream_source.count("websocket_active = False") >= 2
+    assert "store_conversation_photos" not in stream_source
+    assert "photos=photos_to_process" in stream_source
+
+
+def test_incident_regression_file_triggers_pull_request_and_push_ci():
+    workflow = (BACKEND.parent / ".github" / "workflows" / "hermes-cloud-runtime-tests.yml").read_text()
+
+    assert workflow.count('- "backend/tests/unit/test_capture_incident_1210_regressions.py"') == 2
 
 
 def test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot(monkeypatch):

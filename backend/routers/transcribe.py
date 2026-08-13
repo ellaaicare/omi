@@ -444,6 +444,7 @@ async def _stream_handler(
     realtime_photo_buffers: list[dict] = []
     image_chunks: dict[str, dict] = {}
     photo_processing_tasks: dict[str, tuple[str, asyncio.Task]] = {}
+    capture_recovery_conversation_ids: set[str] = set()
     capture_buffers_changed = asyncio.Event()
 
     def bind_capture_conversation(item: dict) -> dict:
@@ -705,6 +706,8 @@ async def _stream_handler(
 
             outcome = await asyncio.to_thread(process_conversation_with_outcome, uid, language, conversation)
             conversation = outcome.conversation
+            if not outcome.dispatched and outcome.status == 'processing_in_progress':
+                return
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
             mark_unexpected_conversation_processing_failed(uid, conversation)
@@ -780,7 +783,9 @@ async def _stream_handler(
             source=conversation_source,
             private_cloud_sync_enabled=private_cloud_sync_enabled,
         )
-        conversations_db.upsert_conversation(uid, conversation_data=stub_conversation.dict())
+        stub_conversation_data = stub_conversation.dict()
+        stub_conversation_data['capture_owner_id'] = str(new_owner_id or '').strip() or None
+        conversations_db.upsert_conversation(uid, conversation_data=stub_conversation_data)
 
         detected_meeting_id = None
 
@@ -822,6 +827,18 @@ async def _stream_handler(
             redis_db.set_conversation_meeting_id(new_conversation_id, detected_meeting_id)
 
         if expected_conversation_id is not None:
+            transferred = conversations_db.transfer_capture_conversation_owner(
+                uid,
+                expected_conversation_id,
+                expected_owner_id or '',
+                new_conversation_id,
+                new_owner_id,
+            )
+            if not transferred:
+                conversations_db.delete_conversation(uid, new_conversation_id)
+                if detected_meeting_id:
+                    redis_db.remove_conversation_meeting_id(new_conversation_id)
+                return False
             published = redis_db.rotate_in_progress_conversation_id(
                 uid,
                 expected_conversation_id,
@@ -844,10 +861,23 @@ async def _stream_handler(
             )
 
         if not published:
-            conversations_db.delete_conversation(uid, new_conversation_id)
+            rolled_back = True
+            if expected_conversation_id is not None:
+                rolled_back = conversations_db.rollback_capture_conversation_owner_transfer(
+                    uid,
+                    expected_conversation_id,
+                    expected_owner_id or '',
+                    new_conversation_id,
+                    new_owner_id,
+                )
+            if rolled_back or expected_conversation_id is None:
+                conversations_db.delete_conversation(uid, new_conversation_id)
             if detected_meeting_id:
                 redis_db.remove_conversation_meeting_id(new_conversation_id)
             return False
+
+        if replace_stale_conversation_id is not None:
+            conversations_db.bind_capture_conversation_owner(uid, replace_stale_conversation_id, None)
 
         if adopt:
             current_conversation_id = new_conversation_id
@@ -1010,6 +1040,10 @@ async def _stream_handler(
                     await asyncio.sleep(0)
                     continue
 
+                if not conversations_db.bind_capture_conversation_owner(uid, candidate_id, session_id):
+                    await asyncio.sleep(0)
+                    continue
+
                 drain_capture_persistence_batches(uid, candidate_id, session_id)
 
                 finished_at = datetime.fromisoformat(candidate['finished_at'].isoformat())
@@ -1049,9 +1083,9 @@ async def _stream_handler(
         MessageServiceStatusEvent(status="in_progress_conversations_processing", status_text="Processing Conversations")
     )
     timed_out_conversation_id = await _prepare_in_progess_conversations()
-    capture_recovery_conversation_ids = {
+    capture_recovery_conversation_ids.update(
         conversation_id for conversation_id in (current_conversation_id, timed_out_conversation_id) if conversation_id
-    }
+    )
 
     # STT
     # Validate websocket_active before initiating STT
@@ -2045,12 +2079,21 @@ async def _stream_handler(
                     )
                     pending_batch_count += len(pending_batch_ids)
                     for pending_batch_id in pending_batch_ids:
-                        conversations_db.commit_capture_persistence_batch(
+                        recovery_result = conversations_db.commit_capture_persistence_batch(
                             uid,
                             recovery_conversation_id,
                             pending_batch_id,
                             session_id,
                         )
+                        if recovery_result.get("status") == "ownership_lost":
+                            capture_recovery_conversation_ids.discard(recovery_conversation_id)
+                            websocket_active = False
+                            _latency_log(
+                                "capture_persistence_ownership_lost",
+                                conversation_id=recovery_conversation_id,
+                                phase="recovery",
+                            )
+                            return
                 except Exception:
                     pending_batch_count += 1
                     _latency_log("capture_persistence_recovery_retry")
@@ -2157,10 +2200,9 @@ async def _stream_handler(
                 )
 
             # Update transcript segments
-            conversation = Conversation(**conversation_data)
             updated_segments = []
             removed_ids = []
-            if transcript_segments:
+            if transcript_segments or photos_to_process:
                 try:
                     pending_batch_id = conversations_db.persist_capture_persistence_batch(
                         uid,
@@ -2168,6 +2210,7 @@ async def _stream_handler(
                         [segment.dict() for segment in transcript_segments],
                         finished_at,
                         session_id,
+                        photos=photos_to_process,
                     )
                     commit_result = conversations_db.commit_capture_persistence_batch(
                         uid,
@@ -2180,49 +2223,36 @@ async def _stream_handler(
                     _latency_log(
                         "capture_persistence_retry",
                         segment_count=len(segments_to_process),
-                        photo_count=0,
+                        photo_count=len(photos_to_process),
                     )
                     continue
                 if commit_result.get("status") == "ownership_lost":
-                    capture_recovery_conversation_ids.add(batch_conversation_id)
-                    _latency_log("capture_persistence_ownership_lost")
-                    continue
+                    acknowledge_capture_persistence_batch(
+                        realtime_segment_buffers,
+                        realtime_photo_buffers,
+                        persistence_batch,
+                        segments=bool(transcript_segments),
+                        photos=bool(photos_to_process),
+                    )
+                    capture_buffers_changed.set()
+                    capture_recovery_conversation_ids.discard(batch_conversation_id)
+                    websocket_active = False
+                    _latency_log(
+                        "capture_persistence_ownership_lost",
+                        conversation_id=batch_conversation_id,
+                        phase="live",
+                    )
+                    return
                 updated_segments = [TranscriptSegment(**segment) for segment in commit_result["updated_segments"]]
                 removed_ids = commit_result["removed_ids"]
                 acknowledge_capture_persistence_batch(
                     realtime_segment_buffers,
                     realtime_photo_buffers,
                     persistence_batch,
-                    segments=True,
-                    photos=False,
+                    segments=bool(transcript_segments),
+                    photos=bool(photos_to_process),
                 )
                 capture_buffers_changed.set()
-
-            if photos_to_process:
-                try:
-                    conversations_db.store_conversation_photos(uid, batch_conversation_id, photos_to_process)
-                    if conversation.source != ConversationSource.openglass:
-                        conversations_db.update_conversation(
-                            uid,
-                            batch_conversation_id,
-                            {'source': ConversationSource.openglass},
-                        )
-                    conversations_db.update_conversation_finished_at(uid, batch_conversation_id, finished_at)
-                except Exception:
-                    _latency_log(
-                        "capture_persistence_retry",
-                        segment_count=0,
-                        photo_count=len(photos_to_process),
-                    )
-                else:
-                    acknowledge_capture_persistence_batch(
-                        realtime_segment_buffers,
-                        realtime_photo_buffers,
-                        persistence_batch,
-                        segments=False,
-                        photos=True,
-                    )
-                    capture_buffers_changed.set()
 
             if removed_ids:
                 _send_message_event(SegmentsDeletedEvent(segment_ids=removed_ids))
