@@ -136,9 +136,10 @@ class _FakeMicRecorder implements IMicRecorderService {
 }
 
 class _FakePureSocket implements IPureSocket {
-  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected}) : _status = status;
+  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected, this.sendError}) : _status = status;
 
   PureSocketStatus _status;
+  final Object? sendError;
   IPureSocketListener? listener;
   final List<dynamic> sent = [];
   int stops = 0;
@@ -166,7 +167,10 @@ class _FakePureSocket implements IPureSocket {
   }
 
   @override
-  void send(dynamic message) => sent.add(message);
+  void send(dynamic message) {
+    if (sendError case final error?) throw error;
+    sent.add(message);
+  }
 
   @override
   void setListener(IPureSocketListener listener) => this.listener = listener;
@@ -185,8 +189,8 @@ class _FakePureSocket implements IPureSocket {
 }
 
 class _FakeTranscriptSocket {
-  _FakeTranscriptSocket({PureSocketStatus status = PureSocketStatus.connected})
-      : pure = _FakePureSocket(status: status) {
+  _FakeTranscriptSocket({PureSocketStatus status = PureSocketStatus.connected, Object? sendError})
+      : pure = _FakePureSocket(status: status, sendError: sendError) {
     service = TranscriptSegmentSocketService.withSocket(16000, BleAudioCodec.opus, 'en', pure);
   }
 
@@ -1244,6 +1248,62 @@ void main() {
     ]);
     expect(provider.segments, isEmpty, reason: 'delayed pre-tap words must not appear in the new Home moment');
     expect(provider.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('continuous necklace replacement awaits replay failure before acknowledging the boundary', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket(sendError: StateError('replacement socket closed'));
+    final replacementEntered = Completer<void>();
+    final replacementGate = Completer<TranscriptSegmentSocketService?>();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) {
+        socketPreparations++;
+        if (socketPreparations == 1) return Future.value(initialSocket.service);
+        if (!replacementEntered.isCompleted) replacementEntered.complete();
+        return replacementGate.future;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('replay-failure-boundary', 'Words before replay failure')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return CreateConversationResponse(messages: const [], conversation: _conversation(conversationId, 'done'));
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+    await replacementEntered.future;
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 30], codec: BleAudioCodec.pcm8);
+
+    replacementGate.complete(replacementSocket.service);
+    expect(await boundary, isFalse);
+    expect(processCalls, 0, reason: 'the old conversation cannot finalize after replacement replay failed');
+    expect(replacementSocket.pure.sent, isEmpty);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 1);
+    expect(provider.deviceCaptureSocketForTesting, isNull);
   });
 
   test('continuous necklace replacement buffer overflow fails visibly exactly once', () async {

@@ -1484,26 +1484,28 @@ class CaptureProvider extends ChangeNotifier
     }
 
     if (session.socket.state == SocketServiceState.connected && SharedPreferencesUtil().aiConsentAccepted) {
-      _sendDeviceFrame(
-        session.socket,
-        _BufferedDeviceCaptureFrame(
-          socketPayload: physicalPayload,
-          walFrame: snapshot,
-          persistedToWal: walSupported,
+      unawaited(
+        _sendDeviceFrame(
+          session.socket,
+          _BufferedDeviceCaptureFrame(
+            socketPayload: physicalPayload,
+            walFrame: snapshot,
+            persistedToWal: walSupported,
+          ),
+          startProof: startProof,
         ),
-        startProof: startProof,
       );
     }
   }
 
-  bool _sendDeviceFrame(
+  Future<bool> _sendDeviceFrame(
     TranscriptSegmentSocketService socket,
     _BufferedDeviceCaptureFrame frame, {
     DeviceCaptureStartProof? startProof,
-  }) {
+  }) async {
     if (socket.state != SocketServiceState.connected || !SharedPreferencesUtil().aiConsentAccepted) return false;
     try {
-      socket.send(frame.socketPayload);
+      await socket.send(frame.socketPayload);
       startProof?.acceptTransmittedFrame(frame.socketPayload);
       _recordTransmittedCaptureFrame(frame.socketPayload);
       _wsSocketBytesSent += frame.socketPayload.length;
@@ -1515,14 +1517,14 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  bool _replayDeviceSocketReplacementBuffer(
+  Future<bool> _replayDeviceSocketReplacementBuffer(
     _DeviceCaptureSession session,
     TranscriptSegmentSocketService replacement,
     _DeviceSocketReplacementBuffer buffer,
-  ) {
+  ) async {
     if (buffer.overflowed || !_isDeviceCaptureCurrent(session)) return false;
     for (final frame in buffer.frames) {
-      if (!_sendDeviceFrame(replacement, frame)) return false;
+      if (!await _sendDeviceFrame(replacement, frame)) return false;
     }
     buffer.clear();
     return true;
@@ -1670,7 +1672,7 @@ class CaptureProvider extends ChangeNotifier
         return false;
       }
       session.socket = replacement;
-      final replayed = _replayDeviceSocketReplacementBuffer(session, replacement, replacementBuffer);
+      final replayed = await _replayDeviceSocketReplacementBuffer(session, replacement, replacementBuffer);
       session.socketReplacementBuffer = null;
       if (!replayed) {
         await _failDeviceCaptureSession(session, 'Necklace transcription replacement could not replay buffered audio');
