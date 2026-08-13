@@ -567,9 +567,63 @@ def test_stale_processing_claim_without_a_lease_can_be_recovered():
     transaction = Transaction()
     result = conversations._claim_initial_conversation_processing_transaction(transaction, Ref())
 
-    assert result == {"status": "processing_claimed"}
+    assert result["status"] == "processing_claimed"
+    assert result["claim_token"]
     assert transaction.updates[0]["status"] == "processing"
     assert isinstance(transaction.updates[0]["initial_processing_claimed_at"], datetime)
+    assert transaction.updates[0]["initial_processing_claim_token"] == result["claim_token"]
+
+
+def test_reconnect_rebinds_firestore_before_publishing_redis_owner():
+    source = (BACKEND / "routers" / "transcribe.py").read_text()
+    preparation = source.split("async def _prepare_in_progess_conversations():", maxsplit=1)[1].split(
+        "timed_out_conversation_id = await _prepare_in_progess_conversations()", maxsplit=1
+    )[0]
+
+    assert preparation.index("rebind_capture_conversation_owner(") < preparation.index(
+        "claim_in_progress_conversation_id("
+    )
+    assert "conversations_db.bind_capture_conversation_owner(" not in preparation
+
+
+def test_capture_owner_rebind_and_rollback_are_generation_conditional():
+    conversations = _load_conversations_module()
+
+    class Ref:
+        def __init__(self, owner_id):
+            self.data = {"status": "in_progress", "capture_owner_id": owner_id}
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: dict(self.data))
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append(payload)
+            ref.data.update(payload)
+
+    ref = Ref("socket-a")
+    takeover = Transaction()
+    assert conversations._rebind_capture_conversation_owner_transaction(
+        takeover,
+        ref,
+        "socket-a",
+        "socket-b",
+    )
+    assert ref.data["capture_owner_id"] == "socket-b"
+
+    stale_rollback = Transaction()
+    ref.data["capture_owner_id"] = "socket-c"
+    assert not conversations._rebind_capture_conversation_owner_transaction(
+        stale_rollback,
+        ref,
+        "socket-b",
+        "socket-a",
+    )
+    assert stale_rollback.updates == []
+    assert ref.data["capture_owner_id"] == "socket-c"
 
 
 def test_capture_photo_commit_uses_the_same_durable_owner_fence(monkeypatch):

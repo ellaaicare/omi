@@ -88,6 +88,7 @@ class ConversationProcessingOutcome:
     conversation: Conversation
     dispatched: bool
     status: str
+    released_claim_token: Optional[str] = None
 
 
 CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED = 'transcript_redelivery_exhausted'
@@ -286,6 +287,30 @@ def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conve
     if conversation.status == ConversationStatus.failed and conversation.processing_error:
         return False
     return mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+
+
+def mark_released_conversation_processing_failed(
+    uid: str,
+    conversation: Conversation,
+    release_token: Optional[str],
+) -> bool:
+    if not release_token:
+        return False
+    failed_at = datetime.now(timezone.utc)
+    result = conversations_db.mark_conversation_processing_failed_if_released(
+        uid,
+        conversation.id,
+        CONVERSATION_PROCESSING_FAILED,
+        release_token,
+        failed_at=failed_at,
+    )
+    if not result.get('updated'):
+        return False
+    conversation.status = ConversationStatus.failed
+    conversation.discarded = False
+    conversation.processing_error = CONVERSATION_PROCESSING_FAILED
+    conversation.processing_error_at = failed_at
+    return True
 
 
 # Function to get conversation summary apps from Redis
@@ -602,11 +627,13 @@ def process_conversation_with_outcome(
     is_reprocess: bool = False,
     app_id: Optional[str] = None,
     _claim_already_held: bool = False,
+    _initial_processing_claim_token: Optional[str] = None,
     _transcript_retry_count: int = 0,
 ) -> ConversationProcessingOutcome:
     assert_current_ai_consent(uid)
     allow_create = not isinstance(conversation, Conversation)
     initial_processing_claim_held = bool(_claim_already_held)
+    initial_processing_claim_token = _initial_processing_claim_token
     if isinstance(conversation, Conversation) and not is_reprocess and not _claim_already_held:
         claim_result = conversations_db.claim_initial_conversation_processing(uid, conversation.id)
         claim_status = claim_result.get('status')
@@ -633,6 +660,7 @@ def process_conversation_with_outcome(
         if claim_status != 'processing_claimed':
             raise RuntimeError(f"conversation processing claim unavailable: {claim_status}")
         initial_processing_claim_held = True
+        initial_processing_claim_token = str(claim_result.get('claim_token') or '') or None
         conversation.status = ConversationStatus.processing
     elif isinstance(conversation, Conversation) and _claim_already_held:
         conversation.status = ConversationStatus.processing
@@ -732,21 +760,23 @@ def process_conversation_with_outcome(
                 is_reprocess=is_reprocess,
                 app_id=app_id,
                 _claim_already_held=initial_processing_claim_held,
+                _initial_processing_claim_token=initial_processing_claim_token,
                 _transcript_retry_count=_transcript_retry_count + 1,
             )
+        released_claim_token = None
         if initial_processing_claim_held:
-            conversations_db.update_conversation(
+            release_result = conversations_db.release_initial_conversation_processing_claim(
                 uid,
                 conversation.id,
-                {
-                    'status': ConversationStatus.in_progress.value,
-                    'initial_processing_claimed_at': None,
-                },
+                initial_processing_claim_token or '',
             )
+            if release_result.get('released'):
+                released_claim_token = str(release_result.get('release_token') or '') or None
         return ConversationProcessingOutcome(
             conversation=Conversation(**(durable_conversation or conversation.dict())),
             dispatched=False,
             status=commit_status,
+            released_claim_token=released_claim_token,
         )
     if commit_status in {
         conversations_db.conversation_stock_summary_cas_lost,
@@ -910,7 +940,11 @@ def process_conversation_with_transcript_redelivery(
         if outcome.status != conversations_db.conversation_stock_summary_transcript_changed:
             return outcome
         if redeliveries >= max_redeliveries:
-            marked_failed = mark_unexpected_conversation_processing_failed(uid, outcome.conversation)
+            marked_failed = mark_released_conversation_processing_failed(
+                uid,
+                outcome.conversation,
+                outcome.released_claim_token,
+            )
             durable_conversation = conversations_db.get_conversation(uid, outcome.conversation.id)
             durable = Conversation(**(durable_conversation or outcome.conversation.dict()))
             if not marked_failed and durable.status == ConversationStatus.completed:
@@ -918,6 +952,15 @@ def process_conversation_with_transcript_redelivery(
                     conversation=durable,
                     dispatched=False,
                     status='already_completed',
+                )
+            if not marked_failed and durable.status in {
+                ConversationStatus.in_progress,
+                ConversationStatus.processing,
+            }:
+                return ConversationProcessingOutcome(
+                    conversation=durable,
+                    dispatched=False,
+                    status='processing_in_progress',
                 )
             return ConversationProcessingOutcome(
                 conversation=durable,

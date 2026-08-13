@@ -795,6 +795,8 @@ def _stock_summary_authority_update(
 
     update_data = _processing_result_update_data(processing_conversation)
     update_data['initial_processing_claimed_at'] = None
+    update_data['initial_processing_claim_token'] = None
+    update_data['initial_processing_release_token'] = None
     processing_external_data = update_data.get('external_data')
     if isinstance(processing_external_data, dict):
         durable_external_data = durable_conversation.get('external_data')
@@ -1018,6 +1020,39 @@ def _mark_conversation_processing_failed_if_unfinished_transaction(
     return {'updated': True, 'reason': 'marked_failed', **update_data}
 
 
+def _mark_conversation_processing_failed_if_released_transaction(
+    transaction,
+    conversation_ref,
+    error_code: str,
+    failed_at: datetime,
+    expected_release_token: str,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'updated': False, 'reason': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status == ConversationStatus.completed.value:
+        return {'updated': False, 'reason': 'already_completed'}
+    if status == ConversationStatus.failed.value and conversation.get('processing_error'):
+        return {'updated': False, 'reason': 'already_failed'}
+    if (
+        status != ConversationStatus.in_progress.value
+        or conversation.get('initial_processing_claimed_at') is not None
+        or str(conversation.get('initial_processing_release_token') or '') != str(expected_release_token or '')
+    ):
+        return {'updated': False, 'reason': 'processing_authority_changed'}
+    update_data = {
+        'status': ConversationStatus.failed.value,
+        'discarded': False,
+        'processing_error': error_code,
+        'processing_error_at': _ensure_timezone_aware(failed_at),
+        'initial_processing_release_token': None,
+    }
+    transaction.update(conversation_ref, update_data)
+    return {'updated': True, 'reason': 'marked_failed', **update_data}
+
+
 @transactional
 def _mark_conversation_processing_failed_if_unfinished(
     transaction,
@@ -1053,6 +1088,42 @@ def mark_conversation_processing_failed_if_unfinished(
     )
 
 
+@transactional
+def _mark_conversation_processing_failed_if_released(
+    transaction,
+    conversation_ref,
+    error_code: str,
+    failed_at: datetime,
+    expected_release_token: str,
+) -> Dict[str, Any]:
+    return _mark_conversation_processing_failed_if_released_transaction(
+        transaction,
+        conversation_ref,
+        error_code,
+        failed_at,
+        expected_release_token,
+    )
+
+
+def mark_conversation_processing_failed_if_released(
+    uid: str,
+    conversation_id: str,
+    error_code: str,
+    expected_release_token: str,
+    failed_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _mark_conversation_processing_failed_if_released(
+        db.transaction(),
+        conversation_ref,
+        error_code,
+        failed_at or datetime.now(timezone.utc),
+        expected_release_token,
+    )
+
+
 def _assign_conversation_folder_if_unset_transaction(transaction, conversation_ref, folder_id: str) -> bool:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
@@ -1076,7 +1147,11 @@ def assign_conversation_folder_if_unset(uid: str, conversation_id: str, folder_i
     return _assign_conversation_folder_if_unset(db.transaction(), conversation_ref, folder_id)
 
 
-def _claim_initial_conversation_processing_transaction(transaction, conversation_ref) -> Dict[str, Any]:
+def _claim_initial_conversation_processing_transaction(
+    transaction,
+    conversation_ref,
+    claim_token: Optional[str] = None,
+) -> Dict[str, Any]:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
         return {'status': 'conversation_missing'}
@@ -1097,26 +1172,91 @@ def _claim_initial_conversation_processing_transaction(transaction, conversation
                 seconds=initial_conversation_processing_lease_seconds
             ):
                 return {'status': 'processing_in_progress'}
+    claimed_at = datetime.now(timezone.utc)
+    exact_claim_token = str(claim_token or uuid.uuid4())
     transaction.update(
         conversation_ref,
         {
             'status': ConversationStatus.processing.value,
-            'initial_processing_claimed_at': datetime.now(timezone.utc),
+            'initial_processing_claimed_at': claimed_at,
+            'initial_processing_claim_token': exact_claim_token,
+            'initial_processing_release_token': None,
         },
     )
-    return {'status': 'processing_claimed'}
+    return {
+        'status': 'processing_claimed',
+        'claim_token': exact_claim_token,
+    }
 
 
 @transactional
-def _claim_initial_conversation_processing(transaction, conversation_ref) -> Dict[str, Any]:
-    return _claim_initial_conversation_processing_transaction(transaction, conversation_ref)
+def _claim_initial_conversation_processing(transaction, conversation_ref, claim_token: str) -> Dict[str, Any]:
+    return _claim_initial_conversation_processing_transaction(transaction, conversation_ref, claim_token)
 
 
 def claim_initial_conversation_processing(uid: str, conversation_id: str) -> Dict[str, Any]:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
     )
-    return _claim_initial_conversation_processing(db.transaction(), conversation_ref)
+    return _claim_initial_conversation_processing(db.transaction(), conversation_ref, str(uuid.uuid4()))
+
+
+def _release_initial_conversation_processing_claim_transaction(
+    transaction,
+    conversation_ref,
+    expected_claim_token: str,
+    release_token: str,
+) -> Dict[str, Any]:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'released': False, 'reason': 'conversation_missing'}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status != ConversationStatus.processing.value or str(
+        conversation.get('initial_processing_claim_token') or ''
+    ) != str(expected_claim_token or ''):
+        return {'released': False, 'reason': 'processing_authority_changed'}
+    transaction.update(
+        conversation_ref,
+        {
+            'status': ConversationStatus.in_progress.value,
+            'initial_processing_claimed_at': None,
+            'initial_processing_claim_token': None,
+            'initial_processing_release_token': release_token,
+        },
+    )
+    return {'released': True, 'reason': 'released', 'release_token': release_token}
+
+
+@transactional
+def _release_initial_conversation_processing_claim(
+    transaction,
+    conversation_ref,
+    expected_claim_token: str,
+    release_token: str,
+) -> Dict[str, Any]:
+    return _release_initial_conversation_processing_claim_transaction(
+        transaction,
+        conversation_ref,
+        expected_claim_token,
+        release_token,
+    )
+
+
+def release_initial_conversation_processing_claim(
+    uid: str,
+    conversation_id: str,
+    expected_claim_token: str,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _release_initial_conversation_processing_claim(
+        db.transaction(),
+        conversation_ref,
+        expected_claim_token,
+        str(uuid.uuid4()),
+    )
 
 
 def _update_conversation_if_active_summary_version_transaction(
@@ -2937,6 +3077,60 @@ def bind_capture_conversation_owner(uid: str, conversation_id: str, owner_id: Op
         db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
     )
     return _bind_capture_conversation_owner(db.transaction(), conversation_ref, owner_id)
+
+
+def _rebind_capture_conversation_owner_transaction(
+    transaction,
+    conversation_ref,
+    expected_owner_id: Optional[str],
+    new_owner_id: Optional[str],
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get("status"), "value", conversation.get("status"))
+    durable_owner_id = str(conversation.get("capture_owner_id") or "").strip()
+    exact_expected_owner_id = str(expected_owner_id or "").strip()
+    if status != ConversationStatus.in_progress.value or durable_owner_id != exact_expected_owner_id:
+        return False
+    transaction.update(
+        conversation_ref,
+        {"capture_owner_id": str(new_owner_id or "").strip() or None},
+    )
+    return True
+
+
+@transactional
+def _rebind_capture_conversation_owner(
+    transaction,
+    conversation_ref,
+    expected_owner_id: Optional[str],
+    new_owner_id: Optional[str],
+) -> bool:
+    return _rebind_capture_conversation_owner_transaction(
+        transaction,
+        conversation_ref,
+        expected_owner_id,
+        new_owner_id,
+    )
+
+
+def rebind_capture_conversation_owner(
+    uid: str,
+    conversation_id: str,
+    expected_owner_id: Optional[str],
+    new_owner_id: Optional[str],
+) -> bool:
+    conversation_ref = (
+        db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _rebind_capture_conversation_owner(
+        db.transaction(),
+        conversation_ref,
+        expected_owner_id,
+        new_owner_id,
+    )
 
 
 def _abandon_capture_conversation_if_owned_transaction(

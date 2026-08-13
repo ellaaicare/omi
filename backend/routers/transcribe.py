@@ -1045,6 +1045,16 @@ async def _stream_handler(
             candidate = retrieve_in_progress_conversation(uid)
             if candidate:
                 candidate_id = str(candidate.get('id') or '').strip()
+                candidate_owner_id = str(candidate.get('capture_owner_id') or '').strip() or None
+                rebound = bool(candidate_id) and conversations_db.rebind_capture_conversation_owner(
+                    uid,
+                    candidate_id,
+                    candidate_owner_id,
+                    session_id,
+                )
+                if not rebound:
+                    await asyncio.sleep(0)
+                    continue
                 claimed = bool(candidate_id) and redis_db.claim_in_progress_conversation_id(
                     uid, candidate_id, session_id
                 )
@@ -1056,10 +1066,12 @@ async def _stream_handler(
                         session_id,
                     )
                 if not claimed:
-                    await asyncio.sleep(0)
-                    continue
-
-                if not conversations_db.bind_capture_conversation_owner(uid, candidate_id, session_id):
+                    conversations_db.rebind_capture_conversation_owner(
+                        uid,
+                        candidate_id,
+                        session_id,
+                        candidate_owner_id,
+                    )
                     await asyncio.sleep(0)
                     continue
 

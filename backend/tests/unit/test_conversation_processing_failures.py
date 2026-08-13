@@ -756,12 +756,13 @@ def test_transcript_redelivery_exhaustion_is_failed_instead_of_left_unowned(monk
             conversation=conversation,
             dispatched=False,
             status=conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+            released_claim_token="release-a",
         ),
     )
     monkeypatch.setattr(
         conversation_processor,
-        "mark_unexpected_conversation_processing_failed",
-        lambda uid, durable: failed.append((uid, durable.id)) or True,
+        "mark_released_conversation_processing_failed",
+        lambda uid, durable, token: failed.append((uid, durable.id, token)) or True,
     )
     monkeypatch.setattr(
         conversation_processor.conversations_db,
@@ -776,7 +777,7 @@ def test_transcript_redelivery_exhaustion_is_failed_instead_of_left_unowned(monk
     )
 
     assert len(calls) == 2
-    assert failed == [("uid-1", conversation.id)]
+    assert failed == [("uid-1", conversation.id, "release-a")]
     assert outcome.status == conversation_processor.CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED
     assert outcome.conversation.status == ConversationStatus.failed
     assert outcome.dispatched is False
@@ -792,11 +793,12 @@ def test_transcript_redelivery_exhaustion_accepts_a_concurrent_completed_winner(
             conversation=conversation,
             dispatched=False,
             status=conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+            released_claim_token="release-a",
         ),
     )
     monkeypatch.setattr(
         conversation_processor,
-        "mark_unexpected_conversation_processing_failed",
+        "mark_released_conversation_processing_failed",
         lambda *_args, **_kwargs: False,
     )
     monkeypatch.setattr(
@@ -814,6 +816,42 @@ def test_transcript_redelivery_exhaustion_accepts_a_concurrent_completed_winner(
 
     assert outcome.status == "already_completed"
     assert outcome.conversation.status == ConversationStatus.completed
+    assert outcome.dispatched is False
+
+
+def test_transcript_redelivery_exhaustion_preserves_a_new_processing_claimant(monkeypatch):
+    conversation = _long_conversation()
+    processing = {**conversation.model_dump(), "status": ConversationStatus.processing.value}
+    monkeypatch.setattr(
+        conversation_processor,
+        "process_conversation_with_outcome",
+        lambda *_args, **_kwargs: conversation_processor.ConversationProcessingOutcome(
+            conversation=conversation,
+            dispatched=False,
+            status=conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+            released_claim_token="release-a",
+        ),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "mark_released_conversation_processing_failed",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "get_conversation",
+        lambda *_args: processing,
+    )
+
+    outcome = conversation_processor.process_conversation_with_transcript_redelivery(
+        "uid-1",
+        "en",
+        conversation,
+        max_redeliveries=0,
+    )
+
+    assert outcome.status == "processing_in_progress"
+    assert outcome.conversation.status == ConversationStatus.processing
     assert outcome.dispatched is False
 
 

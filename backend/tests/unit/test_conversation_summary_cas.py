@@ -1201,14 +1201,91 @@ def test_initial_processing_claim_promotes_in_progress_once_with_partial_update(
 
     result = conversations._claim_initial_conversation_processing_transaction(transaction, ref)
 
-    assert result == {"status": "processing_claimed"}
+    assert result["status"] == "processing_claimed"
+    assert result["claim_token"]
     assert len(transaction.updates) == 1
     updated_ref, update = transaction.updates[0]
     assert updated_ref is ref
     assert update["status"] == "processing"
     assert isinstance(update["initial_processing_claimed_at"], datetime)
     assert update["initial_processing_claimed_at"].tzinfo is not None
+    assert update["initial_processing_claim_token"] == result["claim_token"]
+    assert update["initial_processing_release_token"] is None
     assert ref.data["transcript_segments"] == [{"text": "durable capture"}]
+
+
+def test_released_processing_claim_fences_terminal_failure_from_new_claimant(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    ref = _ConversationRef(
+        {
+            "id": "conversation-1",
+            "status": "processing",
+            "initial_processing_claimed_at": datetime.now(timezone.utc),
+            "initial_processing_claim_token": "claim-a",
+        }
+    )
+    release_transaction = _Transaction()
+
+    released = conversations._release_initial_conversation_processing_claim_transaction(
+        release_transaction,
+        ref,
+        "claim-a",
+        "release-a",
+    )
+
+    assert released == {"released": True, "reason": "released", "release_token": "release-a"}
+    assert ref.data["status"] == "in_progress"
+    assert ref.data["initial_processing_release_token"] == "release-a"
+
+    new_claim_transaction = _Transaction()
+    claimed = conversations._claim_initial_conversation_processing_transaction(
+        new_claim_transaction,
+        ref,
+        "claim-b",
+    )
+    assert claimed["status"] == "processing_claimed"
+
+    failure_transaction = _Transaction()
+    failed = conversations._mark_conversation_processing_failed_if_released_transaction(
+        failure_transaction,
+        ref,
+        "conversation_processing_failed",
+        datetime.now(timezone.utc),
+        "release-a",
+    )
+
+    assert failed == {"updated": False, "reason": "processing_authority_changed"}
+    assert failure_transaction.updates == []
+    assert ref.data["status"] == "processing"
+    assert ref.data["initial_processing_claim_token"] == "claim-b"
+
+
+def test_terminal_failure_updates_only_the_exact_released_generation(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    ref = _ConversationRef(
+        {
+            "id": "conversation-1",
+            "status": "in_progress",
+            "initial_processing_claimed_at": None,
+            "initial_processing_claim_token": None,
+            "initial_processing_release_token": "release-a",
+            "transcript_segments": [{"text": "retained"}],
+        }
+    )
+    transaction = _Transaction()
+
+    result = conversations._mark_conversation_processing_failed_if_released_transaction(
+        transaction,
+        ref,
+        "conversation_processing_failed",
+        datetime.now(timezone.utc),
+        "release-a",
+    )
+
+    assert result["updated"] is True
+    assert ref.data["status"] == "failed"
+    assert ref.data["initial_processing_release_token"] is None
+    assert ref.data["transcript_segments"] == [{"text": "retained"}]
 
 
 def test_strict_decrypt_round_trip_and_failure_emit_no_protected_context(monkeypatch, caplog, capsys):
