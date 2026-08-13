@@ -335,10 +335,8 @@ def test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_
         "async def conversation_timeout_task():", maxsplit=1
     )[0]
 
-    durable_index = stream_source.index("persist_capture_persistence_batch(")
-    persistence_index = stream_source.index("commit_capture_persistence_batch(", durable_index)
+    persistence_index = stream_source.index("persist_and_commit_capture_persistence_batch(")
     acknowledge_index = stream_source.index("acknowledge_capture_persistence_batch(")
-    assert durable_index < persistence_index
     assert acknowledge_index > persistence_index
     assert "realtime_segment_buffers = []" not in stream_source
     assert "realtime_photo_buffers = []" not in stream_source

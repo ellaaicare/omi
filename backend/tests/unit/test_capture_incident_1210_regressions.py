@@ -411,6 +411,115 @@ def test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership(mon
     assert transaction.deletes == []
 
 
+def test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committed():
+    pending_batch_ids = []
+    committed_batch_ids = []
+
+    conversations_db = SimpleNamespace(
+        list_capture_persistence_batches=lambda _uid, _conversation_id: list(pending_batch_ids),
+        commit_capture_persistence_batch=lambda _uid, _conversation_id, batch_id, _owner_id: (
+            committed_batch_ids.append(batch_id) or {"status": "committed"}
+        ),
+    )
+    poll = _nested_function(
+        "routers/transcribe.py",
+        "poll_capture_persistence_batches",
+        {"conversations_db": conversations_db},
+        {},
+    )
+    should_keep_polling = _nested_function(
+        "routers/transcribe.py",
+        "should_keep_capture_recovery_polling",
+        {},
+        {},
+    )
+
+    recovery_conversation_ids = {"conversation-a"}
+    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new")
+    assert (recovered_count, still_owned) == (0, True)
+    assert should_keep_polling("conversation-a", "conversation-a", True)
+    assert recovery_conversation_ids == {"conversation-a"}
+
+    pending_batch_ids.append("batch-from-old-socket")
+    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new")
+    assert (recovered_count, still_owned) == (1, True)
+    assert committed_batch_ids == ["batch-from-old-socket"]
+
+    assert not should_keep_polling("conversation-a", "conversation-b", True)
+    recovery_conversation_ids.discard("conversation-a")
+    assert recovery_conversation_ids == set()
+
+
+def test_superseded_socket_cannot_persist_a_batch_after_ownership_handoff(monkeypatch):
+    conversations = _load_conversations_module()
+    calls = []
+
+    monkeypatch.setattr(
+        conversations.redis_db,
+        "acquire_capture_commit_lease",
+        lambda uid, conversation_id, owner_id: calls.append(("acquire", uid, conversation_id, owner_id)) or False,
+    )
+    monkeypatch.setattr(
+        conversations,
+        "persist_capture_persistence_batch",
+        lambda *_args, **_kwargs: calls.append(("persist",)) or "batch-late",
+    )
+
+    result = conversations.persist_and_commit_capture_persistence_batch(
+        "uid-a",
+        "conversation-a",
+        [{"id": "segment-late"}],
+        datetime.now(timezone.utc),
+        "socket-old",
+    )
+
+    assert result == {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+    assert calls == [("acquire", "uid-a", "conversation-a", "socket-old")]
+
+
+def test_live_capture_persistence_holds_ownership_lease_through_commit(monkeypatch):
+    conversations = _load_conversations_module()
+    calls = []
+
+    monkeypatch.setattr(
+        conversations.redis_db,
+        "acquire_capture_commit_lease",
+        lambda uid, conversation_id, owner_id: calls.append(("acquire", uid, conversation_id, owner_id)) or True,
+    )
+    monkeypatch.setattr(
+        conversations.redis_db,
+        "release_capture_commit_lease",
+        lambda uid, owner_id: calls.append(("release", uid, owner_id)) or True,
+    )
+    monkeypatch.setattr(
+        conversations,
+        "persist_capture_persistence_batch",
+        lambda *_args, **_kwargs: calls.append(("persist",)) or "batch-live",
+    )
+    monkeypatch.setattr(
+        conversations,
+        "_commit_capture_persistence_batch",
+        lambda *_args, **_kwargs: calls.append(("commit",))
+        or {"status": "committed", "updated_segments": [], "removed_ids": []},
+    )
+
+    result = conversations.persist_and_commit_capture_persistence_batch(
+        "uid-a",
+        "conversation-a",
+        [{"id": "segment-live"}],
+        datetime.now(timezone.utc),
+        "socket-current",
+    )
+
+    assert result["status"] == "committed"
+    assert calls == [
+        ("acquire", "uid-a", "conversation-a", "socket-current"),
+        ("persist",),
+        ("commit",),
+        ("release", "uid-a", "socket-current"),
+    ]
+
+
 def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
     source = (BACKEND / "routers" / "transcribe.py").read_text()
 

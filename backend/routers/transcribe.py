@@ -138,6 +138,25 @@ def drain_capture_persistence_batches(uid: str, conversation_id: str, owner_id: 
     return len(batch_ids)
 
 
+def poll_capture_persistence_batches(uid: str, conversation_id: str, owner_id: str) -> Tuple[int, bool]:
+    """Commit one recovery scan and report whether the socket still owns the conversation."""
+    batch_ids = conversations_db.list_capture_persistence_batches(uid, conversation_id)
+    for batch_id in batch_ids:
+        result = conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id, owner_id)
+        if result.get("status") == "ownership_lost":
+            return len(batch_ids), False
+    return len(batch_ids), True
+
+
+def should_keep_capture_recovery_polling(
+    recovery_conversation_id: str,
+    current_conversation_id: Optional[str],
+    websocket_active: bool,
+) -> bool:
+    """Keep polling the active owned conversation for batches from a superseded socket."""
+    return websocket_active and recovery_conversation_id == str(current_conversation_id or "").strip()
+
+
 STT_LATENCY_LOGS_ENABLED = os.getenv('ELLA_STT_LATENCY_LOGS_ENABLED', 'true').lower() == 'true'
 STT_LATENCY_CLIENT_EVENT_LIMIT = int(os.getenv('ELLA_STT_LATENCY_CLIENT_EVENT_LIMIT', '25'))
 # Server-side STT override: when set, all sessions use this provider regardless of client request.
@@ -2104,34 +2123,33 @@ async def _stream_handler(
             pending_batch_count = 0
             for recovery_conversation_id in tuple(capture_recovery_conversation_ids):
                 try:
-                    pending_batch_ids = conversations_db.list_capture_persistence_batches(
+                    recovered_batch_count, recovery_owned = poll_capture_persistence_batches(
                         uid,
                         recovery_conversation_id,
+                        session_id,
                     )
-                    pending_batch_count += len(pending_batch_ids)
-                    for pending_batch_id in pending_batch_ids:
-                        recovery_result = conversations_db.commit_capture_persistence_batch(
-                            uid,
-                            recovery_conversation_id,
-                            pending_batch_id,
-                            session_id,
+                    pending_batch_count += recovered_batch_count
+                    if not recovery_owned:
+                        capture_recovery_conversation_ids.discard(recovery_conversation_id)
+                        websocket_active = False
+                        _latency_log(
+                            "capture_persistence_ownership_lost",
+                            conversation_id=recovery_conversation_id,
+                            phase="recovery",
                         )
-                        if recovery_result.get("status") == "ownership_lost":
-                            capture_recovery_conversation_ids.discard(recovery_conversation_id)
-                            websocket_active = False
-                            _latency_log(
-                                "capture_persistence_ownership_lost",
-                                conversation_id=recovery_conversation_id,
-                                phase="recovery",
-                            )
-                            return
+                        return
                 except Exception:
                     pending_batch_count += 1
                     _latency_log("capture_persistence_recovery_retry")
                     if not websocket_active and not realtime_segment_buffers and not realtime_photo_buffers:
                         continue
                 else:
-                    capture_recovery_conversation_ids.discard(recovery_conversation_id)
+                    if not should_keep_capture_recovery_polling(
+                        recovery_conversation_id,
+                        current_conversation_id,
+                        websocket_active,
+                    ):
+                        capture_recovery_conversation_ids.discard(recovery_conversation_id)
 
             if (
                 not websocket_active
@@ -2235,19 +2253,13 @@ async def _stream_handler(
             removed_ids = []
             if transcript_segments or photos_to_process:
                 try:
-                    pending_batch_id = conversations_db.persist_capture_persistence_batch(
+                    commit_result = conversations_db.persist_and_commit_capture_persistence_batch(
                         uid,
                         batch_conversation_id,
                         [segment.dict() for segment in transcript_segments],
                         finished_at,
                         session_id,
                         photos=photos_to_process,
-                    )
-                    commit_result = conversations_db.commit_capture_persistence_batch(
-                        uid,
-                        batch_conversation_id,
-                        pending_batch_id,
-                        session_id,
                     )
                 except Exception:
                     capture_recovery_conversation_ids.add(batch_conversation_id)

@@ -608,6 +608,9 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_waits_for_terminal_response"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committed"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_superseded_socket_cannot_persist_a_batch_after_ownership_handoff"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_live_capture_persistence_holds_ownership_lease_through_commit"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_is_initialized_before_reconnect_preparation_uses_it"
             "tests/unit/test_capture_incident_1210_regressions.py::test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation"
             "tests/unit/test_capture_incident_1210_regressions.py::test_duplicate_processing_claim_is_a_no_write_inflight_result"
@@ -620,7 +623,7 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 26
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 29
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done

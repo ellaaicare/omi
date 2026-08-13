@@ -3405,6 +3405,46 @@ def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: s
         redis_db.release_capture_commit_lease(uid, exact_owner_id)
 
 
+def persist_and_commit_capture_persistence_batch(
+    uid: str,
+    conversation_id: str,
+    segments: List[dict],
+    finished_at: datetime,
+    capture_owner_id: str,
+    photos: Optional[List[ConversationPhoto]] = None,
+) -> dict:
+    """Persist and commit a live capture while ownership transfer is fenced."""
+    exact_owner_id = str(capture_owner_id or "").strip()
+    if not exact_owner_id:
+        raise ValueError("capture_persistence_owner_id_required")
+    if not redis_db.acquire_capture_commit_lease(uid, conversation_id, exact_owner_id):
+        return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+
+    try:
+        batch_id = persist_capture_persistence_batch(
+            uid,
+            conversation_id,
+            segments,
+            finished_at,
+            exact_owner_id,
+            photos=photos,
+        )
+        conversation_ref = (
+            db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+        )
+        batch_ref = conversation_ref.collection(capture_persistence_batches_collection).document(batch_id)
+        return _commit_capture_persistence_batch(
+            db.transaction(),
+            conversation_ref,
+            batch_ref,
+            uid,
+            conversation_id,
+            exact_owner_id,
+        )
+    finally:
+        redis_db.release_capture_commit_lease(uid, exact_owner_id)
+
+
 # ***********************************
 # ********** VISIBILITY *************
 # ***********************************
