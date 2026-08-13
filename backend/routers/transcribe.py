@@ -733,8 +733,8 @@ async def _stream_handler(
 
         for conversation in processing:
             if PUSHER_ENABLED:
-                requested = await request_conversation_processing(conversation['id'])
-                if not requested:
+                processing_result = await request_conversation_processing(conversation['id'])
+                if processing_result == 'unavailable':
                     await _create_conversation_fallback(conversation)
             else:
                 await _create_conversation_fallback(conversation)
@@ -873,9 +873,10 @@ async def _stream_handler(
                     new_conversation_id,
                     new_owner_id,
                 )
-            if rolled_back or expected_conversation_id is None:
+            stub_adopted_by_another_socket = redis_db.get_in_progress_conversation_id(uid) == new_conversation_id
+            if (rolled_back or expected_conversation_id is None) and not stub_adopted_by_another_socket:
                 conversations_db.delete_conversation(uid, new_conversation_id)
-            if detected_meeting_id:
+            if detected_meeting_id and not stub_adopted_by_another_socket:
                 redis_db.remove_conversation_meeting_id(new_conversation_id)
             return False
 
@@ -940,8 +941,8 @@ async def _stream_handler(
             if has_content:
                 if PUSHER_ENABLED:
                     on_conversation_processing_started(conversation_id)
-                    requested = await request_conversation_processing(conversation_id)
-                    if not requested:
+                    processing_result = await request_conversation_processing(conversation_id)
+                    if processing_result == 'unavailable':
                         await _create_conversation_fallback(conversation)
                 else:
                     await _create_conversation_fallback(conversation)
@@ -1412,7 +1413,7 @@ async def _stream_handler(
         def fail_pending_conversation_requests() -> None:
             for future in tuple(pending_conversation_requests.values()):
                 if not future.done():
-                    future.set_result(False)
+                    future.set_result('unavailable')
 
         def transcript_send(segments, conversation_id: str):
             nonlocal segment_buffers
@@ -1427,12 +1428,12 @@ async def _stream_handler(
             nonlocal pusher_ws, pusher_connected, pending_conversation_requests, pending_request_event
             if not pusher_connected or not pusher_ws:
                 print(f"Pusher not connected, falling back to local processing for {conversation_id}", uid, session_id)
-                return False
+                return 'unavailable'
             response = None
             try:
                 existing = pending_conversation_requests.get(conversation_id)
                 if existing is not None and not existing.done():
-                    return bool(await asyncio.shield(existing))
+                    return await asyncio.shield(existing)
                 response = asyncio.get_running_loop().create_future()
                 pending_conversation_requests[conversation_id] = response
                 pending_request_event.set()  # Signal the receiver
@@ -1444,13 +1445,13 @@ async def _stream_handler(
                 deadline = asyncio.get_running_loop().time() + PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS
                 while websocket_active and asyncio.get_running_loop().time() < deadline:
                     try:
-                        return bool(await asyncio.wait_for(asyncio.shield(response), timeout=0.25))
+                        return await asyncio.wait_for(asyncio.shield(response), timeout=0.25)
                     except asyncio.TimeoutError:
                         continue
-                return False
+                return 'unavailable'
             except Exception as e:
                 print(f"Failed to send process_conversation request: {e}", uid, session_id)
-                return False
+                return 'unavailable'
             finally:
                 if response is not None and pending_conversation_requests.get(conversation_id) is response:
                     pending_conversation_requests.pop(conversation_id, None)
@@ -1591,16 +1592,16 @@ async def _stream_handler(
                         if "error" in result:
                             print(f"Conversation processing failed: {result['error']}", uid, session_id)
                             if response is not None and not response.done():
-                                response.set_result(False)
+                                response.set_result('terminal_error')
                             continue
 
                         if result.get("success"):
                             print(f"Conversation processed by pusher: {conversation_id}", uid, session_id)
                             if response is not None and not response.done():
-                                response.set_result(True)
+                                response.set_result('processed')
                             on_conversation_processed(conversation_id)
                         elif response is not None and not response.done():
-                            response.set_result(False)
+                            response.set_result('terminal_error')
 
                 except asyncio.TimeoutError:
                     continue  # Check loop conditions again
@@ -2312,7 +2313,7 @@ async def _stream_handler(
                     onboarding_handler.on_segments_received([s.dict() for s in transcript_segments])
 
                 if translation_enabled:
-                    await translate(updated_segments, conversation.id)
+                    await translate(updated_segments, batch_conversation_id)
 
                 # Speaker detection
                 for segment in updated_segments:

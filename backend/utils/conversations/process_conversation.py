@@ -603,6 +603,7 @@ def process_conversation_with_outcome(
 ) -> ConversationProcessingOutcome:
     assert_current_ai_consent(uid)
     allow_create = not isinstance(conversation, Conversation)
+    initial_processing_claim_held = bool(_claim_already_held)
     if isinstance(conversation, Conversation) and not is_reprocess and not _claim_already_held:
         claim_result = conversations_db.claim_initial_conversation_processing(uid, conversation.id)
         claim_status = claim_result.get('status')
@@ -628,6 +629,7 @@ def process_conversation_with_outcome(
             )
         if claim_status != 'processing_claimed':
             raise RuntimeError(f"conversation processing claim unavailable: {claim_status}")
+        initial_processing_claim_held = True
         conversation.status = ConversationStatus.processing
     elif isinstance(conversation, Conversation) and _claim_already_held:
         conversation.status = ConversationStatus.processing
@@ -726,17 +728,18 @@ def process_conversation_with_outcome(
                 force_process=force_process,
                 is_reprocess=is_reprocess,
                 app_id=app_id,
-                _claim_already_held=True,
+                _claim_already_held=initial_processing_claim_held,
                 _transcript_retry_count=_transcript_retry_count + 1,
             )
-        conversations_db.update_conversation(
-            uid,
-            conversation.id,
-            {
-                'status': ConversationStatus.in_progress.value,
-                'initial_processing_claimed_at': None,
-            },
-        )
+        if initial_processing_claim_held:
+            conversations_db.update_conversation(
+                uid,
+                conversation.id,
+                {
+                    'status': ConversationStatus.in_progress.value,
+                    'initial_processing_claimed_at': None,
+                },
+            )
         return ConversationProcessingOutcome(
             conversation=Conversation(**(durable_conversation or conversation.dict())),
             dispatched=False,

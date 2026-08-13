@@ -542,8 +542,8 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)" in lifecycle_source
     assert "if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
     assert "return False" in process_source
-    assert "requested = await request_conversation_processing(conversation_id)" in process_source
-    assert "if not requested:" in process_source
+    assert "processing_result = await request_conversation_processing(conversation_id)" in process_source
+    assert "if processing_result == 'unavailable':" in process_source
     assert "await _create_conversation_fallback(conversation)" in process_source
     assert "conversation_id_to_process = current_conversation_id" in lifecycle_source
     assert "expected_conversation_id=conversation_id_to_process" in lifecycle_source
@@ -596,6 +596,8 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "queue_pusher_transcript_batch(" in pusher_source
     assert "deliver_all_pusher_transcript_batches(" in pusher_source
     assert "batch_conversation_id," in stream_source
+    assert "await translate(updated_segments, batch_conversation_id)" in stream_source
+    assert "await translate(updated_segments, conversation.id)" not in stream_source
 
     class Snapshot:
         exists = True

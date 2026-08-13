@@ -5,7 +5,7 @@ import struct
 import sys
 import time
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import cache
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -224,6 +224,37 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
     assert socket.closed is True
     assert fallback_calls == ["conversation-a"]
 
+    async def terminal_request(_conversation_id):
+        return "terminal_error"
+
+    terminal_process = _nested_function(
+        "routers/transcribe.py",
+        "_process_conversation",
+        {
+            "drain_capture_persistence_batches": lambda *_args: None,
+            "conversations_db": SimpleNamespace(
+                get_conversation=lambda *_args: {
+                    "id": "conversation-a",
+                    "transcript_segments": [{"id": "segment-a", "text": "captured"}],
+                    "photos": [],
+                },
+                delete_conversation=lambda *_args: None,
+            ),
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "on_conversation_processing_started": lambda _conversation_id: None,
+            "request_conversation_processing": terminal_request,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+    assert asyncio.run(terminal_process("conversation-a", wait_for_buffers=True)) is True
+    assert fallback_calls == ["conversation-a"]
+
 
 def test_pusher_processing_request_waits_for_terminal_response():
     class PusherSocket:
@@ -288,7 +319,17 @@ def test_pusher_processing_request_waits_for_terminal_response():
         payload = bytearray(struct.pack("I", 201))
         payload.extend(json.dumps({"conversation_id": "conversation-a", "success": True}).encode())
         await socket.responses.put(bytes(payload))
-        assert await request_task is True
+        assert await request_task == "processed"
+
+        failed_task = asyncio.create_task(request_processing("conversation-b"))
+        while len(socket.sent) < 2:
+            await asyncio.sleep(0)
+        failed_payload = bytearray(struct.pack("I", 201))
+        failed_payload.extend(
+            json.dumps({"conversation_id": "conversation-b", "error": "stock_summary_transcript_changed"}).encode()
+        )
+        await socket.responses.put(bytes(failed_payload))
+        assert await failed_task == "terminal_error"
         receive_task.cancel()
         await asyncio.gather(receive_task, return_exceptions=True)
 
@@ -378,6 +419,73 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
     recovery_update = source.index("capture_recovery_conversation_ids.update(", preparation_call)
 
     assert initialization < preparation_call < recovery_update
+
+    class StubConversation:
+        def __init__(self, **kwargs):
+            self.values = kwargs
+
+        def dict(self):
+            return dict(self.values)
+
+    deleted = []
+    upserted = []
+
+    class AdoptingRedis:
+        active_id = "stale"
+
+        def replace_stale_in_progress_conversation_id(self, _uid, _stale_id, new_id, _owner_id):
+            self.active_id = new_id
+            return False
+
+        def get_in_progress_conversation_id(self, _uid):
+            return self.active_id
+
+        def remove_conversation_meeting_id(self, _conversation_id):
+            raise AssertionError("an adopted stub must retain its meeting association")
+
+    create_stub = _nested_function(
+        "routers/transcribe.py",
+        "_create_new_in_progress_conversation",
+        {
+            "Conversation": StubConversation,
+            "ConversationSource": SimpleNamespace(omi="omi", desktop="desktop"),
+            "ConversationStatus": SimpleNamespace(in_progress="in_progress"),
+            "Structured": dict,
+            "calendar_db": SimpleNamespace(get_meetings_in_time_range=lambda *_args: []),
+            "conversations_db": SimpleNamespace(
+                upsert_conversation=lambda _uid, conversation_data: upserted.append(conversation_data),
+                delete_conversation=lambda _uid, conversation_id: deleted.append(conversation_id),
+            ),
+            "datetime": datetime,
+            "redis_db": AdoptingRedis(),
+            "timedelta": timedelta,
+            "timezone": timezone,
+            "uuid": SimpleNamespace(uuid4=lambda: "stub-adopted"),
+        },
+        {
+            "current_conversation_id": "stale",
+            "language": "en",
+            "private_cloud_sync_enabled": False,
+            "session_id": "socket-a",
+            "source": None,
+            "uid": "uid-a",
+        },
+    )
+
+    assert (
+        asyncio.run(
+            create_stub(
+                expected_conversation_id=None,
+                expected_owner_id=None,
+                replace_stale_conversation_id="stale",
+                new_owner_id="socket-a",
+                adopt=True,
+            )
+        )
+        is False
+    )
+    assert upserted[0]["id"] == "stub-adopted"
+    assert deleted == []
 
 
 def test_duplicate_processing_claim_is_a_no_write_inflight_result():

@@ -673,6 +673,39 @@ def test_explicit_reprocess_of_completed_conversation_remains_authorized(monkeyp
     assert len(commits) == 1
     assert commits[0]["allow_create"] is False
 
+    durable_completed = conversation.dict()
+    durable_completed["status"] = ConversationStatus.completed.value
+    transcript_race_commits = []
+    recovery_updates = []
+
+    def reject_changed_transcript(_uid, _conversation_id, _payload, **_kwargs):
+        transcript_race_commits.append(True)
+        return {
+            "status": conversation_processor.conversations_db.conversation_stock_summary_transcript_changed,
+            "conversation": durable_completed,
+            "dispatched": False,
+        }
+
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "commit_stock_summary_processing_result",
+        reject_changed_transcript,
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "update_conversation",
+        lambda *_args, **_kwargs: recovery_updates.append((_args, _kwargs)),
+    )
+
+    raced_outcome = conversation_processor.process_conversation_with_outcome(
+        "uid-1", "en", conversation, force_process=True, is_reprocess=True
+    )
+
+    assert len(transcript_race_commits) == 2
+    assert raced_outcome.status == conversation_processor.conversations_db.conversation_stock_summary_transcript_changed
+    assert raced_outcome.conversation.status == ConversationStatus.completed
+    assert recovery_updates == []
+
 
 def test_post_commit_app_failure_does_not_rollback_or_suppress_hermes_dispatch(monkeypatch):
     conversation = _long_conversation()
