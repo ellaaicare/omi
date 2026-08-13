@@ -2243,6 +2243,7 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
         legacy_api_key="",
         timeout_seconds=45,
     )
+    migration_trace_id = "summary-retry:conversation-1:request-1:hermes:pending-rerun:test"
     result = asyncio.run(
         summary_recovery.invoke_hermes_recovery(
             uid="user-1",
@@ -2251,17 +2252,23 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
             client_context="Cafe context",
             config=config,
             async_client_factory=FakeClient,
+            trace_id_override=migration_trace_id,
         )
     )
 
     assert captured["url"] == "http://hermes.test/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert captured["headers"]["X-Hermes-Session-Key"] == summary_recovery.canonical_omi_session_key("user-1")
+    assert captured["headers"]["X-Trace-Id"] == migration_trace_id
+    assert captured["headers"]["X-Hermes-Session-Id"].endswith(
+        summary_recovery.hashlib.sha256(migration_trace_id.encode("utf-8")).hexdigest()[:16]
+    )
     prompt = captured["body"]["messages"][0]["content"]
     assert "tail-marker" in prompt
     assert "Cafe context" in prompt
     assert summary_recovery.build_hermes_recovery_source(conversation)[1] in prompt
     assert captured["apply"]["summary"]["category"] == "entertainment"
+    assert captured["apply"]["trace_id"] == migration_trace_id
     assert captured["apply"]["require_canonical"] is True
     assert captured["apply"]["preserve_generated_results"] is True
     assert result == {
@@ -2937,6 +2944,15 @@ def test_summary_recovery_reruns_hermes_for_unverifiable_legacy_pending_state(
         return SimpleNamespace()
 
     async def fake_invoke(**kwargs):
+        rerun_trace_id = kwargs["trace_id_override"]
+        assert rerun_trace_id != pending["enrichment_state"]["trace_id"]
+        assert rerun_trace_id.startswith(f"summary-retry:conversation-1:{request_id}:hermes:pending-rerun:")
+        assert rerun_trace_id == summary_recovery._pending_canonical_rerun_trace_id(
+            conversation_id="conversation-1",
+            request_id=request_id,
+            active_summary_version_id="enriched-v2",
+            pending_state=pending["enrichment_state"],
+        )
         events.append(("hermes_rerun", kwargs["request_id"]))
         return {"active_summary_version_id": "enriched-v3", "canonical_confirmed": True}
 
@@ -3097,14 +3113,63 @@ def test_enriched_vector_failure_receipts_version_and_hash_without_rerunning_mod
     assert "private vector provider detail" not in str(receipts)
 
 
-def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch):
+def test_strict_summary_writeback_fresh_trace_supersedes_legacy_pending_and_confirms_canonical(monkeypatch):
+    legacy_structured = {
+        "title": "Legacy title",
+        "overview": "[Ella] Legacy pending summary.",
+        "emoji": "brain",
+        "category": "other",
+    }
+    legacy_request_input = summary_writeback._legacy_summary_request_fingerprint_input(
+        structured=legacy_structured,
+        summary_source="observer",
+        summary_kind="recovered_enriched",
+        correction_id=None,
+        based_on_version_id="generic-v1",
+        set_active=True,
+        require_canonical=True,
+        require_based_on_match=True,
+        preserve_generated_results=True,
+        ella_tags=["omi", "recovery"],
+        ella_signal={"source": "recovery"},
+        today_card_grounding=None,
+        today_card_grounding_evidence=None,
+    )
     conversation = {
         **_retry_conversation(status="completed", request_id=None),
-        "active_summary_version_id": "generic-v1",
-        "summary_versions": [],
+        "structured": legacy_structured,
+        "ella_tags": ["omi", "recovery"],
+        "ella_signal": {"source": "recovery"},
+        "active_summary_version_id": "enriched-v2",
+        "summary_versions": [
+            {
+                "id": "enriched-v2",
+                "source": "observer",
+                "kind": "recovered_enriched",
+                "based_on_version_id": "generic-v1",
+                **legacy_structured,
+                "is_active": True,
+            }
+        ],
+        "enrichment_state": {
+            "status": "writeback_pending_canonical",
+            "pending": True,
+            "source": "observer",
+            "kind": "recovered_enriched",
+            "trace_id": "summary-retry:conversation-1:request-1:hermes",
+            "canonical_status": "failed",
+            "request_fingerprint": summary_writeback._summary_request_fingerprint(legacy_request_input),
+            "request_fingerprint_input": legacy_request_input,
+        },
         "apps_results": [{"app_id": "preserve-me"}],
         "plugins_results": [{"plugin_id": "preserve-me"}],
     }
+    migration_trace_id = summary_recovery._pending_canonical_rerun_trace_id(
+        conversation_id="conversation-1",
+        request_id="request-1",
+        active_summary_version_id="enriched-v2",
+        pending_state=conversation["enrichment_state"],
+    )
     updates = []
     cas_updates = []
     canonical_calls = []
@@ -3113,8 +3178,8 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
         summary_writeback.conversations_db,
         "build_summary_version_update",
         lambda *args, **kwargs: {
-            "summary_versions": [{"id": "enriched-v2", "kind": "recovered_enriched", "is_active": True}],
-            "active_summary_version_id": "enriched-v2",
+            "summary_versions": [{"id": "enriched-v3", "kind": "recovered_enriched", "is_active": True}],
+            "active_summary_version_id": "enriched-v3",
         },
     )
     monkeypatch.setattr(
@@ -3141,21 +3206,28 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
             overview="[Ella] Enriched and canonicalized summary.",
             category="other",
             summary_kind="recovered_enriched",
-            trace_id="trace-1",
+            based_on_version_id="enriched-v2",
+            trace_id=migration_trace_id,
             canonical_writer=canonical_writer,
             require_canonical=True,
+            require_based_on_match=True,
             preserve_generated_results=True,
         )
     )
 
     assert result["canonical_confirmed"] is True
-    assert updates[0]["enrichment_state"]["status"] == "writeback_pending_canonical"
-    assert "apps_results" not in updates[0]
-    assert "plugins_results" not in updates[0]
+    assert updates == []
+    pending_update = cas_updates[0][2]
     assert cas_updates[0][0] == "enriched-v2"
-    assert cas_updates[0][1] == updates[0]["enrichment_state"]
-    assert cas_updates[0][2]["enrichment_state"]["status"] == "writeback_applied"
-    assert cas_updates[0][2]["enrichment_state"]["canonical_status"] == "completed"
+    assert pending_update["enrichment_state"]["status"] == "writeback_pending_canonical"
+    assert pending_update["enrichment_state"]["trace_id"] == migration_trace_id
+    assert pending_update["enrichment_state"]["request_fingerprint_input"]["based_on_version_id"] == "enriched-v2"
+    assert "apps_results" not in pending_update
+    assert "plugins_results" not in pending_update
+    assert cas_updates[1][0] == "enriched-v3"
+    assert cas_updates[1][1] == pending_update["enrichment_state"]
+    assert cas_updates[1][2]["enrichment_state"]["status"] == "writeback_applied"
+    assert cas_updates[1][2]["enrichment_state"]["canonical_status"] == "completed"
     assert canonical_calls[0][1]["enrichment_state"]["canonical_status"] == "completed"
 
 

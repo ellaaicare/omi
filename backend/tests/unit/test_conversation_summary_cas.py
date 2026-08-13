@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import json
 import logging
@@ -982,21 +983,27 @@ def test_stock_summary_falsey_non_string_active_id_fails_closed(monkeypatch, mal
 
 def test_hermes_enrichment_outbox_is_written_in_same_transaction_as_summary(monkeypatch):
     conversations = _load_conversations_module(monkeypatch)
-    monkeypatch.setitem(
-        sys.modules,
-        "database.hermes_cloud_enrichment_outbox",
-        SimpleNamespace(COLLECTION="ella_hermes_cloud_enrichment_outbox"),
+    source = Path(conversations.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    assert "ella.services.hermes_cloud_enrichment" not in source
+    assert not any(
+        isinstance(node, (ast.Import, ast.ImportFrom))
+        for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        for node in ast.walk(function)
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "ella.services.hermes_cloud_enrichment",
-        SimpleNamespace(
-            HERMES_CLOUD_ENRICHMENT_POLICY_VERSION="policy-v1",
-            build_enrichment_identity=lambda **_kwargs: SimpleNamespace(
-                job_id="hce-job-1",
-                client_interaction_id="interaction-1",
-                transcript_sha256="transcript-sha-1",
-            ),
+    monkeypatch.setattr(
+        conversations,
+        "hermes_cloud_enrichment_outbox_collection",
+        "ella_hermes_cloud_enrichment_outbox",
+    )
+    monkeypatch.setattr(conversations, "HERMES_CLOUD_ENRICHMENT_POLICY_VERSION", "policy-v1")
+    monkeypatch.setattr(
+        conversations,
+        "build_enrichment_identity",
+        lambda **_kwargs: SimpleNamespace(
+            job_id="hce-job-1",
+            client_interaction_id="interaction-1",
+            transcript_sha256="transcript-sha-1",
         ),
     )
 

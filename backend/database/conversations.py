@@ -11,12 +11,18 @@ from google.cloud.firestore_v1 import FieldFilter, transactional
 
 import utils.other.hume as hume
 from database import users as users_db
+from database.hermes_cloud_enrichment_outbox import COLLECTION as hermes_cloud_enrichment_outbox_collection
 from models.conversation import (
     ConversationPhoto,
     PostProcessingStatus,
     PostProcessingModel,
     ConversationStatus,
     AudioFile,
+)
+from models.conversation_integrity import transcript_grounding_hash
+from models.hermes_cloud_enrichment_contract import (
+    HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+    build_enrichment_identity,
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
@@ -725,12 +731,6 @@ def _enqueue_hermes_enrichment_in_transaction(
     *,
     now: datetime,
 ) -> Dict[str, Any]:
-    from database.hermes_cloud_enrichment_outbox import COLLECTION
-    from ella.services.hermes_cloud_enrichment import (
-        HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
-        build_enrichment_identity,
-    )
-
     conversation_id = str(conversation.get('id') or '')
     identity = build_enrichment_identity(
         uid=uid,
@@ -754,7 +754,7 @@ def _enqueue_hermes_enrichment_in_transaction(
         'created_at': now,
         'updated_at': now,
     }
-    outbox_ref = db.collection(COLLECTION).document(identity.job_id)
+    outbox_ref = db.collection(hermes_cloud_enrichment_outbox_collection).document(identity.job_id)
     snapshot = outbox_ref.get(transaction=transaction)
     if snapshot.exists:
         existing = snapshot.to_dict() or {}
@@ -1211,8 +1211,6 @@ def _update_conversation_if_transcript_hash_transaction(
     match_active_summary_version: bool = False,
     expected_enrichment_state: Optional[dict] = None,
 ) -> bool:
-    from utils.ella.canonical_omi import transcript_grounding_hash
-
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
         return False

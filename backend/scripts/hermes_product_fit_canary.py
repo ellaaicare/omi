@@ -27,9 +27,9 @@ from database import voice_canary as voice_canary_db
 from ella.services import ai_consent
 from ella.services.hermes_broker_client import HermesBrokerClient
 from ella.services.hermes_broker_prototype import HermesBrokerPrototypeConfig
-from ella.services.hermes_cloud_enrichment import (
-    build_enrichment_identity,
+from models.hermes_cloud_enrichment_contract import (
     _interaction_identity as production_enrichment_interaction_identity,
+    build_enrichment_identity,
 )
 from ella.services.hermes_cloud_runtime import broker_session_id_for_scope
 from ella.services.runtime_errors import ProvisioningError

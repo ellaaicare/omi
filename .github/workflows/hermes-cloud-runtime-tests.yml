@@ -24,6 +24,8 @@ on:
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
+      - "backend/models/conversation_integrity.py"
+      - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
@@ -179,6 +181,8 @@ on:
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
+      - "backend/models/conversation_integrity.py"
+      - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
@@ -380,6 +384,8 @@ jobs:
           database/runtime_targets.py
           database/voice_canary.py
           models/conversation.py
+          models/conversation_integrity.py
+          models/hermes_cloud_enrichment_contract.py
           routers/transcribe.py
           routers/conversations.py
           routers/developer.py
@@ -469,6 +475,8 @@ jobs:
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
           models/conversation.py
+          models/conversation_integrity.py
+          models/hermes_cloud_enrichment_contract.py
           routers/users.py
           routers/conversations.py routers/developer.py
           routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py

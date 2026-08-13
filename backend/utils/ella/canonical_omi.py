@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import requests
+from models.conversation_integrity import (
+    canonical_transcript_segments,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 from utils.ella.canonical_auth import canonical_event_service_headers
 
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
@@ -140,35 +144,6 @@ def _segment_dict(segment: Any) -> dict[str, Any]:
 def _transcript_segments(conversation: Any) -> list[dict[str, Any]]:
     segments = _object_get(conversation, "transcript_segments") or []
     return canonical_transcript_segments(segments)
-
-
-def canonical_transcript_segments(transcript_segments: list[Any]) -> list[dict[str, Any]]:
-    return [_json_safe(_segment_dict(segment)) for segment in transcript_segments]
-
-
-def transcript_grounding_hash(transcript_segments: list[dict[str, Any]]) -> str:
-    normalized_segments = canonical_transcript_segments(transcript_segments)
-    source = json.dumps(
-        normalized_segments,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
-
-
-def summary_grounding_hash(structured: dict[str, Any]) -> str:
-    source = json.dumps(
-        {
-            "overview": str(structured.get("overview") or "").strip(),
-            "title": str(structured.get("title") or "").strip(),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def _today_card_grounding(
