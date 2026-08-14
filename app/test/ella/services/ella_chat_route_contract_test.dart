@@ -130,7 +130,7 @@ void main() {
     expect(result.failure?.kind, ClientApiFailureKind.updateRequired);
   });
 
-  test('history accepts canonical text and created_at fields', () async {
+  test('history preserves canonical sender roles after hydration', () async {
     const authority = _CurrentAuthority('uid-a');
     final result = await fetchEllaChatHistory(
       expectedAuthenticatedUid: 'uid-a',
@@ -140,8 +140,14 @@ void main() {
           jsonEncode({
             'messages': [
               {
+                'id': 'canonical-0',
+                'sender': 'human',
+                'text': 'Persisted question',
+                'created_at': '2026-08-09T02:59:00Z',
+              },
+              {
                 'id': 'canonical-1',
-                'role': 'assistant',
+                'sender': 'ai',
                 'text': 'Persisted answer',
                 'created_at': '2026-08-09T03:00:00Z',
               },
@@ -153,10 +159,14 @@ void main() {
     );
 
     expect(result.isSuccess, isTrue);
-    expect(result.value, hasLength(1));
-    expect(result.value!.single.id, 'canonical-1');
-    expect(result.value!.single.text, 'Persisted answer');
-    expect(result.value!.single.createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
+    expect(result.value, hasLength(2));
+    expect(result.value![0].id, 'canonical-0');
+    expect(result.value![0].sender, MessageSender.human);
+    expect(result.value![0].text, 'Persisted question');
+    expect(result.value![1].id, 'canonical-1');
+    expect(result.value![1].sender, MessageSender.ai);
+    expect(result.value![1].text, 'Persisted answer');
+    expect(result.value![1].createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
   });
 
   test('history rejects a nonempty unsupported message shape so cache can be preserved', () async {

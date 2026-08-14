@@ -100,12 +100,19 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     var recognizedHistoryShape = rawMessages.isEmpty;
     for (final m in rawMessages) {
       if (m is! Map<String, dynamic>) continue;
-      final role = m['role'] as String? ?? '';
+      final rawSender = (m['sender'] ?? m['role']) as String? ?? '';
       final content = (m['content'] ?? m['text']) as String? ?? '';
       final ts = (m['timestamp'] ?? m['created_at']) as String?;
       final id = m['id'] as String? ?? const Uuid().v4();
-      recognizedHistoryShape = recognizedHistoryShape || m.containsKey('content') || m.containsKey('text');
+      final messageSender = switch (rawSender) {
+        'human' || 'user' => MessageSender.human,
+        'ai' || 'assistant' => MessageSender.ai,
+        _ => null,
+      };
+      recognizedHistoryShape =
+          recognizedHistoryShape || ((m.containsKey('content') || m.containsKey('text')) && messageSender != null);
       if (content.isEmpty) continue;
+      if (messageSender == null) continue;
       if (content.startsWith('[SYSTEM:')) {
         continue; // Filter scanner notifications from chat UI
       }
@@ -115,7 +122,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           id,
           ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
           content,
-          role == 'user' ? MessageSender.human : MessageSender.ai,
+          messageSender,
           MessageType.text,
           null,
           false,

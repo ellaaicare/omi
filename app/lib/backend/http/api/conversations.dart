@@ -32,17 +32,24 @@ Future<http.Response?> _defaultConversationDeleteTransport({
     );
 
 Future<CreateConversationResponse?> processInProgressConversation({
+  required String conversationId,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/conversations',
-    headers: {},
-    method: 'POST',
-    body: jsonEncode({}),
-    expectedAuthenticatedUid: expectedAuthenticatedUid,
-    exactAuthority: exactAuthority,
-  );
+  http.Response? response;
+  const maxCaptureDrainAttempts = 40;
+  for (var attempt = 0; attempt < maxCaptureDrainAttempts; attempt++) {
+    response = await makeApiCall(
+      url: '${Env.apiBaseUrl}v1/conversations',
+      headers: {},
+      method: 'POST',
+      body: jsonEncode({'conversation_id': conversationId}),
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    if (response?.statusCode != 409 || attempt == maxCaptureDrainAttempts - 1) break;
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+  }
   if (response == null) return null;
   Logger.debug('createConversationServer: ${response.body}');
   if (response.statusCode == 200) {

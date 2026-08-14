@@ -140,6 +140,8 @@ void main() {
     expect(deleteTarget, findsOneWidget);
     expect(tester.getSize(deleteTarget).height, greaterThanOrEqualTo(48));
 
+    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -300));
+    await tester.pumpAndSettle();
     await tester.tap(deleteTarget);
     await tester.pumpAndSettle();
     expect(find.text('Are you sure you want to delete this memory? This action cannot be undone.'), findsOneWidget);
@@ -231,6 +233,34 @@ void main() {
     expect(harness.capture.deviceStops, 0, reason: 'processing must preserve the continuous necklace stream');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+  });
+
+  testWidgets('Home tap rotates a physical continuous necklace before local transcript delivery', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+      captureHasContent: false,
+      captureHasFinalContent: true,
+      captureHasDeviceBoundaryEvidence: true,
+    );
+    addTearDown(harness.dispose);
+
+    expect(harness.capture.segments, isEmpty);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceBoundaries, 1);
+    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.text('Listening… tap to finish'), findsOneWidget);
   });
 
   testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {
@@ -560,11 +590,13 @@ void main() {
     expect(harness.capture.deviceStarts, 0);
     expect(harness.capture.deviceStops, 0);
     expect(harness.capture.finishes, 1, reason: 'the start tap must exclude pre-tap necklace audio');
+    expect(harness.capture.deviceBoundaries, 1);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
     expect(harness.capture.deviceStops, 0, reason: 'Home must preserve a stream it did not start');
     expect(harness.capture.finishes, 2, reason: 'the finish tap closes only the intentional moment');
+    expect(harness.capture.deviceBoundaries, 2);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
@@ -725,6 +757,7 @@ Future<_HomeHarness> _pumpHome(
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
   bool captureHasFinalContent = false,
+  bool captureHasDeviceBoundaryEvidence = false,
   List<bool> finalizationResults = const [],
   Completer<void>? finalizationGate,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
@@ -739,6 +772,7 @@ Future<_HomeHarness> _pumpHome(
     phoneStartResult: phoneStartResult,
     hasContent: captureHasContent,
     hasFinalContent: captureHasFinalContent,
+    hasDeviceBoundaryEvidence: captureHasDeviceBoundaryEvidence,
     finalizationResults: finalizationResults,
     finalizationGate: finalizationGate,
   );
@@ -857,6 +891,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.phoneStartResult,
     required this.hasContent,
     required this.hasFinalContent,
+    required this.hasDeviceBoundaryEvidence,
     required List<bool> finalizationResults,
     this.finalizationGate,
   }) : finalizationResults = List<bool>.of(finalizationResults) {
@@ -866,6 +901,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   final PhoneCaptureStartResult phoneStartResult;
   final bool hasContent;
   final bool hasFinalContent;
+  final bool hasDeviceBoundaryEvidence;
   final List<bool> finalizationResults;
   final Completer<void>? finalizationGate;
 
@@ -873,12 +909,16 @@ class _FakeCaptureProvider extends CaptureProvider {
   int phoneStops = 0;
   int deviceStarts = 0;
   int deviceStops = 0;
+  int deviceBoundaries = 0;
   int finishes = 0;
   int finalizationCalls = 0;
   int finalContentChecks = 0;
 
   @override
   bool get hasCapturableContent => hasContent;
+
+  @override
+  bool get hasActiveDeviceCaptureBoundaryEvidence => hasDeviceBoundaryEvidence;
 
   @override
   Future<bool> awaitFinalCapturableContent({
@@ -893,6 +933,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<bool> finalizeCurrentConversation({
     int maxTranscriptAttempts = 3,
     Duration transcriptRetryDelay = const Duration(milliseconds: 250),
+    bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
     finalContentChecks++;
     if (!hasContent && !hasFinalContent) return false;
@@ -902,6 +943,12 @@ class _FakeCaptureProvider extends CaptureProvider {
     if (!result) return false;
     finishes++;
     return true;
+  }
+
+  @override
+  Future<bool> finalizeCurrentDeviceConversationAndContinue() async {
+    deviceBoundaries++;
+    return finalizeCurrentConversation();
   }
 
   @override
@@ -920,6 +967,12 @@ class _FakeCaptureProvider extends CaptureProvider {
   }
 
   @override
+  Future<bool> stopStreamRecordingAndFinalize() async {
+    await stopStreamRecording();
+    return finalizeCurrentConversation();
+  }
+
+  @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
     updateRecordingDevice(device);
@@ -930,6 +983,12 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<void> stopStreamDeviceRecording({bool cleanDevice = false}) async {
     deviceStops++;
     updateRecordingState(RecordingState.stop);
+  }
+
+  @override
+  Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    await stopStreamDeviceRecording(cleanDevice: cleanDevice);
+    return finalizeCurrentConversation();
   }
 
   @override

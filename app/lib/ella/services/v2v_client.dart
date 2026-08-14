@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_sound/flutter_sound.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -252,7 +253,7 @@ class _V2VSessionResult {
 
 /// Voice-to-voice WebSocket client for half-duplex PCM16 audio streaming.
 ///
-/// Uses `record` package for mic input and FlutterSound for PCM playback.
+/// Uses `record` for mic input and `just_audio` for deterministic WAV playback.
 /// The mic recorder is suspended during playback so provider VAD cannot hear
 /// Ella's own response audio or post-turn background noise.
 class V2VClient {
@@ -290,14 +291,9 @@ class V2VClient {
   final BytesBuilder _pcmBuffer = BytesBuilder(copy: false);
   int _chunkCount = 0;
 
-  /// Low-latency PCM stream player for provider-native V2V audio.
-  final FlutterSoundPlayer _streamPlayer = FlutterSoundPlayer();
-  bool _streamPlayerOpen = false;
-  bool _streamPlaybackStarted = false;
-  DateTime? _streamPlaybackStartedAt;
-  Future<void> _streamFeedFuture = Future.value();
-  int _streamFeedGeneration = 0;
-  bool _streamFeedRecoveryActive = false;
+  AudioPlayer? _audioPlayer;
+  Future<void> _playbackFuture = Future.value();
+  int _playbackGeneration = 0;
   Timer? _finishPlaybackTimer;
   bool _finishingPlayback = false;
 
@@ -312,7 +308,7 @@ class V2VClient {
   final Future<bool> Function()? _microphoneStarter;
   final Future<bool> Function() _interactiveOutputEnforcer;
   final Future<bool> Function() _playbackOutputEnforcer;
-  final Future<void> Function()? _streamPlaybackStarter;
+  final Future<void> Function(Uint8List wavBytes)? _wavPlayback;
   final bool Function()? _liveChannelForTesting;
   final Duration _playbackMicCooldown;
 
@@ -324,7 +320,7 @@ class V2VClient {
     @visibleForTesting Future<bool> Function()? microphoneStarter,
     @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
     @visibleForTesting Future<bool> Function()? playbackOutputEnforcer,
-    @visibleForTesting Future<void> Function()? streamPlaybackStarter,
+    @visibleForTesting Future<void> Function(Uint8List wavBytes)? wavPlayback,
     @visibleForTesting bool Function()? liveChannelForTesting,
     @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
@@ -335,7 +331,7 @@ class V2VClient {
         _playbackOutputEnforcer = playbackOutputEnforcer ??
             audibleOutputEnforcer ??
             (() => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback)),
-        _streamPlaybackStarter = streamPlaybackStarter,
+        _wavPlayback = wavPlayback,
         _liveChannelForTesting = liveChannelForTesting,
         _playbackMicCooldown = playbackMicCooldown;
 
@@ -357,13 +353,16 @@ class V2VClient {
   void markConnectedForTesting() => _isConnected = true;
 
   @visibleForTesting
-  void streamAudioChunkForTesting(Uint8List pcmData) => _streamAudioChunk(pcmData);
+  void bufferAudioChunkForTesting(Uint8List pcmData) => _bufferAudioChunk(pcmData);
 
   @visibleForTesting
-  Future<void> waitForStreamFeedForTesting() => _streamFeedFuture;
+  Future<void> waitForPlaybackForTesting() => _playbackFuture;
 
   @visibleForTesting
   Future<void> finishPlaybackForTesting() => _finishPlayback(reason: 'test');
+
+  @visibleForTesting
+  void handleMessageForTesting(dynamic message) => _handleMessage(message);
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
@@ -850,29 +849,28 @@ class V2VClient {
 
     await _stopMicStream(reason: 'disconnect');
     try {
-      await _stopStreamingPlayback();
-      if (_streamPlayerOpen) {
-        await _streamPlayer.closePlayer();
-        _streamPlayerOpen = false;
-      }
+      await _stopAudioPlayback(dispose: true);
     } catch (_) {}
     _resetTurnState();
   }
 
   /// Interrupt current playback (e.g., user started speaking).
   Future<void> interruptPlayback() async {
-    _streamFeedGeneration++;
-    if (_isPlaying) {
-      try {
-        await _stopStreamingPlayback();
-      } catch (_) {}
-      _isPlaying = false;
-    }
-    _micSuspendedForPlayback = false;
-    _micMuted = false;
+    _playbackGeneration++;
+    _finishPlaybackTimer?.cancel();
+    _finishPlaybackTimer = null;
+    final shouldResumeMic = _micSuspendedForPlayback;
+    try {
+      await _stopAudioPlayback();
+    } catch (_) {}
+    _isPlaying = false;
     _pcmBuffer.clear();
     _chunkCount = 0;
-    _streamPlaybackStartedAt = null;
+    if (shouldResumeMic) {
+      await _resumeMicAfterPlayback();
+    } else {
+      _micMuted = false;
+    }
   }
 
   void _suspendMicForPlayback(String reason) {
@@ -891,8 +889,7 @@ class V2VClient {
   }
 
   void _resetTurnState() {
-    _streamFeedGeneration++;
-    _streamFeedRecoveryActive = false;
+    _playbackGeneration++;
     _isPlaying = false;
     _micMuted = false;
     _micSuspendedForPlayback = false;
@@ -900,9 +897,7 @@ class V2VClient {
     _chunkCount = 0;
     _micChunksSent = 0;
     _micBytesSent = 0;
-    _streamPlaybackStarted = false;
-    _streamPlaybackStartedAt = null;
-    _streamFeedFuture = Future.value();
+    _playbackFuture = Future.value();
     _finishPlaybackTimer?.cancel();
     _finishPlaybackTimer = null;
     _finishingPlayback = false;
@@ -1336,7 +1331,7 @@ class V2VClient {
       return;
     }
 
-    if (_isPlaying || _streamPlaybackStarted) {
+    if (_isPlaying) {
       Logger.debug('[V2V] Mic gate remains closed: playback still active');
       return;
     }
@@ -1359,129 +1354,64 @@ class V2VClient {
 
   bool get _hasLiveSessionTransport => _isConnected && (_channel != null || _liveChannelForTesting?.call() == true);
 
-  bool _isCurrentStreamFeed(int generation) =>
-      generation == _streamFeedGeneration && !_streamFeedRecoveryActive && _hasLiveSessionTransport;
+  // --- PCM16 playback ---
 
-  // --- Low-latency PCM streaming playback ---
+  /// Buffer provider PCM16 until its explicit completion marker arrives.
+  void _bufferAudioChunk(Uint8List pcmData) {
+    if (pcmData.isEmpty || !_hasLiveSessionTransport) return;
 
-  /// Stream incoming PCM16 audio chunk to the platform player.
-  void _streamAudioChunk(Uint8List pcmData) {
-    if (pcmData.isEmpty || _streamFeedRecoveryActive || !_hasLiveSessionTransport) return;
-    final generation = _streamFeedGeneration;
-
-    // Gate the microphone before enqueueing playback so provider VAD cannot
-    // hear Ella's own response audio and interrupt the active turn.
+    // A binary frame proves that this response has audio. Transcript events do
+    // not: some provider turns are intentionally text-only.
     _suspendMicForPlayback('audio_chunk');
     _deferPendingPlaybackFinish('audio_chunk');
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
-    _streamFeedFuture = _streamFeedFuture.then<void>((_) async {
-      if (!_isCurrentStreamFeed(generation)) return;
-      // A prior feed may have completed failure recovery and reopened the
-      // microphone while this operation was queued. Re-establish and await the
-      // gate immediately before every surviving playback start.
-      _suspendMicForPlayback('queued_audio_chunk');
-      await _micGateFuture;
-      if (!_isCurrentStreamFeed(generation)) return;
-      await _ensureStreamingPlaybackStarted();
-      if (!_isCurrentStreamFeed(generation)) {
-        await _stopStreamingPlayback();
-        return;
-      }
-      _streamPlayer.uint8ListSink?.add(pcmData);
-    }).catchError(
-      (Object error, StackTrace stackTrace) => _recoverFromStreamFeedFailure(error, stackTrace, generation),
-    );
-
     if (_chunkCount == 1) {
-      onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
-      Logger.debug('[V2V] First audio chunk, streaming playback gate active');
+      onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Buffering response audio'));
+      Logger.debug('[V2V] First audio chunk, playback gate active');
     }
 
     if (_chunkCount % 20 == 0) {
-      Logger.debug('[V2V] Streamed $_chunkCount chunks, ${_pcmBuffer.length}B');
+      Logger.debug('[V2V] Buffered $_chunkCount chunks, ${_pcmBuffer.length}B');
     }
   }
 
-  Future<void> _ensureStreamingPlaybackStarted() async {
-    if (_streamPlaybackStarted) return;
-
-    if (!await _playbackOutputEnforcer()) {
-      throw StateError('Ella voice playback route could not be made audible');
+  Future<void> _stopAudioPlayback({bool dispose = false}) async {
+    final player = _audioPlayer;
+    if (player == null) return;
+    try {
+      await player.stop();
+    } catch (_) {}
+    if (dispose) {
+      try {
+        await player.dispose();
+      } catch (_) {}
+      if (identical(_audioPlayer, player)) _audioPlayer = null;
     }
+  }
 
-    final injectedStarter = _streamPlaybackStarter;
-    if (injectedStarter != null) {
-      await injectedStarter();
+  Future<void> _playWav(Uint8List wavBytes, int generation) async {
+    final injectedPlayback = _wavPlayback;
+    if (injectedPlayback != null) {
+      await injectedPlayback(wavBytes);
       return;
     }
 
-    if (!_streamPlayerOpen) {
-      await _streamPlayer.openPlayer();
-      _streamPlayerOpen = true;
-    }
-
-    await _streamPlayer.setVolume(1.0);
-    await _streamPlayer.startPlayerFromStream(
-      codec: Codec.pcm16,
-      sampleRate: _pcmSampleRate,
-      numChannels: _pcmChannels,
-      bufferSize: 4096,
-    );
-    _isPlaying = true;
-    _streamPlaybackStarted = true;
-    _streamPlaybackStartedAt = DateTime.now();
-    Logger.debug('[V2V] PCM stream player started');
-  }
-
-  Future<void> _recoverFromStreamFeedFailure(Object error, StackTrace stackTrace, int generation) async {
-    if (generation != _streamFeedGeneration || _streamFeedRecoveryActive) return;
-    _streamFeedRecoveryActive = true;
-    _streamFeedGeneration++;
-    Logger.error('[V2V] Stream playback feed error: $error');
-    onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
-    _finishPlaybackTimer?.cancel();
-    _finishPlaybackTimer = null;
+    final path = '${Directory.systemTemp.path}/ella_v2v_${DateTime.now().microsecondsSinceEpoch}_$generation.wav';
+    final file = File(path);
+    await file.writeAsBytes(wavBytes, flush: true);
     try {
-      await _stopStreamingPlayback();
-    } catch (_) {}
-    _isPlaying = false;
-    _streamPlaybackStarted = false;
-    _streamPlaybackStartedAt = null;
-    _pcmBuffer.clear();
-    _chunkCount = 0;
-
-    try {
-      if (_hasLiveSessionTransport && _hasCurrentSessionAuthority() && _aiConsentLease?.isActive == true) {
-        await _resumeMicAfterPlayback();
-      } else if (_isConnected) {
-        await disconnect();
-      } else {
-        _micSuspendedForPlayback = false;
-        _micMuted = false;
-      }
-    } catch (recoveryError) {
-      Logger.error('[V2V] Stream playback recovery failed: ${recoveryError.runtimeType}');
-      try {
-        await disconnect();
-      } catch (_) {}
+      final player = _audioPlayer ??= AudioPlayer();
+      await player.setVolume(1.0);
+      await player.setFilePath(path);
+      if (generation != _playbackGeneration || !_hasLiveSessionTransport) return;
+      await player.play();
     } finally {
-      if (!_isConnected) {
-        _micSuspendedForPlayback = false;
-        _micMuted = false;
-      }
-      _streamFeedRecoveryActive = false;
-      onEvent?.call(const V2VEvent(type: 'playback_complete'));
+      try {
+        await file.delete();
+      } catch (_) {}
     }
-  }
-
-  Future<void> _stopStreamingPlayback() async {
-    if (!_streamPlaybackStarted) return;
-    try {
-      await _streamPlayer.stopPlayer();
-    } catch (_) {}
-    _streamPlaybackStarted = false;
   }
 
   void _scheduleFinishPlayback(String reason) {
@@ -1501,49 +1431,58 @@ class V2VClient {
     _scheduleFinishPlayback(reason);
   }
 
-  /// Called after audio/output completion quiets — wait for queued PCM to drain,
-  /// then return to listening.
+  /// Called after audio/output completion quiets. A complete WAV source gives
+  /// just_audio a deterministic duration and an awaitable completion boundary.
   Future<void> _finishPlayback({required String reason}) async {
     if (_finishingPlayback) {
       Logger.debug('[V2V] Playback finish already in progress, ignoring reason=$reason');
       return;
     }
     _finishingPlayback = true;
+    _finishPlaybackTimer?.cancel();
+    _finishPlaybackTimer = null;
+    final generation = ++_playbackGeneration;
     final pcmBytes = _pcmBuffer.toBytes();
     final stats = '$_chunkCount chunks, ${(pcmBytes.length / 1024).toStringAsFixed(1)}KB';
-    Logger.debug('[V2V] Audio stream done: reason=$reason $stats');
-    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Finishing audio: $stats'));
+    Logger.debug('[V2V] Audio buffer done: reason=$reason $stats');
 
     _pcmBuffer.clear();
     _chunkCount = 0;
 
     if (pcmBytes.isEmpty) {
       Logger.debug('[V2V] No audio data to play');
-      await _onPlaybackComplete();
+      if (_micSuspendedForPlayback) await _resumeMicAfterPlayback();
+      onEvent?.call(const V2VEvent(type: 'playback_complete'));
       _finishingPlayback = false;
       return;
     }
 
     try {
-      await _streamFeedFuture.timeout(const Duration(seconds: 5));
+      await _micGateFuture;
+      if (generation != _playbackGeneration || !_hasLiveSessionTransport) return;
+      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+        await _handleRuntimeAuthorityLoss();
+        return;
+      }
+      if (!await _playbackOutputEnforcer()) {
+        throw StateError('Ella voice playback route could not be made audible');
+      }
 
-      // `audio_done` means the proxy finished sending bytes, not that the
-      // native PCM player has drained its internal queue. Stop too early and
-      // the user hears only the first words even though transcript is complete.
-      final startedAt = _streamPlaybackStartedAt;
+      final wavBytes = _buildWav(Uint8List.fromList(pcmBytes));
       final totalAudioMs = (pcmBytes.length / (_pcmSampleRate * _pcmBytesPerSample * _pcmChannels) * 1000).ceil();
-      final elapsedMs = startedAt == null ? 0 : DateTime.now().difference(startedAt).inMilliseconds;
-      final remainingMs = totalAudioMs - elapsedMs;
-      final drainDelayMs = remainingMs > 0 ? remainingMs + 300 : 300;
-      Logger.debug('[V2V] Waiting ${drainDelayMs}ms for PCM drain ($totalAudioMs ms audio, $elapsedMs ms elapsed)');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playing audio: ${(totalAudioMs / 1000).toStringAsFixed(1)}s'));
-      await Future.delayed(Duration(milliseconds: drainDelayMs.clamp(300, 30000)));
-      await _onPlaybackComplete();
-    } catch (e) {
-      Logger.error('[V2V] Stream playback error: $e');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Stream play error: $e'));
+      final timeoutMs = (totalAudioMs + 8000).clamp(8000, 180000);
+      Logger.debug('[V2V] WAV ready: ${wavBytes.length}B, ${totalAudioMs}ms');
+      _isPlaying = true;
+      _playbackFuture = _playWav(wavBytes, generation).timeout(Duration(milliseconds: timeoutMs));
+      await _playbackFuture;
+      if (generation != _playbackGeneration) return;
+      await _onPlaybackComplete(generation);
+    } catch (error) {
+      if (generation != _playbackGeneration) return;
+      Logger.error('[V2V] WAV playback error: ${error.runtimeType}');
+      onEvent?.call(const V2VEvent(type: 'error', text: 'Voice audio playback failed'));
+      await _stopAudioPlayback();
       _isPlaying = false;
-      _streamPlaybackStartedAt = null;
       await _resumeMicAfterPlayback();
       onEvent?.call(const V2VEvent(type: 'playback_complete'));
     } finally {
@@ -1551,24 +1490,47 @@ class V2VClient {
     }
   }
 
-  /// Called when streaming playback finishes.
-  Future<void> _onPlaybackComplete() async {
+  Future<void> _onPlaybackComplete(int generation) async {
+    if (generation != _playbackGeneration) return;
     if (!_isPlaying && !_micMuted) return; // Already handled
     Logger.debug('[V2V] Playback complete, restarting mic');
-    await _stopStreamingPlayback();
+    await _stopAudioPlayback();
     _isPlaying = false;
-    _streamPlaybackStartedAt = null;
     await _resumeMicAfterPlayback();
 
     onEvent?.call(const V2VEvent(type: 'playback_complete'));
+  }
+
+  static Uint8List _buildWav(Uint8List pcmData) {
+    const bitsPerSample = 16;
+    const bytesPerSample = bitsPerSample ~/ 8;
+    const byteRate = _pcmSampleRate * _pcmChannels * bytesPerSample;
+    const blockAlign = _pcmChannels * bytesPerSample;
+    final header = ByteData(44)
+      ..setUint32(0, 0x46464952, Endian.little)
+      ..setUint32(4, 36 + pcmData.length, Endian.little)
+      ..setUint32(8, 0x45564157, Endian.little)
+      ..setUint32(12, 0x20746d66, Endian.little)
+      ..setUint32(16, 16, Endian.little)
+      ..setUint16(20, 1, Endian.little)
+      ..setUint16(22, _pcmChannels, Endian.little)
+      ..setUint32(24, _pcmSampleRate, Endian.little)
+      ..setUint32(28, byteRate, Endian.little)
+      ..setUint16(32, blockAlign, Endian.little)
+      ..setUint16(34, bitsPerSample, Endian.little)
+      ..setUint32(36, 0x61746164, Endian.little)
+      ..setUint32(40, pcmData.length, Endian.little);
+    final wav = Uint8List(44 + pcmData.length)..setRange(0, 44, header.buffer.asUint8List());
+    wav.setRange(44, wav.length, pcmData);
+    return wav;
   }
 
   // --- WebSocket message handling ---
 
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
-      // Binary frame = raw PCM16 audio from proxy — stream directly to playback.
-      _streamAudioChunk(Uint8List.fromList(message));
+      // Binary frame = raw PCM16 audio from proxy.
+      _bufferAudioChunk(Uint8List.fromList(message));
       return;
     }
 
@@ -1586,8 +1548,6 @@ class V2VClient {
         }
 
         if (_isAssistantTranscriptEvent(type)) {
-          _suspendMicForPlayback(type);
-          _deferPendingPlaybackFinish(type);
           onEvent?.call(V2VEvent(type: 'transcript', text: text));
           return;
         }
@@ -1605,7 +1565,7 @@ class V2VClient {
 
         switch (type) {
           case 'speech_started':
-            if (_isPlaying || _micMuted || _micSuspendedForPlayback || _streamPlaybackStarted) {
+            if (_isPlaying || _micMuted || _micSuspendedForPlayback) {
               Logger.debug('[V2V] Ignoring speech_started while playback gate is active');
               onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Ignoring speech_started during response'));
               break;

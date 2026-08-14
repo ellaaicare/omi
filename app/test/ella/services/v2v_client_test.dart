@@ -559,7 +559,116 @@ void main() {
       await client.disconnect();
     });
 
-    test('stream playback startup failure reopens the authorized microphone gate', () async {
+    test('assistant transcript alone does not close the microphone gate', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final events = <V2VEvent>[];
+      var microphoneStarts = 0;
+      final client = V2VClient(
+        onEvent: events.add,
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.handleMessageForTesting('{"type":"transcript","text":"Visible answer"}');
+
+      expect(microphoneStarts, 1);
+      expect(client.micMutedForTesting, isFalse);
+      expect(client.micSuspendedForPlaybackForTesting, isFalse);
+      expect(events.where((event) => event.type == 'transcript').single.text, 'Visible answer');
+      await client.disconnect();
+    });
+
+    test('PCM playback waits for WAV completion then restores the interactive route and mic', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final audioRoutes = <String>[];
+      final playbackEntered = Completer<void>();
+      final releasePlayback = Completer<void>();
+      Uint8List? playedWav;
+      var microphoneStarts = 0;
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+        audibleOutputEnforcer: () async {
+          audioRoutes.add('interactive');
+          return true;
+        },
+        playbackOutputEnforcer: () async {
+          audioRoutes.add('playback');
+          return true;
+        },
+        wavPlayback: (wavBytes) async {
+          playedWav = wavBytes;
+          playbackEntered.complete();
+          await releasePlayback.future;
+        },
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      client.markConnectedForTesting();
+      client.bufferAudioChunkForTesting(Uint8List.fromList([1, 2, 3, 4]));
+      final finish = client.finishPlaybackForTesting();
+      await playbackEntered.future;
+
+      expect(microphoneStarts, 1, reason: 'the mic must remain closed until audible playback completes');
+      expect(client.micMutedForTesting, isTrue);
+      expect(audioRoutes, ['playback']);
+      expect(playedWav, isNotNull);
+      expect(playedWav!.sublist(0, 4), [0x52, 0x49, 0x46, 0x46]);
+      expect(playedWav!.sublist(8, 12), [0x57, 0x41, 0x56, 0x45]);
+      expect(ByteData.sublistView(playedWav!).getUint16(22, Endian.little), 1);
+      expect(ByteData.sublistView(playedWav!).getUint32(24, Endian.little), 24000);
+      expect(ByteData.sublistView(playedWav!).getUint16(34, Endian.little), 16);
+      expect(ByteData.sublistView(playedWav!).getUint32(40, Endian.little), 4);
+      expect(playedWav!.sublist(44), [1, 2, 3, 4]);
+
+      releasePlayback.complete();
+      await finish;
+
+      expect(audioRoutes, ['playback', 'interactive']);
+      expect(microphoneStarts, 2);
+      expect(client.micMutedForTesting, isFalse);
+      expect(client.micSuspendedForPlaybackForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('WAV playback failure reports the error and reopens the authorized mic', () async {
       grantCurrentConsent();
       final authority = AiConsentAuthoritySnapshot.capture(
         preferences: SharedPreferencesUtil(),
@@ -585,7 +694,7 @@ void main() {
           audioRoutes.add('playback');
           return true;
         },
-        streamPlaybackStarter: () async => throw StateError('route unavailable'),
+        wavPlayback: (_) async => throw StateError('player unavailable'),
         liveChannelForTesting: () => true,
         playbackMicCooldown: Duration.zero,
       );
@@ -598,11 +707,11 @@ void main() {
         isTrue,
       );
       client.markConnectedForTesting();
-      client.streamAudioChunkForTesting(Uint8List.fromList([1, 2, 3]));
-      await client.waitForStreamFeedForTesting();
+      client.bufferAudioChunkForTesting(Uint8List.fromList([1, 2]));
+      await client.finishPlaybackForTesting();
 
-      expect(microphoneStarts, 2);
       expect(audioRoutes, ['playback', 'interactive']);
+      expect(microphoneStarts, 2);
       expect(client.micMutedForTesting, isFalse);
       expect(client.micSuspendedForPlaybackForTesting, isFalse);
       expect(events.where((event) => event.type == 'error'), hasLength(1));
@@ -610,7 +719,7 @@ void main() {
       await client.disconnect();
     });
 
-    test('successful stream playback uses playback route then restores interactive route', () async {
+    test('disconnect invalidates held WAV playback without reopening the mic', () async {
       grantCurrentConsent();
       final authority = AiConsentAuthoritySnapshot.capture(
         preferences: SharedPreferencesUtil(),
@@ -618,58 +727,8 @@ void main() {
       );
       expect(authority, isNotNull);
 
-      final audioRoutes = <String>[];
-      var microphoneStarts = 0;
-      final client = V2VClient(
-        onEvent: (_) {},
-        onConnectionChanged: (_) {},
-        microphoneStarter: () async {
-          microphoneStarts++;
-          return true;
-        },
-        audibleOutputEnforcer: () async {
-          audioRoutes.add('interactive');
-          return true;
-        },
-        playbackOutputEnforcer: () async {
-          audioRoutes.add('playback');
-          return true;
-        },
-        streamPlaybackStarter: () async {},
-        liveChannelForTesting: () => true,
-        playbackMicCooldown: Duration.zero,
-      );
-
-      expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
-        isTrue,
-      );
-      client.markConnectedForTesting();
-      client.streamAudioChunkForTesting(Uint8List.fromList([1, 2, 3]));
-      await client.waitForStreamFeedForTesting();
-      await client.finishPlaybackForTesting();
-
-      expect(audioRoutes, ['playback', 'interactive']);
-      expect(microphoneStarts, 2);
-      expect(client.micMutedForTesting, isFalse);
-      await client.disconnect();
-    });
-
-    test('failed stream generation drops queued PCM and re-gates the next generation', () async {
-      grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
-      expect(authority, isNotNull);
-
-      final firstStartEntered = Completer<void>();
-      final releaseFirstStart = Completer<void>();
-      final nextStartEntered = Completer<void>();
-      final releaseNextStart = Completer<void>();
+      final playbackEntered = Completer<void>();
+      final releasePlayback = Completer<void>();
       var playbackStarts = 0;
       var microphoneStarts = 0;
       final client = V2VClient(
@@ -680,15 +739,10 @@ void main() {
           return true;
         },
         playbackOutputEnforcer: () async => true,
-        streamPlaybackStarter: () async {
+        wavPlayback: (_) async {
           playbackStarts++;
-          if (playbackStarts == 1) {
-            firstStartEntered.complete();
-            await releaseFirstStart.future;
-            throw StateError('route unavailable');
-          }
-          nextStartEntered.complete();
-          await releaseNextStart.future;
+          playbackEntered.complete();
+          await releasePlayback.future;
         },
         liveChannelForTesting: () => true,
         playbackMicCooldown: Duration.zero,
@@ -702,78 +756,16 @@ void main() {
         isTrue,
       );
       client.markConnectedForTesting();
-      client.streamAudioChunkForTesting(Uint8List.fromList([1]));
-      await firstStartEntered.future;
-      client.streamAudioChunkForTesting(Uint8List.fromList([2]));
-      final failedGeneration = client.waitForStreamFeedForTesting();
-
-      expect(client.micMutedForTesting, isTrue);
-      expect(client.micSuspendedForPlaybackForTesting, isTrue);
-      releaseFirstStart.complete();
-      await failedGeneration;
-
-      expect(playbackStarts, 1, reason: 'the second stale chunk must be dropped');
-      expect(microphoneStarts, 2, reason: 'failure recovery should reopen the authorized microphone');
-      expect(client.micMutedForTesting, isFalse);
-      expect(client.micSuspendedForPlaybackForTesting, isFalse);
-
-      client.streamAudioChunkForTesting(Uint8List.fromList([3]));
-      await nextStartEntered.future;
-      expect(playbackStarts, 2);
-      expect(client.micMutedForTesting, isTrue);
-      expect(client.micSuspendedForPlaybackForTesting, isTrue);
-      releaseNextStart.complete();
-      await client.waitForStreamFeedForTesting();
-      await client.disconnect();
-    });
-
-    test('disconnect invalidates held and queued stream feeds', () async {
-      grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
-      expect(authority, isNotNull);
-
-      final firstStartEntered = Completer<void>();
-      final releaseFirstStart = Completer<void>();
-      var playbackStarts = 0;
-      final client = V2VClient(
-        onEvent: (_) {},
-        onConnectionChanged: (_) {},
-        microphoneStarter: () async => true,
-        playbackOutputEnforcer: () async => true,
-        streamPlaybackStarter: () async {
-          playbackStarts++;
-          if (playbackStarts > 1) fail('stale queued PCM restarted playback after disconnect');
-          firstStartEntered.complete();
-          await releaseFirstStart.future;
-          throw StateError('late route failure');
-        },
-        liveChannelForTesting: () => true,
-        playbackMicCooldown: Duration.zero,
-      );
-
-      expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
-        isTrue,
-      );
-      client.markConnectedForTesting();
-      client.streamAudioChunkForTesting(Uint8List.fromList([1]));
-      await firstStartEntered.future;
-      client.streamAudioChunkForTesting(Uint8List.fromList([2]));
-      final queuedFeeds = client.waitForStreamFeedForTesting();
+      client.bufferAudioChunkForTesting(Uint8List.fromList([1, 2]));
+      final finish = client.finishPlaybackForTesting();
+      await playbackEntered.future;
 
       await client.disconnect();
-      releaseFirstStart.complete();
-      await queuedFeeds;
-      client.streamAudioChunkForTesting(Uint8List.fromList([3]));
-      await Future<void>.delayed(Duration.zero);
+      releasePlayback.complete();
+      await finish;
 
       expect(playbackStarts, 1);
+      expect(microphoneStarts, 1);
       expect(client.isConnected, isFalse);
       expect(client.micMutedForTesting, isFalse);
       expect(client.micSuspendedForPlaybackForTesting, isFalse);
