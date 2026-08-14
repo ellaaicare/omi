@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -11,6 +12,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/utils/enums.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
   @override
@@ -67,21 +69,48 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate});
+  _RecordingCaptureProvider({
+    this.startGate,
+    this.disconnectGate,
+    this.failuresBeforeStart = 0,
+    this.onDeviceStart,
+  });
 
   final Completer<void>? startGate;
+  final Completer<void>? disconnectGate;
+  final int failuresBeforeStart;
+  final void Function(int attempt)? onDeviceStart;
   int deviceStarts = 0;
+  final List<String> disconnectedDeviceIds = [];
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
+    if (deviceStarts <= failuresBeforeStart) {
+      updateRecordingState(RecordingState.error);
+      onDeviceStart?.call(deviceStarts);
+      throw StateError('synthetic necklace setup failure');
+    }
+    onDeviceStart?.call(deviceStarts);
     await startGate?.future;
+    updateRecordingState(RecordingState.deviceRecord);
+  }
+
+  @override
+  Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
+    disconnectedDeviceIds.add(deviceId);
+    await disconnectGate?.future;
+    return true;
   }
 }
 
 void main() {
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      (_) async => null,
+    );
     SharedPreferences.setMockInitialValues({});
     ConnectivityPlatform.instance = _TestConnectivityPlatform();
     try {
@@ -89,6 +118,13 @@ void main() {
     } catch (_) {
       // Ignore if already initialized by another test.
     }
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('com.omi/floating_control_bar'),
+      null,
+    );
   });
 
   group('battery throttling', () {
@@ -274,6 +310,84 @@ void main() {
     expect(provider.presentationIsConnected, isFalse);
   });
 
+  test('device connection cannot start necklace capture while phone owns audio', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 0);
+    expect(capture.recordingState, RecordingState.record);
+    expect(provider.connectedDevice?.id, necklace.id);
+  });
+
+  test('necklace capture resumes when phone releases audio without reconnecting', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(capture.deviceStarts, 0);
+
+    capture.updateRecordingState(RecordingState.stop);
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.connectedDevice?.id, necklace.id);
+  });
+
+  test('necklace retry re-defers when phone reacquires audio', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    late final _RecordingCaptureProvider capture;
+    capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 1,
+      onDeviceStart: (attempt) {
+        if (attempt == 1) capture.updateRecordingState(RecordingState.record);
+      },
+    );
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.record);
+
+    capture.updateRecordingState(RecordingState.stop);
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.connectedDevice?.id, necklace.id);
+  });
+
   test('in-flight connected resolution cannot repopulate after stop', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final resolution = Completer<BtDevice?>();
@@ -326,6 +440,225 @@ void main() {
     expect(provider.connectedDevice, isNull);
     expect(provider.pairedDevice, isNull);
     expect(provider.presentationIsConnected, isFalse);
+  });
+
+  test('automatic reconnect stops after a bounded number of failed scans', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        return null;
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test bounded reconnect');
+    for (var attempt = 0; attempt < 20 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(provider.automaticReconnectAttempts, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('automatic reconnect recovers from scan exceptions and exhausts', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        throw StateError('synthetic scan failure');
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test throwing reconnect');
+    for (var attempt = 0; attempt < 20 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(provider.automaticReconnectAttempts, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('automatic reconnect clears a partially assigned device and exhausts after storage failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    var scanCalls = 0;
+    var storageCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async {
+        storageCalls++;
+        throw StateError('synthetic storage probe failure');
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test partial reconnect rollback');
+    for (var attempt = 0; attempt < 20 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(storageCalls, 3);
+    expect(provider.connectedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.automaticReconnectAttempts, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('automatic reconnect preserves a connection committed before its scan future throws', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    late DeviceProvider provider;
+    provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        provider.connectedDevice = necklace;
+        provider.setIsConnected(true);
+        throw StateError('synthetic late scan failure');
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test successful event racing scan failure');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.automaticReconnectAttempts, 0);
+    expect(provider.automaticReconnectExhausted, isFalse);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('connected callback publishes device and connection atomically before reconnect scan failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final scanEntered = Completer<void>();
+    final scanResult = Completer<BtDevice?>();
+    final storageEntered = Completer<void>();
+    final storageResult = Completer<List<int>>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        scanEntered.complete();
+        return scanResult.future;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) {
+        storageEntered.complete();
+        return storageResult.future;
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.periodicConnect('test callback publication ordering');
+    await scanEntered.future;
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await storageEntered.future.timeout(const Duration(seconds: 1));
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+
+    scanResult.completeError(StateError('synthetic reconnect scan failed after callback publication'));
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+
+    storageResult.complete(const []);
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.automaticReconnectAttempts, 0);
+    expect(provider.automaticReconnectExhausted, isFalse);
+  });
+
+  test('connected callback retries necklace capture and ignores optional setup failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final capture = _RecordingCaptureProvider(failuresBeforeStart: 1);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) => throw StateError('synthetic optional storage failure'),
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice, same(necklace));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.isConnecting, isFalse);
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('device service restart waits for exact necklace capture teardown', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final disconnectGate = Completer<void>();
+    final capture = _RecordingCaptureProvider(disconnectGate: disconnectGate);
+    var reconnectScans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        reconnectScans++;
+        return null;
+      },
+    )
+      ..setProviders(capture)
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    service.publish(DeviceServiceStatus.stop);
+    await pumpEventQueue();
+    expect(capture.disconnectedDeviceIds, [necklace.id]);
+
+    service.publish(DeviceServiceStatus.ready);
+    await pumpEventQueue();
+    expect(reconnectScans, 0);
+
+    disconnectGate.complete();
+    await pumpEventQueue();
+    expect(reconnectScans, 1);
   });
 
   test('only a later ready generation reconnects the retained bound device', () async {

@@ -45,6 +45,58 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
 
+@visibleForTesting
+class VoicePhoneCaptureTakeoverCoordinator {
+  Future<bool>? _activeTakeover;
+
+  Future<bool> prepareStandard({
+    required bool phoneCaptureActive,
+    required bool phoneCaptureContentful,
+    required Future<PhoneCaptureStopResult> Function() stopAndFinalizePhoneCapture,
+  }) =>
+      _prepare(
+        phoneCaptureActive: phoneCaptureActive,
+        phoneCaptureContentful: phoneCaptureContentful,
+        stopAndFinalizePhoneCapture: stopAndFinalizePhoneCapture,
+      );
+
+  Future<bool> prepareV2V({
+    required bool phoneCaptureActive,
+    required bool phoneCaptureContentful,
+    required Future<PhoneCaptureStopResult> Function() stopAndFinalizePhoneCapture,
+  }) =>
+      _prepare(
+        phoneCaptureActive: phoneCaptureActive,
+        phoneCaptureContentful: phoneCaptureContentful,
+        stopAndFinalizePhoneCapture: stopAndFinalizePhoneCapture,
+      );
+
+  Future<bool> _prepare({
+    required bool phoneCaptureActive,
+    required bool phoneCaptureContentful,
+    required Future<PhoneCaptureStopResult> Function() stopAndFinalizePhoneCapture,
+  }) {
+    final activeTakeover = _activeTakeover;
+    if (activeTakeover != null) return activeTakeover;
+    if (!phoneCaptureActive && !phoneCaptureContentful) return Future<bool>.value(true);
+
+    late final Future<bool> takeover;
+    takeover = (() async {
+      try {
+        final result = await stopAndFinalizePhoneCapture();
+        return result != PhoneCaptureStopResult.failed;
+      } catch (_) {
+        return false;
+      }
+    })()
+        .whenComplete(() {
+      if (identical(_activeTakeover, takeover)) _activeTakeover = null;
+    });
+    _activeTakeover = takeover;
+    return takeover;
+  }
+}
+
 /// Voice-to-voice chat page for Ella.
 ///
 /// Flow: Tap orb → always-listen via on-device speech recognition →
@@ -133,6 +185,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   StreamSubscription? _playerSub;
   final SpeechToText _speech = SpeechToText();
   final StandardVoiceTurnCoordinator _standardVoiceTurn = const StandardVoiceTurnCoordinator();
+  final VoicePhoneCaptureTakeoverCoordinator _phoneCaptureTakeover = VoicePhoneCaptureTakeoverCoordinator();
   bool _speechAvailable = false;
   String _currentWords = '';
 
@@ -583,14 +636,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       }
     }
 
-    // Stop any existing mic recording from CaptureProvider
-    if (mounted) {
-      final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
-      if (captureProvider.recordingState == RecordingState.record) {
-        debugPrint('[VoiceChat] Pausing capture recording to free mic');
-        await captureProvider.stopStreamRecording();
-      }
-    }
+    if (!await _preparePhoneCaptureForVoice(v2v: false)) return;
 
     // Stop audio player to release audio session before mic starts
     try {
@@ -696,13 +742,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final providerName = localizedV2VProviderName(context, provider);
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
 
-    // Stop any existing mic recording from CaptureProvider
-    final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
-    if (captureProvider.recordingState == RecordingState.record) {
-      debugPrint('[VoiceChat] Pausing capture recording for V2V');
-      await captureProvider.stopStreamRecording();
-      if (!hasCurrentStartupAuthority()) return;
-    }
+    if (!await _preparePhoneCaptureForVoice(v2v: true) || !hasCurrentStartupAuthority()) return;
 
     setState(() {
       _orbState = VoiceOrbState.processing;
@@ -825,6 +865,41 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _orbState = VoiceOrbState.listening;
       _statusText = context.l10n.voiceV2vActive(providerName);
     });
+  }
+
+  Future<bool> _preparePhoneCaptureForVoice({required bool v2v}) async {
+    if (!mounted) return false;
+    final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+    final phoneCaptureActive =
+        captureProvider.phoneCaptureOwnsMobileAudio || captureProvider.recordingState == RecordingState.record;
+    final phoneCaptureContentful = captureProvider.hasUnfinalizedPhoneCaptureContent;
+    if (phoneCaptureActive || phoneCaptureContentful) {
+      debugPrint('[VoiceChat] Finalizing phone capture before ${v2v ? 'V2V' : 'standard'} voice');
+    }
+    final acknowledged = await (v2v
+        ? _phoneCaptureTakeover.prepareV2V(
+            phoneCaptureActive: phoneCaptureActive,
+            phoneCaptureContentful: phoneCaptureContentful,
+            stopAndFinalizePhoneCapture: captureProvider.stopPhoneCaptureForVoiceTakeover,
+          )
+        : _phoneCaptureTakeover.prepareStandard(
+            phoneCaptureActive: phoneCaptureActive,
+            phoneCaptureContentful: phoneCaptureContentful,
+            stopAndFinalizePhoneCapture: captureProvider.stopPhoneCaptureForVoiceTakeover,
+          ));
+    if (acknowledged || !mounted) return acknowledged;
+
+    _voiceStartupGuard.cancel();
+    _standardVoiceConsentLease?.stop();
+    _standardVoiceConsentLease = null;
+    setState(() {
+      _voiceModeActive = false;
+      _isV2VMode = false;
+      _orbState = VoiceOrbState.idle;
+      _statusText = context.l10n.voiceError;
+      _audioLevel = 0.0;
+    });
+    return false;
   }
 
   Future<void> _cancelFailedVoiceAttempt() async {
@@ -955,7 +1030,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         // Audio is now being played via just_audio — wait for playback_complete
         setState(() {
-          _statusText = 'Playing audio...';
+          _statusText = context.l10n.voiceEllaSpeaking;
         });
         break;
       case 'playback_complete':

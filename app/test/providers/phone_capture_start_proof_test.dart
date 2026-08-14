@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/providers/capture_provider.dart';
 
 void main() {
@@ -15,11 +16,31 @@ void main() {
     );
   });
 
-  test('first non-empty frame proves phone capture started', () async {
+  test('native recorder receipt does not replace physical phone audio proof', () async {
     final proof = PhoneCaptureStartProof();
 
+    proof.acceptNativeRecorderStart();
+    await proof.waitForNativeRecorder(timeout: const Duration(milliseconds: 50));
+    await expectLater(
+      proof.waitForAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
+  });
+
+  test('phone physical capture and transcription delivery remain separate facts', () async {
+    final proof = PhoneCaptureStartProof();
+
+    proof.acceptNativeRecorderStart();
     expect(proof.acceptFrame(const [1, 2, 3]), isTrue);
+    await proof.waitForNativeRecorder(timeout: const Duration(milliseconds: 50));
     await proof.waitForAudio(timeout: const Duration(milliseconds: 50));
+    await expectLater(
+      proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
+
+    expect(proof.acceptTransmittedFrame(const [1, 2, 3]), isTrue);
+    await proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 50));
   });
 
   test('BLE listener installation cannot prove necklace capture without transmitted audio', () async {
@@ -32,8 +53,27 @@ void main() {
     );
   });
 
-  test('first non-empty frame sent to transcription proves necklace capture started', () async {
+  test('physical BLE audio proves necklace capture independently of transcription', () async {
     final proof = DeviceCaptureStartProof();
+
+    expect(
+      proof.acceptPhysicalFrame(physicalDeviceAudioPayload(DeviceType.omi, const [1, 2, 3])),
+      isFalse,
+    );
+    await expectLater(
+      proof.waitForPhysicalAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
+
+    expect(
+      proof.acceptPhysicalFrame(physicalDeviceAudioPayload(DeviceType.omi, const [1, 2, 3, 4])),
+      isTrue,
+    );
+    await proof.waitForPhysicalAudio(timeout: const Duration(milliseconds: 50));
+    await expectLater(
+      proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 1)),
+      throwsA(isA<TimeoutException>()),
+    );
 
     expect(proof.acceptTransmittedFrame(const [1, 2, 3]), isTrue);
     await proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 50));

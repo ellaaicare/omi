@@ -36,6 +36,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
         PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.accountNotReady ||
         PhoneCaptureStartResult.consentUnavailable ||
         PhoneCaptureStartResult.recorderUnavailable ||
         PhoneCaptureStartResult.cancelled =>

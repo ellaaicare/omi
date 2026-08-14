@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -12,10 +13,12 @@ import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/home/today_page.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -25,6 +28,7 @@ import 'package:omi/providers/home_provider.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
+import 'package:omi/widgets/transcript.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -136,6 +140,8 @@ void main() {
     expect(deleteTarget, findsOneWidget);
     expect(tester.getSize(deleteTarget).height, greaterThanOrEqualTo(48));
 
+    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -300));
+    await tester.pumpAndSettle();
     await tester.tap(deleteTarget);
     await tester.pumpAndSettle();
     expect(find.text('Are you sure you want to delete this memory? This action cannot be undone.'), findsOneWidget);
@@ -179,6 +185,82 @@ void main() {
 
     expect(find.byKey(const Key('today-confirmed-recording-status')), findsOneWidget);
     expect(find.text('Records on this iPhone · Listening… tap to finish'), findsOneWidget);
+  });
+
+  testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    harness.capture.segments = [
+      TranscriptSegment(
+        id: 'live-segment',
+        text: 'This transcript is visible while recording.',
+        speaker: 'SPEAKER_00',
+        isUser: false,
+        personId: null,
+        start: 0,
+        end: 1,
+        translations: const [],
+      ),
+    ];
+    harness.capture.notifyListeners();
+    await tester.pump();
+
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final transcript = tester.widget<TranscriptWidget>(find.byType(TranscriptWidget));
+    expect(transcript.segments.single.text, 'This transcript is visible while recording.');
+    expect(find.text('Process Now'), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.finishes, 1);
+    expect(harness.capture.deviceStops, 0, reason: 'processing must preserve the continuous necklace stream');
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+  });
+
+  testWidgets('Home tap rotates a physical continuous necklace before local transcript delivery', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+      captureHasContent: false,
+      captureHasFinalContent: true,
+      captureHasDeviceBoundaryEvidence: true,
+    );
+    addTearDown(harness.dispose);
+
+    expect(harness.capture.segments, isEmpty);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceBoundaries, 1);
+    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+    expect(find.text('Listening… tap to finish'), findsOneWidget);
   });
 
   testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {
@@ -244,6 +326,154 @@ void main() {
     expect(find.text('No words were captured, so no memory was created.'), findsNothing);
   });
 
+  testWidgets('failed Home phone processing retries without restarting or re-stopping capture', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationResults: [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-retry')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Process Now'), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Process Now'), findsNothing);
+  });
+
+  testWidgets('rapid Process Now taps share one Home finalization', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final finalizationGate = Completer<void>();
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationGate: finalizationGate,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-double-tap')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final processNow = find.text('Process Now');
+    await tester.tap(processNow);
+    await tester.tap(processNow);
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.byKey(const Key('conversation-process-now-progress')), findsOneWidget);
+
+    finalizationGate.complete();
+    await tester.pumpAndSettle();
+
+    expect(harness.capture.finalizationCalls, 1);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Process Now'), findsNothing);
+  });
+
+  testWidgets('leaving transcript blocks a new capture until Home finalization settles', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final finalizationGate = Completer<void>();
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationResults: [false],
+      finalizationGate: finalizationGate,
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-route-abandon')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+
+    expect(harness.capture.finalizationCalls, 1);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(ConversationCapturingPage), findsNothing);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStarts, 1, reason: 'old finalization must remain a capture barrier after route exit');
+
+    finalizationGate.complete();
+    await tester.pumpAndSettle();
+    expect(harness.capture.finalizationCalls, 1);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.phoneStarts, 2, reason: 'a later tap may start only after the old operation settles');
+  });
+
+  testWidgets('account authority change invalidates a pending Home finalization retry', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      finalizationResults: [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-transition')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.finalizationCalls, 1);
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1, reason: 'replacement authority must not retry old-account work');
+    expect(harness.capture.finishes, 0);
+    expect(find.text('Process Now'), findsOneWidget);
+  });
+
   testWidgets('Home-owned necklace capture stops its stream before finishing', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -269,6 +499,49 @@ void main() {
     expect(harness.capture.finishes, 1);
     expect(harness.capture.recordingState, RecordingState.stop);
     expect(find.text('Record a moment'), findsOneWidget);
+  });
+
+  testWidgets('failed Home necklace processing retries without restarting or re-stopping capture', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      finalizationResults: [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('necklace-retry')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Process Now'), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Process Now'), findsNothing);
   });
 
   testWidgets('necklace transport error retries through a fresh Home capture start', (tester) async {
@@ -317,11 +590,13 @@ void main() {
     expect(harness.capture.deviceStarts, 0);
     expect(harness.capture.deviceStops, 0);
     expect(harness.capture.finishes, 1, reason: 'the start tap must exclude pre-tap necklace audio');
+    expect(harness.capture.deviceBoundaries, 1);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
     expect(harness.capture.deviceStops, 0, reason: 'Home must preserve a stream it did not start');
     expect(harness.capture.finishes, 2, reason: 'the finish tap closes only the intentional moment');
+    expect(harness.capture.deviceBoundaries, 2);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
@@ -431,6 +706,17 @@ void main() {
   });
 }
 
+TranscriptSegment _liveTranscriptSegment(String id) => TranscriptSegment(
+      id: id,
+      text: 'A live transcript that is ready to process.',
+      speaker: 'SPEAKER_00',
+      isUser: false,
+      personId: null,
+      start: 0,
+      end: 1,
+      translations: const [],
+    );
+
 class _HomeHarness {
   const _HomeHarness({
     required this.capture,
@@ -471,6 +757,9 @@ Future<_HomeHarness> _pumpHome(
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
   bool captureHasFinalContent = false,
+  bool captureHasDeviceBoundaryEvidence = false,
+  List<bool> finalizationResults = const [],
+  Completer<void>? finalizationGate,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
 }) async {
   tester.view.physicalSize = viewport;
@@ -483,6 +772,9 @@ Future<_HomeHarness> _pumpHome(
     phoneStartResult: phoneStartResult,
     hasContent: captureHasContent,
     hasFinalContent: captureHasFinalContent,
+    hasDeviceBoundaryEvidence: captureHasDeviceBoundaryEvidence,
+    finalizationResults: finalizationResults,
+    finalizationGate: finalizationGate,
   );
   final actionItems = _NoActionsProvider();
   final conversationProvider = _FixtureConversationProvider(conversations);
@@ -599,23 +891,34 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.phoneStartResult,
     required this.hasContent,
     required this.hasFinalContent,
-  }) {
+    required this.hasDeviceBoundaryEvidence,
+    required List<bool> finalizationResults,
+    this.finalizationGate,
+  }) : finalizationResults = List<bool>.of(finalizationResults) {
     recordingState = initialState;
   }
 
   final PhoneCaptureStartResult phoneStartResult;
   final bool hasContent;
   final bool hasFinalContent;
+  final bool hasDeviceBoundaryEvidence;
+  final List<bool> finalizationResults;
+  final Completer<void>? finalizationGate;
 
   int phoneStarts = 0;
   int phoneStops = 0;
   int deviceStarts = 0;
   int deviceStops = 0;
+  int deviceBoundaries = 0;
   int finishes = 0;
+  int finalizationCalls = 0;
   int finalContentChecks = 0;
 
   @override
   bool get hasCapturableContent => hasContent;
+
+  @override
+  bool get hasActiveDeviceCaptureBoundaryEvidence => hasDeviceBoundaryEvidence;
 
   @override
   Future<bool> awaitFinalCapturableContent({
@@ -630,11 +933,22 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<bool> finalizeCurrentConversation({
     int maxTranscriptAttempts = 3,
     Duration transcriptRetryDelay = const Duration(milliseconds: 250),
+    bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
     finalContentChecks++;
     if (!hasContent && !hasFinalContent) return false;
+    finalizationCalls++;
+    await finalizationGate?.future;
+    final result = finalizationResults.isEmpty ? true : finalizationResults.removeAt(0);
+    if (!result) return false;
     finishes++;
     return true;
+  }
+
+  @override
+  Future<bool> finalizeCurrentDeviceConversationAndContinue() async {
+    deviceBoundaries++;
+    return finalizeCurrentConversation();
   }
 
   @override
@@ -653,6 +967,12 @@ class _FakeCaptureProvider extends CaptureProvider {
   }
 
   @override
+  Future<bool> stopStreamRecordingAndFinalize() async {
+    await stopStreamRecording();
+    return finalizeCurrentConversation();
+  }
+
+  @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
     updateRecordingDevice(device);
@@ -663,6 +983,12 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<void> stopStreamDeviceRecording({bool cleanDevice = false}) async {
     deviceStops++;
     updateRecordingState(RecordingState.stop);
+  }
+
+  @override
+  Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    await stopStreamDeviceRecording(cleanDevice: cleanDevice);
+    return finalizeCurrentConversation();
   }
 
   @override

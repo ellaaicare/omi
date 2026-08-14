@@ -16,6 +16,7 @@ import 'package:omi/services/notifications.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/device.dart';
+import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -23,21 +24,33 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 
 typedef DeviceConnectionResolver = Future<BtDevice?> Function(String deviceId);
 typedef DeviceScanConnector = Future<BtDevice?> Function();
+typedef DeviceStorageListResolver = Future<List<int>> Function(String deviceId);
 
 class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption {
   DeviceProvider({
     IDeviceService? deviceService,
     DeviceConnectionResolver? connectionResolver,
     DeviceScanConnector? scanConnector,
+    @visibleForTesting DeviceStorageListResolver? storageListResolver,
+    @visibleForTesting Duration reconnectionInterval = const Duration(seconds: 15),
+    @visibleForTesting int maxAutomaticReconnectAttempts = 3,
+    @visibleForTesting Duration deviceCaptureRetryDelay = const Duration(milliseconds: 500),
+    @visibleForTesting int maxDeviceCaptureStartAttempts = 3,
   })  : _deviceService = deviceService ?? ServiceManager.instance().device,
         _connectionResolver = connectionResolver,
-        _scanConnector = scanConnector {
+        _scanConnector = scanConnector,
+        _storageListResolver = storageListResolver,
+        _reconnectionInterval = reconnectionInterval,
+        _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts,
+        _deviceCaptureRetryDelay = deviceCaptureRetryDelay,
+        _maxDeviceCaptureStartAttempts = maxDeviceCaptureStartAttempts {
     _deviceService.subscribe(this, this);
   }
 
   final IDeviceService _deviceService;
   final DeviceConnectionResolver? _connectionResolver;
   final DeviceScanConnector? _scanConnector;
+  final DeviceStorageListResolver? _storageListResolver;
   CaptureProvider? captureProvider;
 
   bool isConnecting = false;
@@ -52,7 +65,15 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   bool _hasLowBatteryAlerted = false;
   Timer? _reconnectionTimer;
   DateTime? _reconnectAt;
-  final int _connectionCheckSeconds = 15; // 10s periods, 5s for each scan
+  final Duration _reconnectionInterval;
+  final int _maxAutomaticReconnectAttempts;
+  final Duration _deviceCaptureRetryDelay;
+  final int _maxDeviceCaptureStartAttempts;
+  int _automaticReconnectAttempts = 0;
+  bool _automaticReconnectExhausted = false;
+
+  int get automaticReconnectAttempts => _automaticReconnectAttempts;
+  bool get automaticReconnectExhausted => _automaticReconnectExhausted;
 
   bool _havingNewFirmware = false;
   bool get havingNewFirmware => _havingNewFirmware && pairedDevice != null && isConnected;
@@ -92,10 +113,41 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   final Debouncer _connectDebouncer = Debouncer(delay: const Duration(milliseconds: 100));
   int _deviceOperationGeneration = 0;
   bool _deviceServiceReady = false;
+  Future<void>? _captureTeardown;
+  int? _deferredDeviceCaptureGeneration;
+  String? _deferredDeviceCaptureId;
+  Future<void>? _deferredDeviceCaptureStart;
 
   void Function(BtDevice device)? onDeviceConnected;
 
-  bool _isDeviceOperationCurrent(int generation) => _deviceServiceReady && generation == _deviceOperationGeneration;
+  bool _isDeviceOperationCurrent(int generation) =>
+      _deviceServiceReady && _captureTeardown == null && generation == _deviceOperationGeneration;
+
+  Future<void> _teardownCaptureForDevice(String? deviceId) {
+    final priorTeardown = _captureTeardown;
+    final capture = captureProvider;
+    late final Future<void> teardown;
+    teardown = (() async {
+      await priorTeardown;
+      if (deviceId == null || deviceId.isEmpty || capture == null) return;
+      await capture.handleRecordingDeviceDisconnected(deviceId);
+    })()
+        .whenComplete(() {
+      if (identical(_captureTeardown, teardown)) _captureTeardown = null;
+    });
+    _captureTeardown = teardown;
+    return teardown;
+  }
+
+  Future<void> _resumeBoundDeviceAfterTeardown(int generation) async {
+    await _captureTeardown;
+    if (!_isDeviceOperationCurrent(generation) || pairedDevice == null) return;
+    await periodicConnect(
+      'device service resumed',
+      boundDeviceOnly: true,
+      operationGeneration: generation,
+    );
+  }
 
   Future<BtDevice?> _resolveConnectedDevice(String deviceId) async {
     final resolver = _connectionResolver;
@@ -104,8 +156,49 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   void setProviders(CaptureProvider provider) {
+    if (identical(captureProvider, provider)) return;
+    captureProvider?.removeListener(_onCaptureProviderChanged);
     captureProvider = provider;
+    provider.addListener(_onCaptureProviderChanged);
+    _onCaptureProviderChanged();
     notifyListeners();
+  }
+
+  void _deferDeviceCaptureUntilPhoneReleases(BtDevice device, int operationGeneration) {
+    _deferredDeviceCaptureGeneration = operationGeneration;
+    _deferredDeviceCaptureId = device.id;
+    _onCaptureProviderChanged();
+  }
+
+  void _clearDeferredDeviceCapture() {
+    _deferredDeviceCaptureGeneration = null;
+    _deferredDeviceCaptureId = null;
+  }
+
+  void _onCaptureProviderChanged() {
+    if (_deferredDeviceCaptureStart != null) return;
+    final capture = captureProvider;
+    final generation = _deferredDeviceCaptureGeneration;
+    final deviceId = _deferredDeviceCaptureId;
+    final device = connectedDevice;
+    if (capture == null ||
+        capture.phoneCaptureOwnsMobileAudio ||
+        generation == null ||
+        deviceId == null ||
+        device?.id != deviceId ||
+        !_isDeviceOperationCurrent(generation)) {
+      return;
+    }
+
+    _clearDeferredDeviceCapture();
+    late final Future<void> resume;
+    resume = _startDeviceCaptureWithRetry(device!, generation).then<void>((_) {}).whenComplete(() {
+      if (identical(_deferredDeviceCaptureStart, resume)) {
+        _deferredDeviceCaptureStart = null;
+        _onCaptureProviderChanged();
+      }
+    });
+    _deferredDeviceCaptureStart = resume;
   }
 
   Future<void> setConnectedDevice(BtDevice? device, {int? operationGeneration}) async {
@@ -173,6 +266,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   Future<List<int>> _getStorageList(String deviceId) async {
+    final resolver = _storageListResolver;
+    if (resolver != null) return resolver(deviceId);
     var connection = await _deviceService.ensureConnection(deviceId);
     if (connection == null) {
       return [];
@@ -275,12 +370,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    _automaticReconnectAttempts = 0;
+    _automaticReconnectExhausted = false;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
         t.cancel();
         return;
       }
-      debugPrint("Period connect seconds: $_connectionCheckSeconds, triggered timer at ${DateTime.now()}");
+      debugPrint("Periodic connect triggered at ${DateTime.now()}");
 
       final deviceService = _deviceService;
       if (deviceService is DeviceService && deviceService.isWifiSyncInProgress) {
@@ -295,17 +392,43 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         return;
       }
       Logger.debug("isConnected: $isConnected, isConnecting: $isConnecting, connectedDevice: $connectedDevice");
-      if ((!isConnected && connectedDevice == null)) {
+      if (!isConnected) {
         if (isConnecting) {
           return;
         }
-        await scanAndConnectToDevice(operationGeneration: generation);
+        if (_automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
+          t.cancel();
+          isConnecting = false;
+          _automaticReconnectExhausted = true;
+          notifyListeners();
+          return;
+        }
+        _automaticReconnectAttempts++;
+        try {
+          await scanAndConnectToDevice(operationGeneration: generation);
+        } catch (error) {
+          Logger.debug('Automatic BLE reconnect failed: $error');
+          if (_isDeviceOperationCurrent(generation)) {
+            if (!isConnected) {
+              connectedDevice = null;
+              isDeviceStorageSupport = false;
+            }
+            updateConnectingStatus(false);
+          }
+        }
+        if (!_isDeviceOperationCurrent(generation)) return;
+        if (!isConnected && _automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
+          t.cancel();
+          isConnecting = false;
+          _automaticReconnectExhausted = true;
+          notifyListeners();
+        }
       } else {
         t.cancel();
       }
     }
 
-    _reconnectionTimer = Timer.periodic(Duration(seconds: _connectionCheckSeconds), scan);
+    _reconnectionTimer = Timer.periodic(_reconnectionInterval, scan);
     scan(_reconnectionTimer);
   }
 
@@ -407,12 +530,16 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     isConnected = value;
     if (isConnected) {
       _reconnectionTimer?.cancel();
+      _automaticReconnectAttempts = 0;
+      _automaticReconnectExhausted = false;
     }
     notifyListeners();
   }
 
   @override
   void dispose() {
+    captureProvider?.removeListener(_onCaptureProviderChanged);
+    _clearDeferredDeviceCapture();
     _bleBatteryLevelListener?.cancel();
     _reconnectionTimer?.cancel();
     _disconnectDebouncer.cancel();
@@ -421,19 +548,23 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     super.dispose();
   }
 
-  Future<void> onDeviceDisconnected({int? operationGeneration}) async {
+  Future<void> onDeviceDisconnected({int? operationGeneration, String? deviceId}) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('onDisconnected inside: $connectedDevice');
+    final disconnectedDeviceId = deviceId ?? connectedDevice?.id ?? pairedDevice?.id;
+    _deviceOperationGeneration++;
     _havingNewFirmware = false;
-    await setConnectedDevice(null, operationGeneration: generation);
-    if (!_isDeviceOperationCurrent(generation)) return;
-    await setisDeviceStorageSupport(operationGeneration: generation);
-    if (!_isDeviceOperationCurrent(generation)) return;
-    setIsConnected(false);
-    updateConnectingStatus(false);
+    connectedDevice = null;
+    _clearDeferredDeviceCapture();
+    final storedDevice = SharedPreferencesUtil().btDevice;
+    pairedDevice = storedDevice.id.isEmpty ? null : storedDevice;
+    isConnected = false;
+    isConnecting = false;
+    isDeviceStorageSupport = false;
+    notifyListeners();
 
-    captureProvider?.updateRecordingDevice(null);
+    final captureTeardown = _teardownCaptureForDevice(disconnectedDeviceId);
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);
@@ -450,10 +581,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     });
     MixpanelManager().deviceDisconnected();
 
+    await captureTeardown;
+    if (!_deviceServiceReady) return;
+    final reconnectGeneration = ++_deviceOperationGeneration;
+
     // Retired 1s to prevent the race condition made by standby power of ble device
     Future.delayed(const Duration(seconds: 1), () {
-      if (_isDeviceOperationCurrent(generation)) {
-        periodicConnect('coming from onDisconnect', operationGeneration: generation);
+      if (_isDeviceOperationCurrent(reconnectGeneration)) {
+        periodicConnect('coming from onDisconnect', operationGeneration: reconnectGeneration);
       }
     });
   }
@@ -485,39 +620,55 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     } catch (error) {
       Logger.debug('Could not clear the stale disconnect notification: $error');
     }
-    await setConnectedDevice(device, operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-
-    if (captureProvider != null) {
-      captureProvider?.updateRecordingDevice(device);
-    }
-
-    await setisDeviceStorageSupport(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    // The transport callback is the connection authority. Publish the device
+    // and connected bit in one synchronous turn before any setup await so a
+    // failed overlapping scan cannot clear half of the committed state.
+    connectedDevice = device;
+    pairedDevice = device;
     setIsConnected(true);
+    final capture = captureProvider;
+    capture?.updateRecordingDevice(device);
 
-    // Read initial battery level
-    int currentLevel = await _retrieveBatteryLevel(device.id);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    if (currentLevel != -1) {
-      batteryLevel = currentLevel;
+    try {
+      // Capture is the critical post-connect path. Metadata, storage, and
+      // battery probes are useful but must never prevent necklace recording.
+      if (capture?.phoneCaptureOwnsMobileAudio == true) {
+        _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+      } else {
+        await _startDeviceCaptureWithRetry(device, operationGeneration);
+      }
+      if (!_isDeviceOperationCurrent(operationGeneration)) return;
+
+      await _runConnectedSetupStep(
+        'device info',
+        operationGeneration,
+        () => getDeviceInfo(operationGeneration: operationGeneration),
+      );
+      await _runConnectedSetupStep(
+        'storage support',
+        operationGeneration,
+        () => setisDeviceStorageSupport(operationGeneration: operationGeneration),
+      );
+      await _runConnectedSetupStep('initial battery', operationGeneration, () async {
+        final currentLevel = await _retrieveBatteryLevel(device.id);
+        if (!_isDeviceOperationCurrent(operationGeneration)) return;
+        if (currentLevel != -1) batteryLevel = currentLevel;
+      });
+      await _runConnectedSetupStep(
+        'battery listener',
+        operationGeneration,
+        () => initiateBleBatteryListener(operationGeneration: operationGeneration),
+      );
+      if (batteryLevel != -1 && batteryLevel < 20) _hasLowBatteryAlerted = false;
+      await _runConnectedSetupStep(
+        'device name persistence',
+        operationGeneration,
+        () => SharedPreferencesUtil().saveString('deviceName', device.name),
+      );
+      if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    } finally {
+      if (_isDeviceOperationCurrent(operationGeneration)) updateConnectingStatus(false);
     }
-
-    // Then set up listener for battery changes
-    await initiateBleBatteryListener(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    if (batteryLevel != -1 && batteryLevel < 20) {
-      _hasLowBatteryAlerted = false;
-    }
-    updateConnectingStatus(false);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    await captureProvider?.streamDeviceRecording(device: device);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-
-    await getDeviceInfo(operationGeneration: operationGeneration);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
-    await SharedPreferencesUtil().saveString('deviceName', device.name);
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
     // Wals
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
@@ -529,6 +680,48 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _checkFirmwareUpdates(operationGeneration: operationGeneration);
 
     onDeviceConnected?.call(device);
+  }
+
+  Future<void> _runConnectedSetupStep(
+    String name,
+    int operationGeneration,
+    Future<void> Function() step,
+  ) async {
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    try {
+      await step();
+    } catch (error) {
+      Logger.debug('Connected device $name setup failed without suppressing capture: $error');
+    }
+  }
+
+  Future<bool> _startDeviceCaptureWithRetry(BtDevice device, int operationGeneration) async {
+    final capture = captureProvider;
+    if (capture == null) return false;
+    for (var attempt = 1; attempt <= _maxDeviceCaptureStartAttempts; attempt++) {
+      if (!_isDeviceOperationCurrent(operationGeneration)) return false;
+      if (capture.phoneCaptureOwnsMobileAudio) {
+        _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+        return false;
+      }
+      try {
+        await capture.streamDeviceRecording(device: device);
+      } catch (error) {
+        Logger.debug('Necklace capture start attempt $attempt failed: $error');
+      }
+      if (!_isDeviceOperationCurrent(operationGeneration)) return false;
+      if (capture.recordingState == RecordingState.deviceRecord) return true;
+      if (capture.phoneCaptureOwnsMobileAudio) {
+        _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+        return false;
+      }
+      if (attempt < _maxDeviceCaptureStartAttempts) {
+        await Future<void>.delayed(_deviceCaptureRetryDelay);
+      }
+    }
+    Logger.debug('Necklace transport is connected but capture did not become ready after '
+        '$_maxDeviceCaptureStartAttempts attempts');
+    return false;
   }
 
   Future<void> _handleDeviceConnected(String deviceId, int operationGeneration) async {
@@ -690,7 +883,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         if (deviceId == connectedDevice?.id || deviceId == pairedDevice?.id) {
           final generation = _deviceOperationGeneration;
           if (!_isDeviceOperationCurrent(generation)) return;
-          _disconnectDebouncer.run(() => onDeviceDisconnected(operationGeneration: generation));
+          _disconnectDebouncer.run(
+            () => onDeviceDisconnected(operationGeneration: generation, deviceId: deviceId),
+          );
         }
         break;
     }
@@ -703,8 +898,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   void onStatusChanged(DeviceServiceStatus status) {
     switch (status) {
       case DeviceServiceStatus.stop:
+        final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
         _deviceOperationGeneration++;
         _deviceServiceReady = false;
+        _clearDeferredDeviceCapture();
         _reconnectionTimer?.cancel();
         _disconnectDebouncer.cancel();
         _connectDebouncer.cancel();
@@ -716,7 +913,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         isConnecting = false;
         isDeviceStorageSupport = false;
         batteryLevel = -1;
-        captureProvider?.updateRecordingDevice(null);
+        unawaited(_teardownCaptureForDevice(disconnectedDeviceId));
         notifyListeners();
         break;
       case DeviceServiceStatus.ready:
@@ -726,11 +923,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         pairedDevice = stored.id.isEmpty ? null : stored;
         notifyListeners();
         if (pairedDevice != null) {
-          unawaited(periodicConnect(
-            'device service resumed',
-            boundDeviceOnly: true,
-            operationGeneration: generation,
-          ));
+          unawaited(_resumeBoundDeviceAfterTeardown(generation));
         }
         break;
       case DeviceServiceStatus.init:

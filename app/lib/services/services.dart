@@ -14,6 +14,22 @@ import 'package:omi/services/wals.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
+typedef MicRecorderServiceFactory = IMicRecorderService Function();
+typedef BackgroundRecorderRunnerFactory = IBackgroundRecorderRunner Function();
+
+IMicRecorderService selectMicRecorderService({
+  required bool isIOS,
+  MicRecorderServiceFactory foregroundRecorderFactory = _createForegroundMicRecorderService,
+  BackgroundRecorderRunnerFactory backgroundRunnerFactory = _createBackgroundRecorderRunner,
+}) {
+  if (isIOS) return foregroundRecorderFactory();
+  return MicRecorderBackgroundService(runner: backgroundRunnerFactory());
+}
+
+IMicRecorderService _createForegroundMicRecorderService() => MicRecorderService();
+
+IBackgroundRecorderRunner _createBackgroundRecorderRunner() => BackgroundService();
+
 class ServiceManager {
   late IMicRecorderService _mic;
   late IDeviceService _device;
@@ -26,9 +42,9 @@ class ServiceManager {
 
   static ServiceManager _create() {
     ServiceManager sm = ServiceManager();
-    sm._mic = MicRecorderBackgroundService(
-      runner: BackgroundService(),
-    );
+    // Manual iOS recording is a foreground interaction; other platforms keep
+    // the background runner used for long-lived capture.
+    sm._mic = selectMicRecorderService(isIOS: Platform.isIOS);
     sm._device = DeviceService();
     sm._socket = SocketServicePool();
     sm._wal = WalService();

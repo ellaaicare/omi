@@ -28,6 +28,7 @@ import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -132,6 +133,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   EllaProvisioningProvider? _provisioningProvider;
   bool _homeCaptureActive = false;
   bool _homeCaptureStarting = false;
+  bool _homeCaptureFinalizationPending = false;
+  Future<bool>? _homeCaptureFinalizationInFlight;
+  bool _abandonHomeCaptureAfterFinalization = false;
+  int _homeCaptureAuthorityGeneration = 0;
   _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
   bool _whispersVerified = false;
@@ -209,7 +214,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   void _onTodayCardAuthorityChanged() {
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
+    _homeCaptureAuthorityGeneration++;
     _todayCardController.invalidateAuthority();
+    final finalization = _homeCaptureFinalizationInFlight;
+    if (finalization != null) {
+      _abandonHomeCaptureAfterFinalization = true;
+      unawaited(_joinHomeCaptureFinalization(finalization));
+    } else if (_homeCaptureFinalizationPending && mounted) {
+      setState(() {
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      });
+    }
     unawaited(_syncTodayCardAuthority(forceReload: true));
   }
 
@@ -459,6 +475,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
         PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.accountNotReady ||
         PhoneCaptureStartResult.consentUnavailable ||
         PhoneCaptureStartResult.recorderUnavailable ||
         PhoneCaptureStartResult.cancelled =>
@@ -466,10 +483,190 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
-  Future<void> _finalizeHomeMoment(CaptureProvider capture) async {
-    if (await capture.finalizeCurrentConversation()) return;
-    if (!mounted) return;
+  Future<bool> _finalizeHomeMoment(
+    CaptureProvider capture, {
+    bool Function()? isCurrent,
+  }) async {
+    final finalized = capture.recordingState == RecordingState.deviceRecord
+        ? await capture.finalizeCurrentDeviceConversationAndContinue()
+        : await capture.finalizeCurrentConversation();
+    if (isCurrent != null && !isCurrent()) return false;
+    if (finalized) return true;
+    if (!mounted) return false;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+    return false;
+  }
+
+  Future<void> _joinHomeCaptureFinalization(Future<bool> operation) async {
+    try {
+      await operation;
+    } catch (_) {
+      // The initiating UI reports the failure. This join exists only to keep
+      // old capture work behind the transition/route barrier until it settles.
+    }
+  }
+
+  Future<bool> _finishHomeCapture(CaptureProvider capture) {
+    final existing = _homeCaptureFinalizationInFlight;
+    if (existing != null) return existing;
+
+    final completer = Completer<bool>();
+    final operation = completer.future;
+    _homeCaptureFinalizationInFlight = operation;
+    if (mounted) setState(() {});
+    unawaited(_runHomeCaptureFinalization(capture, operation, completer));
+    return operation;
+  }
+
+  Future<void> _runHomeCaptureFinalization(
+    CaptureProvider capture,
+    Future<bool> operation,
+    Completer<bool> completer,
+  ) async {
+    Object? error;
+    StackTrace? stackTrace;
+    var result = false;
+    try {
+      result = await _finishHomeCaptureOnce(capture);
+    } catch (caughtError, caughtStackTrace) {
+      error = caughtError;
+      stackTrace = caughtStackTrace;
+    }
+
+    if (identical(_homeCaptureFinalizationInFlight, operation)) {
+      _homeCaptureFinalizationInFlight = null;
+      if (_abandonHomeCaptureAfterFinalization) {
+        _abandonHomeCaptureAfterFinalization = false;
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      }
+      if (mounted) setState(() {});
+    }
+
+    if (error != null) {
+      completer.completeError(error, stackTrace!);
+    } else {
+      completer.complete(result);
+    }
+  }
+
+  Future<bool> _finishHomeCaptureOnce(CaptureProvider capture) async {
+    final authorityGeneration = _homeCaptureAuthorityGeneration;
+    if (_homeCaptureFinalizationPending) {
+      final finalized = await _finalizeHomeMoment(
+        capture,
+        isCurrent: () => authorityGeneration == _homeCaptureAuthorityGeneration,
+      );
+      final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
+      if (finalized && isCurrent && mounted) {
+        setState(() {
+          _homeCaptureFinalizationPending = false;
+          _homeCaptureSource = null;
+        });
+      }
+      return finalized && isCurrent;
+    }
+
+    final source = _homeCaptureSource;
+    bool? transportFinalized;
+    switch (source) {
+      case _HomeCaptureSource.phone:
+        transportFinalized = await capture.stopStreamRecordingAndFinalize();
+        break;
+      case _HomeCaptureSource.necklaceOwned:
+        transportFinalized = await capture.stopStreamDeviceRecordingAndFinalize();
+        if (capture.recordingState == RecordingState.deviceRecord) {
+          throw StateError('Home-owned necklace stream did not stop');
+        }
+        break;
+      case _HomeCaptureSource.necklaceContinuous:
+        break;
+      case null:
+        if (capture.recordingState == RecordingState.record) {
+          transportFinalized = await capture.stopStreamRecordingAndFinalize();
+        }
+        break;
+    }
+    if (authorityGeneration != _homeCaptureAuthorityGeneration) {
+      if (mounted) {
+        setState(() {
+          _homeCaptureActive = false;
+          _homeCaptureFinalizationPending = false;
+          _homeCaptureSource = null;
+        });
+      }
+      return false;
+    }
+    if (mounted) {
+      setState(() {
+        _homeCaptureActive = false;
+        if (source == _HomeCaptureSource.phone || source == _HomeCaptureSource.necklaceOwned) {
+          _homeCaptureFinalizationPending = true;
+        } else {
+          _homeCaptureSource = null;
+        }
+      });
+    }
+    if (transportFinalized != null) {
+      if (transportFinalized) {
+        if (mounted) {
+          setState(() {
+            _homeCaptureFinalizationPending = false;
+            _homeCaptureSource = null;
+          });
+        }
+        return true;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+      }
+      return false;
+    }
+    final finalized = await _finalizeHomeMoment(
+      capture,
+      isCurrent: () => authorityGeneration == _homeCaptureAuthorityGeneration,
+    );
+    final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
+    if (finalized && isCurrent && mounted) {
+      setState(() {
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      });
+    }
+    return finalized && isCurrent;
+  }
+
+  Future<void> _openLiveTranscript(CaptureProvider capture) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ConversationCapturingPage(
+          onProcessNow: () async {
+            if (_homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null) {
+              return _finishHomeCapture(capture);
+            }
+            if (capture.recordingState == RecordingState.deviceRecord) {
+              return _finalizeHomeMoment(capture);
+            }
+            if (capture.phoneCaptureOwnsMobileAudio || capture.recordingState == RecordingState.record) {
+              return capture.stopStreamRecordingAndFinalize();
+            }
+            return false;
+          },
+        ),
+      ),
+    );
+    final finalization = _homeCaptureFinalizationInFlight;
+    if (finalization != null) {
+      _abandonHomeCaptureAfterFinalization = true;
+      await _joinHomeCaptureFinalization(finalization);
+      return;
+    }
+    if (_homeCaptureFinalizationPending && mounted) {
+      setState(() {
+        _homeCaptureFinalizationPending = false;
+        _homeCaptureSource = null;
+      });
+    }
   }
 
   Future<void> _toggleHomeCapture({
@@ -481,44 +678,17 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (_homeCaptureStarting) return;
     setState(() => _homeCaptureStarting = true);
     try {
+      final finalization = _homeCaptureFinalizationInFlight;
+      if (finalization != null) {
+        await _joinHomeCaptureFinalization(finalization);
+        return;
+      }
+      if (_homeCaptureFinalizationPending) {
+        await _finishHomeCapture(capture);
+        return;
+      }
       if (isActive) {
-        switch (_homeCaptureSource) {
-          case _HomeCaptureSource.phone:
-            await capture.stopStreamRecording();
-            if (mounted) {
-              setState(() {
-                _homeCaptureActive = false;
-                _homeCaptureSource = null;
-              });
-            }
-            await _finalizeHomeMoment(capture);
-            break;
-          case _HomeCaptureSource.necklaceOwned:
-            await capture.stopStreamDeviceRecording();
-            if (capture.recordingState == RecordingState.deviceRecord) {
-              throw StateError('Home-owned necklace stream did not stop');
-            }
-            if (mounted) {
-              setState(() {
-                _homeCaptureActive = false;
-                _homeCaptureSource = null;
-              });
-            }
-            await _finalizeHomeMoment(capture);
-            break;
-          case _HomeCaptureSource.necklaceContinuous:
-            await _finalizeHomeMoment(capture);
-            if (mounted) {
-              setState(() {
-                _homeCaptureActive = false;
-                _homeCaptureSource = null;
-              });
-            }
-            break;
-          case null:
-            if (mounted) setState(() => _homeCaptureActive = false);
-            break;
-        }
+        await _finishHomeCapture(capture);
         return;
       }
 
@@ -531,21 +701,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           // The necklace may already be streaming continuously. Finalize that
           // pre-tap audio so this intentional moment starts at an exact boundary
           // without stopping the user's ambient capture.
-          if (capture.hasCapturableContent) {
-            await capture.finalizeCurrentConversation();
+          if (capture.hasCapturableContent || capture.hasActiveDeviceCaptureBoundaryEvidence) {
+            if (!await _finalizeHomeMoment(capture)) return;
           }
         }
         if (!mounted) return;
         final started = capture.recordingState == RecordingState.deviceRecord;
-        setState(() {
-          _homeCaptureActive = started;
-          _homeCaptureSource =
-              started ? (startedHere ? _HomeCaptureSource.necklaceOwned : _HomeCaptureSource.necklaceContinuous) : null;
-        });
-        if (!started) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+        if (started) {
+          setState(() {
+            _homeCaptureActive = true;
+            _homeCaptureSource = startedHere ? _HomeCaptureSource.necklaceOwned : _HomeCaptureSource.necklaceContinuous;
+          });
+          return;
         }
-        return;
+        // A paired necklace must not make the phone recorder unavailable.
       }
 
       final result = await capture.streamRecording();
@@ -626,10 +795,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       hasMemories: visibleConversations.isNotEmpty,
     );
     final showGuardianSurfaces = _guardianAvailable;
-    final captureIsActive = capture.recordingState == RecordingState.deviceRecord ||
-        capture.recordingState == RecordingState.record ||
-        capture.recordingState == RecordingState.initialising;
-    final homeCaptureActive = _homeCaptureActive && captureIsActive;
+    final homeCaptureOwned =
+        _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
+    final homeCaptureUsesNecklace = _homeCaptureSource == _HomeCaptureSource.necklaceOwned ||
+        _homeCaptureSource == _HomeCaptureSource.necklaceContinuous;
 
     return SafeArea(
       bottom: false,
@@ -668,16 +837,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               onTalk: _todayCardController.state.card == null ? null : _openTodayCardTalk,
             ),
             const SizedBox(height: 20),
-            _RecordMomentControl(
-              active: homeCaptureActive,
+            TodayRecordMomentControl(
+              homeCaptureOwned: homeCaptureOwned,
+              homeCaptureUsesNecklace: homeCaptureUsesNecklace,
               starting: _homeCaptureStarting,
               necklaceConnected: deviceConnected,
+              necklaceConnecting: device.isConnecting,
               recordingState: capture.recordingState,
+              diagnostics: capture.captureDiagnostics,
               necklaceContinuouslyRecording:
-                  deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureActive,
+                  deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureOwned,
+              onViewTranscript: () => _openLiveTranscript(capture),
               onTap: () => _toggleHomeCapture(
                 capture: capture,
-                isActive: homeCaptureActive,
+                isActive: homeCaptureOwned,
                 necklaceConnected: deviceConnected,
                 connectedDevice: device.presentationConnectedDevice,
               ),
@@ -852,47 +1025,77 @@ class _TodayHeader extends StatelessWidget {
   }
 }
 
-class _RecordMomentControl extends StatelessWidget {
-  const _RecordMomentControl({
-    required this.active,
+class TodayRecordMomentControl extends StatelessWidget {
+  const TodayRecordMomentControl({
+    super.key,
+    required this.homeCaptureOwned,
+    required this.homeCaptureUsesNecklace,
     required this.starting,
     required this.necklaceConnected,
+    required this.necklaceConnecting,
     required this.recordingState,
+    this.diagnostics = const CaptureDiagnostics(),
     required this.necklaceContinuouslyRecording,
+    required this.onViewTranscript,
     required this.onTap,
   });
 
-  final bool active;
+  final bool homeCaptureOwned;
+  final bool homeCaptureUsesNecklace;
   final bool starting;
   final bool necklaceConnected;
+  final bool necklaceConnecting;
   final RecordingState recordingState;
+  final CaptureDiagnostics diagnostics;
   final bool necklaceContinuouslyRecording;
+  final VoidCallback onViewTranscript;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final label = starting
-        ? context.l10n.todayRecordStarting
-        : active
-            ? context.l10n.todayRecordListening
-            : context.l10n.todayRecordMoment;
-    final source = necklaceConnected ? context.l10n.todayRecordWithNecklace : context.l10n.todayRecordOnPhone;
+    final initialising = starting || recordingState == RecordingState.initialising;
     final confirmedPhoneRecording = recordingState == RecordingState.record;
     final confirmedNecklaceRecording = recordingState == RecordingState.deviceRecord;
+    final primaryOpensLiveTranscript = !homeCaptureOwned &&
+        (confirmedPhoneRecording || (confirmedNecklaceRecording && !necklaceContinuouslyRecording));
+    final homeCaptureTransportActive = homeCaptureOwned && (confirmedPhoneRecording || confirmedNecklaceRecording);
+    final label = homeCaptureTransportActive
+        ? context.l10n.todayRecordListening
+        : homeCaptureOwned
+            ? context.l10n.stopRecording
+            : primaryOpensLiveTranscript
+                ? context.l10n.liveTranscript
+                : initialising
+                    ? context.l10n.initialisingRecorder
+                    : context.l10n.startRecording;
+    final diagnosticSourceKnown = diagnostics.source != CaptureDiagnosticSource.none;
+    final usesNecklace = homeCaptureUsesNecklace ||
+        confirmedNecklaceRecording ||
+        (initialising && diagnosticSourceKnown && diagnostics.source == CaptureDiagnosticSource.necklace) ||
+        (!confirmedPhoneRecording && !initialising && necklaceConnected);
+    final source = usesNecklace ? context.l10n.todayRecordWithNecklace : context.l10n.todayRecordOnPhone;
     final captureFailed = recordingState == RecordingState.error;
+    final primaryEnabled = homeCaptureOwned || !initialising;
     return Semantics(
       button: true,
-      label: '$label. $source',
+      label: '${context.l10n.todayRecordMoment}. $label. $source',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          Text(
+            context.l10n.todayRecordMoment,
+            key: const Key('today-record-moment-heading'),
+            textAlign: TextAlign.center,
+            style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.tealDeep),
+          ),
+          const SizedBox(height: 8),
           AnimatedContainer(
             duration: reduceMotion ? Duration.zero : const Duration(milliseconds: 240),
             curve: Curves.easeOut,
             height: 72,
             decoration: BoxDecoration(
-              color: active ? EllaColors.tealDeep : const Color(0xFFD0E4DE),
+              color: homeCaptureOwned ? EllaColors.tealDeep : const Color(0xFFD0E4DE),
               borderRadius: BorderRadius.circular(36),
             ),
             child: Material(
@@ -901,7 +1104,7 @@ class _RecordMomentControl extends StatelessWidget {
               clipBehavior: Clip.antiAlias,
               child: InkWell(
                 key: const Key('today-record-moment'),
-                onTap: starting ? null : onTap,
+                onTap: primaryEnabled ? (primaryOpensLiveTranscript ? onViewTranscript : onTap) : null,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -910,15 +1113,17 @@ class _RecordMomentControl extends StatelessWidget {
                       height: 52,
                       alignment: Alignment.center,
                       decoration: const BoxDecoration(color: EllaColors.paper, shape: BoxShape.circle),
-                      child: starting
+                      child: initialising && !homeCaptureOwned
                           ? const SizedBox(
                               width: 22,
                               height: 22,
                               child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
                             )
-                          : active
+                          : homeCaptureTransportActive
                               ? const EllaBreathingDot(active: true, live: true, size: 14)
-                              : const Icon(Icons.mic_none_rounded, size: 30, color: EllaColors.tealDeep),
+                              : homeCaptureOwned
+                                  ? const Icon(Icons.stop_circle_outlined, size: 30, color: EllaColors.tealDeep)
+                                  : const Icon(Icons.mic_none_rounded, size: 30, color: EllaColors.tealDeep),
                     ),
                     const SizedBox(width: 16),
                     Flexible(
@@ -926,7 +1131,7 @@ class _RecordMomentControl extends StatelessWidget {
                         label,
                         style: EllaTextStyles.noteBody.copyWith(
                           fontSize: 21,
-                          color: active ? EllaColors.paper : EllaColors.tealDeep,
+                          color: homeCaptureOwned ? EllaColors.paper : EllaColors.tealDeep,
                         ),
                       ),
                     ),
@@ -942,24 +1147,55 @@ class _RecordMomentControl extends StatelessWidget {
             textAlign: TextAlign.center,
             style: EllaTextStyles.caption.copyWith(fontSize: 14),
           ),
-          if (confirmedPhoneRecording || (confirmedNecklaceRecording && !necklaceContinuouslyRecording)) ...[
+          if (confirmedPhoneRecording || (confirmedNecklaceRecording && homeCaptureOwned)) ...[
             const SizedBox(height: 8),
             Semantics(
               liveRegion: true,
-              label: confirmedPhoneRecording
-                  ? '${context.l10n.todayRecordOnPhone}. ${context.l10n.todayRecordListening}'
-                  : context.l10n.todayNecklaceRecordingContinuously,
+              label: '$source. ${context.l10n.todayRecordListening}',
               child: Row(
                 key: const Key('today-confirmed-recording-status'),
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.sync_rounded, size: 18, color: EllaColors.tealDeep),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      '$source · ${context.l10n.todayRecordListening}',
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: EllaColors.tealDeep,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (!primaryOpensLiveTranscript) ...[
+            const SizedBox(height: 4),
+            TextButton.icon(
+              key: const Key('today-view-live-transcript'),
+              onPressed: onViewTranscript,
+              style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
+              icon: const Icon(Icons.subject_rounded, size: 18),
+              label: Text(context.l10n.liveTranscript),
+            ),
+          ],
+          if (necklaceConnecting) ...[
+            const SizedBox(height: 4),
+            Semantics(
+              liveRegion: true,
+              label: context.l10n.todayStripReconnecting,
+              child: Row(
+                key: const Key('today-recording-reconnecting-status'),
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const EllaBreathingDot(active: true, live: true, size: 10),
                   const SizedBox(width: 8),
                   Flexible(
                     child: Text(
-                      confirmedPhoneRecording
-                          ? '${context.l10n.todayRecordOnPhone} · ${context.l10n.todayRecordListening}'
-                          : context.l10n.todayNecklaceRecordingContinuously,
+                      context.l10n.todayStripReconnecting,
                       textAlign: TextAlign.center,
                       style: EllaTextStyles.caption.copyWith(
                         color: EllaColors.tealDeep,
@@ -1018,7 +1254,138 @@ class _RecordMomentControl extends StatelessWidget {
               ),
             ),
           ],
+          const SizedBox(height: 8),
+          _CaptureProofPanel(diagnostics: diagnostics),
         ],
+      ),
+    );
+  }
+}
+
+class _CaptureProofPanel extends StatelessWidget {
+  const _CaptureProofPanel({required this.diagnostics});
+
+  final CaptureDiagnostics diagnostics;
+
+  String _phaseLabel(BuildContext context) => switch (diagnostics.phase) {
+        CaptureDiagnosticPhase.idle => context.l10n.statusPending,
+        CaptureDiagnosticPhase.checkingPermission ||
+        CaptureDiagnosticPhase.waitingForAccount ||
+        CaptureDiagnosticPhase.connectingTranscription ||
+        CaptureDiagnosticPhase.startingCapture =>
+          context.l10n.initializing,
+        CaptureDiagnosticPhase.waitingForAudio => context.l10n.waitingForDevice,
+        CaptureDiagnosticPhase.streaming => context.l10n.recordingActive,
+        CaptureDiagnosticPhase.receivingTranscript => context.l10n.transcriptReceived,
+        CaptureDiagnosticPhase.stopping || CaptureDiagnosticPhase.finalizing => context.l10n.processing,
+        CaptureDiagnosticPhase.completed => context.l10n.completed,
+        CaptureDiagnosticPhase.disconnected => context.l10n.disconnected,
+        CaptureDiagnosticPhase.failed => context.l10n.failedStatus,
+      };
+
+  String? _failureLabel(BuildContext context) => switch (diagnostics.failure) {
+        CaptureDiagnosticFailure.none => null,
+        CaptureDiagnosticFailure.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
+        CaptureDiagnosticFailure.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        CaptureDiagnosticFailure.physicalAudioUnavailable ||
+        CaptureDiagnosticFailure.necklaceConnectionUnavailable =>
+          context.l10n.waitingForDevice,
+        CaptureDiagnosticFailure.socketClosed ||
+        CaptureDiagnosticFailure.socketError =>
+          context.l10n.todayTranscriptionUnavailable,
+        CaptureDiagnosticFailure.noTranscript => context.l10n.todayNoWordsCaptured,
+        CaptureDiagnosticFailure.finalizationFailed => context.l10n.processingFailed,
+        CaptureDiagnosticFailure.consentUnavailable ||
+        CaptureDiagnosticFailure.accountNotReady ||
+        CaptureDiagnosticFailure.recorderUnavailable ||
+        CaptureDiagnosticFailure.deviceDisconnected =>
+          context.l10n.todayRecordingUnavailable,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final failure = _failureLabel(context);
+    final memoryStatus = switch (diagnostics.phase) {
+      CaptureDiagnosticPhase.finalizing => context.l10n.statusProcessing,
+      CaptureDiagnosticPhase.completed => context.l10n.statusCompleted,
+      CaptureDiagnosticPhase.failed when diagnostics.physicalFrames > 0 => context.l10n.statusFailed,
+      _ => context.l10n.statusPending,
+    };
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      child: Container(
+        key: const Key('today-capture-proof-panel'),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: EllaColors.card,
+          border: Border.all(color: failure == null ? EllaColors.cardEdge : EllaColors.error),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.monitor_heart_outlined, size: 18, color: EllaColors.tealDeep),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    context.l10n.transcriptionDiagnostics,
+                    style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                Text(_phaseLabel(context), style: EllaTextStyles.caption),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 4,
+              children: [
+                Text(
+                  '${context.l10n.audioBytes}: ${diagnostics.physicalBytes} · ${diagnostics.physicalFrames}',
+                  key: const Key('today-capture-audio-proof'),
+                  style: EllaTextStyles.caption,
+                ),
+                Text(
+                  '${context.l10n.transcription}: ${diagnostics.transmittedFrames}',
+                  key: const Key('today-capture-delivery-proof'),
+                  style: EllaTextStyles.caption,
+                ),
+                Text(
+                  context.l10n.segmentsCount(diagnostics.transcriptSegments),
+                  key: const Key('today-capture-transcript-proof'),
+                  style: EllaTextStyles.caption,
+                ),
+                Text(
+                  '${context.l10n.statusLabel}: $memoryStatus'
+                  '${diagnostics.finalizationAttempts > 0 ? ' · ${diagnostics.finalizationAttempts}' : ''}',
+                  key: const Key('today-capture-memory-proof'),
+                  style: EllaTextStyles.caption,
+                ),
+              ],
+            ),
+            if (diagnostics.latestTranscript.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                '${context.l10n.transcript}: ${diagnostics.latestTranscript.trim()}',
+                key: const Key('today-capture-latest-transcript'),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: EllaTextStyles.caption.copyWith(color: EllaColors.tealDeep),
+              ),
+            ],
+            if (failure != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                failure,
+                key: const Key('today-capture-failure-proof'),
+                style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w700),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

@@ -64,15 +64,119 @@ import 'package:omi/backend/schema/message_event.dart'
 enum PhoneCaptureStartResult {
   started,
   consentUnavailable,
+  accountNotReady,
   microphonePermissionDenied,
   transcriptionUnavailable,
   recorderUnavailable,
   cancelled,
 }
 
+enum PhoneCaptureStopResult { empty, finalized, failed }
+
+enum CaptureDiagnosticSource { none, phone, necklace }
+
+enum CaptureDiagnosticPhase {
+  idle,
+  checkingPermission,
+  waitingForAccount,
+  connectingTranscription,
+  startingCapture,
+  waitingForAudio,
+  streaming,
+  receivingTranscript,
+  stopping,
+  finalizing,
+  completed,
+  disconnected,
+  failed,
+}
+
+enum CaptureDiagnosticFailure {
+  none,
+  consentUnavailable,
+  accountNotReady,
+  microphonePermissionDenied,
+  transcriptionUnavailable,
+  recorderUnavailable,
+  necklaceConnectionUnavailable,
+  physicalAudioUnavailable,
+  socketClosed,
+  socketError,
+  deviceDisconnected,
+  noTranscript,
+  finalizationFailed,
+}
+
+@immutable
+class CaptureDiagnostics {
+  const CaptureDiagnostics({
+    this.source = CaptureDiagnosticSource.none,
+    this.phase = CaptureDiagnosticPhase.idle,
+    this.physicalFrames = 0,
+    this.physicalBytes = 0,
+    this.transmittedFrames = 0,
+    this.transmittedBytes = 0,
+    this.transcriptSegments = 0,
+    this.latestTranscript = '',
+    this.finalizationAttempts = 0,
+    this.failure = CaptureDiagnosticFailure.none,
+    this.startedAt,
+    this.updatedAt,
+  });
+
+  final CaptureDiagnosticSource source;
+  final CaptureDiagnosticPhase phase;
+  final int physicalFrames;
+  final int physicalBytes;
+  final int transmittedFrames;
+  final int transmittedBytes;
+  final int transcriptSegments;
+  final String latestTranscript;
+  final int finalizationAttempts;
+  final CaptureDiagnosticFailure failure;
+  final DateTime? startedAt;
+  final DateTime? updatedAt;
+
+  bool get hasPhysicalAudio => physicalFrames > 0 && physicalBytes > 0;
+  bool get hasTranscriptionDelivery => transmittedFrames > 0 && transmittedBytes > 0;
+  bool get hasTranscript => transcriptSegments > 0 || latestTranscript.trim().isNotEmpty;
+
+  CaptureDiagnostics copyWith({
+    CaptureDiagnosticSource? source,
+    CaptureDiagnosticPhase? phase,
+    int? physicalFrames,
+    int? physicalBytes,
+    int? transmittedFrames,
+    int? transmittedBytes,
+    int? transcriptSegments,
+    String? latestTranscript,
+    int? finalizationAttempts,
+    CaptureDiagnosticFailure? failure,
+    DateTime? startedAt,
+    DateTime? updatedAt,
+    bool clearFailure = false,
+  }) =>
+      CaptureDiagnostics(
+        source: source ?? this.source,
+        phase: phase ?? this.phase,
+        physicalFrames: physicalFrames ?? this.physicalFrames,
+        physicalBytes: physicalBytes ?? this.physicalBytes,
+        transmittedFrames: transmittedFrames ?? this.transmittedFrames,
+        transmittedBytes: transmittedBytes ?? this.transmittedBytes,
+        transcriptSegments: transcriptSegments ?? this.transcriptSegments,
+        latestTranscript: latestTranscript ?? this.latestTranscript,
+        finalizationAttempts: finalizationAttempts ?? this.finalizationAttempts,
+        failure: clearFailure ? CaptureDiagnosticFailure.none : (failure ?? this.failure),
+        startedAt: startedAt ?? this.startedAt,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+}
+
 @visibleForTesting
 class PhoneCaptureStartProof {
   final Completer<void> _firstAudioFrame = Completer<void>();
+  final Completer<void> _firstTransmittedAudioFrame = Completer<void>();
+  final Completer<void> _nativeRecorderStarted = Completer<void>();
 
   bool acceptFrame(List<int> bytes) {
     if (bytes.isEmpty) return false;
@@ -80,13 +184,38 @@ class PhoneCaptureStartProof {
     return true;
   }
 
+  void acceptNativeRecorderStart() {
+    if (!_nativeRecorderStarted.isCompleted) _nativeRecorderStarted.complete();
+  }
+
+  bool acceptTransmittedFrame(List<int> bytes) {
+    if (bytes.isEmpty) return false;
+    if (!_firstTransmittedAudioFrame.isCompleted) _firstTransmittedAudioFrame.complete();
+    return true;
+  }
+
   Future<void> waitForAudio({Duration timeout = const Duration(seconds: 5)}) =>
       _firstAudioFrame.future.timeout(timeout);
+
+  Future<void> waitForNativeRecorder({Duration timeout = const Duration(seconds: 5)}) =>
+      _nativeRecorderStarted.future.timeout(timeout);
+
+  Future<void> waitForTransmittedAudio({Duration timeout = const Duration(seconds: 5)}) =>
+      _firstTransmittedAudioFrame.future.timeout(timeout);
+
+  bool get hasNativeRecorder => _nativeRecorderStarted.isCompleted;
 }
 
 @visibleForTesting
 class DeviceCaptureStartProof {
+  final Completer<void> _firstPhysicalAudioFrame = Completer<void>();
   final Completer<void> _firstTransmittedAudioFrame = Completer<void>();
+
+  bool acceptPhysicalFrame(List<int> bytes) {
+    if (bytes.isEmpty) return false;
+    if (!_firstPhysicalAudioFrame.isCompleted) _firstPhysicalAudioFrame.complete();
+    return true;
+  }
 
   bool acceptTransmittedFrame(List<int> bytes) {
     if (bytes.isEmpty) return false;
@@ -98,6 +227,18 @@ class DeviceCaptureStartProof {
 
   Future<void> waitForTransmittedAudio({Duration timeout = const Duration(seconds: 5)}) =>
       _firstTransmittedAudioFrame.future.timeout(timeout);
+
+  Future<void> waitForPhysicalAudio({Duration timeout = const Duration(seconds: 5)}) =>
+      _firstPhysicalAudioFrame.future.timeout(timeout);
+
+  bool get hasPhysicalAudio => _firstPhysicalAudioFrame.isCompleted;
+}
+
+@visibleForTesting
+List<int> physicalDeviceAudioPayload(DeviceType deviceType, List<int> frame) {
+  final headerLength = deviceType == DeviceType.omi || deviceType == DeviceType.openglass ? 3 : 0;
+  if (frame.length <= headerLength) return const <int>[];
+  return headerLength == 0 ? frame : frame.sublist(headerLength);
 }
 
 @visibleForTesting
@@ -119,6 +260,7 @@ typedef InProgressConversationFetchCall = Future<List<ServerConversation>> Funct
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 typedef InProgressConversationProcessCall = Future<CreateConversationResponse?> Function({
+  required String conversationId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
@@ -130,6 +272,96 @@ typedef CaptureGeolocationSender = Future<bool> Function({
 typedef CaptureConsentAuthorityEnsurer = Future<bool> Function();
 typedef DeviceCaptureStarter = Future<bool> Function();
 typedef PhoneCaptureStarter = Future<PhoneCaptureStartResult> Function();
+typedef PhoneTranscriptionPreparer = Future<bool> Function();
+typedef PhoneAudioSender = bool Function(Uint8List bytes);
+typedef PhoneMicrophonePermissionChecker = Future<bool> Function();
+typedef DeviceTranscriptionSocketPreparer = Future<TranscriptSegmentSocketService?> Function(
+  BtDevice device, {
+  required bool force,
+});
+
+class _DeviceCaptureAttempt {
+  _DeviceCaptureAttempt({
+    required this.id,
+    required this.deviceId,
+    required this.accountGeneration,
+  });
+
+  final int id;
+  final String deviceId;
+  final int accountGeneration;
+  final Completer<void> cancelled = Completer<void>();
+  ActiveWalAuthority? authority;
+  TranscriptSegmentSocketService? socket;
+
+  void cancel() {
+    if (!cancelled.isCompleted) cancelled.complete();
+  }
+}
+
+class _DeviceCaptureSession {
+  _DeviceCaptureSession({
+    required this.id,
+    required this.deviceId,
+    required this.deviceType,
+    required this.accountGeneration,
+    required this.authority,
+    required this.socket,
+    required this.cancelled,
+  });
+
+  final int id;
+  final String deviceId;
+  final DeviceType deviceType;
+  final int accountGeneration;
+  final ActiveWalAuthority authority;
+  TranscriptSegmentSocketService socket;
+  final Completer<void> cancelled;
+  StreamSubscription? bytesStream;
+  StreamSubscription? buttonStream;
+  StreamSubscription? photoStream;
+  Timer? physicalFrameWatchdog;
+  _DeviceSocketReplacementBuffer? socketReplacementBuffer;
+}
+
+class _BufferedDeviceCaptureFrame {
+  const _BufferedDeviceCaptureFrame({
+    required this.socketPayload,
+    required this.walFrame,
+    required this.persistedToWal,
+  });
+
+  final List<int> socketPayload;
+  final List<int> walFrame;
+  final bool persistedToWal;
+}
+
+class _DeviceSocketReplacementBuffer {
+  _DeviceSocketReplacementBuffer({required this.maxFrames, required this.maxBytes});
+
+  final int maxFrames;
+  final int maxBytes;
+  final List<_BufferedDeviceCaptureFrame> frames = <_BufferedDeviceCaptureFrame>[];
+  int bytes = 0;
+  bool overflowed = false;
+  bool failureSignalled = false;
+
+  bool add(_BufferedDeviceCaptureFrame frame) {
+    if (overflowed) return false;
+    if (frames.length >= maxFrames || bytes + frame.socketPayload.length > maxBytes) {
+      overflowed = true;
+      return false;
+    }
+    frames.add(frame);
+    bytes += frame.socketPayload.length;
+    return true;
+  }
+
+  void clear() {
+    frames.clear();
+    bytes = 0;
+  }
+}
 
 Future<List<ServerConversation>> _fetchInProgressConversation({
   required String expectedAuthenticatedUid,
@@ -143,10 +375,12 @@ Future<List<ServerConversation>> _fetchInProgressConversation({
     );
 
 Future<CreateConversationResponse?> _processInProgressConversation({
+  required String conversationId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 }) =>
     processInProgressConversation(
+      conversationId: conversationId,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );
@@ -262,17 +496,38 @@ class CaptureProvider extends ChangeNotifier
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
   Future<PhoneCaptureStartResult>? _micStartFuture;
+  int _phoneCaptureReleaseOperations = 0;
+  Future<void>? _phoneCaptureTransportStopFuture;
+  Future<PhoneCaptureStopResult>? _phoneCaptureStopFuture;
+  Future<bool>? _deviceCaptureFinalizationFuture;
+  Future<bool>? _deviceCaptureBoundaryFuture;
   Future<bool>? _systemAudioStartFuture;
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
+  int _deviceCaptureGeneration = 0;
+  int _deviceCaptureFailureTransitions = 0;
+  _DeviceCaptureAttempt? _deviceCaptureAttempt;
+  Future<void>? _deviceCaptureStartFuture;
+  _DeviceCaptureSession? _deviceCaptureSession;
   final ActiveAccountAuthorityProvider _activeAccountAuthority;
   final ActiveWalAuthorityProvider _activeWalAuthority;
   final CaptureGeolocationSender? _geolocationSender;
   final Set<Future<bool>> _captureGeolocationFutures = <Future<bool>>{};
   final CaptureConsentAuthorityEnsurer? _captureConsentAuthorityEnsurer;
   final DeviceCaptureStarter? _deviceCaptureStarter;
+  final DeviceTranscriptionSocketPreparer? _deviceTranscriptionSocketPreparer;
   final PhoneCaptureStarter? _phoneCaptureStarter;
+  final IMicRecorderService? _phoneMicRecorder;
+  final PhoneTranscriptionPreparer? _phoneTranscriptionPreparer;
+  final PhoneAudioSender? _phoneAudioSender;
+  final PhoneMicrophonePermissionChecker? _phoneMicrophonePermissionChecker;
+  final Duration _captureStartProofTimeout;
+  final Duration _devicePhysicalFrameTimeout;
+  final Duration _captureAuthorityWaitTimeout;
+  final Duration _captureAuthorityPollInterval;
+  final int _deviceSocketReplacementBufferMaxFrames;
+  final int _deviceSocketReplacementBufferMaxBytes;
   final InProgressConversationFetchCall _inProgressConversationFetch;
   final InProgressConversationProcessCall _inProgressConversationProcess;
 
@@ -331,7 +586,18 @@ class CaptureProvider extends ChangeNotifier
     CaptureGeolocationSender? geolocationSender,
     CaptureConsentAuthorityEnsurer? captureConsentAuthorityEnsurer,
     DeviceCaptureStarter? deviceCaptureStarter,
+    DeviceTranscriptionSocketPreparer? deviceTranscriptionSocketPreparer,
     PhoneCaptureStarter? phoneCaptureStarter,
+    IMicRecorderService? phoneMicRecorder,
+    PhoneTranscriptionPreparer? phoneTranscriptionPreparer,
+    PhoneAudioSender? phoneAudioSender,
+    PhoneMicrophonePermissionChecker? phoneMicrophonePermissionChecker,
+    @visibleForTesting Duration captureStartProofTimeout = const Duration(seconds: 5),
+    @visibleForTesting Duration devicePhysicalFrameTimeout = const Duration(seconds: 5),
+    @visibleForTesting Duration captureAuthorityWaitTimeout = const Duration(seconds: 3),
+    @visibleForTesting Duration captureAuthorityPollInterval = const Duration(milliseconds: 100),
+    @visibleForTesting int deviceSocketReplacementBufferMaxFrames = 2048,
+    @visibleForTesting int deviceSocketReplacementBufferMaxBytes = 1024 * 1024,
     InProgressConversationFetchCall inProgressConversationFetch = _fetchInProgressConversation,
     InProgressConversationProcessCall inProgressConversationProcess = _processInProgressConversation,
   })  : _activeAccountAuthority = activeAccountAuthority,
@@ -339,7 +605,18 @@ class CaptureProvider extends ChangeNotifier
         _geolocationSender = geolocationSender,
         _captureConsentAuthorityEnsurer = captureConsentAuthorityEnsurer,
         _deviceCaptureStarter = deviceCaptureStarter,
+        _deviceTranscriptionSocketPreparer = deviceTranscriptionSocketPreparer,
         _phoneCaptureStarter = phoneCaptureStarter,
+        _phoneMicRecorder = phoneMicRecorder,
+        _phoneTranscriptionPreparer = phoneTranscriptionPreparer,
+        _phoneAudioSender = phoneAudioSender,
+        _phoneMicrophonePermissionChecker = phoneMicrophonePermissionChecker,
+        _captureStartProofTimeout = captureStartProofTimeout,
+        _devicePhysicalFrameTimeout = devicePhysicalFrameTimeout,
+        _captureAuthorityWaitTimeout = captureAuthorityWaitTimeout,
+        _captureAuthorityPollInterval = captureAuthorityPollInterval,
+        _deviceSocketReplacementBufferMaxFrames = deviceSocketReplacementBufferMaxFrames,
+        _deviceSocketReplacementBufferMaxBytes = deviceSocketReplacementBufferMaxBytes,
         _inProgressConversationFetch = inProgressConversationFetch,
         _inProgressConversationProcess = inProgressConversationProcess {
     _accountIsolationProducerToken = EllaAccountIsolationService.registerCaptureProducer(stopForAccountTransition);
@@ -424,6 +701,7 @@ class CaptureProvider extends ChangeNotifier
     _freemiumThresholdReached = false;
     _freemiumRemainingSeconds = 0;
     _freemiumRequiresUserAction = false;
+    _resetCaptureDiagnostics();
     notifyListeners();
   }
 
@@ -488,6 +766,108 @@ class CaptureProvider extends ChangeNotifier
 
   RecordingState recordingState = RecordingState.stop;
 
+  CaptureDiagnostics _captureDiagnostics = const CaptureDiagnostics();
+  DateTime? _lastCaptureDiagnosticsNotificationAt;
+
+  CaptureDiagnostics get captureDiagnostics => _captureDiagnostics;
+
+  bool get hasUnfinalizedPhoneCaptureContent =>
+      _captureDiagnostics.source == CaptureDiagnosticSource.phone &&
+      _captureDiagnostics.phase != CaptureDiagnosticPhase.completed &&
+      (_captureDiagnostics.hasPhysicalAudio || hasCapturableContent);
+
+  void _resetCaptureDiagnostics({bool notify = false}) {
+    _captureDiagnostics = const CaptureDiagnostics();
+    _lastCaptureDiagnosticsNotificationAt = null;
+    if (notify) notifyListeners();
+  }
+
+  void _beginCaptureDiagnostics(CaptureDiagnosticSource source, CaptureDiagnosticPhase phase) {
+    final now = DateTime.now();
+    _captureDiagnostics = CaptureDiagnostics(source: source, phase: phase, startedAt: now, updatedAt: now);
+    _lastCaptureDiagnosticsNotificationAt = now;
+    notifyListeners();
+  }
+
+  void _updateCaptureDiagnostics({
+    CaptureDiagnosticPhase? phase,
+    CaptureDiagnosticFailure? failure,
+    int? finalizationAttempts,
+    bool clearFailure = false,
+    bool notify = true,
+  }) {
+    _captureDiagnostics = _captureDiagnostics.copyWith(
+      phase: phase,
+      failure: failure,
+      finalizationAttempts: finalizationAttempts,
+      clearFailure: clearFailure,
+      updatedAt: DateTime.now(),
+    );
+    if (notify) notifyListeners();
+  }
+
+  void _recordPhysicalCaptureFrame(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    final firstFrame = _captureDiagnostics.physicalFrames == 0;
+    _captureDiagnostics = _captureDiagnostics.copyWith(
+      physicalFrames: _captureDiagnostics.physicalFrames + 1,
+      physicalBytes: _captureDiagnostics.physicalBytes + bytes.length,
+      updatedAt: DateTime.now(),
+    );
+    _notifyCaptureDiagnosticsForFrame(force: firstFrame);
+  }
+
+  void _recordTransmittedCaptureFrame(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    final firstFrame = _captureDiagnostics.transmittedFrames == 0;
+    _captureDiagnostics = _captureDiagnostics.copyWith(
+      transmittedFrames: _captureDiagnostics.transmittedFrames + 1,
+      transmittedBytes: _captureDiagnostics.transmittedBytes + bytes.length,
+      updatedAt: DateTime.now(),
+    );
+    _notifyCaptureDiagnosticsForFrame(force: firstFrame);
+  }
+
+  void _recordTranscriptDiagnostics({bool preservePhase = false}) {
+    final latest = segments.lastWhereOrNull((segment) => segment.text.trim().isNotEmpty)?.text.trim() ?? '';
+    _captureDiagnostics = _captureDiagnostics.copyWith(
+      phase: preservePhase ? _captureDiagnostics.phase : CaptureDiagnosticPhase.receivingTranscript,
+      transcriptSegments: segments.where((segment) => segment.text.trim().isNotEmpty).length,
+      latestTranscript: latest,
+      clearFailure: true,
+      updatedAt: DateTime.now(),
+    );
+    notifyListeners();
+  }
+
+  void _notifyCaptureDiagnosticsForFrame({required bool force}) {
+    final now = DateTime.now();
+    final lastNotification = _lastCaptureDiagnosticsNotificationAt;
+    if (!force && lastNotification != null && now.difference(lastNotification) < const Duration(milliseconds: 500)) {
+      return;
+    }
+    _lastCaptureDiagnosticsNotificationAt = now;
+    notifyListeners();
+  }
+
+  void _failCaptureDiagnostics(CaptureDiagnosticFailure failure) {
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.failed, failure: failure);
+  }
+
+  bool get phoneCaptureOwnsMobileAudio =>
+      _micStartFuture != null || _phoneCaptureReleaseOperations > 0 || recordingState == RecordingState.record;
+
+  void _beginPhoneCaptureRelease() {
+    _phoneCaptureReleaseOperations++;
+    notifyListeners();
+  }
+
+  void _endPhoneCaptureRelease() {
+    if (_phoneCaptureReleaseOperations == 0) return;
+    _phoneCaptureReleaseOperations--;
+    notifyListeners();
+  }
+
   bool _isPaused = false;
   bool get isPaused => _isPaused;
 
@@ -549,6 +929,193 @@ class CaptureProvider extends ChangeNotifier
     _updateRecordingDevice(device);
   }
 
+  void _clearFailedDeviceCaptureOwner(_DeviceCaptureAttempt attempt, BtDevice targetDevice) {
+    if (!_isDeviceCaptureAttemptCurrent(attempt) ||
+        _deviceCaptureSession != null ||
+        recordingState == RecordingState.deviceRecord ||
+        _recordingDevice?.id != targetDevice.id) {
+      return;
+    }
+    _updateRecordingDevice(null);
+  }
+
+  bool _isDeviceCaptureAttemptCurrent(_DeviceCaptureAttempt attempt) =>
+      identical(_deviceCaptureAttempt, attempt) &&
+      attempt.id == _deviceCaptureGeneration &&
+      attempt.accountGeneration == _captureGeneration;
+
+  bool _isDeviceCaptureCurrent(_DeviceCaptureSession session) =>
+      identical(_deviceCaptureSession, session) &&
+      session.id == _deviceCaptureGeneration &&
+      session.accountGeneration == _captureGeneration &&
+      session.authority.isCurrent();
+
+  @visibleForTesting
+  TranscriptSegmentSocketService? get deviceCaptureSocketForTesting => _deviceCaptureSession?.socket;
+
+  bool get hasActiveDeviceCaptureBoundaryEvidence {
+    final session = _deviceCaptureSession;
+    return session != null &&
+        _isDeviceCaptureCurrent(session) &&
+        recordingState == RecordingState.deviceRecord &&
+        _captureDiagnostics.source == CaptureDiagnosticSource.necklace &&
+        _captureDiagnostics.hasPhysicalAudio;
+  }
+
+  @visibleForTesting
+  void ingestDeviceAudioFrameForTesting(
+    List<int> frame, {
+    BleAudioCodec codec = BleAudioCodec.pcm8,
+  }) {
+    final session = _deviceCaptureSession;
+    if (session != null) _handleDeviceAudioFrame(session, codec, frame);
+  }
+
+  @visibleForTesting
+  void reconnectDeviceCaptureSocketForTesting(TranscriptSegmentSocketService socket) {
+    _socket = socket;
+    onConnected();
+  }
+
+  @visibleForTesting
+  bool get hasPendingDeviceCaptureStartForTesting => _deviceCaptureStartFuture != null;
+
+  @visibleForTesting
+  int get deviceCaptureFailureTransitionsForTesting => _deviceCaptureFailureTransitions;
+
+  Future<bool> _closeDeviceCaptureSession(
+    _DeviceCaptureSession session, {
+    required bool stopSocket,
+    bool stopCamera = false,
+  }) async {
+    final wasCurrent = identical(_deviceCaptureSession, session);
+    if (!session.cancelled.isCompleted) session.cancelled.complete();
+    session.physicalFrameWatchdog?.cancel();
+    session.physicalFrameWatchdog = null;
+    session.socketReplacementBuffer?.clear();
+    session.socketReplacementBuffer = null;
+
+    if (wasCurrent) _deviceCaptureSession = null;
+    if (identical(_bleBytesStream, session.bytesStream)) _bleBytesStream = null;
+    if (identical(_bleButtonStream, session.buttonStream)) _bleButtonStream = null;
+    if (identical(_blePhotoStream, session.photoStream)) _blePhotoStream = null;
+    if (wasCurrent || _deviceCaptureSession == null) _stopMetricsTracking();
+
+    var succeeded = true;
+    Future<void> cancel(StreamSubscription? subscription, String label) async {
+      try {
+        await subscription?.cancel();
+      } catch (error) {
+        succeeded = false;
+        Logger.error('Could not stop old necklace $label: $error');
+      }
+    }
+
+    await cancel(session.bytesStream, 'audio stream');
+    await cancel(session.photoStream, 'photo stream');
+    await cancel(session.buttonStream, 'button stream');
+
+    if (stopCamera) {
+      try {
+        final connection = await ServiceManager.instance().device.ensureConnection(session.deviceId);
+        if (connection != null && await connection.hasPhotoStreamingCharacteristic()) {
+          await connection.performCameraStopPhotoController();
+        }
+      } catch (error) {
+        succeeded = false;
+        Logger.error('Could not stop old necklace camera: $error');
+      }
+    }
+
+    final replacementUsesSocket = _deviceCaptureSession != null &&
+        !identical(_deviceCaptureSession, session) &&
+        identical(_deviceCaptureSession?.socket, session.socket);
+    if (stopSocket && !replacementUsesSocket && session.socket.state == SocketServiceState.connected) {
+      try {
+        await session.socket.stop(reason: 'necklace capture session stopped');
+      } catch (error) {
+        succeeded = false;
+        Logger.error('Could not stop old necklace transcription socket: $error');
+      }
+    }
+    return succeeded;
+  }
+
+  /// Stops only the capture session owned by [deviceId]. A disconnected but
+  /// idle necklace must never cancel a phone or desktop capture.
+  Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
+    final attempt = _deviceCaptureAttempt;
+    final session = _deviceCaptureSession;
+    final deviceMatched = _recordingDevice?.id == deviceId;
+    final attemptMatched = attempt != null && attempt.deviceId == deviceId;
+    final sessionMatched = session != null && session.deviceId == deviceId;
+    if (!attemptMatched && !sessionMatched) {
+      if (deviceMatched) _updateRecordingDevice(null);
+      return false;
+    }
+
+    final shouldFinalize = sessionMatched && (_captureDiagnostics.hasPhysicalAudio || hasCapturableContent);
+    _deviceCaptureGeneration++;
+    if (attemptMatched) attempt.cancel();
+    if (sessionMatched && !session.cancelled.isCompleted) session.cancelled.complete();
+    if (sessionMatched) session.physicalFrameWatchdog?.cancel();
+    _isPaused = false;
+    if (deviceMatched) _updateRecordingDevice(null);
+    updateRecordingState(RecordingState.stop);
+    _updateCaptureDiagnostics(
+      phase: CaptureDiagnosticPhase.disconnected,
+      failure: CaptureDiagnosticFailure.deviceDisconnected,
+    );
+    var succeeded = true;
+    final pendingStart = attemptMatched ? _deviceCaptureStartFuture : null;
+    if (pendingStart != null) {
+      try {
+        await pendingStart;
+      } catch (error) {
+        succeeded = false;
+        Logger.error('Could not finish cancelled necklace start: $error');
+      }
+    }
+    if (shouldFinalize) {
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing);
+      final finalized = await _serializedDeviceCaptureFinalization();
+      if (finalized) {
+        _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.completed, clearFailure: true);
+      } else {
+        _failCaptureDiagnostics(
+          _captureDiagnostics.hasTranscript
+              ? CaptureDiagnosticFailure.finalizationFailed
+              : CaptureDiagnosticFailure.noTranscript,
+        );
+        succeeded = false;
+      }
+    }
+    if (sessionMatched) {
+      final closed = await _closeDeviceCaptureSession(session, stopSocket: true);
+      succeeded = closed && succeeded;
+    }
+    return succeeded;
+  }
+
+  Future<void> _failDeviceCaptureSession(_DeviceCaptureSession session, String reason) async {
+    if (!_isDeviceCaptureCurrent(session)) return;
+    _deviceCaptureFailureTransitions++;
+    Logger.error(reason);
+    _deviceCaptureGeneration++;
+    _isPaused = false;
+    updateRecordingState(RecordingState.error);
+    _failCaptureDiagnostics(CaptureDiagnosticFailure.necklaceConnectionUnavailable);
+    await _closeDeviceCaptureSession(session, stopSocket: true);
+  }
+
+  void _armDevicePhysicalFrameWatchdog(_DeviceCaptureSession session) {
+    session.physicalFrameWatchdog?.cancel();
+    session.physicalFrameWatchdog = Timer(_devicePhysicalFrameTimeout, () {
+      if (!_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return;
+      unawaited(_failDeviceCaptureSession(session, 'Necklace capture stopped because physical BLE audio ceased'));
+    });
+  }
+
   Future _resetStateVariables() async {
     segments = [];
     photos = [];
@@ -571,14 +1138,9 @@ class CaptureProvider extends ChangeNotifier
     _replacingTranscriptionSocket = true;
     try {
       // Handle device recording
-      if (_recordingDevice != null) {
-        await _socket?.stop(reason: 'transcription settings changed');
-        BleAudioCodec codec = await _getAudioCodec(_recordingDevice!.id);
-        await _initiateWebsocket(
-          audioCodec: codec,
-          force: true,
-          source: _getConversationSourceFromDevice(),
-        );
+      final deviceSession = _deviceCaptureSession;
+      if (deviceSession != null && _isDeviceCaptureCurrent(deviceSession)) {
+        await _replaceDeviceCaptureSocket(deviceSession, reason: 'transcription settings changed');
         return;
       }
 
@@ -720,12 +1282,11 @@ class CaptureProvider extends ChangeNotifier
     _processVoiceCommandBytes(deviceId, data);
   }
 
-  Future streamButton(String deviceId) async {
-    final generation = _captureGeneration;
+  Future<StreamSubscription?> _streamButton(String deviceId, _DeviceCaptureSession session) async {
     Logger.debug('streamButton in capture_provider');
     await _bleButtonStream?.cancel();
     final subscription = await _getBleButtonListener(deviceId, onButtonReceived: (List<int> value) {
-      if (generation != _captureGeneration) return;
+      if (!_isDeviceCaptureCurrent(session)) return;
       final snapshot = List<int>.from(value);
       if (snapshot.isEmpty || snapshot.length < 4) return;
       var buttonState = ByteData.view(Uint8List.fromList(snapshot.sublist(0, 4).reversed.toList()).buffer).getUint32(0);
@@ -824,16 +1385,19 @@ class CaptureProvider extends ChangeNotifier
         _endVoiceCommandSession(deviceId);
       }
     });
-    if (generation != _captureGeneration) {
+    if (!_isDeviceCaptureCurrent(session)) {
       await subscription?.cancel();
-      return;
+      return null;
     }
     _bleButtonStream = subscription;
+    session.buttonStream = subscription;
+    return subscription;
   }
 
-  Future<StreamSubscription?> streamAudioToWs(
+  Future<StreamSubscription?> _streamAudioToWs(
     String deviceId,
     BleAudioCodec codec, {
+    required _DeviceCaptureSession session,
     DeviceCaptureStartProof? startProof,
   }) async {
     if (!SharedPreferencesUtil().aiConsentAccepted) {
@@ -841,9 +1405,7 @@ class CaptureProvider extends ChangeNotifier
       _bleBytesStream = null;
       return null;
     }
-    final generation = _captureGeneration;
-    final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isDeviceCaptureCurrent(session)) {
       _bleBytesStream = null;
       return null;
     }
@@ -851,92 +1413,154 @@ class CaptureProvider extends ChangeNotifier
     await _bleBytesStream?.cancel();
     _startMetricsTracking();
     final subscription = await _getBleAudioBytesListener(deviceId, onAudioBytesReceived: (List<int> value) {
-      final snapshot = List<int>.from(value);
-      if (snapshot.isEmpty || snapshot.length < 3) return;
-
-      // Keep late frames bound to the capture-start authority. Unknown/stale
-      // frames are retained for quarantine and never inherit the next account.
-      if (!_isCaptureCurrent(generation, captureAuthority)) {
-        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
-        return;
-      }
-
-      // Track bytes received from BLE
-      _blesBytesReceived += snapshot.length;
-
-      // Command button triggered
-      bool voiceCommandSupported = _recordingDevice != null
-          ? (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass)
-          : false;
-      if (_voiceCommandSession != null && voiceCommandSupported) {
-        _commandBytes.add(snapshot.sublist(3));
-      }
-
-      // Local storage syncs
-      var checkWalSupported =
-          (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) &&
-              codec.isOpusSupported() &&
-              (_socket?.state != SocketServiceState.connected || SharedPreferencesUtil().unlimitedLocalStorageEnabled);
-      if (checkWalSupported != _isWalSupported) {
-        setIsWalSupported(checkWalSupported);
-      }
-      if (_isWalSupported) {
-        _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
-      }
-
-      // Send WS
-      if (_socket?.state == SocketServiceState.connected) {
-        if (!SharedPreferencesUtil().aiConsentAccepted) return;
-        final paddingLeft =
-            (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) ? 3 : 0;
-        final trimmedValue = paddingLeft > 0 ? value.sublist(paddingLeft) : value;
-        _socket?.send(trimmedValue);
-        startProof?.acceptTransmittedFrame(trimmedValue);
-
-        // Track bytes sent to websocket
-        _wsSocketBytesSent += trimmedValue.length;
-
-        // Mark as synced
-        if (_isWalSupported) {
-          _wal.getSyncs().phone.onBytesSync(value);
-        }
-      }
+      _handleDeviceAudioFrame(session, codec, value, startProof: startProof);
     });
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isDeviceCaptureCurrent(session)) {
       await subscription?.cancel();
       return null;
     }
     _bleBytesStream = subscription;
+    session.bytesStream = subscription;
     notifyListeners();
     return subscription;
   }
 
-  Future<void> _resetState() async {
-    Logger.debug('resetState');
-    await _cleanupCurrentState();
+  void _handleDeviceAudioFrame(
+    _DeviceCaptureSession session,
+    BleAudioCodec codec,
+    List<int> value, {
+    DeviceCaptureStartProof? startProof,
+  }) {
+    final snapshot = List<int>.from(value);
+    if (snapshot.isEmpty || snapshot.length < 3) return;
+    final captureAuthority = session.authority;
 
-    // Always try to stream audio if a device is present
-    await _ensureDeviceSocketConnection();
-    await _initiateDeviceAudioStreaming();
-
-    // Additionally, stream photos if the device supports it
-    if (_recordingDevice != null) {
-      var connection = await ServiceManager.instance().device.ensureConnection(_recordingDevice!.id);
-      if (connection != null && await connection.hasPhotoStreamingCharacteristic()) {
-        await _initiateDevicePhotoStreaming();
-      }
+    // Keep late frames bound to the capture-start authority. Unknown/stale
+    // frames are retained for quarantine and never inherit the next account.
+    if (!_isDeviceCaptureCurrent(session)) {
+      _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
+      return;
     }
 
+    final physicalPayload = physicalDeviceAudioPayload(session.deviceType, snapshot);
+    if (physicalPayload.isNotEmpty) {
+      startProof?.acceptPhysicalFrame(physicalPayload);
+      _recordPhysicalCaptureFrame(physicalPayload);
+      _armDevicePhysicalFrameWatchdog(session);
+    }
+
+    _blesBytesReceived += snapshot.length;
+
+    final voiceCommandSupported = session.deviceType == DeviceType.omi || session.deviceType == DeviceType.openglass;
+    if (_voiceCommandSession != null && voiceCommandSupported) {
+      _commandBytes.add(snapshot.sublist(3));
+    }
+
+    final walSupported = (session.deviceType == DeviceType.omi || session.deviceType == DeviceType.openglass) &&
+        codec.isOpusSupported() &&
+        (session.socket.state != SocketServiceState.connected || SharedPreferencesUtil().unlimitedLocalStorageEnabled);
+    if (walSupported != _isWalSupported) setIsWalSupported(walSupported);
+    if (walSupported) {
+      _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
+    }
+
+    if (physicalPayload.isEmpty) return;
+    final replacementBuffer = session.socketReplacementBuffer;
+    if (replacementBuffer != null) {
+      final accepted = replacementBuffer.add(
+        _BufferedDeviceCaptureFrame(
+          socketPayload: physicalPayload,
+          walFrame: snapshot,
+          persistedToWal: walSupported,
+        ),
+      );
+      if (!accepted && !replacementBuffer.failureSignalled) {
+        replacementBuffer.failureSignalled = true;
+        unawaited(
+          _failDeviceCaptureSession(session, 'Necklace transcription replacement buffer exceeded its safe bound'),
+        );
+      }
+      return;
+    }
+
+    if (session.socket.state == SocketServiceState.connected && SharedPreferencesUtil().aiConsentAccepted) {
+      unawaited(
+        _sendDeviceFrame(
+          session.socket,
+          _BufferedDeviceCaptureFrame(
+            socketPayload: physicalPayload,
+            walFrame: snapshot,
+            persistedToWal: walSupported,
+          ),
+          startProof: startProof,
+        ),
+      );
+    }
+  }
+
+  Future<bool> _sendDeviceFrame(
+    TranscriptSegmentSocketService socket,
+    _BufferedDeviceCaptureFrame frame, {
+    DeviceCaptureStartProof? startProof,
+  }) async {
+    if (socket.state != SocketServiceState.connected || !SharedPreferencesUtil().aiConsentAccepted) return false;
+    try {
+      await socket.send(frame.socketPayload);
+      startProof?.acceptTransmittedFrame(frame.socketPayload);
+      _recordTransmittedCaptureFrame(frame.socketPayload);
+      _wsSocketBytesSent += frame.socketPayload.length;
+      if (frame.persistedToWal) _wal.getSyncs().phone.onBytesSync(frame.walFrame);
+      return true;
+    } catch (error) {
+      Logger.error('Could not send necklace audio frame: $error');
+      return false;
+    }
+  }
+
+  Future<bool> _replayDeviceSocketReplacementBuffer(
+    _DeviceCaptureSession session,
+    TranscriptSegmentSocketService replacement,
+    _DeviceSocketReplacementBuffer buffer,
+  ) async {
+    if (buffer.overflowed || !_isDeviceCaptureCurrent(session)) return false;
+    for (final frame in buffer.frames) {
+      if (!await _sendDeviceFrame(replacement, frame)) return false;
+    }
+    buffer.clear();
+    return true;
+  }
+
+  void _beginNextContinuousDeviceMoment(_DeviceSocketReplacementBuffer buffer) {
+    final now = DateTime.now();
+    _captureDiagnostics = CaptureDiagnostics(
+      source: CaptureDiagnosticSource.necklace,
+      phase: CaptureDiagnosticPhase.streaming,
+      physicalFrames: buffer.frames.length,
+      physicalBytes: buffer.frames.fold<int>(0, (total, frame) => total + frame.socketPayload.length),
+      startedAt: now,
+      updatedAt: now,
+    );
+    _lastCaptureDiagnosticsNotificationAt = now;
     notifyListeners();
   }
 
-  Future<bool> _startDeviceCaptureTransport() async {
-    await _resetState();
-    return recordingState == RecordingState.deviceRecord;
+  Future<void> _resetState() async {
+    Logger.debug('resetState');
+    final device = _recordingDevice;
+    await _cleanupCurrentState();
+    if (device != null) await streamDeviceRecording(device: device);
   }
 
   Future _cleanupCurrentState() async {
+    final pendingDeviceStart = _deviceCaptureStartFuture;
     await _closeBleStream();
+    if (pendingDeviceStart != null) {
+      try {
+        await pendingDeviceStart;
+      } catch (error) {
+        Logger.error('Could not finish cancelled necklace start during cleanup: $error');
+      }
+    }
     notifyListeners();
   }
 
@@ -978,40 +1602,110 @@ class CaptureProvider extends ChangeNotifier
     return connection.getBleButtonListener(onButtonReceived: onButtonReceived);
   }
 
-  Future<void> _ensureDeviceSocketConnection() async {
-    if (_recordingDevice == null) {
-      return;
+  Future<TranscriptSegmentSocketService?> _ensureDeviceSocketConnection(
+    BtDevice device, {
+    bool force = false,
+  }) async {
+    final testPreparer = _deviceTranscriptionSocketPreparer;
+    if (testPreparer != null) {
+      final prepared = await testPreparer(device, force: force);
+      _socket = prepared;
+      if (prepared == null || prepared.state != SocketServiceState.connected) {
+        _transcriptServiceReady = false;
+        return null;
+      }
+      prepared.subscribe(this, this);
+      _transcriptServiceReady = true;
+      return prepared;
     }
-    BleAudioCodec codec = await _getAudioCodec(_recordingDevice!.id);
+
+    BleAudioCodec codec = await _getAudioCodec(device.id);
     var language =
         SharedPreferencesUtil().hasSetPrimaryLanguage ? SharedPreferencesUtil().userPrimaryLanguage : "multi";
     final customSttConfig = SharedPreferencesUtil().customSttConfig;
     final sttConfigId = customSttConfig.sttConfigId;
 
-    if (language != _socket?.language ||
+    if (force ||
+        language != _socket?.language ||
         codec != _socket?.codec ||
         _socket?.state != SocketServiceState.connected ||
         _socket?.sttConfigId != sttConfigId) {
       await _initiateWebsocket(audioCodec: codec, force: true, source: _getConversationSourceFromDevice());
     }
+    final socket = _socket;
+    return socket?.state == SocketServiceState.connected ? socket : null;
   }
 
-  Future<bool> _initiateDeviceAudioStreaming() async {
+  Future<bool> _replaceDeviceCaptureSocket(
+    _DeviceCaptureSession session, {
+    required String reason,
+    Future<void> Function()? afterOldSocketStopped,
+  }) async {
+    if (!_isDeviceCaptureCurrent(session)) return false;
     final device = _recordingDevice;
-    if (device == null) {
+    if (device == null || device.id != session.deviceId) {
+      await _failDeviceCaptureSession(session, 'Necklace transcription replacement lost its device owner');
       return false;
     }
+
+    final oldSocket = session.socket;
+    if (session.socketReplacementBuffer != null) return false;
+    final replacementBuffer = _DeviceSocketReplacementBuffer(
+      maxFrames: _deviceSocketReplacementBufferMaxFrames,
+      maxBytes: _deviceSocketReplacementBufferMaxBytes,
+    );
+    session.socketReplacementBuffer = replacementBuffer;
+    try {
+      oldSocket.unsubscribe(this);
+      await oldSocket.stop(reason: reason);
+      await afterOldSocketStopped?.call();
+      if (!_isDeviceCaptureCurrent(session)) return false;
+      final replacement = await _ensureDeviceSocketConnection(device, force: true);
+      if (!_isDeviceCaptureCurrent(session)) {
+        if (replacement != null && !identical(replacement, oldSocket)) {
+          await replacement.stop(reason: 'stale necklace transcription replacement');
+        }
+        return false;
+      }
+      if (replacement == null || replacement.state != SocketServiceState.connected) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement failed');
+        return false;
+      }
+      session.socket = replacement;
+      final replayed = await _replayDeviceSocketReplacementBuffer(session, replacement, replacementBuffer);
+      session.socketReplacementBuffer = null;
+      if (!replayed) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement could not replay buffered audio');
+        return false;
+      }
+      _transcriptServiceReady = true;
+      notifyListeners();
+      return true;
+    } catch (error) {
+      Logger.error('Could not replace necklace transcription socket: $error');
+      if (_isDeviceCaptureCurrent(session)) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement failed');
+      }
+      return false;
+    } finally {
+      if (identical(session.socketReplacementBuffer, replacementBuffer)) {
+        session.socketReplacementBuffer = null;
+      }
+      replacementBuffer.clear();
+    }
+  }
+
+  Future<bool> _startDeviceCaptureTransport(_DeviceCaptureSession session, BtDevice device) async {
     final deviceId = device.id;
     if (deviceId.isEmpty) {
       return false;
     }
-    final generation = _captureGeneration;
-    final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isDeviceCaptureCurrent(session)) {
       return false;
     }
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.startingCapture, clearFailure: true);
     final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null || !_isCaptureCurrent(generation, captureAuthority)) {
+    if (connection == null || !_isDeviceCaptureCurrent(session)) {
       return false;
     }
     final codec = await _getAudioCodec(deviceId);
@@ -1022,51 +1716,64 @@ class CaptureProvider extends ChangeNotifier
     final deviceModel = pd.modelNumber.isNotEmpty ? pd.modelNumber : "Omi";
     _wal.getSyncs().phone.setDeviceInfo(deviceId, deviceModel);
 
-    await streamButton(deviceId);
+    await _streamButton(deviceId, session);
     final startProof = DeviceCaptureStartProof();
-    final subscription = await streamAudioToWs(deviceId, codec, startProof: startProof);
-    if (subscription == null || !_isCaptureCurrent(generation, captureAuthority)) {
+    final subscription = await _streamAudioToWs(deviceId, codec, session: session, startProof: startProof);
+    if (subscription == null || !_isDeviceCaptureCurrent(session)) {
       return false;
     }
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAudio, clearFailure: true);
     try {
-      await startProof.waitForTransmittedAudio();
+      await Future.any<void>([
+        startProof.waitForPhysicalAudio(timeout: _captureStartProofTimeout),
+        session.cancelled.future.then<void>((_) => throw StateError('necklace capture start cancelled')),
+      ]);
     } catch (error) {
-      Logger.error('Necklace did not transmit an audio frame to transcription: $error');
-      await subscription.cancel();
-      if (identical(_bleBytesStream, subscription)) {
-        _bleBytesStream = null;
+      if (!_isDeviceCaptureCurrent(session)) {
+        await _closeDeviceCaptureSession(session, stopSocket: false);
+        return false;
       }
+      Logger.error('Necklace physical capture start proof failed: $error');
+      _failCaptureDiagnostics(
+        startProof.hasPhysicalAudio
+            ? CaptureDiagnosticFailure.transcriptionUnavailable
+            : CaptureDiagnosticFailure.physicalAudioUnavailable,
+      );
+      await _closeDeviceCaptureSession(session, stopSocket: true);
       return false;
     }
-    if (!_isCaptureCurrent(generation, captureAuthority) || _socket?.state != SocketServiceState.connected) {
-      await subscription.cancel();
-      if (identical(_bleBytesStream, subscription)) {
-        _bleBytesStream = null;
+    if (!_isDeviceCaptureCurrent(session) || session.socket.state != SocketServiceState.connected) {
+      if (_isDeviceCaptureCurrent(session)) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription disconnected during physical start');
+      } else {
+        await _closeDeviceCaptureSession(session, stopSocket: false);
       }
       return false;
     }
 
-    // Recording is visible only after a non-empty frame reaches the live
-    // transcription socket under the same exact account/capture authority.
+    // Recording is visible after physical BLE audio is proven. The socket is
+    // still prepared first and receives frames when connected, but transport
+    // latency does not rewrite physical necklace state.
     updateRecordingState(RecordingState.deviceRecord);
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
     notifyListeners();
-    return true;
+    if (await connection.hasPhotoStreamingCharacteristic() && _isDeviceCaptureCurrent(session)) {
+      await _initiateDevicePhotoStreaming(session);
+    }
+    return _isDeviceCaptureCurrent(session);
   }
 
-  Future<void> _initiateDevicePhotoStreaming() async {
+  Future<void> _initiateDevicePhotoStreaming(_DeviceCaptureSession session) async {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
-    if (_recordingDevice == null) return;
-    final generation = _captureGeneration;
-    final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return;
-    final deviceId = _recordingDevice!.id;
+    if (!_isDeviceCaptureCurrent(session)) return;
+    final deviceId = session.deviceId;
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null || !_isCaptureCurrent(generation, captureAuthority)) return;
+    if (connection == null || !_isDeviceCaptureCurrent(session)) return;
 
     await connection.performCameraStartPhotoController();
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
+    if (!_isDeviceCaptureCurrent(session)) return;
     final subscription = await connection.performGetImageListener(onImageReceived: (orientedImage) async {
-      if (!_isCaptureCurrent(generation, captureAuthority)) return;
+      if (!_isDeviceCaptureCurrent(session)) return;
       final rotatedImageBytes = rotateImage(orientedImage);
       final String tempId = 'temp_img_${DateTime.now().millisecondsSinceEpoch}';
       final String base64Image = base64Encode(rotatedImageBytes);
@@ -1081,7 +1788,7 @@ class CaptureProvider extends ChangeNotifier
       final totalChunks = (base64Image.length / chunkSize).ceil();
 
       for (int i = 0; i < totalChunks; i++) {
-        if (!_isCaptureCurrent(generation, captureAuthority)) return;
+        if (!_isDeviceCaptureCurrent(session)) return;
         final start = i * chunkSize;
         final end = (start + chunkSize > base64Image.length) ? base64Image.length : start + chunkSize;
         final chunk = base64Image.substring(start, end);
@@ -1094,17 +1801,18 @@ class CaptureProvider extends ChangeNotifier
           'data': chunk,
         });
 
-        if (_socket?.state == SocketServiceState.connected) {
-          _socket?.send(payload); // Send the JSON string
+        if (session.socket.state == SocketServiceState.connected) {
+          session.socket.send(payload); // Send the JSON string
         }
         await Future.delayed(const Duration(milliseconds: 20)); // Small delay to prevent flooding
       }
     });
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isDeviceCaptureCurrent(session)) {
       await subscription?.cancel();
       return;
     }
     _blePhotoStream = subscription;
+    session.photoStream = subscription;
     notifyListeners();
   }
 
@@ -1172,7 +1880,20 @@ class CaptureProvider extends ChangeNotifier
     _calculateMetricsRates();
   }
 
-  Future<void> _closeBleStream({bool stopCamera = true}) async {
+  Future<void> _closeBleStream({
+    bool stopCamera = true,
+    bool invalidateDeviceCapture = true,
+  }) async {
+    if (invalidateDeviceCapture) {
+      _deviceCaptureGeneration++;
+      _deviceCaptureAttempt?.cancel();
+    }
+    final session = _deviceCaptureSession;
+    if (session != null) {
+      await _closeDeviceCaptureSession(session, stopSocket: false, stopCamera: stopCamera);
+      notifyListeners();
+      return;
+    }
     final bytesStream = _bleBytesStream;
     final photoStream = _blePhotoStream;
     final buttonStream = _bleButtonStream;
@@ -1195,9 +1916,15 @@ class CaptureProvider extends ChangeNotifier
   @override
   void dispose() {
     _captureGeneration++;
+    _deviceCaptureGeneration++;
+    _deviceCaptureAttempt?.cancel();
+    final deviceSession = _deviceCaptureSession;
+    if (deviceSession != null && !deviceSession.cancelled.isCompleted) deviceSession.cancelled.complete();
+    deviceSession?.physicalFrameWatchdog?.cancel();
     EllaAccountIsolationService.unregisterCaptureProducer(_accountIsolationProducerToken);
     _bleBytesStream?.cancel();
     _blePhotoStream?.cancel();
+    _bleButtonStream?.cancel();
     _socket?.unsubscribe(this);
     _keepAliveTimer?.cancel();
     _connectionStateListener?.cancel();
@@ -1322,10 +2049,20 @@ class CaptureProvider extends ChangeNotifier
   Future<PhoneCaptureStartResult> streamRecording() {
     final activeStart = _micStartFuture;
     if (activeStart != null) return activeStart;
+    if (_phoneCaptureReleaseOperations > 0 ||
+        _deviceCaptureAttempt != null ||
+        _deviceCaptureSession != null ||
+        recordingState == RecordingState.deviceRecord ||
+        recordingState == RecordingState.pause) {
+      return Future.value(PhoneCaptureStartResult.cancelled);
+    }
 
     late final Future<PhoneCaptureStartResult> trackedStart;
     trackedStart = _streamRecording().whenComplete(() {
-      if (identical(_micStartFuture, trackedStart)) _micStartFuture = null;
+      if (identical(_micStartFuture, trackedStart)) {
+        _micStartFuture = null;
+        notifyListeners();
+      }
     });
     _micStartFuture = trackedStart;
     return trackedStart;
@@ -1333,50 +2070,67 @@ class CaptureProvider extends ChangeNotifier
 
   Future<PhoneCaptureStartResult> _streamRecording() async {
     final generation = _captureGeneration;
+    _beginCaptureDiagnostics(CaptureDiagnosticSource.phone, CaptureDiagnosticPhase.checkingPermission);
     final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
-    if (!consentCurrent || generation != _captureGeneration) return PhoneCaptureStartResult.consentUnavailable;
-    final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
-      return PhoneCaptureStartResult.cancelled;
+    if (!consentCurrent || generation != _captureGeneration) {
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.consentUnavailable);
+      return PhoneCaptureStartResult.consentUnavailable;
+    }
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
+    final captureAuthority = await _waitForCaptureAuthority(generation);
+    if (generation != _captureGeneration) return PhoneCaptureStartResult.cancelled;
+    if (captureAuthority == null) {
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
+      return PhoneCaptureStartResult.accountNotReady;
     }
     final phoneCaptureStarter = _phoneCaptureStarter;
     if (phoneCaptureStarter != null) {
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.startingCapture, clearFailure: true);
       final result = await phoneCaptureStarter();
       if (!_isCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
       if (result == PhoneCaptureStartResult.started) {
         updateRecordingState(RecordingState.record);
+        _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
         unawaited(_queueCaptureGeolocation(generation, captureAuthority));
       } else {
         updateRecordingState(RecordingState.stop);
+        _failCaptureDiagnostics(_diagnosticFailureForPhoneResult(result));
       }
       return result;
     }
     updateRecordingState(RecordingState.initialising);
-    PermissionStatus microphonePermission;
+    bool microphonePermissionGranted;
     try {
-      microphonePermission = await Permission.microphone.request();
+      microphonePermissionGranted = await (_phoneMicrophonePermissionChecker?.call() ??
+          Permission.microphone.request().then((permission) => permission.isGranted));
     } catch (error) {
       Logger.error('Phone microphone permission could not be checked: $error');
       updateRecordingState(RecordingState.stop);
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.recorderUnavailable);
       return PhoneCaptureStartResult.recorderUnavailable;
     }
     if (!_isCaptureCurrent(generation, captureAuthority)) {
       updateRecordingState(RecordingState.stop);
       return PhoneCaptureStartResult.cancelled;
     }
-    if (!microphonePermission.isGranted) {
+    if (!microphonePermissionGranted) {
       updateRecordingState(RecordingState.stop);
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.microphonePermissionDenied);
       return PhoneCaptureStartResult.microphonePermissionDenied;
     }
 
     // prepare
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.connectingTranscription, clearFailure: true);
     try {
-      await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
+      final prepared = await (_phoneTranscriptionPreparer?.call() ??
+          changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000).then((_) => true));
+      if (!prepared) throw StateError('transcription transport unavailable');
     } catch (error) {
       Logger.error('Phone transcription could not start: $error');
       _transcriptServiceReady = false;
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'phone capture transcript unavailable');
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
     if (!_isCaptureCurrent(generation, captureAuthority)) {
@@ -1384,72 +2138,228 @@ class CaptureProvider extends ChangeNotifier
       await _socket?.stop(reason: 'phone capture authority changed');
       return PhoneCaptureStartResult.cancelled;
     }
-    if (_socket == null || _socket?.state != SocketServiceState.connected) {
+    if (_phoneTranscriptionPreparer == null && (_socket == null || _socket?.state != SocketServiceState.connected)) {
       _transcriptServiceReady = false;
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'phone capture transcript unavailable');
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
 
-    // A native start receipt proves the recorder is physically running. The
-    // first non-empty frame additionally proves that audio reached this
-    // account-scoped transcription boundary before Home reports success.
-    final startProof = PhoneCaptureStartProof();
-    try {
-      await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
-        if (_isCaptureCurrent(generation, captureAuthority) &&
-            _socket?.state == SocketServiceState.connected &&
-            startProof.acceptFrame(bytes)) {
-          _socket?.send(bytes);
-        }
-      }, onRecording: () {
-        // The isolate receipt is authoritative for physical start. Keep the UI
-        // initialising until the first frame also reaches transcription.
-      }, onStop: () {
-        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
-      }, onInitializing: () {
-        if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.initialising);
-      });
-      await startProof.waitForAudio();
-    } catch (error) {
-      Logger.error('Phone microphone did not transmit an audio frame to transcription: $error');
-      updateRecordingState(RecordingState.stop);
+    // Native start plus a nonempty microphone frame prove physical capture.
+    // Transcription delivery remains separate so network delay cannot make a
+    // running recorder appear stopped.
+    final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+    CaptureDiagnosticFailure? startFailure;
+    var started = false;
+    for (var attempt = 0; attempt < 2 && !started; attempt++) {
+      final startProof = PhoneCaptureStartProof();
+      _updateCaptureDiagnostics(
+        phase: attempt == 0 ? CaptureDiagnosticPhase.startingCapture : CaptureDiagnosticPhase.waitingForAudio,
+        clearFailure: true,
+      );
       try {
-        await ServiceManager.instance().mic.stop();
-      } catch (stopError) {
-        Logger.error('Phone microphone cleanup failed after start failure: $stopError');
+        await mic.start(onByteReceived: (bytes) {
+          if (!_isCaptureCurrent(generation, captureAuthority) || !startProof.acceptFrame(bytes)) return;
+          _recordPhysicalCaptureFrame(bytes);
+          final transmitted = _phoneAudioSender?.call(bytes) ??
+              (() {
+                if (_socket?.state != SocketServiceState.connected) return false;
+                _socket?.send(bytes);
+                return true;
+              })();
+          if (transmitted && startProof.acceptTransmittedFrame(bytes)) _recordTransmittedCaptureFrame(bytes);
+        }, onRecording: () {
+          if (_isCaptureCurrent(generation, captureAuthority)) startProof.acceptNativeRecorderStart();
+        }, onStop: () {
+          if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
+        }, onInitializing: () {
+          if (_isCaptureCurrent(generation, captureAuthority)) {
+            updateRecordingState(RecordingState.initialising);
+            _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAudio, clearFailure: true);
+          }
+        });
+        await Future.wait([
+          startProof.waitForNativeRecorder(timeout: _captureStartProofTimeout),
+          startProof.waitForAudio(timeout: _captureStartProofTimeout),
+        ]);
+        started = true;
+      } catch (error) {
+        startFailure = startProof.hasNativeRecorder
+            ? CaptureDiagnosticFailure.physicalAudioUnavailable
+            : CaptureDiagnosticFailure.recorderUnavailable;
+        Logger.error('Phone microphone attempt ${attempt + 1} did not confirm physical audio start: $error');
+        updateRecordingState(RecordingState.stop);
+        try {
+          await mic.stop().timeout(const Duration(seconds: 2));
+        } catch (stopError) {
+          Logger.error('Phone microphone cleanup failed after start failure: $stopError');
+        }
+        if (!_isCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
+        if (attempt == 0) await Future<void>.delayed(const Duration(milliseconds: 100));
       }
+    }
+    if (!started) {
       await _socket?.stop(reason: 'phone recorder did not produce audio');
+      _failCaptureDiagnostics(startFailure ?? CaptureDiagnosticFailure.recorderUnavailable);
       return PhoneCaptureStartResult.recorderUnavailable;
     }
     if (!_isCaptureCurrent(generation, captureAuthority)) {
-      await ServiceManager.instance().mic.stop();
+      await mic.stop();
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'phone capture authority changed');
       return PhoneCaptureStartResult.cancelled;
     }
-    if (_socket == null || _socket?.state != SocketServiceState.connected) {
-      await ServiceManager.instance().mic.stop();
+    if (_phoneTranscriptionPreparer == null && (_socket == null || _socket?.state != SocketServiceState.connected)) {
+      await mic.stop();
       _transcriptServiceReady = false;
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'phone capture transcript disconnected');
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
     updateRecordingState(RecordingState.record);
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
     // Capture has actually started; do not send location for failed attempts.
     unawaited(_queueCaptureGeolocation(generation, captureAuthority));
     return PhoneCaptureStartResult.started;
   }
 
-  stopStreamRecording() async {
-    await _cleanupCurrentState();
-    await ServiceManager.instance().mic.stop();
-    updateRecordingState(RecordingState.stop);
-    await _socket?.stop(reason: 'stop stream recording');
+  CaptureDiagnosticFailure _diagnosticFailureForPhoneResult(PhoneCaptureStartResult result) => switch (result) {
+        PhoneCaptureStartResult.consentUnavailable => CaptureDiagnosticFailure.consentUnavailable,
+        PhoneCaptureStartResult.accountNotReady => CaptureDiagnosticFailure.accountNotReady,
+        PhoneCaptureStartResult.microphonePermissionDenied => CaptureDiagnosticFailure.microphonePermissionDenied,
+        PhoneCaptureStartResult.transcriptionUnavailable => CaptureDiagnosticFailure.transcriptionUnavailable,
+        PhoneCaptureStartResult.recorderUnavailable ||
+        PhoneCaptureStartResult.cancelled =>
+          CaptureDiagnosticFailure.recorderUnavailable,
+        PhoneCaptureStartResult.started => CaptureDiagnosticFailure.none,
+      };
+
+  Future<ActiveWalAuthority?> _waitForCaptureAuthority(int generation) async {
+    final deadline = DateTime.now().add(_captureAuthorityWaitTimeout);
+    while (generation == _captureGeneration) {
+      final authority = _activeWalAuthority();
+      if (authority != null && _isCaptureCurrent(generation, authority)) return authority;
+      if (!DateTime.now().isBefore(deadline)) return null;
+      await Future<void>.delayed(_captureAuthorityPollInterval);
+    }
+    return null;
+  }
+
+  Future<void> stopStreamRecording() {
+    final activeFinalization = _phoneCaptureStopFuture;
+    if (activeFinalization != null) return activeFinalization.then<void>((_) {});
+
+    final activeTransportStop = _phoneCaptureTransportStopFuture;
+    if (activeTransportStop != null) return activeTransportStop;
+
+    late final Future<void> trackedStop;
+    trackedStop = _stopPhoneCaptureTransport().whenComplete(() {
+      if (identical(_phoneCaptureTransportStopFuture, trackedStop)) {
+        _phoneCaptureTransportStopFuture = null;
+      }
+    });
+    _phoneCaptureTransportStopFuture = trackedStop;
+    return trackedStop;
+  }
+
+  Future<void> _stopPhoneCaptureTransport() async {
+    final pendingStart = _micStartFuture;
+    _captureGeneration++;
+    _beginPhoneCaptureRelease();
+    try {
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+      await _cleanupCurrentState();
+      final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+      await mic.stop();
+      if (pendingStart != null) {
+        try {
+          await pendingStart;
+        } catch (error) {
+          Logger.error('Pending phone capture start failed during regular stop: $error');
+        }
+        await mic.stop();
+      }
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'stop stream recording');
+    } finally {
+      _endPhoneCaptureRelease();
+    }
+  }
+
+  /// Stops phone audio, closes the exact transcript owner so the backend can
+  /// drain it, then processes the exact conversation that was observed before
+  /// transport shutdown.
+  Future<bool> stopStreamRecordingAndFinalize() async {
+    return await _serializedPhoneCaptureStopAndFinalize() == PhoneCaptureStopResult.finalized;
+  }
+
+  /// Returns an exact stop disposition for voice microphone takeover. Unlike
+  /// the legacy bool API, this distinguishes a genuinely empty capture from a
+  /// contentful capture whose finalization failed.
+  Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() => _serializedPhoneCaptureStopAndFinalize();
+
+  Future<PhoneCaptureStopResult> _serializedPhoneCaptureStopAndFinalize() {
+    final activeStop = _phoneCaptureStopFuture;
+    if (activeStop != null) return activeStop;
+
+    final activeTransportStop = _phoneCaptureTransportStopFuture;
+    late final Future<PhoneCaptureStopResult> trackedStop;
+    trackedStop = Future<PhoneCaptureStopResult>.sync(() async {
+      if (activeTransportStop != null) await activeTransportStop;
+      return _stopPhoneCaptureAndFinalize();
+    }).whenComplete(() {
+      if (identical(_phoneCaptureStopFuture, trackedStop)) {
+        _phoneCaptureStopFuture = null;
+      }
+    });
+    _phoneCaptureStopFuture = trackedStop;
+    return trackedStop;
+  }
+
+  Future<PhoneCaptureStopResult> _stopPhoneCaptureAndFinalize() async {
+    _beginPhoneCaptureRelease();
+    try {
+      final pendingStart = _micStartFuture;
+      _captureGeneration++;
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+      await _cleanupCurrentState();
+      final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+      await mic.stop();
+      if (pendingStart != null) {
+        try {
+          await pendingStart;
+        } catch (error) {
+          Logger.error('Pending phone capture start failed during microphone takeover: $error');
+        }
+        // A native/injected start can finish after the first stop. Reassert the
+        // stop only after the generation-fenced start future has settled.
+        await mic.stop();
+      }
+      updateRecordingState(RecordingState.stop);
+      final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+      try {
+        if (!shouldFinalize) return PhoneCaptureStopResult.empty;
+        return await finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true)
+            ? PhoneCaptureStopResult.finalized
+            : PhoneCaptureStopResult.failed;
+      } finally {
+        if (_socket?.state == SocketServiceState.connected) {
+          await _socket?.stop(reason: 'phone capture finalized');
+        }
+      }
+    } finally {
+      _endPhoneCaptureRelease();
+    }
   }
 
   Future<void> stopForAccountTransition() async {
     _captureGeneration++;
+    _deviceCaptureGeneration++;
+    _deviceCaptureAttempt?.cancel();
+    _resetCaptureDiagnostics(notify: true);
+    final deviceStart = _deviceCaptureStartFuture;
     final pendingGeolocation = _captureGeolocationFutures.toList(growable: false);
     final pendingGeolocationStops = pendingGeolocation.map(
       (future) => future.timeout(const Duration(seconds: 5), onTimeout: () => false).then<void>((_) {}),
@@ -1469,81 +2379,373 @@ class CaptureProvider extends ChangeNotifier
     _commandBytes = [];
     _voiceCommandSession = null;
     _systemAudioBuffer.clear();
-    await _closeBleStream(stopCamera: false);
-    if (ServiceManager.isInitialized) {
-      final stops = <Future<void>>[ServiceManager.instance().mic.stop()];
+    await _closeBleStream(stopCamera: false, invalidateDeviceCapture: false);
+    if (_phoneMicRecorder != null || ServiceManager.isInitialized) {
+      final stops = <Future<void>>[(_phoneMicRecorder ?? ServiceManager.instance().mic).stop()];
       if (PlatformService.isDesktop) {
         stops.add(ServiceManager.instance().systemAudio.stopAndClearCallbacks());
       }
       await Future.wait([
         if (micStart != null) micStart,
+        if (deviceStart != null) deviceStart,
         if (systemAudioStart != null) systemAudioStart.then<void>((_) {}),
         ...pendingGeolocationStops,
         ...stops,
       ]);
     } else {
-      await Future.wait(pendingGeolocationStops);
+      await Future.wait([
+        if (deviceStart != null) deviceStart,
+        ...pendingGeolocationStops,
+      ]);
     }
     _systemAudioCaptureAuthority = null;
+    updateRecordingState(RecordingState.stop);
     await _socket?.stop(reason: 'account transition');
     reset();
-    updateRecordingState(RecordingState.stop);
   }
 
-  Future streamDeviceRecording({BtDevice? device}) async {
-    final generation = _captureGeneration;
-    if (recordingState == RecordingState.error) {
-      _keepAliveTimer?.cancel();
-      _keepAliveTimer = null;
-      await _closeBleStream();
-      await _socket?.stop(reason: 'retry necklace capture after transport failure');
-      if (generation != _captureGeneration) return;
-      updateRecordingState(RecordingState.stop);
-    }
-    final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
-    if (!consentCurrent || generation != _captureGeneration) {
-      if (generation == _captureGeneration) {
+  Future<void> streamDeviceRecording({BtDevice? device}) async {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) await activeBoundary;
+
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) await activeFinalization;
+
+    final targetDevice = device ?? _recordingDevice;
+    if (targetDevice == null || targetDevice.id.isEmpty) {
+      if (recordingState != RecordingState.record && _micStartFuture == null) {
         updateRecordingState(RecordingState.error);
       }
       return;
     }
-    final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) {
-      if (generation == _captureGeneration) updateRecordingState(RecordingState.error);
+    if (phoneCaptureOwnsMobileAudio) {
       return;
     }
-    Logger.debug("streamDeviceRecording $device");
-    if (device != null) _updateRecordingDevice(device);
+    final activeSession = _deviceCaptureSession;
+    if (activeSession != null &&
+        activeSession.deviceId == targetDevice.id &&
+        _isDeviceCaptureCurrent(activeSession) &&
+        activeSession.socket.state == SocketServiceState.connected &&
+        recordingState == RecordingState.deviceRecord) {
+      return;
+    }
+
+    _deviceCaptureAttempt?.cancel();
+    if (activeSession != null && !activeSession.cancelled.isCompleted) activeSession.cancelled.complete();
+    final attempt = _DeviceCaptureAttempt(
+      id: ++_deviceCaptureGeneration,
+      deviceId: targetDevice.id,
+      accountGeneration: _captureGeneration,
+    );
+    _deviceCaptureAttempt = attempt;
+    final priorStart = _deviceCaptureStartFuture;
+    late final Future<void> trackedStart;
+    trackedStart = (() async {
+      if (priorStart != null) {
+        try {
+          await priorStart;
+        } catch (error) {
+          Logger.error('Previous necklace start failed during replacement: $error');
+        }
+      }
+      if (!_isDeviceCaptureAttemptCurrent(attempt)) return;
+      await _streamDeviceRecording(attempt, targetDevice);
+    })()
+        .whenComplete(() {
+      if (identical(_deviceCaptureStartFuture, trackedStart)) _deviceCaptureStartFuture = null;
+      if (identical(_deviceCaptureAttempt, attempt)) _deviceCaptureAttempt = null;
+    });
+    _deviceCaptureStartFuture = trackedStart;
+    await trackedStart;
+  }
+
+  Future<void> _streamDeviceRecording(_DeviceCaptureAttempt attempt, BtDevice targetDevice) async {
+    if (!_isDeviceCaptureAttemptCurrent(attempt)) return;
+    _beginCaptureDiagnostics(CaptureDiagnosticSource.necklace, CaptureDiagnosticPhase.checkingPermission);
+    if (recordingState == RecordingState.error) {
+      _keepAliveTimer?.cancel();
+      _keepAliveTimer = null;
+      await _closeBleStream(invalidateDeviceCapture: false);
+      if (!_isDeviceCaptureAttemptCurrent(attempt)) return;
+      await _socket?.stop(reason: 'retry necklace capture after transport failure');
+      if (!_isDeviceCaptureAttemptCurrent(attempt)) return;
+      updateRecordingState(RecordingState.stop);
+    }
+    final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
+    if (!_isDeviceCaptureAttemptCurrent(attempt)) return;
+    if (!consentCurrent) {
+      updateRecordingState(RecordingState.error);
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.consentUnavailable);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      return;
+    }
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
+    final captureAuthority = _activeWalAuthority();
+    if (captureAuthority == null || !_isCaptureCurrent(attempt.accountGeneration, captureAuthority)) {
+      if (_isDeviceCaptureAttemptCurrent(attempt)) {
+        updateRecordingState(RecordingState.error);
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
+        _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      }
+      return;
+    }
+    attempt.authority = captureAuthority;
+    Logger.debug("streamDeviceRecording $targetDevice");
+    await _closeBleStream(stopCamera: false, invalidateDeviceCapture: false);
+    if (!_isDeviceCaptureAttemptCurrent(attempt) || !captureAuthority.isCurrent()) return;
+    _updateRecordingDevice(targetDevice);
     updateRecordingState(RecordingState.initialising);
 
     bool wasPaused = _isPaused;
 
     await _resetStateVariables();
-    final started = await (_deviceCaptureStarter?.call() ?? _startDeviceCaptureTransport());
-    if (!_isCaptureCurrent(generation, captureAuthority)) return;
-    if (!started || recordingState != RecordingState.deviceRecord) {
+    if (!_isDeviceCaptureAttemptCurrent(attempt) || !captureAuthority.isCurrent()) {
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      return;
+    }
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.connectingTranscription, clearFailure: true);
+    TranscriptSegmentSocketService? socket;
+    try {
+      socket = await _ensureDeviceSocketConnection(targetDevice);
+    } catch (error) {
+      Logger.error('Necklace transcription socket could not start: $error');
+      if (_isDeviceCaptureAttemptCurrent(attempt)) {
+        updateRecordingState(RecordingState.error);
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
+        _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      }
+      return;
+    }
+    attempt.socket = socket;
+    if (!_isDeviceCaptureAttemptCurrent(attempt) || !captureAuthority.isCurrent()) {
+      await _stopAbandonedDeviceAttemptSocket(attempt);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      return;
+    }
+    if (socket == null || socket.state != SocketServiceState.connected) {
+      _transcriptServiceReady = false;
       updateRecordingState(RecordingState.error);
-      await _socket?.stop(reason: 'necklace recorder did not produce audio');
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
+      await _stopAbandonedDeviceAttemptSocket(attempt);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      return;
+    }
+    final session = _DeviceCaptureSession(
+      id: attempt.id,
+      deviceId: targetDevice.id,
+      deviceType: targetDevice.type,
+      accountGeneration: attempt.accountGeneration,
+      authority: captureAuthority,
+      socket: socket,
+      cancelled: attempt.cancelled,
+    );
+    _deviceCaptureSession = session;
+    bool started;
+    try {
+      started = await (_deviceCaptureStarter?.call() ?? _startDeviceCaptureTransport(session, targetDevice));
+    } catch (error) {
+      Logger.error('Necklace capture transport could not start: $error');
+      started = false;
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.necklaceConnectionUnavailable);
+    }
+    if (!_isDeviceCaptureAttemptCurrent(attempt) || !_isDeviceCaptureCurrent(session)) {
+      if (identical(_deviceCaptureSession, session)) {
+        await _closeDeviceCaptureSession(session, stopSocket: false);
+      }
+      await _stopAbandonedDeviceAttemptSocket(attempt);
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
+      return;
+    }
+    if (!started ||
+        recordingState != RecordingState.deviceRecord ||
+        session.socket.state != SocketServiceState.connected) {
+      updateRecordingState(RecordingState.error);
+      if (_captureDiagnostics.phase != CaptureDiagnosticPhase.failed) {
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.necklaceConnectionUnavailable);
+      }
+      if (identical(_deviceCaptureSession, session)) {
+        await _closeDeviceCaptureSession(session, stopSocket: true);
+      }
+      _clearFailedDeviceCaptureOwner(attempt, targetDevice);
       return;
     }
 
-    // Location is protected capture context. Emit it only after a non-empty
-    // necklace frame reached a connected transcription socket under the same
-    // exact account/capture authority.
-    unawaited(_queueCaptureGeolocation(generation, captureAuthority));
+    // Location is protected capture context. Emit it only after physical BLE
+    // capture is proven under the same exact account/capture authority.
+    unawaited(_queueCaptureGeolocation(attempt.accountGeneration, captureAuthority));
 
     if (wasPaused) {
       await pauseDeviceRecording();
     }
   }
 
+  Future<void> _stopAbandonedDeviceAttemptSocket(_DeviceCaptureAttempt attempt) async {
+    final socket = attempt.socket;
+    if (socket == null) return;
+    final currentAttemptUsesSocket = _deviceCaptureAttempt != null &&
+        !identical(_deviceCaptureAttempt, attempt) &&
+        identical(_deviceCaptureAttempt?.socket, socket);
+    final currentSessionUsesSocket = _deviceCaptureSession != null && identical(_deviceCaptureSession?.socket, socket);
+    if (currentAttemptUsesSocket || currentSessionUsesSocket) return;
+    try {
+      await socket.stop(reason: 'cancelled necklace capture start');
+    } catch (error) {
+      Logger.error('Could not stop cancelled necklace transcription socket: $error');
+    }
+  }
+
   Future stopStreamDeviceRecording({bool cleanDevice = false}) async {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) await activeBoundary;
+
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
     await _cleanupCurrentState();
     if (cleanDevice) {
       _updateRecordingDevice(null);
     }
     updateRecordingState(RecordingState.stop);
     await _socket?.stop(reason: 'stop stream device recording');
+  }
+
+  /// Stops necklace transport, lets the server drain the exact socket owner,
+  /// then processes that exact conversation. The disconnect path remains a
+  /// fallback for crashes and transport loss.
+  Future<bool> stopStreamDeviceRecordingAndFinalize({bool cleanDevice = false}) async {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) await activeBoundary;
+
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) return activeFinalization;
+
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
+    await _cleanupCurrentState();
+    if (cleanDevice) _updateRecordingDevice(null);
+    updateRecordingState(RecordingState.stop);
+    final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+    try {
+      return shouldFinalize ? await _serializedDeviceCaptureFinalization() : false;
+    } finally {
+      if (_socket?.state == SocketServiceState.connected) {
+        await _socket?.stop(reason: 'necklace capture finalized');
+      }
+    }
+  }
+
+  Future<bool> _serializedDeviceCaptureFinalization({
+    bool closeBleTransport = false,
+    bool finalize = true,
+  }) {
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) return activeFinalization;
+
+    late final Future<bool> trackedFinalization;
+    trackedFinalization = (() async {
+      if (closeBleTransport) await _closeBleStream();
+      if (!finalize) return false;
+      return finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true);
+    })()
+        .whenComplete(() {
+      if (identical(_deviceCaptureFinalizationFuture, trackedFinalization)) {
+        _deviceCaptureFinalizationFuture = null;
+      }
+    });
+    _deviceCaptureFinalizationFuture = trackedFinalization;
+    return trackedFinalization;
+  }
+
+  /// Finalizes the exact conversation owned by the current necklace socket,
+  /// then binds the still-running BLE stream to a replacement socket.
+  Future<bool> finalizeCurrentDeviceConversationAndContinue() {
+    final activeBoundary = _deviceCaptureBoundaryFuture;
+    if (activeBoundary != null) return activeBoundary;
+
+    late final Future<bool> trackedBoundary;
+    trackedBoundary = _finalizeCurrentDeviceConversationAndContinue().whenComplete(() {
+      if (identical(_deviceCaptureBoundaryFuture, trackedBoundary)) {
+        _deviceCaptureBoundaryFuture = null;
+      }
+    });
+    _deviceCaptureBoundaryFuture = trackedBoundary;
+    return trackedBoundary;
+  }
+
+  Future<bool> _finalizeCurrentDeviceConversationAndContinue() async {
+    final activeFinalization = _deviceCaptureFinalizationFuture;
+    if (activeFinalization != null) await activeFinalization;
+
+    final session = _deviceCaptureSession;
+    if (session == null || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) {
+      return false;
+    }
+    final operation = _beginFinalizationOperation();
+    if (operation == null) return false;
+    try {
+      final hasBoundaryEvidence = hasCapturableContent || hasActiveDeviceCaptureBoundaryEvidence;
+      if (!hasBoundaryEvidence || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) {
+        return false;
+      }
+
+      String? conversationId;
+      _replacingTranscriptionSocket = true;
+      try {
+        final replaced = await _replaceDeviceCaptureSocket(
+          session,
+          reason: 'continuous necklace moment boundary',
+          afterOldSocketStopped: () async {
+            conversationId = await _awaitInProgressConversationId(
+              operation,
+              maxAttempts: 12,
+              retryDelay: const Duration(milliseconds: 500),
+            );
+            final boundaryBuffer = session.socketReplacementBuffer;
+            if (!_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return;
+            await _resetStateVariables();
+            _beginNextContinuousDeviceMoment(boundaryBuffer);
+          },
+        );
+        if (!replaced || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
+      } finally {
+        _replacingTranscriptionSocket = false;
+      }
+
+      final exactConversationId = (conversationId ?? '').trim();
+      if (exactConversationId.isEmpty) return false;
+      final finalized = await _forceProcessingConversationId(exactConversationId, operation);
+      if (finalized && _isDeviceCaptureCurrent(session)) {
+        _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
+      }
+      return finalized;
+    } finally {
+      operation.close();
+    }
+  }
+
+  Future<String?> _awaitInProgressConversationId(
+    CaptureFinalizationOperation operation, {
+    required int maxAttempts,
+    required Duration retryDelay,
+  }) async {
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      if (!operation.isCurrent) return null;
+      _updateCaptureDiagnostics(
+        phase: CaptureDiagnosticPhase.finalizing,
+        finalizationAttempts: attempt + 1,
+      );
+      try {
+        if (!await _loadInProgressConversation(operation)) return null;
+      } on ExactAccountAuthorityChangedException {
+        return null;
+      } catch (_) {
+        // The socket is already fenced and BLE frames are buffered. Retry only
+        // within the same bounded finalization lease.
+      }
+      final conversationId = (_conversation?.id ?? '').trim();
+      if (conversationId.isNotEmpty) return conversationId;
+      if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
+        await Future<void>.delayed(retryDelay);
+      }
+    }
+    return null;
   }
 
   Future<bool> streamSystemAudioRecording() {
@@ -2009,18 +3211,58 @@ class CaptureProvider extends ChangeNotifier
     Logger.error('Capture stopped because $reason');
     _keepAliveTimer?.cancel();
     _keepAliveTimer = null;
-    if (state == RecordingState.record && ServiceManager.isInitialized) {
-      unawaited(ServiceManager.instance().mic.stop());
-    }
-    if (state == RecordingState.deviceRecord) {
-      unawaited(_closeBleStream());
-    }
     updateRecordingState(RecordingState.error);
+    final failure =
+        reason.contains('closed') ? CaptureDiagnosticFailure.socketClosed : CaptureDiagnosticFailure.socketError;
+    _failCaptureDiagnostics(failure);
+    unawaited(_finalizeAfterUnexpectedCaptureStop(failure, state));
     return true;
+  }
+
+  Future<void> _finalizeAfterUnexpectedCaptureStop(
+    CaptureDiagnosticFailure failure,
+    RecordingState stoppedState,
+  ) async {
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing, failure: failure);
+    final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
+    var empty = false;
+    final finalized = switch (stoppedState) {
+      RecordingState.record => await (() async {
+          final result = await _serializedPhoneCaptureStopAndFinalize();
+          empty = result == PhoneCaptureStopResult.empty;
+          return result == PhoneCaptureStopResult.finalized;
+        })(),
+      RecordingState.deviceRecord => await _serializedDeviceCaptureFinalization(
+          closeBleTransport: true,
+          finalize: shouldFinalize,
+        ),
+      _ => false,
+    };
+    empty = empty || !shouldFinalize;
+    if (finalized) {
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.completed, clearFailure: true);
+    } else if (empty) {
+      _failCaptureDiagnostics(failure);
+    } else {
+      _failCaptureDiagnostics(
+        _captureDiagnostics.hasTranscript
+            ? CaptureDiagnosticFailure.finalizationFailed
+            : CaptureDiagnosticFailure.noTranscript,
+      );
+    }
   }
 
   @override
   void onConnected() {
+    final session = _deviceCaptureSession;
+    final connectedSocket = _socket;
+    if (session != null &&
+        connectedSocket != null &&
+        connectedSocket.state == SocketServiceState.connected &&
+        _isDeviceCaptureCurrent(session) &&
+        !identical(session.socket, connectedSocket)) {
+      session.socket = connectedSocket;
+    }
     _transcriptServiceReady = true;
     notifyListeners();
   }
@@ -2054,8 +3296,8 @@ class CaptureProvider extends ChangeNotifier
   /// final segment after microphone/socket shutdown. Empty placeholder
   /// segments never qualify, so Home cannot create a blank processing memory.
   Future<bool> awaitFinalCapturableContent({
-    int maxAttempts = 3,
-    Duration retryDelay = const Duration(milliseconds: 250),
+    int maxAttempts = 12,
+    Duration retryDelay = const Duration(milliseconds: 500),
   }) async {
     final operation = _beginFinalizationOperation();
     if (operation == null) return false;
@@ -2076,6 +3318,12 @@ class CaptureProvider extends ChangeNotifier
     required Duration retryDelay,
   }) async {
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+        _updateCaptureDiagnostics(
+          phase: CaptureDiagnosticPhase.finalizing,
+          finalizationAttempts: attempt + 1,
+        );
+      }
       try {
         if (!await _loadInProgressConversation(operation)) return false;
       } on ExactAccountAuthorityChangedException {
@@ -2123,6 +3371,9 @@ class CaptureProvider extends ChangeNotifier
     }
     _segmentsPhotosVersion++; // Bump version so Selector rebuilds
     setHasTranscripts(segments.isNotEmpty);
+    if (segments.isNotEmpty && _captureDiagnostics.source != CaptureDiagnosticSource.none) {
+      _recordTranscriptDiagnostics(preservePhase: true);
+    }
     notifyListeners();
     return true;
   }
@@ -2214,19 +3465,45 @@ class CaptureProvider extends ChangeNotifier
   /// Performs one authoritative final transcript read and processing request
   /// under the same account lease and capture generation.
   Future<bool> finalizeCurrentConversation({
-    int maxTranscriptAttempts = 3,
-    Duration transcriptRetryDelay = const Duration(milliseconds: 250),
+    int maxTranscriptAttempts = 12,
+    Duration transcriptRetryDelay = const Duration(milliseconds: 500),
+    bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
+    if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+      _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing);
+    }
     final operation = _beginFinalizationOperation();
-    if (operation == null) return false;
+    if (operation == null) {
+      if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
+      }
+      return false;
+    }
     try {
       final hasContent = await _awaitFinalCapturableContent(
         operation,
         maxAttempts: maxTranscriptAttempts,
         retryDelay: transcriptRetryDelay,
       );
-      if (!hasContent || !operation.isCurrent) return false;
-      return await forceProcessingCurrentConversation(operation: operation);
+      if (!hasContent || !operation.isCurrent) {
+        if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+          _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
+        }
+        return false;
+      }
+      if (closeTranscriptTransportBeforeProcessing) {
+        await _socket?.stop(reason: 'capture transport drained before exact processing');
+        if (!operation.isCurrent) return false;
+      }
+      final finalized = await forceProcessingCurrentConversation(operation: operation);
+      if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+        if (finalized) {
+          _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.completed, clearFailure: true);
+        } else {
+          _failCaptureDiagnostics(CaptureDiagnosticFailure.finalizationFailed);
+        }
+      }
+      return finalized;
     } finally {
       operation.close();
     }
@@ -2243,8 +3520,24 @@ class CaptureProvider extends ChangeNotifier
     }
     try {
       if (!activeOperation.isCurrent) return false;
+      final conversationId = (_conversation?.id ?? '').trim();
+      if (conversationId.isEmpty) return false;
       await _resetStateVariables();
-      if (!activeOperation.isCurrent) return false;
+      return _forceProcessingConversationId(conversationId, activeOperation);
+    } on ExactAccountAuthorityChangedException {
+      return false;
+    } finally {
+      if (ownsOperation) activeOperation.close();
+    }
+  }
+
+  Future<bool> _forceProcessingConversationId(
+    String conversationId,
+    CaptureFinalizationOperation activeOperation,
+  ) async {
+    final conversations = conversationProvider;
+    if (conversations == null || !activeOperation.isCurrent) return false;
+    try {
       conversations.addProcessingConversation(
         ServerConversation(
           id: '0',
@@ -2254,6 +3547,7 @@ class CaptureProvider extends ChangeNotifier
         ),
       );
       final result = await _inProgressConversationProcess(
+        conversationId: conversationId,
         expectedAuthenticatedUid: activeOperation.uid,
         exactAuthority: activeOperation,
       );
@@ -2271,8 +3565,6 @@ class CaptureProvider extends ChangeNotifier
       );
     } on ExactAccountAuthorityChangedException {
       return false;
-    } finally {
-      if (ownsOperation) activeOperation.close();
     }
   }
 
@@ -2496,7 +3788,11 @@ class CaptureProvider extends ChangeNotifier
 
     _segmentsPhotosVersion++; // Bump version so Selector rebuilds
     hasTranscripts = true;
-    notifyListeners();
+    if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+      _recordTranscriptDiagnostics();
+    } else {
+      notifyListeners();
+    }
   }
 
   void onConnectionStateChanged(bool isConnected) {
@@ -2606,7 +3902,13 @@ class CaptureProvider extends ChangeNotifier
     if (_recordingDevice == null) return;
 
     // Pause the BLE stream but keep the device connection
-    await _bleBytesStream?.cancel();
+    final session = _deviceCaptureSession;
+    final bytesStream = session?.bytesStream ?? _bleBytesStream;
+    session?.physicalFrameWatchdog?.cancel();
+    session?.physicalFrameWatchdog = null;
+    session?.bytesStream = null;
+    if (identical(_bleBytesStream, bytesStream)) _bleBytesStream = null;
+    await bytesStream?.cancel();
     _isPaused = true;
     updateRecordingState(RecordingState.pause);
     notifyListeners();
@@ -2616,10 +3918,7 @@ class CaptureProvider extends ChangeNotifier
     if (_recordingDevice == null) return;
     _isPaused = false;
     updateRecordingState(RecordingState.initialising);
-    final started = await _initiateDeviceAudioStreaming();
-    if (!started) {
-      updateRecordingState(RecordingState.error);
-    }
+    await streamDeviceRecording(device: _recordingDevice);
     notifyListeners();
   }
 }

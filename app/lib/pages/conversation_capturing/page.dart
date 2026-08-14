@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -23,12 +24,30 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 import 'package:omi/widgets/photo_viewer_page.dart';
 import 'package:omi/ella/ella_theme.dart';
 
+enum _CaptureStopTarget { none, phone, necklace, systemAudio }
+
+_CaptureStopTarget _captureStopTarget(CaptureProvider provider) {
+  if (provider.phoneCaptureOwnsMobileAudio) return _CaptureStopTarget.phone;
+  return switch (provider.recordingState) {
+    RecordingState.record => _CaptureStopTarget.phone,
+    RecordingState.deviceRecord => _CaptureStopTarget.necklace,
+    RecordingState.systemAudioRecord => _CaptureStopTarget.systemAudio,
+    RecordingState.initialising =>
+      provider.havingRecordingDevice ? _CaptureStopTarget.necklace : _CaptureStopTarget.systemAudio,
+    RecordingState.pause =>
+      provider.havingRecordingDevice ? _CaptureStopTarget.necklace : _CaptureStopTarget.systemAudio,
+    RecordingState.stop || RecordingState.error => _CaptureStopTarget.none,
+  };
+}
+
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
+  final Future<bool> Function()? onProcessNow;
 
   const ConversationCapturingPage({
     super.key,
     this.topConversationId,
+    this.onProcessNow,
   });
 
   @override
@@ -41,11 +60,15 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   late bool showSummarizeConfirmation;
   late AnimationController _animationController;
   bool _isMuted = false;
+  _CaptureStopTarget _mutedCaptureTarget = _CaptureStopTarget.none;
+  bool _isProcessDialogOpen = false;
+  Future<bool>? _processNowInFlight;
   final ScrollController _timelineScrollController = ScrollController();
 
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
         PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+        PhoneCaptureStartResult.accountNotReady ||
         PhoneCaptureStartResult.consentUnavailable ||
         PhoneCaptureStartResult.recorderUnavailable ||
         PhoneCaptureStartResult.cancelled =>
@@ -70,16 +93,20 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       // Unmute - resume recording
       HapticFeedback.mediumImpact();
 
-      if (PlatformService.isDesktop) {
+      final target = _mutedCaptureTarget;
+      if (target == _CaptureStopTarget.systemAudio ||
+          (PlatformService.isDesktop && target == _CaptureStopTarget.none)) {
         // Desktop - system audio
         setState(() {
           _isMuted = false;
+          _mutedCaptureTarget = _CaptureStopTarget.none;
         });
         await provider.resumeSystemAudioRecording();
-      } else if (provider.havingRecordingDevice) {
+      } else if (target == _CaptureStopTarget.necklace) {
         // Device recording (Omi device)
         setState(() {
           _isMuted = false;
+          _mutedCaptureTarget = _CaptureStopTarget.none;
         });
         await provider.resumeDeviceRecording();
       } else {
@@ -89,6 +116,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
         if (result == PhoneCaptureStartResult.started && provider.recordingState == RecordingState.record) {
           setState(() {
             _isMuted = false;
+            _mutedCaptureTarget = _CaptureStopTarget.none;
           });
           MixpanelManager().phoneMicRecordingStarted();
         } else {
@@ -100,17 +128,20 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       HapticFeedback.heavyImpact();
       await Future.delayed(const Duration(milliseconds: 80));
       HapticFeedback.lightImpact();
+      final target = _captureStopTarget(provider);
       setState(() {
         _isMuted = true;
+        _mutedCaptureTarget = target;
       });
 
-      if (PlatformService.isDesktop) {
+      if (target == _CaptureStopTarget.systemAudio ||
+          (PlatformService.isDesktop && target == _CaptureStopTarget.none)) {
         // Desktop - system audio
         await provider.pauseSystemAudioRecording();
-      } else if (provider.havingRecordingDevice) {
+      } else if (target == _CaptureStopTarget.necklace) {
         // Device recording (Omi device)
         await provider.pauseDeviceRecording();
-      } else {
+      } else if (target == _CaptureStopTarget.phone) {
         // Phone mic
         await provider.stopStreamRecording();
         MixpanelManager().phoneMicRecordingStopped();
@@ -143,64 +174,142 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     return '${twoDigits(hours)}:${twoDigits(minutes)}:${twoDigits(remainingSeconds)}';
   }
 
-  Future<void> _stopConversation(CaptureProvider provider) async {
-    if (provider.segments.isNotEmpty || provider.photos.isNotEmpty) {
-      // Helper function to stop recording and process conversation
-      Future<void> stopRecordingAndProcess() async {
-        // Stop any active recording (phone mic or system audio)
-        if (provider.recordingState == RecordingState.record) {
-          await provider.stopStreamRecording();
-        } else if (provider.recordingState == RecordingState.systemAudioRecord) {
-          await provider.stopSystemAudioRecording();
-        }
-        // Then process the conversation
-        provider.forceProcessingCurrentConversation();
-      }
+  Future<void> _stopCaptureTransport(CaptureProvider provider, _CaptureStopTarget target) async {
+    switch (target) {
+      case _CaptureStopTarget.phone:
+        await provider.stopStreamRecording();
+        return;
+      case _CaptureStopTarget.necklace:
+        await provider.stopStreamDeviceRecording();
+        return;
+      case _CaptureStopTarget.systemAudio:
+        await provider.stopSystemAudioRecording();
+        return;
+      case _CaptureStopTarget.none:
+        return;
+    }
+  }
 
+  Future<bool> _runProcessNow(CaptureProvider provider) {
+    final existing = _processNowInFlight;
+    if (existing != null) return existing;
+
+    final processNow = widget.onProcessNow;
+    final stopTarget = _captureStopTarget(provider);
+    final operation = Future<bool>.sync(() async {
+      if (processNow != null) return processNow();
+      return switch (stopTarget) {
+        _CaptureStopTarget.phone => provider.stopStreamRecordingAndFinalize(),
+        _CaptureStopTarget.necklace => provider.stopStreamDeviceRecordingAndFinalize(),
+        _CaptureStopTarget.systemAudio || _CaptureStopTarget.none => () async {
+            await _stopCaptureTransport(provider, stopTarget);
+            return provider.forceProcessingCurrentConversation();
+          }(),
+      };
+    });
+    _processNowInFlight = operation;
+    if (mounted) setState(() {});
+    unawaited(
+      operation.then<void>(
+        (_) => _clearProcessNow(operation),
+        onError: (Object _, StackTrace __) => _clearProcessNow(operation),
+      ),
+    );
+    return operation;
+  }
+
+  void _clearProcessNow(Future<bool> operation) {
+    if (!identical(_processNowInFlight, operation)) return;
+    _processNowInFlight = null;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _stopConversation(CaptureProvider provider) async {
+    if (_processNowInFlight != null || _isProcessDialogOpen) return;
+    final hasContent = provider.segments.isNotEmpty || provider.photos.isNotEmpty;
+    if (!hasContent) {
+      try {
+        await _runProcessNow(provider);
+      } finally {
+        if (mounted) Navigator.of(context).pop();
+      }
+      return;
+    }
+    if (hasContent) {
       if (!showSummarizeConfirmation) {
-        await stopRecordingAndProcess();
-        Navigator.of(context).pop();
+        final processed = await _runProcessNow(provider);
+        if (processed && mounted) Navigator.of(context).pop();
         return;
       }
-      showDialog(
-        context: context,
-        builder: (context) {
-          return StatefulBuilder(
-            builder: (context, setState) {
-              final timeoutDuration = SharedPreferencesUtil().conversationSilenceDuration;
-              String timeoutText;
-              if (timeoutDuration == -1) {
-                timeoutText = context.l10n.conversationEndsManually;
-              } else {
-                final minutes = timeoutDuration ~/ 60;
-                timeoutText = context.l10n.conversationSummarizedAfterMinutes(minutes, minutes == 1 ? '' : 's');
-              }
+      setState(() => _isProcessDialogOpen = true);
+      var confirmationInFlight = false;
+      try {
+        await showDialog(
+          context: context,
+          builder: (context) {
+            return StatefulBuilder(
+              builder: (context, setState) {
+                final timeoutDuration = SharedPreferencesUtil().conversationSilenceDuration;
+                String timeoutText;
+                if (timeoutDuration == -1) {
+                  timeoutText = context.l10n.conversationEndsManually;
+                } else {
+                  final minutes = timeoutDuration ~/ 60;
+                  timeoutText = context.l10n.conversationSummarizedAfterMinutes(minutes, minutes == 1 ? '' : 's');
+                }
 
-              return ConfirmationDialog(
-                title: context.l10n.finishedConversation,
-                description: "${context.l10n.stopRecordingConfirmation}\n\n${context.l10n.hints(timeoutText)}",
-                checkboxValue: !showSummarizeConfirmation,
-                checkboxText: context.l10n.dontAskAgain,
-                onCheckboxChanged: (value) {
-                  setState(() {
-                    showSummarizeConfirmation = !value;
-                  });
-                },
-                onCancel: () {
-                  Navigator.of(context).pop();
-                },
-                onConfirm: () async {
-                  SharedPreferencesUtil().showSummarizeConfirmation = showSummarizeConfirmation;
-                  await stopRecordingAndProcess();
-                  Navigator.of(context).pop();
-                  Navigator.of(context).pop();
-                },
-              );
-            },
-          );
-        },
-      );
+                return ConfirmationDialog(
+                  title: context.l10n.finishedConversation,
+                  description: "${context.l10n.stopRecordingConfirmation}\n\n${context.l10n.hints(timeoutText)}",
+                  checkboxValue: !showSummarizeConfirmation,
+                  checkboxText: context.l10n.dontAskAgain,
+                  confirmText: confirmationInFlight ? context.l10n.processing : null,
+                  onCheckboxChanged: (value) {
+                    setState(() {
+                      showSummarizeConfirmation = !value;
+                    });
+                  },
+                  onCancel: () {
+                    if (confirmationInFlight) return;
+                    Navigator.of(context).pop();
+                  },
+                  onConfirm: () async {
+                    if (confirmationInFlight) return;
+                    setState(() => confirmationInFlight = true);
+                    SharedPreferencesUtil().showSummarizeConfirmation = showSummarizeConfirmation;
+                    final processed = await _runProcessNow(provider);
+                    if (!context.mounted) return;
+                    Navigator.of(context).pop();
+                    if (processed && mounted) Navigator.of(this.context).pop();
+                  },
+                );
+              },
+            );
+          },
+        );
+      } finally {
+        if (mounted) setState(() => _isProcessDialogOpen = false);
+      }
     }
+  }
+
+  String _captureStatusLabel(CaptureProvider provider) {
+    if (provider.recordingState == RecordingState.error) return context.l10n.error;
+    if (provider.recordingState == RecordingState.initialising ||
+        (provider.recordingState == RecordingState.stop && provider.phoneCaptureOwnsMobileAudio)) {
+      return context.l10n.initializing;
+    }
+    if (provider.recordingState == RecordingState.pause) return context.l10n.recordingPaused;
+    if (_isMuted) return context.l10n.muted;
+
+    final hasPhysicalCapture = provider.recordingState == RecordingState.record ||
+        provider.recordingState == RecordingState.deviceRecord ||
+        provider.recordingState == RecordingState.systemAudioRecord;
+    if (hasPhysicalCapture && !provider.transcriptServiceReady) {
+      return '${context.l10n.recordingActive} · ${context.l10n.reconnecting}';
+    }
+    if (hasPhysicalCapture) return context.l10n.recordingActive;
+    return context.l10n.liveTranscript;
   }
 
   @override
@@ -231,9 +340,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                   Text(provider.photos.isNotEmpty ? "📸" : (_isMuted ? "🔇" : "🎙️")),
                   const SizedBox(width: 4),
                   Expanded(
-                      child: Text(provider.photos.isNotEmpty
-                          ? 'Capturing'
-                          : (_isMuted ? context.l10n.muted : context.l10n.listening))),
+                    child: Text(
+                      _captureStatusLabel(provider),
+                      key: const Key('conversation-capture-status'),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -320,14 +431,20 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
               ],
             ),
             floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-            floatingActionButton: (provider.segments.isNotEmpty || provider.photos.isNotEmpty)
+            floatingActionButton: (provider.segments.isNotEmpty ||
+                    provider.photos.isNotEmpty ||
+                    _captureStopTarget(provider) != _CaptureStopTarget.none ||
+                    _processNowInFlight != null)
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       // Process Now button
                       GestureDetector(
-                        onTap: () => _stopConversation(provider),
+                        key: const Key('conversation-process-now'),
+                        onTap: _processNowInFlight == null && !_isProcessDialogOpen
+                            ? () => _stopConversation(provider)
+                            : null,
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                           decoration: BoxDecoration(
@@ -345,14 +462,29 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const FaIcon(
-                                FontAwesomeIcons.stop,
-                                color: Colors.black,
-                                size: 16.0,
-                              ),
+                              if (_processNowInFlight == null)
+                                const FaIcon(
+                                  FontAwesomeIcons.stop,
+                                  color: Colors.black,
+                                  size: 16.0,
+                                )
+                              else
+                                const SizedBox(
+                                  key: Key('conversation-process-now-progress'),
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.black,
+                                  ),
+                                ),
                               const SizedBox(width: 10),
                               Text(
-                                context.l10n.processNow,
+                                _processNowInFlight != null
+                                    ? context.l10n.processing
+                                    : provider.segments.isEmpty && provider.photos.isEmpty
+                                        ? context.l10n.stopRecording
+                                        : context.l10n.processNow,
                                 style: const TextStyle(
                                   color: Colors.black,
                                   fontSize: 16,
@@ -366,6 +498,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                       const SizedBox(width: 12),
                       // Mute button
                       GestureDetector(
+                        key: const Key('conversation-capture-mute'),
                         onTap: () => _toggleMute(provider),
                         child: Container(
                           width: 52,
