@@ -184,7 +184,7 @@ jobs:
           for required_id in "${required_correction_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 62
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 63
           python -m pytest \
             tests/unit/test_ella_correction_runtime_resolver.py \
             tests/unit/test_ella_conversation_corrections.py \

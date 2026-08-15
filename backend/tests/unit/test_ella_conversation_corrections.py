@@ -2963,7 +2963,7 @@ class _MutableCorrectionAuditRef:
     def __init__(self, value):
         self.value = value
 
-    def get(self):
+    def get(self, transaction=None):
         return SimpleNamespace(exists=True, to_dict=lambda: dict(self.value))
 
     def set(self, payload, merge=False):
@@ -3015,12 +3015,15 @@ def test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_ef
     monkeypatch.setattr(corrections, "_audit_ref", lambda uid, cid, corr_id: audit_ref)
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
 
-    def claim(uid, cid, expected, update):
-        assert (uid, cid, expected) == ("owner-1", "conv-1", "base-v1")
-        conversation.update(update)
-        return True
+    def claim(**kwargs):
+        assert kwargs["uid"] == "owner-1"
+        assert kwargs["conversation_id"] == "conv-1"
+        assert kwargs["correction_id"] == correction_id
+        assert kwargs["recorded_base_version_id"] == "base-v1"
+        audit_ref.value.update({"status": "retry_queued", "retry_count": 1})
+        return "claimed"
 
-    monkeypatch.setattr(corrections.conversations_db, "update_conversation_if_active_summary_version", claim)
+    monkeypatch.setattr(corrections, "_claim_failed_correction_retry", claim)
     monkeypatch.setattr(corrections.uuid, "uuid4", lambda: pytest.fail("retry must retain the existing correction id"))
 
     async def generate(**kwargs):
@@ -3069,6 +3072,18 @@ def test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_ef
     assert queued.status == "queued"
     assert len(background.tasks) == 1
 
+    duplicate_background = _CorrectionBackgroundTasks()
+    duplicate = asyncio.run(
+        corrections._retry_failed_conversation_correction(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            background_tasks=duplicate_background,
+        )
+    )
+    assert duplicate.status == "queued"
+    assert duplicate_background.tasks == []
+
     function, args, kwargs = background.tasks[0]
     applied = asyncio.run(function(*args, **kwargs))
     assert applied.correction_id == correction_id
@@ -3115,9 +3130,9 @@ def test_retry_failed_correction_rejects_changed_active_version_before_any_write
     monkeypatch.setattr(corrections, "_audit_ref", lambda uid, cid, corr_id: audit_ref)
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
     monkeypatch.setattr(
-        corrections.conversations_db,
-        "update_conversation_if_active_summary_version",
-        lambda *args, **kwargs: writes.append("conversation") or True,
+        corrections,
+        "_claim_failed_correction_retry",
+        lambda **kwargs: writes.append("retry_claim") or "claimed",
     )
     monkeypatch.setattr(
         corrections,
@@ -3142,6 +3157,68 @@ def test_retry_failed_correction_rejects_changed_active_version_before_any_write
 
     assert error.value.status_code == 409
     assert writes == []
+
+
+def test_retry_failed_correction_claim_is_exclusive_per_correction_and_base_version():
+    correction_id = "retained-correction"
+    conversation_ref = _MutableCorrectionAuditRef({"active_summary_version_id": "base-v1"})
+    audit_ref = _MutableCorrectionAuditRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": correction_id,
+            "status": "direct_apply_failed",
+            "source": "ios",
+            "retry_count": 1,
+        }
+    )
+
+    class _Transaction:
+        def __init__(self):
+            self.writes = []
+
+        def set(self, ref, payload, merge=False):
+            self.writes.append((ref, dict(payload), merge))
+            ref.set(payload, merge=merge)
+
+    transaction = _Transaction()
+    kwargs = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "recorded_base_version_id": "base-v1",
+        "retry_queued_at": "2026-08-15T23:19:09+00:00",
+        "source": "ios",
+    }
+    first = corrections._claim_failed_correction_retry_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **kwargs,
+    )
+    duplicate = corrections._claim_failed_correction_retry_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **kwargs,
+    )
+
+    assert first == "claimed"
+    assert duplicate == "already_queued"
+    assert len(transaction.writes) == 1
+    assert audit_ref.value["retry_count"] == 2
+    assert audit_ref.value["active_summary_version_id"] == "base-v1"
+
+    audit_ref.value["status"] = "direct_apply_failed"
+    conversation_ref.value["active_summary_version_id"] = "newer-v2"
+    drift = corrections._claim_failed_correction_retry_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **kwargs,
+    )
+    assert drift == "version_drift"
+    assert len(transaction.writes) == 1
 
 
 def test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced(monkeypatch):

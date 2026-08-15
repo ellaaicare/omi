@@ -173,7 +173,7 @@ void main() {
                 jsonEncode({
                   'correction_id': correctionId,
                   'conversation_id': conversationId,
-                  'status': receiptCalls == 1 ? 'queued' : 'direct_apply_failed',
+                  'status': receiptCalls == 1 ? 'retry_queued' : 'direct_apply_failed',
                   'failure_code': receiptCalls == 1 ? null : 'self_hosted_runtime_target_mode_required',
                   'before': {'title': 'Before'},
                   'after': {'private_response_body': responseOnlySentinel},

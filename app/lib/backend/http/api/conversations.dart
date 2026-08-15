@@ -402,7 +402,7 @@ class ConversationCorrectionReceipt {
   final DateTime? undoneAt;
   final String? failureCode;
 
-  bool get isPending => const {'submitted', 'queued', 'processing', 'pending'}.contains(status);
+  bool get isPending => const {'submitted', 'queued', 'retry_queued', 'processing', 'pending'}.contains(status);
   bool get isApplied => status == 'applied' && undoneAt == null;
   bool get isUndone => status == 'undone' || undoneAt != null;
   bool get isFailed => !isPending && !isApplied && !isUndone;

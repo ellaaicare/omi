@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from google.cloud.firestore_v1 import transactional
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
@@ -1728,6 +1729,93 @@ def _exact_correction_retry_context(
     return conversation, audit, recorded_base_version_id
 
 
+def _claim_failed_correction_retry_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_queued_at: str,
+    source: str,
+) -> str:
+    """Atomically fence version drift and duplicate exact-correction retry claims."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if str(conversation.get("active_summary_version_id") or "") != recorded_base_version_id:
+        return "version_drift"
+    audit_base_version_id = str(audit.get("active_summary_version_id") or "")
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or (audit_base_version_id and audit_base_version_id != recorded_base_version_id)
+    ):
+        return "identity_mismatch"
+    audit_status = str(audit.get("status") or "")
+    if audit_status in {"queued", "processing", "retry_queued"}:
+        return "already_queued"
+    if audit_status not in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
+        return "not_retryable"
+    transaction.set(
+        audit_ref,
+        {
+            "status": "retry_queued",
+            "source": source,
+            "active_summary_version_id": recorded_base_version_id,
+            "retry_count": int(audit.get("retry_count") or 0) + 1,
+            "updated_at": retry_queued_at,
+        },
+        merge=True,
+    )
+    return "claimed"
+
+
+@transactional
+def _claim_failed_correction_retry_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    **kwargs,
+) -> str:
+    return _claim_failed_correction_retry_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **kwargs,
+    )
+
+
+def _claim_failed_correction_retry(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_queued_at: str,
+    source: str,
+) -> str:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _claim_failed_correction_retry_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        recorded_base_version_id=recorded_base_version_id,
+        retry_queued_at=retry_queued_at,
+        source=source,
+    )
+
+
 async def _retry_failed_conversation_correction(
     *,
     uid: str,
@@ -1802,35 +1890,31 @@ async def _retry_failed_conversation_correction(
         raise HTTPException(status_code=409, detail="Correction is not retryable")
 
     retry_queued_at = _now_iso()
-    retry_state = {
-        "correction_id": correction_id,
-        "status": "retry_queued",
-        "pending": True,
-        "source": request.source,
-        "submitted_at": submitted_at,
-        "updated_at": retry_queued_at,
-        "active_summary_version_id": recorded_base_version_id,
-    }
-    claimed = conversations_db.update_conversation_if_active_summary_version(
-        uid,
-        conversation_id,
-        recorded_base_version_id,
-        {"correction_state": retry_state},
+    claim_status = _claim_failed_correction_retry(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        recorded_base_version_id=recorded_base_version_id,
+        retry_queued_at=retry_queued_at,
+        source=request.source,
     )
-    if not claimed:
+    if claim_status == "version_drift":
         raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
-    _persist_correction_audit(
-        uid,
-        conversation_id,
-        correction_id,
-        {
-            "status": "retry_queued",
-            "source": request.source,
-            "active_summary_version_id": recorded_base_version_id,
-            "retry_count": int(audit.get("retry_count") or 0) + 1,
-            "updated_at": retry_queued_at,
-        },
-    )
+    if claim_status == "already_queued":
+        return ConversationCorrectionResponse(
+            correction_id=correction_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            status="queued",
+            queued=True,
+            proposal_id=str(audit.get("proposal_id") or "") or None,
+        )
+    if claim_status == "missing":
+        raise HTTPException(status_code=404, detail="Correction not found")
+    if claim_status in {"identity_mismatch", "not_retryable"}:
+        raise HTTPException(status_code=409, detail="Correction is not retryable")
+    if claim_status != "claimed":
+        raise HTTPException(status_code=500, detail="Correction retry claim failed")
     direct_apply_kwargs = {
         "uid": uid,
         "conversation_id": conversation_id,
