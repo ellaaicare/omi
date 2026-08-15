@@ -430,6 +430,31 @@ def refresh_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int
     return 'mismatch'
 
 
+def rotate_in_progress_conversation_id(
+    uid: str,
+    current_conversation_id: str,
+    new_conversation_id: str,
+    ttl: int = 300,
+) -> str:
+    """CAS an owned active capture pointer to its same-stream successor."""
+    key = f'users:{uid}:in_progress_memory_id'
+    rotated = r.eval(
+        """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            return 1
+        end
+        return 0
+        """,
+        1,
+        key,
+        current_conversation_id,
+        new_conversation_id,
+        ttl,
+    )
+    return 'rotated' if rotated else 'mismatch'
+
+
 def claim_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300) -> str:
     """CAS the exact capture pointer to a processing fence without touching a successor."""
     key = f'users:{uid}:in_progress_memory_id'

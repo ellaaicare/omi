@@ -160,6 +160,7 @@ except Exception:
     pass
 
 from utils.conversations import process_conversation as conversation_processor
+from utils.conversations import capture_authority
 from utils.conversations.failure_state import (
     CONVERSATION_PROCESSING_FAILED,
     CONVERSATION_SUMMARY_FAILED,
@@ -827,6 +828,13 @@ class _ExpiringCapturePointerRedis:
             if self.value == processing_fence:
                 return 2
             return 0
+        if "redis.call('GET', KEYS[1]) == ARGV[1]" in script:
+            expected_value, new_value, ttl = args
+            if self.value != expected_value:
+                return 0
+            self.value = new_value
+            self.expires_at = self.now + int(ttl)
+            return 1
         raise AssertionError('unexpected Redis script')
 
 
@@ -883,3 +891,203 @@ def test_active_capture_pointer_refresh_never_overwrites_successor(monkeypatch):
         == 'mismatch'
     )
     assert fake_redis.value == 'successor-capture'
+
+
+def test_capture_finalization_redis_rotation_is_exact_and_preserves_successor(monkeypatch):
+    fake_redis = _ExpiringCapturePointerRedis()
+    fake_redis.value = 'capture-a'
+    fake_redis.expires_at = 300
+    monkeypatch.setattr(conversations_router.redis_db, 'r', fake_redis)
+
+    assert (
+        conversations_router.redis_db.rotate_in_progress_conversation_id(
+            'authenticated-user',
+            'capture-a',
+            'capture-a-next',
+        )
+        == 'rotated'
+    )
+    assert fake_redis.value == 'capture-a-next'
+    assert fake_redis.expires_at == 300
+
+    fake_redis.value = 'capture-b'
+    assert (
+        conversations_router.redis_db.rotate_in_progress_conversation_id(
+            'authenticated-user',
+            'capture-a-next',
+            'capture-a-late',
+        )
+        == 'mismatch'
+    )
+    assert fake_redis.value == 'capture-b'
+
+
+def _mount_capture_stream_authority(monkeypatch, pointer='capture-a'):
+    state = {
+        'pointer': pointer,
+        'expires_in': 300,
+        'refreshes': [],
+        'rotations': [],
+        'compare_deletes': [],
+    }
+
+    def refresh(uid, conversation_id, ttl=300):
+        assert uid == 'authenticated-user'
+        state['refreshes'].append(conversation_id)
+        if state['pointer'] == conversation_id:
+            state['expires_in'] = ttl
+            return 'refreshed'
+        if state['pointer'] is None:
+            state['pointer'] = conversation_id
+            state['expires_in'] = ttl
+            return 'restored'
+        return 'mismatch'
+
+    def rotate(uid, current_conversation_id, new_conversation_id, ttl=300):
+        assert uid == 'authenticated-user'
+        state['rotations'].append((current_conversation_id, new_conversation_id))
+        if state['pointer'] != current_conversation_id:
+            return 'mismatch'
+        state['pointer'] = new_conversation_id
+        state['expires_in'] = ttl
+        return 'rotated'
+
+    def compare_delete(uid, expected_value):
+        assert uid == 'authenticated-user'
+        state['compare_deletes'].append(expected_value)
+        if state['pointer'] != expected_value:
+            return False
+        state['pointer'] = None
+        return True
+
+    monkeypatch.setattr(capture_authority.redis_db, 'refresh_in_progress_conversation_id', refresh)
+    monkeypatch.setattr(capture_authority.redis_db, 'rotate_in_progress_conversation_id', rotate)
+    monkeypatch.setattr(capture_authority.redis_db, 'remove_in_progress_conversation_id_if_matches', compare_delete)
+    return state
+
+
+@pytest.mark.parametrize('checkpoint', ['resume', 'segment_photo_update', 'lifecycle'])
+def test_capture_finalization_live_stream_mismatch_paths_are_terminal(monkeypatch, checkpoint):
+    state = _mount_capture_stream_authority(monkeypatch, pointer='capture-b')
+    losses = []
+    durable_updates = []
+    authority = capture_authority.CaptureStreamAuthority(
+        'authenticated-user',
+        lambda lost_checkpoint, conversation_id: losses.append((lost_checkpoint, conversation_id)),
+    )
+
+    if checkpoint == 'segment_photo_update':
+        result = authority.run_if_owned('capture-a', checkpoint, lambda: durable_updates.append('segment-photo'))
+        assert result is None
+    else:
+        assert authority.refresh('capture-a', checkpoint) is False
+
+    assert authority.lost is True
+    assert losses == [(checkpoint, 'capture-a')]
+    assert durable_updates == []
+    assert state['pointer'] == 'capture-b'
+    assert authority.refresh('capture-a', 'later_work') is False
+    assert state['refreshes'] == ['capture-a']
+
+
+def test_capture_finalization_overlapping_stream_successor_blocks_stale_updates_processing_and_split(monkeypatch):
+    state = _mount_capture_stream_authority(monkeypatch)
+    durable = {
+        'capture_b_stubs': 0,
+        'capture_a_segments': 0,
+        'capture_a_photos': 0,
+        'capture_a_finished_at': 0,
+        'capture_a_processing': 0,
+        'capture_a_integrations': 0,
+        'capture_a_new_stubs': 0,
+    }
+    stream_a = capture_authority.CaptureStreamAuthority('authenticated-user')
+    stream_b = capture_authority.CaptureStreamAuthority('authenticated-user')
+
+    assert stream_a.refresh('capture-a', 'resume') is True
+    state['pointer'] = None
+
+    def install_capture_b():
+        durable['capture_b_stubs'] += 1
+
+    assert stream_b.acquire('capture-b', install_capture_b, 'initial_acquisition') is True
+    assert state['pointer'] == 'capture-b'
+
+    def persist_stale_data():
+        durable['capture_a_segments'] += 1
+        durable['capture_a_photos'] += 1
+        durable['capture_a_finished_at'] += 1
+
+    assert stream_a.run_if_owned('capture-a', 'segment_photo_update', persist_stale_data) is None
+    if stream_a.refresh('capture-a', 'lifecycle'):
+        rotated = stream_a.rotate(
+            'capture-a',
+            'capture-a-next',
+            lambda: durable.__setitem__('capture_a_new_stubs', durable['capture_a_new_stubs'] + 1),
+            'conversation_rotation',
+        )
+        if rotated:
+            durable['capture_a_processing'] += 1
+            durable['capture_a_integrations'] += 1
+
+    assert (
+        stream_a.rotate(
+            'capture-a',
+            'capture-a-next',
+            lambda: durable.__setitem__('capture_a_new_stubs', durable['capture_a_new_stubs'] + 1),
+            'conversation_rotation',
+        )
+        is False
+    )
+    assert stream_b.refresh('capture-b', 'lifecycle') is True
+    assert state['pointer'] == 'capture-b'
+    assert durable == {
+        'capture_b_stubs': 1,
+        'capture_a_segments': 0,
+        'capture_a_photos': 0,
+        'capture_a_finished_at': 0,
+        'capture_a_processing': 0,
+        'capture_a_integrations': 0,
+        'capture_a_new_stubs': 0,
+    }
+
+
+def test_capture_finalization_normal_same_stream_rotation_is_exact_and_bounded(monkeypatch):
+    state = _mount_capture_stream_authority(monkeypatch)
+    installed_with_pointer = []
+    authority = capture_authority.CaptureStreamAuthority('authenticated-user')
+
+    assert (
+        authority.rotate(
+            'capture-a',
+            'capture-a-next',
+            lambda: installed_with_pointer.append(state['pointer']),
+            'conversation_rotation',
+        )
+        is True
+    )
+
+    assert state['pointer'] == 'capture-a-next'
+    assert state['expires_in'] == 300
+    assert state['rotations'] == [('capture-a', 'capture-a-next')]
+    assert installed_with_pointer == ['capture-a-next']
+
+
+def test_capture_finalization_rotation_never_overwrites_processing_fence_or_successor(monkeypatch):
+    for protected_pointer in ('processing:capture-a', 'capture-b'):
+        state = _mount_capture_stream_authority(monkeypatch, pointer=protected_pointer)
+        installed = []
+        authority = capture_authority.CaptureStreamAuthority('authenticated-user')
+
+        assert (
+            authority.rotate(
+                'capture-a',
+                'capture-a-next',
+                lambda: installed.append('stub'),
+                'conversation_rotation',
+            )
+            is False
+        )
+        assert authority.lost is True
+        assert state['pointer'] == protected_pointer
+        assert installed == []

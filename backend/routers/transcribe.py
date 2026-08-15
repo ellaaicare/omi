@@ -71,6 +71,7 @@ from utils.conversations.process_conversation import (
     process_conversation,
     retrieve_in_progress_conversation,
 )
+from utils.conversations.capture_authority import CaptureStreamAuthority
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -405,10 +406,27 @@ async def _stream_handler(
 
     websocket_active = True
     websocket_close_code = 1001  # Going Away, don't close with good from backend
+    authority_loss_close_task = None
 
     # Initialize segment buffers early (before onboarding handler needs them)
     realtime_segment_buffers = []
     realtime_photo_buffers: list[ConversationPhoto] = []
+
+    def _on_capture_authority_lost(checkpoint: str, conversation_id: str) -> None:
+        nonlocal websocket_active, websocket_close_code, authority_loss_close_task
+        websocket_active = False
+        websocket_close_code = 1008
+        print(
+            f"Capture authority lost at {checkpoint} for conversation {conversation_id}",
+            uid,
+            session_id,
+        )
+        if websocket.client_state == WebSocketState.CONNECTED and authority_loss_close_task is None:
+            authority_loss_close_task = asyncio.create_task(
+                websocket.close(code=websocket_close_code, reason="Capture authority lost")
+            )
+
+    capture_authority = CaptureStreamAuthority(uid, _on_capture_authority_lost)
 
     # === Speaker Identification State ===
     RING_BUFFER_DURATION = 60.0  # seconds
@@ -633,6 +651,8 @@ async def _stream_handler(
 
     # Fallback for when pusher is not available
     async def _create_conversation_fallback(conversation_data: dict):
+        if capture_authority.lost:
+            return
         conversation = Conversation(**conversation_data)
         if conversation.status != ConversationStatus.processing:
             _send_message_event(ConversationEvent(event_type="memory_processing_started", memory=conversation))
@@ -661,12 +681,16 @@ async def _stream_handler(
         _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=messages))
 
     async def cleanup_processing_conversations():
+        if capture_authority.lost:
+            return
         processing = conversations_db.get_processing_conversations(uid)
         print('finalize_processing_conversations len(processing):', len(processing), uid, session_id)
         if not processing or len(processing) == 0:
             return
 
         for conversation in processing:
+            if capture_authority.lost:
+                return
             if PUSHER_ENABLED:
                 await request_conversation_processing(conversation['id'])
             else:
@@ -674,8 +698,14 @@ async def _stream_handler(
 
     async def process_pending_conversations(timed_out_id: Optional[str]):
         await asyncio.sleep(7.0)
+        if capture_authority.lost or not websocket_active or not current_conversation_id:
+            return
+        if not capture_authority.refresh(current_conversation_id, 'pending_processing'):
+            return
         if timed_out_id:
             await _process_conversation(timed_out_id)
+        if capture_authority.lost:
+            return
         await cleanup_processing_conversations()
 
     # Send last completed conversation to client
@@ -687,8 +717,11 @@ async def _stream_handler(
     send_last_conversation()
 
     # Create new stub conversation for next batch
-    async def _create_new_in_progress_conversation():
+    async def _create_new_in_progress_conversation(expected_conversation_id: Optional[str] = None) -> bool:
         nonlocal current_conversation_id
+
+        if capture_authority.lost:
+            return False
 
         conversation_source = ConversationSource.omi
         if source:
@@ -712,8 +745,23 @@ async def _stream_handler(
             source=conversation_source,
             private_cloud_sync_enabled=private_cloud_sync_enabled,
         )
-        conversations_db.upsert_conversation(uid, conversation_data=stub_conversation.dict())
-        redis_db.set_in_progress_conversation_id(uid, new_conversation_id)
+        install_stub = lambda: conversations_db.upsert_conversation(
+            uid,
+            conversation_data=stub_conversation.dict(),
+        )
+        if expected_conversation_id is None:
+            installed = capture_authority.acquire(new_conversation_id, install_stub, 'initial_acquisition')
+        else:
+            installed = capture_authority.rotate(
+                expected_conversation_id,
+                new_conversation_id,
+                install_stub,
+                'conversation_rotation',
+            )
+        if not installed:
+            return False
+
+        current_conversation_id = new_conversation_id
 
         detected_meeting_id = None
 
@@ -754,11 +802,16 @@ async def _stream_handler(
         if detected_meeting_id:
             redis_db.set_conversation_meeting_id(new_conversation_id, detected_meeting_id)
 
-        current_conversation_id = new_conversation_id
-
         print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
+        return True
 
     async def _process_conversation(conversation_id: str):
+        if (
+            capture_authority.lost
+            or not current_conversation_id
+            or not capture_authority.refresh(current_conversation_id, 'conversation_processing')
+        ):
+            return
         print("_process_conversation", uid, session_id)
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if conversation:
@@ -786,12 +839,14 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(existing_conversation['id']):
+                    return None
                 return existing_conversation["id"]
 
             # Continue with the existing conversation
             current_conversation_id = existing_conversation['id']
-            redis_db.refresh_in_progress_conversation_id(uid, current_conversation_id)
+            if not capture_authority.refresh(current_conversation_id, 'resume'):
+                return None
             print(
                 f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
                 uid,
@@ -807,6 +862,12 @@ async def _stream_handler(
         MessageServiceStatusEvent(status="in_progress_conversations_processing", status_text="Processing Conversations")
     )
     timed_out_conversation_id = await _prepare_in_progess_conversations()
+    if capture_authority.lost:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        if authority_loss_close_task:
+            await asyncio.gather(authority_loss_close_task, return_exceptions=True)
+        return
 
     def _update_in_progress_conversation(
         conversation: Conversation,
@@ -814,32 +875,38 @@ async def _stream_handler(
         photos: List[ConversationPhoto],
         finished_at: datetime,
     ):
-        redis_db.refresh_in_progress_conversation_id(uid, conversation.id)
-        updated_segments: List[TranscriptSegment] = []
-        removed_ids: List[str] = []
+        def persist_update():
+            updated_segments: List[TranscriptSegment] = []
+            removed_ids: List[str] = []
 
-        if segments:
-            conversation.transcript_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
-                conversation.transcript_segments, segments
-            )
-            process_speaker_assigned_segments(
-                updated_segments,
-                segment_person_assignment_map,
-                speaker_to_person_map,
-            )
-            conversations_db.update_conversation_segments(
-                uid, conversation.id, [segment.dict() for segment in conversation.transcript_segments]
-            )
+            if segments:
+                conversation.transcript_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
+                    conversation.transcript_segments, segments
+                )
+                process_speaker_assigned_segments(
+                    updated_segments,
+                    segment_person_assignment_map,
+                    speaker_to_person_map,
+                )
+                conversations_db.update_conversation_segments(
+                    uid, conversation.id, [segment.dict() for segment in conversation.transcript_segments]
+                )
 
-        if photos:
-            conversations_db.store_conversation_photos(uid, conversation.id, photos)
-            # Update source if we now have photos
-            if conversation.source != ConversationSource.openglass:
-                conversations_db.update_conversation(uid, conversation.id, {'source': ConversationSource.openglass})
-                conversation.source = ConversationSource.openglass
+            if photos:
+                conversations_db.store_conversation_photos(uid, conversation.id, photos)
+                # Update source if we now have photos
+                if conversation.source != ConversationSource.openglass:
+                    conversations_db.update_conversation(uid, conversation.id, {'source': ConversationSource.openglass})
+                    conversation.source = ConversationSource.openglass
 
-        conversations_db.update_conversation_finished_at(uid, conversation.id, finished_at)
-        return conversation, updated_segments, removed_ids
+            conversations_db.update_conversation_finished_at(uid, conversation.id, finished_at)
+            return conversation, updated_segments, removed_ids
+
+        return capture_authority.run_if_owned(
+            conversation.id,
+            'segment_photo_update',
+            persist_update,
+        )
 
     # STT
     # Validate websocket_active before initiating STT
@@ -1448,7 +1515,7 @@ async def _stream_handler(
     translation_service = TranslationService()
 
     async def translate(segments: List[TranscriptSegment], conversation_id: str):
-        if not translation_language:
+        if capture_authority.lost or not translation_language:
             return
 
         try:
@@ -1500,7 +1567,7 @@ async def _stream_handler(
                             conversation['transcript_segments'][i]['translations'] = segment.dict()['translations']
                             should_update = True
                             break
-                if should_update:
+                if should_update and not capture_authority.lost:
                     conversations_db.update_conversation_segments(
                         uid, conversation_id, conversation['transcript_segments']
                     )
@@ -1524,10 +1591,14 @@ async def _stream_handler(
                 print(f"WARN: the current conversation is not valid", uid, session_id)
                 continue
 
+            if not capture_authority.refresh(current_conversation_id, 'lifecycle'):
+                return
+
             conversation = conversations_db.get_conversation(uid, current_conversation_id)
             if not conversation:
                 print(f"WARN: the current conversation is not found (id: {current_conversation_id})", uid, session_id)
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(current_conversation_id):
+                    return
                 continue
 
             # Check if conversation status is not in_progress
@@ -1537,10 +1608,9 @@ async def _stream_handler(
                     uid,
                     session_id,
                 )
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(current_conversation_id):
+                    return
                 continue
-
-            redis_db.refresh_in_progress_conversation_id(uid, current_conversation_id)
 
             # Check if conversation should be processed
             now = datetime.now(timezone.utc)
@@ -1567,13 +1637,15 @@ async def _stream_handler(
                     print(f"Error checking max conversation duration: {e}", uid, session_id)
 
             if split_reason:
+                completed_conversation_id = current_conversation_id
                 print(
-                    f"Conversation {current_conversation_id} split triggered ({split_reason}: {split_elapsed_seconds:.1f}s/{split_limit_seconds}s). Processing...",
+                    f"Conversation {completed_conversation_id} split triggered ({split_reason}: {split_elapsed_seconds:.1f}s/{split_limit_seconds}s). Processing...",
                     uid,
                     session_id,
                 )
-                await _process_conversation(current_conversation_id)
-                await _create_new_in_progress_conversation()
+                if not await _create_new_in_progress_conversation(completed_conversation_id):
+                    return
+                await _process_conversation(completed_conversation_id)
 
     async def speaker_identification_task():
         """Consume segment queue, accumulate per speaker, trigger match when ready."""
@@ -1785,6 +1857,12 @@ async def _stream_handler(
 
             finished_at = datetime.now(timezone.utc)
 
+            if not current_conversation_id or not capture_authority.refresh(
+                current_conversation_id,
+                'segment_photo_update',
+            ):
+                return
+
             # Get conversation
             conversation_data = conversations_db.get_conversation(uid, current_conversation_id)
             if not conversation_data:
@@ -1881,6 +1959,9 @@ async def _stream_handler(
                 except Exception as e:
                     print(f"Error sending transcript segments to websocket: {e}", uid, session_id)
 
+                if capture_authority.lost:
+                    return
+
                 if transcript_send is not None and user_has_credits:
                     transcript_send([segment.dict() for segment in transcript_segments])
                 elif not PUSHER_ENABLED and user_has_credits:
@@ -1898,6 +1979,9 @@ async def _stream_handler(
 
                 if translation_enabled:
                     await translate(updated_segments, conversation.id)
+
+                if capture_authority.lost:
+                    return
 
                 # Speaker detection
                 for segment in updated_segments:
@@ -1985,6 +2069,9 @@ async def _stream_handler(
     ):
         from utils.llm.openglass import describe_image
 
+        if capture_authority.lost:
+            return
+
         photo_id = str(uuid.uuid4())
         await send_event_func(PhotoProcessingEvent(temp_id=temp_id, photo_id=photo_id))
 
@@ -1996,6 +2083,9 @@ async def _stream_handler(
             description = "Could not generate description."
             discarded = True
 
+        if capture_authority.lost:
+            return
+
         final_photo = ConversationPhoto(id=photo_id, base64=image_b64, description=description, discarded=discarded)
         photo_buffer.append(final_photo)
         await send_event_func(PhotoDescribedEvent(photo_id=photo_id, description=description, discarded=discarded))
@@ -2003,6 +2093,8 @@ async def _stream_handler(
     async def handle_image_chunk(
         uid: str, chunk_data: dict, image_chunks_cache: dict, send_event_func, photo_buffer: list[ConversationPhoto]
     ):
+        if capture_authority.lost:
+            return
         temp_id = chunk_data.get('id')
         index = chunk_data.get('index')
         total = chunk_data.get('total')
