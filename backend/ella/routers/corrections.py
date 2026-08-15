@@ -144,6 +144,7 @@ class ConversationCorrectionReceiptResponse(BaseModel):
     after_version_id: Optional[str] = None
     active_version_id: Optional[str] = None
     undo_version_id: Optional[str] = None
+    failure_code: Optional[str] = None
     before: CorrectionSummarySnapshot
     after: CorrectionSummarySnapshot
     propagation_status: str = "known"
@@ -423,6 +424,7 @@ async def _apply_corrected_summary(
         summary=corrected,
         summary_kind="corrected_enriched",
         correction_id=correction_id,
+        require_based_on_match=True,
     )
 
 
@@ -434,6 +436,29 @@ def _audit_ref(uid: str, conversation_id: str, correction_id: str):
         .document(conversation_id)
         .collection("corrections")
         .document(correction_id)
+    )
+
+
+def _read_correction_audit(uid: str, conversation_id: str, correction_id: str) -> dict[str, Any]:
+    snapshot = _audit_ref(uid, conversation_id, correction_id).get()
+    if not getattr(snapshot, "exists", False):
+        return {}
+    value = snapshot.to_dict() or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _correction_failure_code(error: Exception) -> str:
+    candidate = str(getattr(error, "code", "") or "").strip()
+    if candidate and all(character.isalnum() or character in {"_", "-"} for character in candidate):
+        return candidate[:128]
+    return error.__class__.__name__.lower()[:128]
+
+
+def _audit_has_completed_stage(audit: dict[str, Any], *stages: str) -> bool:
+    completed = set(stages)
+    return any(
+        isinstance(event, dict) and event.get("stage") in completed and event.get("status") in {"ok", "completed"}
+        for event in audit.get("events") or []
     )
 
 
@@ -528,8 +553,7 @@ def _correction_receipt(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     _require_unlocked_conversation(conversation)
-    audit_snapshot = _audit_ref(uid, conversation_id, correction_id).get()
-    audit = audit_snapshot.to_dict() if getattr(audit_snapshot, "exists", False) else {}
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
     before, corrected = _correction_summary_versions(conversation, correction_id)
     if not audit and corrected is None:
         raise HTTPException(status_code=404, detail="Correction not found")
@@ -538,6 +562,11 @@ def _correction_receipt(
         raw_state if isinstance(raw_state, dict) and str(raw_state.get("correction_id") or "") == correction_id else {}
     )
     status_value = str(audit.get("status") or state.get("status") or "pending")
+    recorded_base_version_id = str(
+        audit.get("active_summary_version_id") or state.get("active_summary_version_id") or ""
+    )
+    if before is None and recorded_base_version_id:
+        before = _summary_version(conversation, recorded_base_version_id)
     applied_count, reverted_count, propagation_status = _correction_propagation_counts(
         uid,
         conversation_id,
@@ -563,6 +592,7 @@ def _correction_receipt(
         after_version_id=corrected_id or None,
         active_version_id=str(conversation.get("active_summary_version_id") or "") or None,
         undo_version_id=(str(undo_version.get("id") or "") or None) if undo_version else None,
+        failure_code=str(audit.get("failure_code") or state.get("failure_code") or "") or None,
         before=_snapshot(before),
         after=_snapshot(corrected),
         propagation_status=propagation_status,
@@ -808,6 +838,12 @@ async def _emit_canonical_correction_event(
                 "write_result": result,
             },
         )
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {"canonical_event_completed": True, "updated_at": _now_iso()},
+        )
     except Exception as exc:
         logger.warning(
             "Failed to emit canonical correction event",
@@ -884,6 +920,7 @@ async def _run_correction_propagation_for_submission(
                 "propagation_status": run.status,
                 "propagation_candidate_count": run.candidate_count,
                 "propagation_proposal_count": run.proposal_count,
+                "propagation_completed": True,
                 "updated_at": _now_iso(),
             },
         )
@@ -919,25 +956,36 @@ async def _run_correction_observer_work(
     active_summary_version_id: Optional[str],
     proposal_id: Optional[str],
 ) -> None:
-    await _emit_canonical_correction_event(
-        uid=uid,
-        conversation_id=conversation_id,
-        correction_id=correction_id,
-        trace_id=trace_id,
-        request=request,
-        structured=structured,
-        submitted_at=submitted_at,
-        active_summary_version_id=active_summary_version_id,
-        proposal_id=proposal_id,
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    canonical_completed = audit.get("canonical_event_completed") is True or _audit_has_completed_stage(
+        audit, "canonical_event_emitted"
     )
-    await _run_correction_propagation_for_submission(
-        uid=uid,
-        conversation_id=conversation_id,
-        correction_id=correction_id,
-        trace_id=trace_id,
-        request=request,
-        source_conversation=source_conversation,
+    if not canonical_completed:
+        await _emit_canonical_correction_event(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=request,
+            structured=structured,
+            submitted_at=submitted_at,
+            active_summary_version_id=active_summary_version_id,
+            proposal_id=proposal_id,
+        )
+
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    propagation_completed = audit.get("propagation_completed") is True or _audit_has_completed_stage(
+        audit, "propagation_run_completed"
     )
+    if not propagation_completed:
+        await _run_correction_propagation_for_submission(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=request,
+            source_conversation=source_conversation,
+        )
 
 
 async def _queue_correction_observer_work(
@@ -1054,6 +1102,85 @@ def _create_summary_correction_proposal(
     return proposal.get("proposal_id")
 
 
+async def _run_post_source_correction_side_effects(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    source_conversation: dict[str, Any],
+    structured: dict[str, Any],
+    transcript: str,
+    segment_count: int,
+    submitted_at: str,
+    active_summary_version_id: Optional[str],
+) -> Optional[str]:
+    """Run only incomplete downstream work after the source summary CAS succeeds."""
+
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    proposal_id = str(audit.get("proposal_id") or "") or None
+    proposal_completed = bool(proposal_id) or _audit_has_completed_stage(audit, "proposal_created")
+    if not proposal_completed:
+        try:
+            proposal_id = _create_summary_correction_proposal(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                request=request,
+                structured=structured,
+                transcript=transcript,
+                segment_count=segment_count,
+                active_summary_version_id=active_summary_version_id,
+            )
+            if proposal_id:
+                created_at = _now_iso()
+                _persist_correction_audit(
+                    uid,
+                    conversation_id,
+                    correction_id,
+                    {"proposal_id": proposal_id, "proposal_completed": True, "updated_at": created_at},
+                )
+                _append_correction_event(
+                    uid,
+                    conversation_id,
+                    correction_id,
+                    {
+                        "stage": "proposal_created",
+                        "status": "ok",
+                        "at": created_at,
+                        "trace_id": trace_id,
+                        "proposal_id": proposal_id,
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "Failed to create summary correction proposal",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+            )
+            _append_correction_event(
+                uid,
+                conversation_id,
+                correction_id,
+                {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id},
+            )
+
+    await _run_correction_observer_work(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        trace_id=trace_id,
+        request=request,
+        source_conversation=source_conversation,
+        structured=structured,
+        submitted_at=submitted_at,
+        active_summary_version_id=active_summary_version_id,
+        proposal_id=proposal_id,
+    )
+    return proposal_id
+
+
 def _n8n_correction_response_is_accepted(response_body: Any) -> bool:
     if not isinstance(response_body, dict):
         return False
@@ -1117,7 +1244,8 @@ async def _run_direct_correction_apply(
     segment_count: int,
     submitted_at: str,
     active_summary_version_id: Optional[str],
-    proposal_id: Optional[str],
+    proposal_id: Optional[str] = None,
+    source_conversation: Optional[dict[str, Any]] = None,
 ) -> ConversationCorrectionResponse:
     try:
         corrected_summary = await _generate_corrected_summary(
@@ -1163,6 +1291,26 @@ async def _run_direct_correction_apply(
                 "apply_result": apply_result,
             },
         )
+        try:
+            latest_source = conversations_db.get_conversation(uid, conversation_id) or source_conversation or {}
+            proposal_id = await _run_post_source_correction_side_effects(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                request=request,
+                source_conversation=latest_source,
+                structured=structured,
+                transcript=transcript,
+                segment_count=segment_count,
+                submitted_at=submitted_at,
+                active_summary_version_id=active_summary_version_id,
+            )
+        except Exception:
+            logger.exception(
+                "Post-source correction side effects failed",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+            )
         return ConversationCorrectionResponse(
             correction_id=correction_id,
             conversation_id=conversation_id,
@@ -1177,6 +1325,7 @@ async def _run_direct_correction_apply(
             extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
         )
         failed_at = _now_iso()
+        failure_code = _correction_failure_code(exc)
         _append_correction_event(
             uid,
             conversation_id,
@@ -1186,7 +1335,7 @@ async def _run_direct_correction_apply(
                 "status": "error",
                 "at": failed_at,
                 "trace_id": trace_id,
-                "error": str(exc),
+                "failure_code": failure_code,
                 "n8n_fallback_enabled": N8N_CORRECTION_FALLBACK_ENABLED,
             },
         )
@@ -1198,7 +1347,9 @@ async def _run_direct_correction_apply(
                 {
                     "status": "direct_apply_failed",
                     "updated_at": failed_at,
-                    "direct_apply_error": str(exc),
+                    "failure_code": failure_code,
+                    "source": request.source,
+                    "active_summary_version_id": active_summary_version_id,
                 },
             )
             _update_conversation_correction_state(
@@ -1212,7 +1363,9 @@ async def _run_direct_correction_apply(
                         "trace_id": trace_id,
                         "submitted_at": submitted_at,
                         "updated_at": failed_at,
-                        "error": str(exc),
+                        "source": request.source,
+                        "active_summary_version_id": active_summary_version_id,
+                        "failure_code": failure_code,
                     }
                 },
             )
@@ -1281,6 +1434,7 @@ async def _submit_conversation_correction(
         "summary_context": request.summary_context.model_dump(),
         "current_summary": structured,
         "segment_count": segment_count,
+        "active_summary_version_id": submitted_state.get("active_summary_version_id"),
         "created_at": submitted_at,
         "updated_at": submitted_at,
         "events": [{"stage": "submitted", "status": "ok", "at": submitted_at, "trace_id": trace_id}],
@@ -1288,65 +1442,6 @@ async def _submit_conversation_correction(
     _persist_correction_audit(uid, conversation_id, correction_id, audit_payload)
 
     proposal_id = None
-    try:
-        proposal_id = _create_summary_correction_proposal(
-            uid=uid,
-            conversation_id=conversation_id,
-            correction_id=correction_id,
-            trace_id=trace_id,
-            request=request,
-            structured=structured,
-            transcript=transcript,
-            segment_count=segment_count,
-            active_summary_version_id=submitted_state.get("active_summary_version_id"),
-        )
-        if proposal_id:
-            _persist_correction_audit(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    "proposal_id": proposal_id,
-                    "updated_at": _now_iso(),
-                },
-            )
-            _append_correction_event(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    "stage": "proposal_created",
-                    "status": "ok",
-                    "at": _now_iso(),
-                    "trace_id": trace_id,
-                    "proposal_id": proposal_id,
-                },
-            )
-    except Exception as exc:
-        logger.exception(
-            "Failed to create summary correction proposal",
-            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
-        )
-        _append_correction_event(
-            uid,
-            conversation_id,
-            correction_id,
-            {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id, "error": str(exc)},
-        )
-
-    await _queue_correction_observer_work(
-        background_tasks=background_tasks,
-        uid=uid,
-        conversation_id=conversation_id,
-        correction_id=correction_id,
-        trace_id=trace_id,
-        request=request,
-        source_conversation=conversation,
-        structured=structured,
-        submitted_at=submitted_at,
-        active_summary_version_id=submitted_state.get("active_summary_version_id"),
-        proposal_id=proposal_id,
-    )
 
     if DIRECT_CORRECTION_APPLY_ENABLED:
         direct_apply_kwargs = {
@@ -1361,6 +1456,7 @@ async def _submit_conversation_correction(
             "submitted_at": submitted_at,
             "active_summary_version_id": submitted_state.get("active_summary_version_id"),
             "proposal_id": proposal_id,
+            "source_conversation": conversation,
         }
         if DIRECT_CORRECTION_BACKGROUND_ENABLED and background_tasks is not None:
             queued_at = _now_iso()
@@ -1428,6 +1524,9 @@ async def _submit_conversation_correction(
                 "status": "direct_apply_disabled",
                 "updated_at": skipped_at,
                 "queue_error": "n8n correction fallback disabled",
+                "failure_code": "direct_apply_disabled",
+                "source": request.source,
+                "active_summary_version_id": submitted_state.get("active_summary_version_id"),
             },
         )
         _append_correction_event(
@@ -1453,7 +1552,9 @@ async def _submit_conversation_correction(
                     "trace_id": trace_id,
                     "submitted_at": submitted_at,
                     "updated_at": skipped_at,
-                    "error": "n8n correction fallback disabled",
+                    "source": request.source,
+                    "active_summary_version_id": submitted_state.get("active_summary_version_id"),
+                    "failure_code": "direct_apply_disabled",
                 }
             },
         )
@@ -1490,14 +1591,22 @@ async def _submit_conversation_correction(
             {
                 "status": "queue_failed",
                 "updated_at": failed_at,
-                "queue_error": str(exc),
+                "failure_code": _correction_failure_code(exc),
+                "source": request.source,
+                "active_summary_version_id": submitted_state.get("active_summary_version_id"),
             },
         )
         _append_correction_event(
             uid,
             conversation_id,
             correction_id,
-            {"stage": "queue_failed", "status": "error", "at": failed_at, "trace_id": trace_id, "error": str(exc)},
+            {
+                "stage": "queue_failed",
+                "status": "error",
+                "at": failed_at,
+                "trace_id": trace_id,
+                "failure_code": _correction_failure_code(exc),
+            },
         )
         _update_conversation_correction_state(
             uid,
@@ -1511,7 +1620,7 @@ async def _submit_conversation_correction(
                     "submitted_at": submitted_at,
                     "updated_at": failed_at,
                     "active_summary_version_id": submitted_state.get("active_summary_version_id"),
-                    "error": str(exc),
+                    "failure_code": _correction_failure_code(exc),
                 }
             },
         )
@@ -1555,6 +1664,198 @@ async def _submit_conversation_correction(
         status="queued",
         queued=True,
         proposal_id=proposal_id,
+    )
+
+
+def _recorded_correction_base_version_id(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    audit: dict[str, Any],
+) -> str:
+    recorded = str(audit.get("active_summary_version_id") or "")
+    if recorded:
+        return recorded
+
+    proposal_id = str(audit.get("proposal_id") or "")
+    if not proposal_id:
+        return ""
+    proposal = proposal_ingest.proposals_db.get_proposal(uid, proposal_id)
+    if proposal is None:
+        return ""
+    target = proposal.payload.get("target") if isinstance(proposal.payload, dict) else None
+    expected_idempotency_key = f"summary-correction:{uid}:{conversation_id}:{correction_id}"
+    if (
+        proposal.profile_uid != uid
+        or proposal.idempotency_key != expected_idempotency_key
+        or proposal.trace_id != str(audit.get("trace_id") or "")
+        or not isinstance(target, dict)
+        or str(target.get("conversation_id") or "") != conversation_id
+        or str(target.get("correction_id") or "") != correction_id
+    ):
+        return ""
+    return str(target.get("active_summary_version_id") or "")
+
+
+def _exact_correction_retry_context(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _require_unlocked_conversation(conversation)
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    if not audit:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+    ):
+        raise HTTPException(status_code=404, detail="Correction not found")
+    recorded_base_version_id = _recorded_correction_base_version_id(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        audit=audit,
+    )
+    if not recorded_base_version_id:
+        raise HTTPException(status_code=409, detail="Correction base version is unavailable")
+    return conversation, audit, recorded_base_version_id
+
+
+async def _retry_failed_conversation_correction(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    background_tasks: Optional[BackgroundTasks],
+) -> ConversationCorrectionResponse:
+    conversation, audit, recorded_base_version_id = _exact_correction_retry_context(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+    )
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    if corrected is not None:
+        corrected_version_id = str(corrected.get("id") or "")
+        if (
+            str(corrected.get("based_on_version_id") or "") != recorded_base_version_id
+            or str(conversation.get("active_summary_version_id") or "") != corrected_version_id
+        ):
+            raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
+    elif str(conversation.get("active_summary_version_id") or "") != recorded_base_version_id:
+        raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
+
+    trace_id = str(audit.get("trace_id") or f"correction:{conversation_id}:{correction_id}")
+    submitted_at = str(audit.get("created_at") or audit.get("submitted_at") or _now_iso())
+    try:
+        request = ConversationCorrectionRequest(
+            correction_text=str(audit.get("correction_text") or ""),
+            source=str(audit.get("source") or "ios"),
+            summary_context=audit.get("summary_context") if isinstance(audit.get("summary_context"), dict) else {},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail="Correction retry metadata is invalid") from exc
+    structured = audit.get("current_summary") if isinstance(audit.get("current_summary"), dict) else {}
+    transcript = _format_transcript(conversation)
+    segment_count = len(conversation.get("transcript_segments") or [])
+
+    if corrected is not None:
+        proposal_id = await _run_post_source_correction_side_effects(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=request,
+            source_conversation=conversation,
+            structured=structured,
+            transcript=transcript,
+            segment_count=segment_count,
+            submitted_at=submitted_at,
+            active_summary_version_id=recorded_base_version_id,
+        )
+        return ConversationCorrectionResponse(
+            correction_id=correction_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            status="applied",
+            queued=False,
+            proposal_id=proposal_id,
+        )
+
+    audit_status = str(audit.get("status") or "")
+    if audit_status in {"queued", "processing", "retry_queued"}:
+        return ConversationCorrectionResponse(
+            correction_id=correction_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            status="queued",
+            queued=True,
+            proposal_id=str(audit.get("proposal_id") or "") or None,
+        )
+    if audit_status not in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
+        raise HTTPException(status_code=409, detail="Correction is not retryable")
+
+    retry_queued_at = _now_iso()
+    retry_state = {
+        "correction_id": correction_id,
+        "status": "retry_queued",
+        "pending": True,
+        "source": request.source,
+        "submitted_at": submitted_at,
+        "updated_at": retry_queued_at,
+        "active_summary_version_id": recorded_base_version_id,
+    }
+    claimed = conversations_db.update_conversation_if_active_summary_version(
+        uid,
+        conversation_id,
+        recorded_base_version_id,
+        {"correction_state": retry_state},
+    )
+    if not claimed:
+        raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "status": "retry_queued",
+            "source": request.source,
+            "active_summary_version_id": recorded_base_version_id,
+            "retry_count": int(audit.get("retry_count") or 0) + 1,
+            "updated_at": retry_queued_at,
+        },
+    )
+    direct_apply_kwargs = {
+        "uid": uid,
+        "conversation_id": conversation_id,
+        "correction_id": correction_id,
+        "trace_id": trace_id,
+        "request": request,
+        "structured": structured,
+        "transcript": transcript,
+        "segment_count": segment_count,
+        "submitted_at": submitted_at,
+        "active_summary_version_id": recorded_base_version_id,
+        "proposal_id": str(audit.get("proposal_id") or "") or None,
+        "source_conversation": conversation,
+    }
+    if background_tasks is not None:
+        background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)
+    else:
+        return await _run_direct_correction_apply(**direct_apply_kwargs)
+    return ConversationCorrectionResponse(
+        correction_id=correction_id,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        status="queued",
+        queued=True,
+        proposal_id=str(audit.get("proposal_id") or "") or None,
     )
 
 
@@ -1673,6 +1974,25 @@ def get_conversation_correction_receipt(
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
+    )
+
+
+@router.post(
+    "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/retry",
+    response_model=ConversationCorrectionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_failed_conversation_correction(
+    conversation_id: str,
+    correction_id: str,
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionResponse:
+    return await _retry_failed_conversation_correction(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        background_tasks=background_tasks,
     )
 
 

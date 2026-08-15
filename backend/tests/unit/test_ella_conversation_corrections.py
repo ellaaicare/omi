@@ -179,7 +179,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
 
     assert result.status == "queued"
     assert result.queued is True
-    assert result.proposal_id == "proposal-123"
+    assert result.proposal_id is None
     assert result.conversation_id == "conv-123"
     assert result.correction_id
     assert result.trace_id.startswith("correction:conv-123:")
@@ -191,9 +191,8 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     assert submitted["conversation_id"] == "conv-123"
     assert "The podcast said memory can be tricky." in submitted["transcript"]
     assert submitted["request"].summary_context.app_summary == "The app summary was too clinical."
-    assert proposals[0]["conversation_id"] == "conv-123"
-    assert proposals[0]["request"].correction_text == "This was background TV audio, not a real memory concern."
-    assert any(event["stage"] == "proposal_created" for event in events)
+    assert proposals == []
+    assert not any(event["stage"] == "proposal_created" for event in events)
     assert events[-1]["stage"] == "queued"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
     assert conversation_updates[0]["active_summary_version_id"] == "legacy-v1"
@@ -858,9 +857,9 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
 
     assert result.status == "queue_failed"
     assert result.queued is False
-    assert result.proposal_id == "proposal-123"
+    assert result.proposal_id is None
     assert audits[-1]["status"] == "queue_failed"
-    assert audits[-1]["queue_error"] == "n8n offline"
+    assert audits[-1]["failure_code"] == "runtimeerror"
     assert events[-1]["stage"] == "queue_failed"
     assert events[-1]["status"] == "error"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
@@ -989,10 +988,12 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
     assert submitted["conversation_id"] == "conv-123"
     assert submitted["active_summary_version_id"] == "legacy-v1"
     assert submitted["corrected"]["overview"].startswith("[Ella] ")
-    assert audits[-1]["status"] == "applied"
-    assert audits[-1]["applied_at"] == audits[-1]["updated_at"]
-    assert audits[-1]["direct_apply_result"]["active_summary_version_id"] == "corrected-v1"
-    assert events[-1]["stage"] == "direct_apply_succeeded"
+    applied_audit = next(payload for payload in audits if payload.get("status") == "applied")
+    assert applied_audit["applied_at"] == applied_audit["updated_at"]
+    assert applied_audit["direct_apply_result"]["active_summary_version_id"] == "corrected-v1"
+    assert [event["stage"] for event in events].index("direct_apply_succeeded") < [
+        event["stage"] for event in events
+    ].index("proposal_created")
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
 
 
@@ -1033,6 +1034,7 @@ def test_apply_corrected_summary_uses_shared_direct_writeback_service(monkeypatc
         "summary": corrected,
         "summary_kind": "corrected_enriched",
         "correction_id": "corr-123",
+        "require_based_on_match": True,
     }
 
 
@@ -1112,28 +1114,28 @@ def test_submit_correction_queues_background_direct_apply_without_waiting(monkey
 
     assert result.status == "queued"
     assert result.queued is True
-    assert result.proposal_id == "proposal-123"
-    assert len(background_tasks.tasks) == 2
+    assert result.proposal_id is None
+    assert len(background_tasks.tasks) == 1
     assert generated == []
     assert audits[-1]["status"] == "queued"
     assert audits[-1]["queue_result"] == {"mode": "background_direct_apply"}
     assert events[-1]["stage"] == "direct_apply_queued"
     assert conversation_updates[-1]["correction_state"]["status"] == "queued"
 
-    observer_func, _, _ = background_tasks.tasks[0]
-    assert observer_func is corrections._run_correction_observer_work
-
-    func, args, kwargs = background_tasks.tasks[1]
+    func, args, kwargs = background_tasks.tasks[0]
     assert func is corrections._run_direct_correction_apply
     asyncio.run(func(*args, **kwargs))
 
     assert generated[0]["uid"] == "user-123"
     assert generated[0]["conversation_id"] == "conv-123"
-    assert audits[-1]["status"] == "applied"
-    assert events[-1]["stage"] == "direct_apply_succeeded"
+    assert proposals[0]["conversation_id"] == "conv-123"
+    assert any(payload.get("status") == "applied" for payload in audits)
+    assert [event["stage"] for event in events].index("direct_apply_succeeded") < [
+        event["stage"] for event in events
+    ].index("proposal_created")
 
 
-def test_submit_correction_queues_observer_work_without_blocking_on_canonical_event(monkeypatch):
+def test_submit_correction_does_not_queue_observer_work_before_source_success(monkeypatch):
     emitted = {}
     events = []
     conversation_updates = []
@@ -1176,21 +1178,8 @@ def test_submit_correction_queues_observer_work_without_blocking_on_canonical_ev
 
     assert result.status == "direct_apply_disabled"
     assert emitted == {}
-    assert len(background_tasks.tasks) == 1
-    func, args, kwargs = background_tasks.tasks[0]
-    assert func is corrections._run_correction_observer_work
-    assert kwargs["uid"] == "user-123"
-    assert kwargs["conversation_id"] == "conv-123"
-    assert kwargs["correction_id"] == result.correction_id
-    assert any(event["stage"] == "observer_work_queued" for event in events)
-
-    asyncio.run(func(*args, **kwargs))
-
-    assert emitted["uid"] == "user-123"
-    assert emitted["conversation_id"] == "conv-123"
-    assert emitted["correction_id"] == result.correction_id
-    assert emitted["proposal_id"] == "proposal-123"
-    assert emitted["request"].correction_text == "Actually this was background TV audio."
+    assert background_tasks.tasks == []
+    assert not any(event["stage"] == "observer_work_queued" for event in events)
 
 
 def test_correction_propagation_feature_flag_defaults_off():
@@ -2961,3 +2950,261 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
             }
         }
     ]
+
+
+class _MutableCorrectionAuditRef:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return SimpleNamespace(exists=True, to_dict=lambda: dict(self.value))
+
+    def set(self, payload, merge=False):
+        if merge:
+            self.value.update(payload)
+        else:
+            self.value = dict(payload)
+
+    def collection(self, name):
+        return SimpleNamespace(stream=lambda: [])
+
+
+class _CorrectionBackgroundTasks:
+    def __init__(self):
+        self.tasks = []
+
+    def add_task(self, function, *args, **kwargs):
+        self.tasks.append((function, args, kwargs))
+
+
+def test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_effects(monkeypatch):
+    correction_id = "retained-correction"
+    conversation = {
+        **_conversation(),
+        "active_summary_version_id": "base-v1",
+        "summary_versions": [{"id": "base-v1", "is_active": True}],
+    }
+    audit = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "trace_id": f"correction:conv-1:{correction_id}",
+        "status": "direct_apply_failed",
+        "source": "ios",
+        "correction_text": "Correct the attribution.",
+        "summary_context": {},
+        "current_summary": _conversation()["structured"],
+        "active_summary_version_id": "base-v1",
+        "created_at": "2026-08-15T22:13:10+00:00",
+        "proposal_id": "existing-proposal",
+        "canonical_event_completed": True,
+        "propagation_completed": True,
+        "events": [],
+    }
+    audit_ref = _MutableCorrectionAuditRef(audit)
+    source_applies = []
+    downstream_calls = []
+
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, cid, corr_id: audit_ref)
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
+
+    def claim(uid, cid, expected, update):
+        assert (uid, cid, expected) == ("owner-1", "conv-1", "base-v1")
+        conversation.update(update)
+        return True
+
+    monkeypatch.setattr(corrections.conversations_db, "update_conversation_if_active_summary_version", claim)
+    monkeypatch.setattr(corrections.uuid, "uuid4", lambda: pytest.fail("retry must retain the existing correction id"))
+
+    async def generate(**kwargs):
+        return {"title": "Corrected", "overview": "[Ella] Corrected.", "category": "other"}
+
+    async def apply(**kwargs):
+        source_applies.append(kwargs)
+        conversation["summary_versions"].append(
+            {
+                "id": "corrected-v2",
+                "based_on_version_id": "base-v1",
+                "correction_id": correction_id,
+                "is_active": True,
+            }
+        )
+        conversation["active_summary_version_id"] = "corrected-v2"
+        return {"status": "ok", "active_summary_version_id": "corrected-v2"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", apply)
+    monkeypatch.setattr(
+        corrections,
+        "_create_summary_correction_proposal",
+        lambda **kwargs: downstream_calls.append("proposal") or "duplicate",
+    )
+
+    async def emit(**kwargs):
+        downstream_calls.append("canonical")
+
+    async def propagate(**kwargs):
+        downstream_calls.append("propagation")
+
+    monkeypatch.setattr(corrections, "_emit_canonical_correction_event", emit)
+    monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", propagate)
+
+    background = _CorrectionBackgroundTasks()
+    queued = asyncio.run(
+        corrections._retry_failed_conversation_correction(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            background_tasks=background,
+        )
+    )
+    assert queued.correction_id == correction_id
+    assert queued.status == "queued"
+    assert len(background.tasks) == 1
+
+    function, args, kwargs = background.tasks[0]
+    applied = asyncio.run(function(*args, **kwargs))
+    assert applied.correction_id == correction_id
+    assert applied.status == "applied"
+    assert len(source_applies) == 1
+    assert source_applies[0]["active_summary_version_id"] == "base-v1"
+    assert downstream_calls == []
+
+    replay = asyncio.run(
+        corrections._retry_failed_conversation_correction(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            background_tasks=_CorrectionBackgroundTasks(),
+        )
+    )
+    assert replay.status == "applied"
+    assert len(source_applies) == 1
+    assert downstream_calls == []
+
+
+def test_retry_failed_correction_rejects_changed_active_version_before_any_write(monkeypatch):
+    correction_id = "retained-correction"
+    conversation = {
+        **_conversation(),
+        "active_summary_version_id": "newer-v2",
+        "summary_versions": [{"id": "newer-v2", "is_active": True}],
+    }
+    audit_ref = _MutableCorrectionAuditRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": correction_id,
+            "trace_id": f"correction:conv-1:{correction_id}",
+            "status": "direct_apply_failed",
+            "source": "ios",
+            "correction_text": "Correct the attribution.",
+            "summary_context": {},
+            "current_summary": _conversation()["structured"],
+            "active_summary_version_id": "base-v1",
+        }
+    )
+    writes = []
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, cid, corr_id: audit_ref)
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda *args, **kwargs: writes.append("conversation") or True,
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda *args, **kwargs: writes.append("audit"),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_generate_corrected_summary",
+        lambda **kwargs: pytest.fail("version drift must fail before provider work"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            corrections._retry_failed_conversation_correction(
+                uid="owner-1",
+                conversation_id="conv-1",
+                correction_id=correction_id,
+                background_tasks=_CorrectionBackgroundTasks(),
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert writes == []
+
+
+def test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced(monkeypatch):
+    conversation = {
+        **_conversation(),
+        "active_summary_version_id": "base-v1",
+        "summary_versions": [{"id": "base-v1", "is_active": True}],
+    }
+    audit_ref = _MutableCorrectionAuditRef({})
+    order = []
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_BACKGROUND_ENABLED", False)
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, cid, corr_id: audit_ref)
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda value: {})
+    monkeypatch.setattr(
+        corrections.conversations_db, "update_conversation", lambda uid, cid, update: conversation.update(update)
+    )
+
+    async def generate(**kwargs):
+        order.append("source_generate")
+        return {"title": "Corrected", "overview": "[Ella] Corrected.", "category": "other"}
+
+    async def apply(**kwargs):
+        order.append("source_apply")
+        conversation["active_summary_version_id"] = "corrected-v2"
+        return {"status": "ok", "active_summary_version_id": "corrected-v2"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", apply)
+    monkeypatch.setattr(
+        corrections,
+        "_create_summary_correction_proposal",
+        lambda **kwargs: order.append("proposal") or "proposal-1",
+    )
+
+    async def emit(**kwargs):
+        order.append("canonical")
+        audit_ref.value["canonical_event_completed"] = True
+
+    async def propagate(**kwargs):
+        order.append("propagation")
+        audit_ref.value["propagation_completed"] = True
+
+    monkeypatch.setattr(corrections, "_emit_canonical_correction_event", emit)
+    monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", propagate)
+
+    result = asyncio.run(
+        corrections._submit_conversation_correction(
+            "conv-1",
+            corrections.ConversationCorrectionRequest(correction_text="Correct the attribution."),
+            background_tasks=None,
+            uid="owner-1",
+        )
+    )
+    assert result.status == "applied"
+    assert order == ["source_generate", "source_apply", "proposal", "canonical", "propagation"]
+
+    asyncio.run(
+        corrections._run_post_source_correction_side_effects(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=result.correction_id,
+            trace_id=result.trace_id,
+            request=corrections.ConversationCorrectionRequest(correction_text="Correct the attribution."),
+            source_conversation=conversation,
+            structured=_conversation()["structured"],
+            transcript="Speaker: retained transcript",
+            segment_count=1,
+            submitted_at="2026-08-15T22:13:10+00:00",
+            active_summary_version_id="base-v1",
+        )
+    )
+    assert order == ["source_generate", "source_apply", "proposal", "canonical", "propagation"]
