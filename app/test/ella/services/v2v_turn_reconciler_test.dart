@@ -1,7 +1,25 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
+
+const ownerNamespaceA = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+const ownerNamespaceB = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+
+Future<bool> beginSession(
+  V2VTurnReconciler reconciler, {
+  String uid = 'uid-a',
+  String ownerNamespace = ownerNamespaceA,
+  required String sessionId,
+  required bool Function() isAuthorityCurrent,
+}) =>
+    reconciler.beginSession(
+      uid: uid,
+      ownerNamespace: ownerNamespace,
+      sessionId: sessionId,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
 
 V2VTerminalTranscriptTurn terminalTurn({
   required String sessionId,
@@ -22,6 +40,22 @@ V2VTerminalTranscriptTurn terminalTurn({
   );
 }
 
+V2VTranscriptTurn ownedTurn({required String sessionId, required int ordinal}) {
+  final terminal = terminalTurn(sessionId: sessionId, ordinal: ordinal);
+  return V2VTranscriptTurn(
+    uid: 'uid-a',
+    ownerNamespace: ownerNamespaceA,
+    sessionId: terminal.sessionId,
+    turnId: terminal.turnId,
+    userEventId: terminal.userEventId,
+    assistantEventId: terminal.assistantEventId,
+    userTranscript: terminal.userTranscript,
+    assistantTranscript: terminal.assistantTranscript,
+    startedAt: terminal.startedAt,
+    completedAt: terminal.completedAt,
+  );
+}
+
 void main() {
   group('V2VTurnReconciler', () {
     test('persists only one complete proxy-owned terminal turn', () async {
@@ -32,7 +66,7 @@ void main() {
           return true;
         },
       );
-      expect(reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true), isTrue);
+      expect(await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true), isTrue);
 
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
       await reconciler.settle();
@@ -54,7 +88,7 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
 
       reconciler.addTerminalTurn(
         'session-1',
@@ -79,7 +113,7 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
       final terminal = terminalTurn(sessionId: 'session-1', ordinal: 1);
 
       reconciler.addTerminalTurn('session-1', terminal);
@@ -100,14 +134,14 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
       await reconciler.settle();
       reconciler.endSession('session-1');
 
       expect(reconciler.sessionCountForTesting, 1);
       expect(reconciler.pendingTurnCountForTesting('session-1'), 1);
-      expect(reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true), isTrue);
+      expect(await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true), isTrue);
       await reconciler.settle();
       reconciler.endSession('session-1');
 
@@ -115,7 +149,7 @@ void main() {
       expect(writes, hasLength(1));
       expect(reconciler.sessionCountForTesting, 0);
 
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-2', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-2', isAuthorityCurrent: () => true);
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 2));
       reconciler.addTerminalTurn('session-2', terminalTurn(sessionId: 'session-2', ordinal: 1));
       await reconciler.settle();
@@ -131,7 +165,7 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
       authorityCurrent = false;
 
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
@@ -154,7 +188,7 @@ void main() {
         },
         onWriteFailure: () => failures++,
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
       await reconciler.settle();
 
@@ -182,7 +216,7 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
 
       await firstAttemptStarted.future;
@@ -203,7 +237,7 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
       await writeStarted.future;
 
@@ -226,7 +260,7 @@ void main() {
           return true;
         },
       );
-      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
       reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
       await writeStarted.future;
 
@@ -239,12 +273,159 @@ void main() {
       expect(reconciler.sessionCountForTesting, 0);
     });
 
+    test('failed turn survives disposed page ownership and retries after page recreation', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-page-recreate-');
+      try {
+        final store = FileV2VTurnDurableStore(baseDirectory: directory);
+        final writeStarted = Completer<void>();
+        final finishFailedWrite = Completer<void>();
+        final firstPage = V2VTurnReconciler(
+          durableStore: store,
+          writer: (_) async {
+            writeStarted.complete();
+            await finishFailedWrite.future;
+            return false;
+          },
+        );
+        await beginSession(firstPage, sessionId: 'session-1', isAuthorityCurrent: () => true);
+        firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
+        await writeStarted.future;
+        firstPage.endSession('session-1');
+        finishFailedWrite.complete();
+        await firstPage.settle();
+
+        final retried = <V2VTranscriptTurn>[];
+        final recreatedPage = V2VTurnReconciler(
+          durableStore: store,
+          writer: (turn) async {
+            retried.add(turn);
+            return true;
+          },
+        );
+        await beginSession(recreatedPage, sessionId: 'session-2', isAuthorityCurrent: () => true);
+        await recreatedPage.settle();
+
+        expect(retried.map((turn) => '${turn.sessionId}:${turn.turnId}'), [
+          'session-1:v2v-turn-00000000000000000000000000000001',
+        ]);
+        expect(await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('restart-style store instance hydrates the same failed stable turn from disk', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-outbox-');
+      try {
+        final failedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        final attemptedTurnIds = <String>[];
+        final firstPage = V2VTurnReconciler(
+          durableStore: failedStore,
+          writer: (turn) async {
+            attemptedTurnIds.add(turn.turnId);
+            return false;
+          },
+        );
+        await beginSession(firstPage, sessionId: 'session-1', isAuthorityCurrent: () => true);
+        firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
+        await firstPage.settle();
+        firstPage.endSession('session-1');
+
+        final durableAfterFailure = await failedStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA);
+        expect(durableAfterFailure.map((turn) => turn.turnId), [
+          'v2v-turn-00000000000000000000000000000001',
+        ]);
+
+        final committed = <V2VTranscriptTurn>[];
+        final nextPageStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        final nextPage = V2VTurnReconciler(
+          durableStore: nextPageStore,
+          writer: (turn) async {
+            committed.add(turn);
+            return true;
+          },
+        );
+        await beginSession(nextPage, sessionId: 'session-2', isAuthorityCurrent: () => true);
+        await nextPage.settle();
+
+        expect(attemptedTurnIds, ['v2v-turn-00000000000000000000000000000001']);
+        expect(committed.map((turn) => '${turn.sessionId}:${turn.turnId}'), [
+          'session-1:v2v-turn-00000000000000000000000000000001',
+        ]);
+        expect(await nextPageStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('different owner cannot retry a turn and terminal authority loss clears it', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-owner-');
+      try {
+        var authorityCurrent = true;
+        final ownerAStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        final firstPage = V2VTurnReconciler(
+          durableStore: ownerAStore,
+          writer: (_) async => false,
+        );
+        await beginSession(firstPage, sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
+        firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
+        await firstPage.settle();
+
+        final crossOwnerWrites = <V2VTranscriptTurn>[];
+        final ownerBStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        final ownerBPage = V2VTurnReconciler(
+          durableStore: ownerBStore,
+          writer: (turn) async {
+            crossOwnerWrites.add(turn);
+            return true;
+          },
+        );
+        await beginSession(
+          ownerBPage,
+          uid: 'uid-b',
+          ownerNamespace: ownerNamespaceB,
+          sessionId: 'session-2',
+          isAuthorityCurrent: () => true,
+        );
+        await ownerBPage.settle();
+
+        expect(crossOwnerWrites, isEmpty);
+        expect(await ownerAStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), hasLength(1));
+        expect(await ownerBStore.load(uid: 'uid-b', ownerNamespace: ownerNamespaceB), isEmpty);
+
+        authorityCurrent = false;
+        firstPage.retryAuthorizedPending();
+        await firstPage.settle();
+        expect(firstPage.sessionCountForTesting, 0);
+        expect(await ownerAStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('durable outbox rejects overflow without evicting its stable retained turn', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-bounds-');
+      try {
+        final store = FileV2VTurnDurableStore(baseDirectory: directory, maxPendingTurns: 1);
+        final first = ownedTurn(sessionId: 'session-1', ordinal: 1);
+        final overflow = ownedTurn(sessionId: 'session-1', ordinal: 2);
+
+        await store.put(first);
+        await expectLater(store.put(overflow), throwsStateError);
+
+        final retained = await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA);
+        expect(retained.map((turn) => turn.turnId), [first.turnId]);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
     test('completed reconnect sessions do not accumulate retained transcript state', () async {
       final reconciler = V2VTurnReconciler(writer: (_) async => true);
 
       for (var index = 1; index <= 25; index++) {
         final sessionId = 'session-$index';
-        reconciler.beginSession(uid: 'uid-a', sessionId: sessionId, isAuthorityCurrent: () => true);
+        await beginSession(reconciler, sessionId: sessionId, isAuthorityCurrent: () => true);
         reconciler.addTerminalTurn(sessionId, terminalTurn(sessionId: sessionId, ordinal: index));
         await reconciler.settle();
         reconciler.endSession(sessionId);

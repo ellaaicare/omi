@@ -261,6 +261,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     super.initState();
     _v2vTurnReconciler = V2VTurnReconciler(
       writer: _persistV2VTranscriptTurn,
+      durableStore: FileV2VTurnDurableStore(),
       onWriteFailure: () {
         if (!mounted) return;
         setState(() => _statusText = context.l10n.ellaVoiceTechnicalFailure);
@@ -861,13 +862,18 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
 
     _voiceStartupGuard.complete(startupGeneration);
-    if (receipt.sessionId.isEmpty ||
-        (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) &&
-            !_v2vTurnReconciler.beginSession(
-              uid: authority!.uid,
-              sessionId: receipt.sessionId,
-              isAuthorityCurrent: authority.isCurrent,
-            ))) {
+    var transcriptSessionReady = receipt.sessionId.isNotEmpty;
+    if (transcriptSessionReady && EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
+      final activeAuthority = WalOwnerAuthority.active(authenticatedUid: authority!.uid);
+      transcriptSessionReady = activeAuthority != null &&
+          await _v2vTurnReconciler.beginSession(
+            uid: activeAuthority.uid,
+            ownerNamespace: activeAuthority.owner.storageNamespace,
+            sessionId: receipt.sessionId,
+            isAuthorityCurrent: activeAuthority.isCurrent,
+          );
+    }
+    if (!transcriptSessionReady || !_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
       _v2vClient = null;
       await client.disconnect();
       if (!mounted) return;

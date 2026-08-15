@@ -11,6 +11,7 @@ from utils.ella.time_context import annotate_event_time, build_time_context, tim
 
 DEFAULT_TIMELINE_URL = os.getenv("ELLA_CANONICAL_TIMELINE_URL", "http://127.0.0.1:8000/v1/ella/timeline")
 DEFAULT_TIMEOUT_SECONDS = float(os.getenv("ELLA_CANONICAL_TIMELINE_TIMEOUT", "5"))
+MAX_IOS_VOICE_TEXT_CHARS = 20000
 DEFAULT_CONTEXT_CHANNELS = [
     "omi",
     "ios_chat",
@@ -160,14 +161,19 @@ def canonical_events_to_chat_turns(events: list[dict[str, Any]], *, limit: int =
     return turns
 
 
-def canonical_events_to_server_messages(events: list[dict[str, Any]], *, limit: int = 50) -> list[dict[str, Any]]:
+def canonical_events_to_server_messages(
+    events: list[dict[str, Any]], *, limit: int = 50, max_text_chars: int = 2000
+) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for event in reversed(list(events)[-limit:]):
+        event_max_text_chars = (
+            max(max_text_chars, MAX_IOS_VOICE_TEXT_CHARS) if event.get("channel") == "ios_voice" else max_text_chars
+        )
         messages.append(
             {
                 "id": str(event.get("event_id") or event.get("id") or ""),
                 "created_at": _event_time(event),
-                "text": _event_text(event, max_chars=2000),
+                "text": _event_text(event, max_chars=event_max_text_chars),
                 "sender": "ai" if _role_for_event(event) == "assistant" else "human",
                 "type": "text",
                 "plugin_id": None,

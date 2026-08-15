@@ -58,6 +58,23 @@ def test_v2v_turn_write_is_idempotent_and_returns_existing_canonical_content(mon
     assert len(store._events) == 2
 
 
+def test_v2v_turn_returns_full_accepted_transcripts_without_history_truncation(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    long_user_text = "u" * 20000
+    long_assistant_text = "a" * 20000
+
+    result = asyncio.run(
+        chat.persist_v2v_voice_turn(
+            _request(user_transcript=long_user_text, assistant_transcript=long_assistant_text),
+            authenticated_uid="uid-a",
+        )
+    )
+
+    messages_by_sender = {message["sender"]: message["text"] for message in result["messages"]}
+    assert messages_by_sender == {"human": long_user_text, "ai": long_assistant_text}
+
+
 def test_v2v_turn_readback_uses_leading_event_id_index_with_exact_owner_binding(monkeypatch):
     pool = _ReadbackPool()
 
@@ -125,11 +142,18 @@ def test_v2v_turn_rejects_cross_authority_before_canonical_write(monkeypatch):
 def test_v2v_turn_survives_canonical_history_refresh(monkeypatch):
     store = InMemoryCanonicalEventStore()
     monkeypatch.setattr(chat, "_canonical_event_store", store)
-    asyncio.run(chat.persist_v2v_voice_turn(_request(), authenticated_uid="uid-a"))
+    long_user_text = "u" * 20000
+    long_assistant_text = "a" * 20000
+    asyncio.run(
+        chat.persist_v2v_voice_turn(
+            _request(user_transcript=long_user_text, assistant_transcript=long_assistant_text),
+            authenticated_uid="uid-a",
+        )
+    )
 
     events = asyncio.run(store.timeline(uid="uid-a", since=None, limit=50, channels=["ios_voice"]))
     refreshed = canonical_events_to_server_messages(events, limit=50)
 
     assert len(refreshed) == 2
     assert {message["sender"] for message in refreshed} == {"human", "ai"}
-    assert {message["text"] for message in refreshed} == {"Durable user turn", "Durable assistant turn"}
+    assert {message["text"] for message in refreshed} == {long_user_text, long_assistant_text}

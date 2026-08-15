@@ -39,6 +39,7 @@ from ella.routers.trace import RouteTrace, record_trace
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 from utils.ella.canonical_context import (
     DEFAULT_CONTEXT_CHANNELS,
+    MAX_IOS_VOICE_TEXT_CHARS,
     canonical_events_to_server_messages,
     fetch_canonical_timeline,
     format_canonical_context,
@@ -163,7 +164,7 @@ class EllaVoiceTurnRequest(BaseModel):
 
 
 _VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_MAX_VOICE_TRANSCRIPT_CHARS = 20000
+_MAX_VOICE_TRANSCRIPT_CHARS = MAX_IOS_VOICE_TEXT_CHARS
 
 
 def _validated_voice_turn(request: EllaVoiceTurnRequest) -> tuple[str, str]:
@@ -362,7 +363,11 @@ async def persist_v2v_voice_turn(
         "session_id": request.session_id,
         "turn_id": request.turn_id,
         "idempotent_replay": write_result.get("inserted", 0) == 0,
-        "messages": canonical_events_to_server_messages(canonical, limit=2),
+        "messages": canonical_events_to_server_messages(
+            canonical,
+            limit=2,
+            max_text_chars=_MAX_VOICE_TRANSCRIPT_CHARS,
+        ),
     }
 
 
