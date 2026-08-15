@@ -154,6 +154,7 @@ jobs:
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
+            asyncpg==0.31.0 \
             python-multipart==0.0.9
           python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
           python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
@@ -169,12 +170,11 @@ jobs:
             backend/ella/routers/corrections.py \
             backend/ella/services/runtime_resolver.py
           cd backend
-          correction_ids="$(
-            python -m pytest --collect-only -q \
-              tests/unit/test_ella_correction_runtime_resolver.py \
-              tests/unit/test_ella_conversation_corrections.py |
-              sed '/^$/d'
-          )"
+          python -m pytest --collect-only -q \
+            tests/unit/test_ella_correction_runtime_resolver.py \
+            tests/unit/test_ella_conversation_corrections.py |
+            tee /tmp/correction-terminal-receipt-collection.log
+          correction_ids="$(sed '/^$/d' /tmp/correction-terminal-receipt-collection.log)"
           required_correction_ids=(
             "tests/unit/test_ella_correction_runtime_resolver.py::test_self_hosted_correction_transcript_mode_maps_to_hermes_chat"
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_effects"

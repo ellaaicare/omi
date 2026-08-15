@@ -14,6 +14,13 @@ sys.modules.setdefault("database.conversations", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.other.endpoints", MagicMock())
 sys.modules.setdefault(
+    "ella.routers.canonical_events",
+    SimpleNamespace(
+        CanonicalEventIn=lambda **kwargs: SimpleNamespace(**kwargs),
+        PostgresCanonicalEventStore=MagicMock,
+    ),
+)
+sys.modules.setdefault(
     "utils.conversations.vector",
     MagicMock(refresh_structured_summary_vector=MagicMock()),
 )
