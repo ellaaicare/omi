@@ -105,7 +105,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/runtime_resolver.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -168,7 +168,9 @@ jobs:
           source "$RUNNER_TEMP/guardian-python/bin/activate"
           python -m py_compile \
             backend/ella/routers/corrections.py \
-            backend/ella/services/runtime_resolver.py
+            backend/ella/services/ai_consent.py \
+            backend/ella/services/runtime_resolver.py \
+            backend/ella/services/summary_recovery.py
           cd backend
           python -m pytest --collect-only -q \
             tests/unit/test_ella_correction_runtime_resolver.py \
@@ -177,14 +179,17 @@ jobs:
           correction_ids="$(sed '/^$/d' /tmp/correction-terminal-receipt-collection.log)"
           required_correction_ids=(
             "tests/unit/test_ella_correction_runtime_resolver.py::test_self_hosted_correction_transcript_mode_maps_to_hermes_chat"
+            "tests/unit/test_ella_conversation_corrections.py::test_generate_corrected_summary_binds_two_owners_to_two_current_runtimes_with_zero_legacy_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_correction_routes_use_deployed_exact_auth_and_current_consent_dependencies"
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_effects"
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_rejects_changed_active_version_before_any_write"
+            "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_live_lease"
             "tests/unit/test_ella_conversation_corrections.py::test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced"
           )
           for required_id in "${required_correction_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 63
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 65
           python -m pytest \
             tests/unit/test_ella_correction_runtime_resolver.py \
             tests/unit/test_ella_conversation_corrections.py \

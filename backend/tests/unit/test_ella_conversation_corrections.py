@@ -51,8 +51,13 @@ def _disable_external_observer_side_effects(monkeypatch):
     async def noop_propagate(**kwargs):
         return None
 
+    async def passthrough_provider_config(uid, config):
+        del uid
+        return config
+
     monkeypatch.setattr(corrections, "_emit_canonical_correction_event", noop_emit)
     monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", noop_propagate)
+    monkeypatch.setattr(corrections, "summary_provider_config_for_uid", passthrough_provider_config)
     monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: False)
 
 
@@ -102,7 +107,7 @@ def _retry_conversation(status="processing", request_id="84eb13fa-31d9-40ba-a742
 def _retry_api_client():
     app = FastAPI()
     app.include_router(corrections.router)
-    app.dependency_overrides[corrections.auth.get_current_user_uid] = lambda: "authenticated-user"
+    app.dependency_overrides[corrections.get_exact_firebase_uid] = lambda: "authenticated-user"
     return app, TestClient(app)
 
 
@@ -1200,6 +1205,34 @@ def test_router_uses_custom_ella_namespace_only():
     assert "/v1/conversations/{conversation_id}/corrections" in paths
 
 
+def test_correction_routes_use_deployed_exact_auth_and_current_consent_dependencies():
+    route_dependencies = {
+        (route.path, method): [dependency.call for dependency in route.dependant.dependencies]
+        for route in corrections.router.routes
+        for method in route.methods
+    }
+    submit_paths = {
+        "/v1/ella/conversations/{conversation_id}/corrections",
+        "/v1/conversations/{conversation_id}/corrections",
+    }
+    for path in submit_paths:
+        assert route_dependencies[(path, "POST")] == [corrections.require_current_ai_consent]
+
+    exact_paths = {
+        ("/v1/conversations/{conversation_id}/processing-retry-plan", "GET"),
+        ("/v1/conversations/{conversation_id}/processing-retries", "POST"),
+        ("/v1/ella/conversations/{conversation_id}/corrections/{correction_id}", "GET"),
+        ("/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/retry", "POST"),
+        ("/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo", "POST"),
+    }
+    for route_key in exact_paths:
+        assert route_dependencies[route_key] == [corrections.get_exact_firebase_uid]
+
+    source = _corrections_path.read_text(encoding="utf-8")
+    assert "utils.other.endpoints" not in source
+    assert "Depends(auth.get_current_user_uid)" not in source
+
+
 def test_submit_correction_accepts_text_alias():
     request = corrections.ConversationCorrectionRequest(text="Please fix the doctor name.")
 
@@ -1298,6 +1331,115 @@ def test_generate_corrected_summary_uses_hermes_api_with_scoped_session(monkeypa
     assert calls[0]["headers"]["X-Trace-Id"] == "trace-123"
     assert calls[0]["json"]["model"] == "profile-model"
     assert "Speaker 5" in calls[0]["json"]["messages"][0]["content"]
+
+
+def test_generate_corrected_summary_binds_two_owners_to_two_current_runtimes_with_zero_legacy_egress(monkeypatch):
+    calls = []
+    resolved = []
+    revalidated = []
+    initial_runtimes = {
+        "owner-a": SimpleNamespace(provider="hermes_cloud", uid="owner-a"),
+        "owner-b": SimpleNamespace(provider="hermes_cloud", uid="owner-b"),
+    }
+    current_runtimes = {
+        "owner-a": SimpleNamespace(
+            gateway_url="https://owner-a.runtime.test",
+            gateway_token="owner-a-token",
+            agent_id="owner-a-model",
+        ),
+        "owner-b": SimpleNamespace(
+            gateway_url="https://owner-b.runtime.test",
+            gateway_token="owner-b-token",
+            agent_id="owner-b-model",
+        ),
+    }
+
+    async def resolve_runtime(uid, *, target_mode):
+        resolved.append((uid, target_mode))
+        return initial_runtimes[uid]
+
+    def bind_authority(runtime):
+        return SimpleNamespace(uid=runtime.uid, target_mode="hermes-cloud-transcript")
+
+    async def revalidate(authority):
+        revalidated.append(authority.uid)
+        return current_runtimes[authority.uid]
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"title":"Corrected","overview":"[Ella] Corrected summary.",'
+                                '"emoji":"🪽","category":"other"}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            calls.append({"url": url, "headers": headers, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", resolve_runtime)
+    monkeypatch.setattr(summary_recovery, "cloud_runtime_authority_identity", bind_authority)
+    monkeypatch.setattr(summary_recovery, "revalidate_cloud_runtime_authority", revalidate)
+    monkeypatch.setattr(
+        corrections, "summary_provider_config_for_uid", summary_recovery.summary_provider_config_for_uid
+    )
+    monkeypatch.setattr(corrections.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_API_URL", "https://legacy.invalid/v1/chat/completions")
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_MODEL", "legacy-model")
+    monkeypatch.setenv("ELLA_CORRECTION_API_KEY", "legacy-secret")
+
+    for uid in ("owner-a", "owner-b"):
+        result = asyncio.run(
+            corrections._generate_corrected_summary(
+                uid=uid,
+                conversation_id="conversation-1",
+                correction_id="correction-1",
+                trace_id=f"trace-{uid}",
+                request=corrections.ConversationCorrectionRequest(correction_text="Correct the owner-bound summary."),
+                structured={"title": "Old", "overview": "[Ella] Old."},
+                transcript="Speaker: retained transcript",
+                segment_count=1,
+            )
+        )
+        assert result["title"] == "Corrected"
+
+    assert resolved == [
+        ("owner-a", "hermes-cloud-transcript"),
+        ("owner-b", "hermes-cloud-transcript"),
+    ]
+    assert revalidated == ["owner-a", "owner-b"]
+    assert [call["url"] for call in calls] == [
+        "https://owner-a.runtime.test/v1/chat/completions",
+        "https://owner-b.runtime.test/v1/chat/completions",
+    ]
+    assert [call["json"]["model"] for call in calls] == ["owner-a-model", "owner-b-model"]
+    assert [call["headers"]["Authorization"] for call in calls] == [
+        "Bearer owner-a-token",
+        "Bearer owner-b-token",
+    ]
+    assert "legacy.invalid" not in str(calls)
+    assert "legacy-model" not in str(calls)
+    assert "legacy-secret" not in str(calls)
 
 
 def test_correction_session_key_is_stable_per_user():
@@ -3020,10 +3162,27 @@ def test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_ef
         assert kwargs["conversation_id"] == "conv-1"
         assert kwargs["correction_id"] == correction_id
         assert kwargs["recorded_base_version_id"] == "base-v1"
-        audit_ref.value.update({"status": "retry_queued", "retry_count": 1})
+        if audit_ref.value.get("status") in {"retry_queued", "processing"}:
+            return "already_queued"
+        audit_ref.value.update(
+            {
+                "status": "retry_queued",
+                "retry_count": 1,
+                "retry_attempt_token": kwargs["retry_attempt_token"],
+                "retry_lease_expires_at": kwargs["retry_lease_expires_at"],
+            }
+        )
         return "claimed"
 
     monkeypatch.setattr(corrections, "_claim_failed_correction_retry", claim)
+    monkeypatch.setattr(corrections, "_new_correction_attempt_token", lambda: "attempt-1")
+    attempt_starts = []
+
+    def start_attempt(**kwargs):
+        attempt_starts.append(kwargs["retry_attempt_token"])
+        return "started"
+
+    monkeypatch.setattr(corrections, "_start_correction_retry_attempt", start_attempt)
     monkeypatch.setattr(corrections.uuid, "uuid4", lambda: pytest.fail("retry must retain the existing correction id"))
 
     async def generate(**kwargs):
@@ -3089,6 +3248,7 @@ def test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_ef
     assert applied.correction_id == correction_id
     assert applied.status == "applied"
     assert len(source_applies) == 1
+    assert attempt_starts == ["attempt-1", "attempt-1"]
     assert source_applies[0]["active_summary_version_id"] == "base-v1"
     assert downstream_calls == []
 
@@ -3159,7 +3319,7 @@ def test_retry_failed_correction_rejects_changed_active_version_before_any_write
     assert writes == []
 
 
-def test_retry_failed_correction_claim_is_exclusive_per_correction_and_base_version():
+def test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_live_lease():
     correction_id = "retained-correction"
     conversation_ref = _MutableCorrectionAuditRef({"active_summary_version_id": "base-v1"})
     audit_ref = _MutableCorrectionAuditRef(
@@ -3188,6 +3348,8 @@ def test_retry_failed_correction_claim_is_exclusive_per_correction_and_base_vers
         "correction_id": correction_id,
         "recorded_base_version_id": "base-v1",
         "retry_queued_at": "2026-08-15T23:19:09+00:00",
+        "retry_lease_expires_at": "2026-08-15T23:21:09+00:00",
+        "retry_attempt_token": "attempt-1",
         "source": "ios",
     }
     first = corrections._claim_failed_correction_retry_in_transaction(
@@ -3208,6 +3370,60 @@ def test_retry_failed_correction_claim_is_exclusive_per_correction_and_base_vers
     assert len(transaction.writes) == 1
     assert audit_ref.value["retry_count"] == 2
     assert audit_ref.value["active_summary_version_id"] == "base-v1"
+    assert audit_ref.value["retry_attempt_token"] == "attempt-1"
+
+    audit_ref.value["retry_lease_expires_at"] = "2026-08-15T23:18:00+00:00"
+    reclaimed_kwargs = {
+        **kwargs,
+        "retry_queued_at": "2026-08-15T23:22:00+00:00",
+        "retry_lease_expires_at": "2026-08-15T23:24:00+00:00",
+        "retry_attempt_token": "attempt-2",
+    }
+    reclaimed = corrections._claim_failed_correction_retry_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **reclaimed_kwargs,
+    )
+    live_duplicate = corrections._claim_failed_correction_retry_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **reclaimed_kwargs,
+    )
+    assert reclaimed == "claimed"
+    assert live_duplicate == "already_queued"
+    assert len(transaction.writes) == 2
+    assert audit_ref.value["retry_attempt_token"] == "attempt-2"
+    assert audit_ref.value["retry_count"] == 3
+
+    stale_start = corrections._start_correction_retry_attempt_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        recorded_base_version_id="base-v1",
+        retry_attempt_token="attempt-1",
+        started_at="2026-08-15T23:22:01+00:00",
+        retry_lease_expires_at="2026-08-15T23:24:01+00:00",
+    )
+    current_start = corrections._start_correction_retry_attempt_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        recorded_base_version_id="base-v1",
+        retry_attempt_token="attempt-2",
+        started_at="2026-08-15T23:22:01+00:00",
+        retry_lease_expires_at="2026-08-15T23:24:01+00:00",
+    )
+    assert stale_start == "stale_attempt"
+    assert current_start == "started"
+    assert len(transaction.writes) == 3
 
     audit_ref.value["status"] = "direct_apply_failed"
     conversation_ref.value["active_summary_version_id"] = "newer-v2"
@@ -3218,7 +3434,7 @@ def test_retry_failed_correction_claim_is_exclusive_per_correction_and_base_vers
         **kwargs,
     )
     assert drift == "version_drift"
-    assert len(transaction.writes) == 1
+    assert len(transaction.writes) == 3
 
 
 def test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced(monkeypatch):

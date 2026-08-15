@@ -22,6 +22,7 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/memory_correction_receipt.dart';
+import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
@@ -42,6 +43,42 @@ import 'package:omi/widgets/extensions/string.dart';
 import 'maps_util.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/widgets/ella_source_indicator.dart';
+
+String correctionTerminalFailureMessage(
+  AppLocalizations l10n,
+  ConversationCorrectionReceipt? receipt,
+) {
+  switch (receipt?.failureCode) {
+    case 'self_hosted_runtime_target_mode_required':
+    case 'self_hosted_runtime_target_mode_missing':
+    case 'self_hosted_runtime_target_identity_missing':
+    case 'self_hosted_runtime_target_lineage_stale':
+    case 'self_hosted_runtime_authority_unavailable':
+    case 'hermes_cloud_runtime_required':
+    case 'hermes_cloud_runtime_authority_changed':
+    case 'hermes_cloud_runtime_target_identity_missing':
+    case 'hermes_cloud_not_provisioned':
+    case 'runtime_ownership_mismatch':
+    case 'runtime_not_ready':
+      return l10n.memoryCorrectionRuntimeUnavailable;
+    case 'active_summary_version_changed':
+    case 'concurrentconversationsummarychangeerror':
+      return l10n.memoryCorrectionMemoryChanged;
+    case 'direct_apply_disabled':
+    case 'queue_failed':
+      return l10n.memoryCorrectionServiceUnavailable;
+  }
+
+  switch (receipt?.status) {
+    case 'direct_apply_disabled':
+    case 'queue_failed':
+      return l10n.memoryCorrectionServiceUnavailable;
+    case 'direct_apply_failed':
+      return l10n.memoryCorrectionFailed;
+    default:
+      return l10n.memoryCorrectionFailed;
+  }
+}
 
 // Highlight search matches with current result highlighting
 List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int currentResultIndex = -1}) {
@@ -1033,14 +1070,10 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
 
     setState(() => _isSubmitting = false);
     HapticFeedback.lightImpact();
-    final terminalFailure = terminalReceipt?.failureCode ?? terminalReceipt?.status;
-    final failureMessage = terminalFailure == null
-        ? context.l10n.memoryCorrectionFailed
-        : '${context.l10n.memoryCorrectionFailed} ($terminalFailure)';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         key: ValueKey('type-correction-terminal-${terminalReceipt?.status ?? 'unavailable'}'),
-        content: Text(failureMessage),
+        content: Text(correctionTerminalFailureMessage(context.l10n, terminalReceipt)),
       ),
     );
   }

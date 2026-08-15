@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -135,6 +135,7 @@ class SummaryProviderConfig:
     legacy_model: str
     legacy_api_key: str
     timeout_seconds: float
+    cloud_authority: Optional[Any] = None
 
 
 class ConcurrentConversationRecoveryChangeError(RuntimeError):
@@ -164,6 +165,67 @@ def default_summary_provider_config() -> SummaryProviderConfig:
             os.getenv('ELLA_CORRECTION_API_KEY') or os.getenv('XAI_API_KEY') or os.getenv('HERMES_API_KEY') or ''
         ),
         timeout_seconds=float(os.getenv('ELLA_CORRECTION_TIMEOUT_SECONDS', '45')),
+    )
+
+
+async def resolve_isolated_runtime(uid: str, *, target_mode: str):
+    """Lazy deployed-runtime bridge for the shipped release source overlay."""
+    from ella.services.runtime_resolver import resolve_isolated_runtime as resolve_runtime
+
+    return await resolve_runtime(uid, target_mode=target_mode)
+
+
+def cloud_runtime_authority_identity(runtime):
+    from ella.services.runtime_resolver import cloud_runtime_authority_identity as build_identity
+
+    return build_identity(runtime)
+
+
+async def revalidate_cloud_runtime_authority(identity):
+    from ella.services.runtime_resolver import revalidate_cloud_runtime_authority as revalidate
+
+    return await revalidate(identity)
+
+
+async def summary_provider_config_for_uid(
+    uid: str,
+    config: Optional[SummaryProviderConfig] = None,
+) -> SummaryProviderConfig:
+    """Bind transcript summary work to the exact owner's current runtime."""
+    selected = config or default_summary_provider_config()
+    runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+    if runtime is None:
+        return selected
+    if runtime.provider != 'hermes_cloud':
+        return replace(
+            selected,
+            provider='hermes-api',
+            hermes_url=f"{runtime.gateway_url.rstrip('/')}/v1/chat/completions",
+            hermes_model=runtime.agent_id,
+            hermes_api_key=runtime.gateway_token,
+            legacy_api_key='',
+            cloud_authority=None,
+        )
+    return replace(
+        selected,
+        provider='hermes-api',
+        hermes_url='',
+        hermes_model='',
+        hermes_api_key='',
+        legacy_api_key='',
+        cloud_authority=cloud_runtime_authority_identity(runtime),
+    )
+
+
+async def resolve_summary_provider_send(config: SummaryProviderConfig) -> tuple[str, str, str]:
+    """Revalidate the exact cloud authority immediately before provider egress."""
+    if config.cloud_authority is None:
+        return config.hermes_url, config.hermes_model, config.hermes_api_key
+    current = await revalidate_cloud_runtime_authority(config.cloud_authority)
+    return (
+        f"{current.gateway_url.rstrip('/')}/v1/chat/completions",
+        current.agent_id,
+        current.gateway_token,
     )
 
 
@@ -256,27 +318,32 @@ async def generate_summary_from_prompt(
     async_client_factory: Any = httpx.AsyncClient,
 ) -> dict[str, Any]:
     if config.provider == 'hermes-api':
-        if not config.hermes_api_key:
+        if config.cloud_authority is None and not config.hermes_api_key:
             raise RuntimeError('No Hermes summary API key configured')
-        headers = {
-            'Authorization': f'Bearer {config.hermes_api_key}',
-            'Content-Type': 'application/json',
-            'X-Hermes-Session-Id': session_id,
-            'X-Hermes-Session-Key': session_key,
-            'X-Trace-Id': trace_id,
-        }
         url = config.hermes_url
         model = config.hermes_model
+        api_key = config.hermes_api_key
         max_tokens = 900
     else:
         if not config.legacy_api_key:
             raise RuntimeError('No legacy summary API key configured')
-        headers = {'Authorization': f'Bearer {config.legacy_api_key}', 'Content-Type': 'application/json'}
         url = config.legacy_url
         model = config.legacy_model
+        api_key = config.legacy_api_key
         max_tokens = 800
 
     async with async_client_factory(timeout=config.timeout_seconds) as client:
+        if config.provider == 'hermes-api' and config.cloud_authority is not None:
+            url, model, api_key = await resolve_summary_provider_send(config)
+        headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+        if config.provider == 'hermes-api':
+            headers.update(
+                {
+                    'X-Hermes-Session-Id': session_id,
+                    'X-Hermes-Session-Key': session_key,
+                    'X-Trace-Id': trace_id,
+                }
+            )
         response = await client.post(
             url,
             headers=headers,

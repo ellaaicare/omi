@@ -566,7 +566,7 @@ Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
   ConversationCorrectionReceiptFetcher fetchReceipt = getConversationCorrectionReceipt,
   Future<void> Function(Duration duration) wait = Future<void>.delayed,
   Duration pollInterval = const Duration(seconds: 1),
-  int maxAttempts = 45,
+  int maxAttempts = 181,
 }) async {
   if (maxAttempts < 1) return null;
   for (var attempt = 0; attempt < maxAttempts; attempt++) {

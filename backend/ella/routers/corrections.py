@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -23,6 +23,7 @@ import database.conversations as conversations_db
 from database._client import db
 from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
+from ella.services.ai_consent import require_current_ai_consent
 from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 from ella.services.summary_recovery import (
@@ -33,11 +34,12 @@ from ella.services.summary_recovery import (
     generate_summary_from_prompt,
     normalize_summary,
     recover_failed_conversation_summary,
+    summary_provider_config_for_uid,
 )
 from ella.services.summary_writeback import ConcurrentConversationSummaryChangeError
 from ella.services import proposal_ingest
 from models.conversation import Conversation, ConversationStatus
-from utils.other import endpoints as auth
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,10 @@ HERMES_CORRECTION_MODEL = os.getenv(
 DIRECT_CORRECTION_API_URL = os.getenv("ELLA_CORRECTION_API_URL", "https://api.x.ai/v1/chat/completions")
 DIRECT_CORRECTION_MODEL = os.getenv("ELLA_CORRECTION_MODEL", "grok-4.3")
 DIRECT_CORRECTION_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_TIMEOUT_SECONDS", "45"))
+CORRECTION_RETRY_LEASE_SECONDS = max(
+    float(os.getenv("ELLA_CORRECTION_RETRY_LEASE_SECONDS", "120")),
+    DIRECT_CORRECTION_TIMEOUT_SECONDS + 30,
+)
 N8N_CORRECTION_FALLBACK_ENABLED = os.getenv("ELLA_CORRECTION_N8N_FALLBACK_ENABLED", "false").lower() in {
     "1",
     "true",
@@ -387,14 +393,9 @@ async def _generate_corrected_summary(
         transcript=transcript,
         segment_count=segment_count,
     )
-    return await generate_summary_from_prompt(
-        prompt=prompt,
-        fallback=structured,
-        session_id=_correction_session_id(uid, conversation_id, correction_id),
-        session_key=_correction_session_key(uid),
-        trace_id=trace_id,
-        required_tags=("omi", "correction"),
-        config=SummaryProviderConfig(
+    config = await summary_provider_config_for_uid(
+        uid,
+        SummaryProviderConfig(
             provider=CORRECTION_PROVIDER,
             hermes_url=HERMES_CORRECTION_API_URL,
             hermes_model=HERMES_CORRECTION_MODEL,
@@ -404,6 +405,15 @@ async def _generate_corrected_summary(
             legacy_api_key=_legacy_correction_api_key(),
             timeout_seconds=DIRECT_CORRECTION_TIMEOUT_SECONDS,
         ),
+    )
+    return await generate_summary_from_prompt(
+        prompt=prompt,
+        fallback=structured,
+        session_id=_correction_session_id(uid, conversation_id, correction_id),
+        session_key=_correction_session_key(uid),
+        trace_id=trace_id,
+        required_tags=("omi", "correction"),
+        config=config,
         async_client_factory=httpx.AsyncClient,
     )
 
@@ -1247,7 +1257,25 @@ async def _run_direct_correction_apply(
     active_summary_version_id: Optional[str],
     proposal_id: Optional[str] = None,
     source_conversation: Optional[dict[str, Any]] = None,
+    retry_attempt_token: Optional[str] = None,
 ) -> ConversationCorrectionResponse:
+    if retry_attempt_token:
+        attempt_status = _start_correction_retry_attempt(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            recorded_base_version_id=str(active_summary_version_id or ""),
+            retry_attempt_token=retry_attempt_token,
+        )
+        if attempt_status != "started":
+            return ConversationCorrectionResponse(
+                correction_id=correction_id,
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                status="queued",
+                queued=True,
+                proposal_id=proposal_id,
+            )
     try:
         corrected_summary = await _generate_corrected_summary(
             uid=uid,
@@ -1259,6 +1287,23 @@ async def _run_direct_correction_apply(
             transcript=transcript,
             segment_count=segment_count,
         )
+        if retry_attempt_token:
+            attempt_status = _start_correction_retry_attempt(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                recorded_base_version_id=str(active_summary_version_id or ""),
+                retry_attempt_token=retry_attempt_token,
+            )
+            if attempt_status != "started":
+                return ConversationCorrectionResponse(
+                    correction_id=correction_id,
+                    conversation_id=conversation_id,
+                    trace_id=trace_id,
+                    status="queued",
+                    queued=True,
+                    proposal_id=proposal_id,
+                )
         apply_result = await _apply_corrected_summary(
             uid=uid,
             conversation_id=conversation_id,
@@ -1278,6 +1323,8 @@ async def _run_direct_correction_apply(
                 "updated_at": applied_at,
                 "direct_apply_result": apply_result,
                 "direct_apply_summary": corrected_summary,
+                "retry_attempt_token": retry_attempt_token,
+                "retry_lease_expires_at": None,
             },
         )
         _append_correction_event(
@@ -1321,6 +1368,23 @@ async def _run_direct_correction_apply(
             proposal_id=proposal_id,
         )
     except Exception as exc:
+        if retry_attempt_token:
+            attempt_status = _start_correction_retry_attempt(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                recorded_base_version_id=str(active_summary_version_id or ""),
+                retry_attempt_token=retry_attempt_token,
+            )
+            if attempt_status in {"missing", "stale_attempt"}:
+                return ConversationCorrectionResponse(
+                    correction_id=correction_id,
+                    conversation_id=conversation_id,
+                    trace_id=trace_id,
+                    status="queued",
+                    queued=True,
+                    proposal_id=proposal_id,
+                )
         logger.exception(
             "Direct conversation correction apply failed",
             extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
@@ -1351,6 +1415,8 @@ async def _run_direct_correction_apply(
                     "failure_code": failure_code,
                     "source": request.source,
                     "active_summary_version_id": active_summary_version_id,
+                    "retry_attempt_token": retry_attempt_token,
+                    "retry_lease_expires_at": None,
                 },
             )
             _update_conversation_correction_state(
@@ -1385,7 +1451,7 @@ async def _submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     background_tasks: Optional[BackgroundTasks] = None,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionResponse:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -1729,6 +1795,29 @@ def _exact_correction_retry_context(
     return conversation, audit, recorded_base_version_id
 
 
+def _parse_correction_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _new_correction_attempt_token() -> str:
+    return str(uuid.uuid4())
+
+
+def _correction_retry_lease_expiry(now: datetime) -> str:
+    return (now + timedelta(seconds=CORRECTION_RETRY_LEASE_SECONDS)).isoformat()
+
+
 def _claim_failed_correction_retry_in_transaction(
     transaction,
     conversation_ref,
@@ -1739,6 +1828,8 @@ def _claim_failed_correction_retry_in_transaction(
     correction_id: str,
     recorded_base_version_id: str,
     retry_queued_at: str,
+    retry_lease_expires_at: str,
+    retry_attempt_token: str,
     source: str,
 ) -> str:
     """Atomically fence version drift and duplicate exact-correction retry claims."""
@@ -1760,9 +1851,14 @@ def _claim_failed_correction_retry_in_transaction(
     ):
         return "identity_mismatch"
     audit_status = str(audit.get("status") or "")
-    if audit_status in {"queued", "processing", "retry_queued"}:
+    if audit_status == "queued":
         return "already_queued"
-    if audit_status not in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
+    if audit_status in {"processing", "retry_queued"}:
+        lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
+        retry_now = _parse_correction_timestamp(retry_queued_at)
+        if lease_expires_at is not None and retry_now is not None and lease_expires_at > retry_now:
+            return "already_queued"
+    elif audit_status not in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
         return "not_retryable"
     transaction.set(
         audit_ref,
@@ -1771,6 +1867,8 @@ def _claim_failed_correction_retry_in_transaction(
             "source": source,
             "active_summary_version_id": recorded_base_version_id,
             "retry_count": int(audit.get("retry_count") or 0) + 1,
+            "retry_attempt_token": retry_attempt_token,
+            "retry_lease_expires_at": retry_lease_expires_at,
             "updated_at": retry_queued_at,
         },
         merge=True,
@@ -1800,6 +1898,8 @@ def _claim_failed_correction_retry(
     correction_id: str,
     recorded_base_version_id: str,
     retry_queued_at: str,
+    retry_lease_expires_at: str,
+    retry_attempt_token: str,
     source: str,
 ) -> str:
     conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
@@ -1812,7 +1912,81 @@ def _claim_failed_correction_retry(
         correction_id=correction_id,
         recorded_base_version_id=recorded_base_version_id,
         retry_queued_at=retry_queued_at,
+        retry_lease_expires_at=retry_lease_expires_at,
+        retry_attempt_token=retry_attempt_token,
         source=source,
+    )
+
+
+def _start_correction_retry_attempt_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_attempt_token: str,
+    started_at: str,
+    retry_lease_expires_at: str,
+) -> str:
+    """Renew only the current attempt before any provider or source work."""
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("status") or "") not in {"retry_queued", "processing"}
+    ):
+        return "stale_attempt"
+    if str(conversation.get("active_summary_version_id") or "") != recorded_base_version_id:
+        return "version_drift"
+    transaction.set(
+        audit_ref,
+        {
+            "status": "processing",
+            "retry_attempt_token": retry_attempt_token,
+            "retry_lease_expires_at": retry_lease_expires_at,
+            "updated_at": started_at,
+        },
+        merge=True,
+    )
+    return "started"
+
+
+@transactional
+def _start_correction_retry_attempt_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
+    return _start_correction_retry_attempt_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _start_correction_retry_attempt(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_attempt_token: str,
+) -> str:
+    started = datetime.now(timezone.utc)
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _start_correction_retry_attempt_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        recorded_base_version_id=recorded_base_version_id,
+        retry_attempt_token=retry_attempt_token,
+        started_at=started.isoformat(),
+        retry_lease_expires_at=_correction_retry_lease_expiry(started),
     )
 
 
@@ -1877,7 +2051,7 @@ async def _retry_failed_conversation_correction(
         )
 
     audit_status = str(audit.get("status") or "")
-    if audit_status in {"queued", "processing", "retry_queued"}:
+    if audit_status == "queued":
         return ConversationCorrectionResponse(
             correction_id=correction_id,
             conversation_id=conversation_id,
@@ -1886,16 +2060,26 @@ async def _retry_failed_conversation_correction(
             queued=True,
             proposal_id=str(audit.get("proposal_id") or "") or None,
         )
-    if audit_status not in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
+    if audit_status not in {
+        "processing",
+        "retry_queued",
+        "direct_apply_failed",
+        "direct_apply_disabled",
+        "queue_failed",
+    }:
         raise HTTPException(status_code=409, detail="Correction is not retryable")
 
-    retry_queued_at = _now_iso()
+    retry_now = datetime.now(timezone.utc)
+    retry_queued_at = retry_now.isoformat()
+    retry_attempt_token = _new_correction_attempt_token()
     claim_status = _claim_failed_correction_retry(
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
         recorded_base_version_id=recorded_base_version_id,
         retry_queued_at=retry_queued_at,
+        retry_lease_expires_at=_correction_retry_lease_expiry(retry_now),
+        retry_attempt_token=retry_attempt_token,
         source=request.source,
     )
     if claim_status == "version_drift":
@@ -1928,6 +2112,7 @@ async def _retry_failed_conversation_correction(
         "active_summary_version_id": recorded_base_version_id,
         "proposal_id": str(audit.get("proposal_id") or "") or None,
         "source_conversation": conversation,
+        "retry_attempt_token": retry_attempt_token,
     }
     if background_tasks is not None:
         background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)
@@ -1949,7 +2134,7 @@ async def _retry_failed_conversation_correction(
 )
 def get_conversation_processing_retry_plan(
     conversation_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationProcessingRetryPlan:
     plan = build_conversation_processing_retry_plan(uid, conversation_id)
     if plan is None:
@@ -1966,7 +2151,7 @@ def retry_failed_conversation_processing(
     conversation_id: str,
     request: RetryConversationProcessingRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> RetryConversationProcessingResponse:
     """Atomically queue generic recovery followed by canonical Hermes enrichment."""
 
@@ -2040,7 +2225,7 @@ async def submit_conversation_correction_ella(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(require_current_ai_consent),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
 
@@ -2052,7 +2237,7 @@ async def submit_conversation_correction_ella(
 def get_conversation_correction_receipt(
     conversation_id: str,
     correction_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionReceiptResponse:
     return _correction_receipt(
         uid=uid,
@@ -2070,7 +2255,7 @@ async def retry_failed_conversation_correction(
     conversation_id: str,
     correction_id: str,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionResponse:
     return await _retry_failed_conversation_correction(
         uid=uid,
@@ -2087,7 +2272,7 @@ async def retry_failed_conversation_correction(
 async def undo_conversation_correction(
     conversation_id: str,
     correction_id: str,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionReceiptResponse:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -2235,6 +2420,6 @@ async def submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(require_current_ai_consent),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)

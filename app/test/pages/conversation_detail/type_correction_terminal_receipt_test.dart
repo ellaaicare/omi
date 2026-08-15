@@ -215,9 +215,10 @@ void main() {
     expect(receiptCalls, 2);
     expect(refreshCalls, 0);
     expect(
-      find.text("Ella couldn't update this memory (self_hosted_runtime_target_mode_required)"),
+      find.text("Ella can't reach your correction service right now"),
       findsOneWidget,
     );
+    expect(find.textContaining('self_hosted_runtime_target_mode_required'), findsNothing);
     expect(find.byType(CorrectSummarySheet), findsOneWidget);
     expect(find.text('Memory updated'), findsNothing);
     expect(logs, isNotEmpty);
@@ -228,5 +229,141 @@ void main() {
       'getConversationCorrectionReceipt: status=200',
       'getConversationCorrectionReceipt: status=200',
     ]);
+  });
+
+  testWidgets('test_type_correction_unknown_terminal_failure_uses_non_english_generic_localization', (
+    tester,
+  ) async {
+    const conversationId = 'conversation-es';
+    const correctionId = 'correction-es';
+    const correctionText = 'contenido privado que no debe registrarse';
+    final authority = _ExactAuthority('owner-1');
+    final logs = <String>[];
+
+    final conversation = ServerConversation(
+      id: conversationId,
+      createdAt: DateTime.utc(2026, 8, 15),
+      structured: Structured('Antes', '[Ella] Antes.'),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('es'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: CorrectSummarySheet(
+            conversation: conversation,
+            appSummary: '[Ella] Antes.',
+            authorityProvider: () => authority,
+            submitter: ({
+              required conversationId,
+              required correctionText,
+              summaryTitle,
+              summaryOverview,
+              appSummary,
+              expectedAuthenticatedUid,
+              exactAuthority,
+            }) async {
+              logs.add('submit status=202');
+              return ConversationCorrectionSubmission(
+                correctionId: correctionId,
+                conversationId: conversationId,
+                traceId: 'correction:conversation-es:correction-es',
+                status: 'queued',
+                queued: true,
+              );
+            },
+            receiptPoller: ({
+              required conversationId,
+              required correctionId,
+              required expectedAuthenticatedUid,
+              required exactAuthority,
+            }) async {
+              logs.add('receipt status=200');
+              return ConversationCorrectionReceipt(
+                correctionId: correctionId,
+                conversationId: conversationId,
+                status: 'direct_apply_failed',
+                before: const ConversationCorrectionSummary(),
+                after: const ConversationCorrectionSummary(),
+                failureCode: 'unrecognized_backend_failure_private_detail',
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byKey(const ValueKey('type-correction-input')), correctionText);
+    await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Ella no pudo actualizar este recuerdo'), findsOneWidget);
+    expect(find.textContaining('unrecognized_backend_failure_private_detail'), findsNothing);
+    expect(logs.every((entry) => !entry.contains(correctionText)), isTrue);
+  });
+
+  test('test_correction_receipt_pending_past_provider_timeout_later_applies_without_resubmission', () async {
+    const conversationId = 'conversation-long-running';
+    const correctionId = 'correction-long-running';
+    final authority = _ExactAuthority('owner-1');
+    var submissionCalls = 0;
+    var receiptCalls = 0;
+    var waited = Duration.zero;
+
+    final submission = await submitConversationCorrection(
+      conversationId: conversationId,
+      correctionText: 'Correct the retained summary.',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      debugLog: (_) {},
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        submissionCalls += 1;
+        return http.Response(
+          jsonEncode({
+            'correction_id': correctionId,
+            'conversation_id': conversationId,
+            'trace_id': 'correction:$conversationId:$correctionId',
+            'status': 'queued',
+            'queued': true,
+          }),
+          202,
+        );
+      },
+    );
+
+    final receipt = await pollConversationCorrectionReceipt(
+      conversationId: submission!.conversationId,
+      correctionId: submission.correctionId,
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      wait: (duration) async => waited += duration,
+      fetchReceipt: ({
+        required conversationId,
+        required correctionId,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        receiptCalls += 1;
+        return ConversationCorrectionReceipt(
+          correctionId: correctionId,
+          conversationId: conversationId,
+          status: receiptCalls <= 46 ? 'retry_queued' : 'applied',
+          before: const ConversationCorrectionSummary(title: 'Before'),
+          after: const ConversationCorrectionSummary(title: 'Applied'),
+        );
+      },
+    );
+
+    expect(submissionCalls, 1);
+    expect(receiptCalls, 47);
+    expect(waited, const Duration(seconds: 46));
+    expect(receipt?.isApplied, isTrue);
   });
 }
