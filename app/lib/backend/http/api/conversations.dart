@@ -17,6 +17,16 @@ typedef ConversationDeleteTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier? exactAuthority,
 });
 
+typedef ConversationFinalizationTransport = Future<http.Response?> Function({
+  required String url,
+  required String method,
+  required String body,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+});
+
+typedef ConversationFinalizationDelay = Future<void> Function(Duration duration);
+
 Future<http.Response?> _defaultConversationDeleteTransport({
   required String url,
   required String? expectedAuthenticatedUid,
@@ -31,33 +41,106 @@ Future<http.Response?> _defaultConversationDeleteTransport({
       exactAuthority: exactAuthority,
     );
 
+Future<http.Response?> _defaultConversationFinalizationTransport({
+  required String url,
+  required String method,
+  required String body,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: const {},
+      method: method,
+      body: body,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<void> _defaultConversationFinalizationDelay(Duration duration) => Future<void>.delayed(duration);
+
+void _verifyConversationFinalizationAuthority({
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) {
+  if (exactAuthority == null) return;
+  if (!exactAuthority.isExactCurrent() ||
+      (expectedAuthenticatedUid != null && exactAuthority.uid != expectedAuthenticatedUid)) {
+    throw ExactAccountAuthorityChangedException('Capture finalization authority changed while polling');
+  }
+}
+
 Future<CreateConversationResponse?> processInProgressConversation({
   required String conversationId,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  int maxStatusPollAttempts = 60,
+  Duration statusPollInterval = const Duration(seconds: 1),
+  ConversationFinalizationTransport transport = _defaultConversationFinalizationTransport,
+  ConversationFinalizationDelay delay = _defaultConversationFinalizationDelay,
 }) async {
-  http.Response? response;
-  const maxCaptureDrainAttempts = 40;
-  for (var attempt = 0; attempt < maxCaptureDrainAttempts; attempt++) {
-    response = await makeApiCall(
-      url: '${Env.apiBaseUrl}v1/conversations',
-      headers: {},
-      method: 'POST',
-      body: jsonEncode({'conversation_id': conversationId}),
-      expectedAuthenticatedUid: expectedAuthenticatedUid,
-      exactAuthority: exactAuthority,
-    );
-    if (response?.statusCode != 409 || attempt == maxCaptureDrainAttempts - 1) break;
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-  }
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  final response = await transport(
+    url: '${Env.apiBaseUrl}v1/conversations',
+    method: 'POST',
+    body: jsonEncode({'conversation_id': conversationId}),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
   if (response == null) return null;
   Logger.debug('createConversationServer: ${response.body}');
   if (response.statusCode == 200) {
-    return CreateConversationResponse.fromJson(jsonDecode(response.body));
-  } else {
-    // TODO: Server returns 304 doesn't recover
-    PlatformManager.instance.crashReporter.reportCrash(Exception('Failed to create conversation'), StackTrace.current,
-        userAttributes: {'response': response.body});
+    final result = CreateConversationResponse.fromJson(jsonDecode(response.body));
+    return result.conversation?.id == conversationId ? result : null;
+  }
+  if (response.statusCode != 409) {
+    PlatformManager.instance.crashReporter.reportCrash(
+      Exception('Failed to create conversation'),
+      StackTrace.current,
+      userAttributes: {'status_code': response.statusCode.toString()},
+    );
+    return null;
+  }
+
+  final statusUrl = '${Env.apiBaseUrl}v1/conversations/${Uri.encodeComponent(conversationId)}';
+  for (var attempt = 0; attempt < maxStatusPollAttempts; attempt++) {
+    if (statusPollInterval > Duration.zero) await delay(statusPollInterval);
+    _verifyConversationFinalizationAuthority(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    final statusResponse = await transport(
+      url: statusUrl,
+      method: 'GET',
+      body: '',
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    _verifyConversationFinalizationAuthority(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    if (statusResponse == null ||
+        statusResponse.statusCode == 404 ||
+        statusResponse.statusCode == 409 ||
+        statusResponse.statusCode >= 500) {
+      continue;
+    }
+    if (statusResponse.statusCode != 200) return null;
+
+    final conversation = ServerConversation.fromJson(jsonDecode(statusResponse.body));
+    if (conversation.id != conversationId) return null;
+    if (conversation.status == ConversationStatus.completed) {
+      return CreateConversationResponse(messages: const [], conversation: conversation);
+    }
+    if (conversation.status == ConversationStatus.failed) return null;
   }
   return null;
 }
