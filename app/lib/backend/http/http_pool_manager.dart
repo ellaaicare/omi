@@ -41,9 +41,11 @@ class HttpPoolManager {
       return _pendingGets[url]!;
     }
 
+    final retryBackoff = Duration(milliseconds: retries * (retries + 1) * 100);
+    final totalTimeout = timeout * (retries + 1) + retryBackoff;
     final future = _pool.withResource(() async {
       return _executeWithRetry(requestBuilder, timeout, retries, exactAuthority);
-    });
+    }).timeout(totalTimeout);
 
     if (isGet && exactAuthority == null) {
       _pendingGets[url] = future;
@@ -64,12 +66,16 @@ class HttpPoolManager {
 
     for (var i = 0; i <= retries; i++) {
       try {
-        final request = requestBuilder();
-        _verifyExactAuthority(exactAuthority, 'immediately before HTTP egress');
-        final streamed = await _client.send(request).timeout(timeout);
-        _verifyExactAuthority(exactAuthority, 'after HTTP response headers');
-        lastResponse = await http.Response.fromStream(streamed);
-        _verifyExactAuthority(exactAuthority, 'after HTTP response body');
+        lastResponse = await (() async {
+          final request = requestBuilder();
+          _verifyExactAuthority(exactAuthority, 'immediately before HTTP egress');
+          final streamed = await _client.send(request);
+          _verifyExactAuthority(exactAuthority, 'after HTTP response headers');
+          final response = await http.Response.fromStream(streamed);
+          _verifyExactAuthority(exactAuthority, 'after HTTP response body');
+          return response;
+        })()
+            .timeout(timeout);
 
         if (lastResponse.statusCode < 500) {
           return lastResponse;

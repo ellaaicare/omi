@@ -29,7 +29,7 @@ from models.conversation import (
 from models.transcript_segment import TranscriptSegment
 from models.other import Person
 
-from utils.conversations.process_conversation import process_conversation, retrieve_in_progress_conversation
+from utils.conversations.process_conversation import process_conversation
 from utils.conversations.search import search_conversations
 from utils.llm.conversation_processing import generate_summary_with_prompt
 from utils.speaker_identification import extract_speaker_samples
@@ -53,37 +53,72 @@ def _get_valid_conversation_by_id(uid: str, conversation_id: str) -> dict:
 
 
 class ProcessConversationRequest(BaseModel):
+    conversation_id: str
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
 
 
 @router.post("/v1/conversations", response_model=CreateConversationResponse, tags=['conversations'])
 def process_in_progress_conversation(
-    request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
+    request: ProcessConversationRequest, uid: str = Depends(auth.get_current_user_uid)
 ):
-    conversation = retrieve_in_progress_conversation(uid)
+    conversation_id = request.conversation_id
+    conversation = conversations_db.get_conversation(uid, conversation_id)
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation in progress not found")
-    redis_db.remove_in_progress_conversation_id(uid)
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.get('id') != conversation_id:
+        raise HTTPException(status_code=409, detail="Conversation identity mismatch")
 
-    conversation = Conversation(**conversation)
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    settled_statuses = {
+        ConversationStatus.processing.value,
+        ConversationStatus.merging.value,
+        ConversationStatus.completed.value,
+        ConversationStatus.failed.value,
+    }
+    if status in settled_statuses:
+        return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
+    if status != ConversationStatus.in_progress.value:
+        raise HTTPException(status_code=409, detail="Conversation cannot be processed from its current state")
 
-    # Inject calendar context if provided
-    if request and request.calendar_meeting_context:
-        if not conversation.external_data:
-            conversation.external_data = {}
-        conversation.external_data['calendar_meeting_context'] = request.calendar_meeting_context.dict()
+    pointer_claim = redis_db.claim_in_progress_conversation_id(uid, conversation_id)
+    if pointer_claim == 'mismatch':
+        raise HTTPException(status_code=409, detail="Conversation is no longer the active capture")
 
-    # Geolocation
-    geolocation = redis_db.get_cached_user_geolocation(uid)
-    if geolocation:
-        geolocation = Geolocation(**geolocation)
-        conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
+    try:
+        # Resolve optional context before the durable processing claim so an enrichment failure cannot strand the
+        # conversation in processing.
+        calendar_context = request.calendar_meeting_context.dict() if request.calendar_meeting_context else None
+        resolved_geolocation = None
+        geolocation = redis_db.get_cached_user_geolocation(uid)
+        if geolocation:
+            geolocation = Geolocation(**geolocation)
+            resolved_geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-    conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
-    conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
-    messages = trigger_external_integrations(uid, conversation)
+        claimed = conversations_db.claim_in_progress_conversation(uid, conversation_id)
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conversation.get('id') != conversation_id:
+            raise HTTPException(status_code=409, detail="Conversation identity mismatch")
+        status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+        if not claimed:
+            if status in settled_statuses:
+                return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
+            raise HTTPException(status_code=409, detail="Conversation processing claim was not acquired")
 
-    return CreateConversationResponse(conversation=conversation, messages=messages)
+        conversation = Conversation(**conversation)
+        if calendar_context:
+            if not conversation.external_data:
+                conversation.external_data = {}
+            conversation.external_data['calendar_meeting_context'] = calendar_context
+        if resolved_geolocation:
+            conversation.geolocation = resolved_geolocation
+
+        conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
+        messages = trigger_external_integrations(uid, conversation)
+        return CreateConversationResponse(conversation=conversation, messages=messages)
+    finally:
+        redis_db.remove_in_progress_conversation_id_if_matches(uid, f'processing:{conversation_id}')
 
 
 @router.post('/v1/conversations/{conversation_id}/reprocess', response_model=Conversation, tags=['conversations'])

@@ -400,6 +400,52 @@ def set_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 3
     r.expire(f'users:{uid}:in_progress_memory_id', ttl)
 
 
+def claim_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300) -> str:
+    """CAS the exact capture pointer to a processing fence without touching a successor."""
+    key = f'users:{uid}:in_progress_memory_id'
+    processing_fence = f'processing:{conversation_id}'
+    result = r.eval(
+        """
+        local current = redis.call('GET', KEYS[1])
+        if current == ARGV[1] then
+            redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            return 1
+        end
+        if current == ARGV[2] then
+            return 2
+        end
+        return 0
+        """,
+        1,
+        key,
+        conversation_id,
+        processing_fence,
+        ttl,
+    )
+    if result == 1:
+        return 'claimed'
+    if result == 2:
+        return 'already_claimed'
+    return 'mismatch'
+
+
+def remove_in_progress_conversation_id_if_matches(uid: str, expected_value: str) -> bool:
+    """Delete the capture pointer only while it still contains the expected value."""
+    key = f'users:{uid}:in_progress_memory_id'
+    removed = r.eval(
+        """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            return redis.call('DEL', KEYS[1])
+        end
+        return 0
+        """,
+        1,
+        key,
+        expected_value,
+    )
+    return bool(removed)
+
+
 def remove_in_progress_conversation_id(uid: str):
     r.delete(f'users:{uid}:in_progress_memory_id')
 

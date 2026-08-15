@@ -119,6 +119,7 @@ Future<http.Response?> makeApiCall({
   required String method,
   Duration? timeout,
   int? retries,
+  bool retryOnUnauthorized = true,
   bool? requireAuthCheck,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
@@ -143,7 +144,7 @@ Future<http.Response?> makeApiCall({
       exactAuthority: exactAuthority,
     );
 
-    if (shouldCheckAuth && response.statusCode == 401) {
+    if (retryOnUnauthorized && shouldCheckAuth && response.statusCode == 401) {
       Logger.log('Token expired on 1st attempt');
       SharedPreferencesUtil().authToken = await AuthService.instance.getIdToken() ?? '';
       if (SharedPreferencesUtil().authToken.isNotEmpty) {

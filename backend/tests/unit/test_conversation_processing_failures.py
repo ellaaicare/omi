@@ -412,3 +412,239 @@ def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(mo
     assert payload["processing_error"] == CONVERSATION_SUMMARY_FAILED
     assert payload["processing_error_at"] is not None
     assert len(payload["transcript_segments"][0]["text"]) > 25_000
+
+
+def _capture_finalization_conversation(conversation_id: str, status: ConversationStatus) -> dict:
+    conversation = _long_conversation()
+    conversation.id = conversation_id
+    conversation.status = status
+    conversation.language = 'en'
+    return conversation.dict()
+
+
+def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a', pointer='capture-a'):
+    state = {
+        'conversations': {
+            conversation_id: _capture_finalization_conversation(conversation_id, ConversationStatus.in_progress)
+        },
+        'pointer': pointer,
+        'claims': 0,
+        'processes': 0,
+        'integrations': 0,
+        'compare_deletes': 0,
+        'successor_during_processing': None,
+    }
+
+    def get_conversation(uid, requested_id):
+        assert uid == 'authenticated-user'
+        conversation = state['conversations'].get(requested_id)
+        return dict(conversation) if conversation else None
+
+    def claim_pointer(uid, requested_id):
+        assert uid == 'authenticated-user'
+        state['claims'] += 1
+        expected_fence = f'processing:{requested_id}'
+        if state['pointer'] == requested_id:
+            state['pointer'] = expected_fence
+            return 'claimed'
+        if state['pointer'] == expected_fence:
+            return 'already_claimed'
+        return 'mismatch'
+
+    def claim_conversation(uid, requested_id):
+        conversation = state['conversations'].get(requested_id)
+        if not conversation or conversation['status'] != ConversationStatus.in_progress:
+            return False
+        conversation['status'] = ConversationStatus.processing
+        return True
+
+    def process(uid, language, conversation, force_process=False):
+        assert uid == 'authenticated-user'
+        assert language == 'en'
+        assert force_process is True
+        state['processes'] += 1
+        if state['successor_during_processing']:
+            state['pointer'] = state['successor_during_processing']
+        conversation.status = ConversationStatus.completed
+        state['conversations'][conversation.id] = conversation.dict()
+        return conversation
+
+    def integrations(uid, conversation):
+        assert uid == 'authenticated-user'
+        assert conversation.id == conversation_id
+        state['integrations'] += 1
+        return []
+
+    def compare_delete(uid, expected_value):
+        assert uid == 'authenticated-user'
+        state['compare_deletes'] += 1
+        if state['pointer'] != expected_value:
+            return False
+        state['pointer'] = None
+        return True
+
+    monkeypatch.setattr(conversations_router.conversations_db, 'get_conversation', get_conversation)
+    monkeypatch.setattr(conversations_router.conversations_db, 'claim_in_progress_conversation', claim_conversation)
+    monkeypatch.setattr(conversations_router.redis_db, 'claim_in_progress_conversation_id', claim_pointer)
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        'remove_in_progress_conversation_id_if_matches',
+        compare_delete,
+    )
+    monkeypatch.setattr(conversations_router.redis_db, 'get_cached_user_geolocation', lambda uid: None)
+    monkeypatch.setattr(conversations_router, 'process_conversation', process)
+    monkeypatch.setattr(conversations_router, 'trigger_external_integrations', integrations)
+    app, client = _conversation_api_client()
+    return app, client, state
+
+
+def test_capture_finalization_route_requires_exact_id_and_rejects_non_owner_before_mutation(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+    try:
+        missing = client.post('/v1/conversations', json={})
+        wrong_owner = client.post('/v1/conversations', json={'conversation_id': 'not-owned'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert missing.status_code == 422
+    assert wrong_owner.status_code == 404
+    assert state['claims'] == 0
+    assert state['processes'] == 0
+    assert state['integrations'] == 0
+    assert state['pointer'] == 'capture-a'
+
+
+def test_capture_finalization_route_successor_mismatch_fails_before_any_conversation_mutation(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch, pointer='successor-capture')
+    try:
+        response = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert state['conversations']['capture-a']['status'] == ConversationStatus.in_progress
+    assert state['processes'] == 0
+    assert state['integrations'] == 0
+    assert state['compare_deletes'] == 0
+    assert state['pointer'] == 'successor-capture'
+
+
+def test_capture_finalization_route_cross_id_document_fails_before_pointer_claim(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+    state['conversations']['capture-a']['id'] = 'successor-capture'
+    try:
+        response = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert state['claims'] == 0
+    assert state['processes'] == 0
+    assert state['integrations'] == 0
+    assert state['pointer'] == 'capture-a'
+
+
+def test_capture_finalization_lost_ack_and_repeats_converge_without_duplicate_side_effects(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+    try:
+        lost_acknowledgement = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+        state['pointer'] = 'successor-capture'
+        replay = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+        repeated = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert lost_acknowledgement.status_code == 200
+    assert replay.status_code == 200
+    assert repeated.status_code == 200
+    assert replay.json()['conversation']['id'] == 'capture-a'
+    assert replay.json()['conversation']['status'] == ConversationStatus.completed.value
+    assert state['processes'] == 1
+    assert state['integrations'] == 1
+    assert state['compare_deletes'] == 1
+    assert state['pointer'] == 'successor-capture'
+
+
+def test_capture_finalization_compare_delete_cannot_clear_successor_race(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+    state['successor_during_processing'] = 'successor-capture'
+    try:
+        response = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert state['processes'] == 1
+    assert state['integrations'] == 1
+    assert state['compare_deletes'] == 1
+    assert state['pointer'] == 'successor-capture'
+
+
+def test_capture_finalization_processing_replay_does_not_touch_successor_or_side_effects(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch, pointer='successor-capture')
+    state['conversations']['capture-a']['status'] = ConversationStatus.processing
+    try:
+        response = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()['conversation']['status'] == ConversationStatus.processing.value
+    assert state['claims'] == 0
+    assert state['processes'] == 0
+    assert state['integrations'] == 0
+    assert state['compare_deletes'] == 0
+    assert state['pointer'] == 'successor-capture'
+
+
+def test_capture_finalization_firestore_claim_is_atomic_and_exact():
+    transaction = _FakeTransaction()
+    conversation_ref = _FakeDocumentRef({'id': 'capture-a', 'status': ConversationStatus.in_progress.value})
+
+    claimed = conversations_router.conversations_db._claim_in_progress_conversation_transaction(
+        transaction,
+        conversation_ref,
+    )
+
+    assert claimed is True
+    assert transaction.updates == [(conversation_ref, {'status': ConversationStatus.processing.value})]
+
+
+class _CapturePointerRedis:
+    def __init__(self, value):
+        self.value = value
+
+    def eval(self, script, key_count, key, *args):
+        assert key_count == 1
+        assert key == 'users:authenticated-user:in_progress_memory_id'
+        if "redis.call('SET'" in script:
+            conversation_id, processing_fence, _ttl = args
+            if self.value == conversation_id:
+                self.value = processing_fence
+                return 1
+            if self.value == processing_fence:
+                return 2
+            return 0
+        expected_value = args[0]
+        if self.value == expected_value:
+            self.value = None
+            return 1
+        return 0
+
+
+def test_capture_finalization_redis_claim_and_compare_delete_preserve_successor(monkeypatch):
+    fake_redis = _CapturePointerRedis('capture-a')
+    monkeypatch.setattr(conversations_router.redis_db, 'r', fake_redis)
+
+    assert (
+        conversations_router.redis_db.claim_in_progress_conversation_id('authenticated-user', 'capture-a') == 'claimed'
+    )
+    assert fake_redis.value == 'processing:capture-a'
+    fake_redis.value = 'successor-capture'
+    assert (
+        conversations_router.redis_db.remove_in_progress_conversation_id_if_matches(
+            'authenticated-user', 'processing:capture-a'
+        )
+        is False
+    )
+    assert fake_redis.value == 'successor-capture'

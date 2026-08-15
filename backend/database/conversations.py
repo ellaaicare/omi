@@ -1029,6 +1029,33 @@ def update_conversation_status(uid: str, conversation_id: str, status: str):
     conversation_ref.update({'status': status})
 
 
+def _claim_in_progress_conversation_transaction(transaction, conversation_ref) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status != ConversationStatus.in_progress.value:
+        return False
+
+    transaction.update(conversation_ref, {'status': ConversationStatus.processing.value})
+    return True
+
+
+@transactional
+def _claim_in_progress_conversation(transaction, conversation_ref) -> bool:
+    return _claim_in_progress_conversation_transaction(transaction, conversation_ref)
+
+
+def claim_in_progress_conversation(uid: str, conversation_id: str) -> bool:
+    """Atomically claim only the owner's exact in-progress conversation."""
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_in_progress_conversation(db.transaction(), conversation_ref)
+
+
 def _claim_conversation_processing_retry_transaction(
     transaction,
     conversation_ref,
