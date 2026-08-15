@@ -222,6 +222,9 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Run app/test.sh setup and smoke tests
+        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
+
       - name: Enforce pinned Dart formatting for changed source
         run: |
           set -euo pipefail
@@ -278,9 +281,6 @@ jobs:
             echo "Network sandbox did not block outbound traffic." >&2
             exit 1
           fi
-
-      - name: Run app/test.sh setup and smoke tests
-        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
 
       - name: Enforce focused test collection counts
         run: |
