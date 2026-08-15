@@ -140,12 +140,24 @@ class V2VTurnReconciler {
 
   void _signal(_V2VSessionTurns state) {
     state.revision++;
-    if (state.drainFuture != null) return;
+    if (state.drainFuture != null) {
+      state.rerunRequested = true;
+      return;
+    }
+    _scheduleDrain(state);
+  }
+
+  void _scheduleDrain(_V2VSessionTurns state) {
     final future = Future<void>.microtask(() => _drain(state));
     state.drainFuture = future;
     unawaited(
       future.whenComplete(() {
-        if (identical(state.drainFuture, future)) state.drainFuture = null;
+        if (!identical(state.drainFuture, future)) return;
+        state.drainFuture = null;
+        if (state.rerunRequested) {
+          state.rerunRequested = false;
+          _scheduleDrain(state);
+        }
       }),
     );
   }
@@ -169,6 +181,7 @@ class V2VTurnReconciler {
         completedAt: completedAt,
       );
 
+      final attemptRevision = state.revision;
       var committed = false;
       try {
         committed = await _writer(turn);
@@ -177,7 +190,7 @@ class V2VTurnReconciler {
       }
       if (!state.isAuthorityCurrent()) return;
       if (!committed) {
-        state.failedAtRevision = state.revision;
+        state.failedAtRevision = attemptRevision;
         _onWriteFailure?.call();
         return;
       }
@@ -204,6 +217,7 @@ class _V2VSessionTurns {
   int nextTurnIndex = 0;
   int revision = 0;
   int failedAtRevision = -1;
+  bool rerunRequested = false;
   Future<void>? drainFuture;
 }
 

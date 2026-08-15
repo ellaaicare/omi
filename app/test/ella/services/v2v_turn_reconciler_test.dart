@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 
@@ -166,6 +168,38 @@ void main() {
       await reconciler.settle();
       expect(attempts, 2);
       expect(committedKeys, {'session-1:turn-000001'});
+    });
+
+    test('retry signal during an in-flight failure is not lost', () async {
+      final firstAttemptStarted = Completer<void>();
+      final releaseFirstAttempt = Completer<void>();
+      final attemptedKeys = <String>[];
+      var attempts = 0;
+      final reconciler = V2VTurnReconciler(
+        writer: (turn) async {
+          attempts++;
+          attemptedKeys.add('${turn.sessionId}:${turn.turnId}');
+          if (attempts == 1) {
+            firstAttemptStarted.complete();
+            await releaseFirstAttempt.future;
+            return false;
+          }
+          return true;
+        },
+      );
+      reconciler.beginSession(uid: 'uid-a', sessionId: 'session-1', isAuthorityCurrent: () => true);
+      reconciler.beginUserTurn('session-1');
+      reconciler.addUserTerminal('session-1', 'Question');
+      reconciler.addAssistantFragment('session-1', 'Answer');
+      reconciler.markAssistantTerminal('session-1');
+
+      await firstAttemptStarted.future;
+      reconciler.retryAuthorizedPending();
+      releaseFirstAttempt.complete();
+      await reconciler.settle();
+
+      expect(attempts, 2);
+      expect(attemptedKeys.toSet(), {'session-1:turn-000001'});
     });
   });
 }
