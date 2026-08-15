@@ -14,36 +14,16 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
   });
 
-  test(
-    'iOS voice route requires an acknowledged non-receiver output',
-    () async {
-      MethodCall? received;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-        received = call;
-        return <String, dynamic>{
-          'success': true,
-          'usesReceiver': false,
-          'usesPhoneSpeaker': true,
-        };
-      });
-
-      expect(
-        await EllaVoiceAudioRoute.ensureAudibleOutput(
-          channel: channel,
-          isIos: true,
-        ),
-        isTrue,
-      );
-      expect(received?.method, 'ensureAudibleVoiceOutput');
-      expect(received?.arguments, {'usage': 'interactive'});
-    },
-  );
-
-  test('standard replies request the playback-only native route', () async {
+  test('no-external playback requires a verified speaker classification', () async {
     MethodCall? received;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
       received = call;
-      return <String, dynamic>{'success': true, 'usesReceiver': false, 'outputVolume': 1.0};
+      return <String, dynamic>{
+        'success': true,
+        'routeClassification': 'speaker',
+        'usesReceiver': false,
+        'usesPhoneSpeaker': true,
+      };
     });
 
     expect(
@@ -54,7 +34,46 @@ void main() {
       ),
       isTrue,
     );
+    expect(received?.method, 'ensureAudibleVoiceOutput');
     expect(received?.arguments, {'usage': 'playback'});
+  });
+
+  test('standard replies request the playback-only native route', () async {
+    MethodCall? received;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      received = call;
+      return <String, dynamic>{'success': true, 'routeClassification': 'speaker', 'outputVolume': 1.0};
+    });
+
+    expect(
+      await EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback, channel: channel, isIos: true),
+      isTrue,
+    );
+    expect(received?.arguments, {'usage': 'playback'});
+  });
+
+  test('Bluetooth and wired playback preserve a classified external route', () async {
+    for (final outputType in ['BluetoothA2DPOutput', 'Headphones']) {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (_) async => <String, dynamic>{
+          'success': true,
+          'routeClassification': 'external',
+          'outputType': outputType,
+          'hasHeadset': true,
+        },
+      );
+
+      expect(
+        await EllaVoiceAudioRoute.ensureAudibleOutput(
+          usage: EllaVoiceAudioUsage.playback,
+          channel: channel,
+          isIos: true,
+        ),
+        isTrue,
+        reason: '$outputType must remain audible',
+      );
+    }
   });
 
   test('on-device standard fallback uses playback spoken-audio instead of play-and-record', () {
@@ -66,59 +85,71 @@ void main() {
     expect(configuration.options, isNot(contains(IosTextToSpeechAudioCategoryOptions.defaultToSpeaker)));
   });
 
-  test(
-    'iOS voice route fails closed when output remains on the receiver',
-    () async {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        (_) async => <String, dynamic>{
-          'success': true,
-          'usesReceiver': true,
-          'usesPhoneSpeaker': false,
-        },
-      );
+  test('typed native route failure fails closed and reports the actual receiver', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (_) async => <String, dynamic>{
+        'success': false,
+        'routeClassification': 'receiver',
+        'failureCode': 'speaker_selection_failed',
+        'usesReceiver': true,
+        'usesPhoneSpeaker': false,
+      },
+    );
 
-      expect(
-        await EllaVoiceAudioRoute.ensureAudibleOutput(
-          channel: channel,
-          isIos: true,
-        ),
-        isFalse,
-      );
-    },
-  );
+    expect(
+      await EllaVoiceAudioRoute.ensureAudibleOutput(
+        usage: EllaVoiceAudioUsage.playback,
+        channel: channel,
+        isIos: true,
+      ),
+      isFalse,
+    );
+  });
 
   test('iOS voice route fails closed when native output is absent', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
       channel,
       (_) async => <String, dynamic>{
         'success': false,
+        'routeClassification': 'unavailable',
+        'failureCode': 'route_unavailable',
         'hasOutput': false,
         'usesReceiver': false,
         'usesPhoneSpeaker': false,
       },
     );
 
+    expect(await EllaVoiceAudioRoute.ensureAudibleOutput(channel: channel, isIos: true), isFalse);
+  });
+
+  test('interactive restore requests the native mic-capable route and verifies speaker output', () async {
+    MethodCall? received;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      received = call;
+      return <String, dynamic>{'success': true, 'routeClassification': 'speaker'};
+    });
+
     expect(
-      await EllaVoiceAudioRoute.ensureAudibleOutput(channel: channel, isIos: true),
-      isFalse,
+      await EllaVoiceAudioRoute.ensureAudibleOutput(
+        usage: EllaVoiceAudioUsage.interactive,
+        channel: channel,
+        isIos: true,
+      ),
+      isTrue,
     );
+
+    expect(received?.arguments, {'usage': 'interactive'});
   });
 
   test('non-iOS voice route does not invoke the iOS channel', () async {
     var calls = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (_) async {
       calls++;
-      return <String, dynamic>{'success': true, 'usesReceiver': false};
+      return <String, dynamic>{'success': true, 'routeClassification': 'speaker'};
     });
 
-    expect(
-      await EllaVoiceAudioRoute.ensureAudibleOutput(
-        channel: channel,
-        isIos: false,
-      ),
-      isTrue,
-    );
+    expect(await EllaVoiceAudioRoute.ensureAudibleOutput(channel: channel, isIos: false), isTrue);
     expect(calls, 0);
   });
 }

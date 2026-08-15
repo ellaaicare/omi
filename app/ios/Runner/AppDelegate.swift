@@ -297,6 +297,7 @@ extension FlutterError: Error {}
       ]
       let outputType = output?.portType
       let hasHeadset = outputType.map(privateOutputTypes.contains) ?? false
+      let routeClassification = SystemEllaVoiceAudioSession().routeSnapshot().classification
 
       return [
           "outputName": output?.portName ?? "",
@@ -305,47 +306,36 @@ extension FlutterError: Error {}
           "hasHeadset": hasHeadset,
           "usesPhoneSpeaker": outputType == .builtInSpeaker,
           "usesReceiver": outputType == .builtInReceiver,
+          "routeClassification": routeClassification.rawValue,
           "outputVolume": AVAudioSession.sharedInstance().outputVolume,
       ]
   }
 
   private func ensureAudibleVoiceOutput(usage: String) -> [String: Any] {
-      let audioSession = AVAudioSession.sharedInstance()
-      do {
-          if usage == "playback" {
-              // Standard Ella replies do not capture while audio is playing.
-              // Keep them out of the quieter bidirectional voice-processing
-              // path and let iOS use its normal media/headset output route.
-              try audioSession.setCategory(
-                  .playback,
-                  mode: .spokenAudio,
-                  options: [.allowBluetoothA2DP, .allowAirPlay]
-              )
-          } else {
-              // V2V gates its microphone while remote PCM is playing, so the
-              // default mode preserves full-range output without applying a
-              // second voice-processing profile over the streamed response.
-              try audioSession.setCategory(
-                  .playAndRecord,
-                  mode: .default,
-                  options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
-              )
-          }
-          try audioSession.setActive(true, options: [])
-
-          let outputType = audioSession.currentRoute.outputs.first?.portType
-          if usage != "playback" && (outputType == nil || outputType == .builtInReceiver) {
-              try audioSession.overrideOutputAudioPort(.speaker)
-          }
-
-          var payload = currentAudioRoutePayload()
-          payload["success"] = payload["hasOutput"] as? Bool == true && payload["usesReceiver"] as? Bool != true
-          return payload
-      } catch {
+      guard let routeUsage = EllaVoiceAudioRouteUsage(rawValue: usage) else {
           var payload = currentAudioRoutePayload()
           payload["success"] = false
+          payload["failureCode"] = EllaVoiceAudioRouteFailure.invalidUsage.rawValue
           return payload
       }
+
+      let outcome = EllaVoiceAudioRoutePolicy().apply(
+          usage: routeUsage,
+          session: SystemEllaVoiceAudioSession()
+      )
+      var payload = currentAudioRoutePayload()
+      payload["success"] = outcome.success
+      payload["routeClassification"] = outcome.classification.rawValue
+      payload["usage"] = outcome.usage.rawValue
+      if let failure = outcome.failure {
+          payload["failureCode"] = failure.rawValue
+      }
+      print(
+          "AppDelegate: Ella audio route usage=\(outcome.usage.rawValue) " +
+          "classification=\(outcome.classification.rawValue) " +
+          "success=\(outcome.success) failure=\(outcome.failure?.rawValue ?? \"none\")"
+      )
+      return payload
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
