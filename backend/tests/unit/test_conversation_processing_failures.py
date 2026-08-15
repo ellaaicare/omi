@@ -432,6 +432,7 @@ def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a
         'processes': 0,
         'integrations': 0,
         'compare_deletes': 0,
+        'restores': 0,
         'successor_during_processing': None,
     }
 
@@ -483,6 +484,14 @@ def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a
         state['pointer'] = None
         return True
 
+    def restore_pointer(uid, requested_id):
+        assert uid == 'authenticated-user'
+        state['restores'] += 1
+        if state['pointer'] != f'processing:{requested_id}':
+            return False
+        state['pointer'] = requested_id
+        return True
+
     monkeypatch.setattr(conversations_router.conversations_db, 'get_conversation', get_conversation)
     monkeypatch.setattr(conversations_router.conversations_db, 'claim_in_progress_conversation', claim_conversation)
     monkeypatch.setattr(conversations_router.redis_db, 'claim_in_progress_conversation_id', claim_pointer)
@@ -490,6 +499,11 @@ def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a
         conversations_router.redis_db,
         'remove_in_progress_conversation_id_if_matches',
         compare_delete,
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        'restore_in_progress_conversation_id_if_matches',
+        restore_pointer,
     )
     monkeypatch.setattr(conversations_router.redis_db, 'get_cached_user_geolocation', lambda uid: None)
     monkeypatch.setattr(conversations_router, 'process_conversation', process)
@@ -597,6 +611,133 @@ def test_capture_finalization_processing_replay_does_not_touch_successor_or_side
     assert state['pointer'] == 'successor-capture'
 
 
+def test_capture_finalization_pointer_acquisition_failure_preserves_exact_pointer(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+
+    def fail_pointer_claim(uid, requested_id):
+        raise RuntimeError('redis acquisition failed')
+
+    monkeypatch.setattr(conversations_router.redis_db, 'claim_in_progress_conversation_id', fail_pointer_claim)
+    try:
+        with pytest.raises(RuntimeError, match='redis acquisition failed'):
+            client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert state['pointer'] == 'capture-a'
+    assert state['conversations']['capture-a']['status'] == ConversationStatus.in_progress
+    assert state['processes'] == 0
+    assert state['restores'] == 0
+    assert state['compare_deletes'] == 0
+
+
+@pytest.mark.parametrize('failure_boundary', ['enrichment', 'firestore_claim'])
+def test_capture_finalization_preclaim_failure_restores_exact_pointer_for_safe_replay(monkeypatch, failure_boundary):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+    original_claim = conversations_router.conversations_db.claim_in_progress_conversation
+    failed = False
+
+    def fail_enrichment_once(uid):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError(f'{failure_boundary} failed')
+        return None
+
+    def fail_claim_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError(f'{failure_boundary} failed')
+        return original_claim(*args, **kwargs)
+
+    if failure_boundary == 'enrichment':
+        monkeypatch.setattr(conversations_router.redis_db, 'get_cached_user_geolocation', fail_enrichment_once)
+    else:
+        monkeypatch.setattr(conversations_router.conversations_db, 'claim_in_progress_conversation', fail_claim_once)
+
+    try:
+        with pytest.raises(RuntimeError, match=f'{failure_boundary} failed'):
+            client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+
+        assert state['pointer'] == 'capture-a'
+        assert state['conversations']['capture-a']['status'] == ConversationStatus.in_progress
+        assert state['restores'] == 1
+        assert state['compare_deletes'] == 0
+
+        replay = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert replay.status_code == 200
+    assert replay.json()['conversation']['id'] == 'capture-a'
+    assert replay.json()['conversation']['status'] == ConversationStatus.completed.value
+    assert state['processes'] == 1
+    assert state['integrations'] == 1
+    assert state['pointer'] is None
+
+
+def test_capture_finalization_preclaim_failure_retains_an_existing_processing_fence(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch, pointer='processing:capture-a')
+    failed = False
+
+    def fail_enrichment_once(uid):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError('enrichment failed')
+        return None
+
+    monkeypatch.setattr(conversations_router.redis_db, 'get_cached_user_geolocation', fail_enrichment_once)
+    try:
+        with pytest.raises(RuntimeError, match='enrichment failed'):
+            client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+
+        assert state['pointer'] == 'processing:capture-a'
+        assert state['restores'] == 0
+        replay = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert replay.status_code == 200
+    assert replay.json()['conversation']['id'] == 'capture-a'
+    assert state['processes'] == 1
+    assert state['pointer'] is None
+
+
+def test_capture_finalization_preclaim_restore_cannot_overwrite_successor_or_finalize_wrong_capture(monkeypatch):
+    app, client, state = _mount_capture_finalization_route(monkeypatch)
+
+    def fail_enrichment(uid):
+        raise RuntimeError('enrichment failed')
+
+    def successor_wins_restore(uid, requested_id):
+        assert state['pointer'] == f'processing:{requested_id}'
+        state['restores'] += 1
+        state['pointer'] = 'successor-capture'
+        return False
+
+    monkeypatch.setattr(conversations_router.redis_db, 'get_cached_user_geolocation', fail_enrichment)
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        'restore_in_progress_conversation_id_if_matches',
+        successor_wins_restore,
+    )
+    try:
+        with pytest.raises(RuntimeError, match='enrichment failed'):
+            client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+        retry = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert retry.status_code == 409
+    assert state['pointer'] == 'successor-capture'
+    assert state['conversations']['capture-a']['status'] == ConversationStatus.in_progress
+    assert state['processes'] == 0
+    assert state['integrations'] == 0
+    assert state['compare_deletes'] == 0
+
+
 def test_capture_finalization_firestore_claim_is_atomic_and_exact():
     transaction = _FakeTransaction()
     conversation_ref = _FakeDocumentRef({'id': 'capture-a', 'status': ConversationStatus.in_progress.value})
@@ -632,6 +773,63 @@ class _CapturePointerRedis:
         return 0
 
 
+class _ExpiringCapturePointerRedis:
+    def __init__(self):
+        self.now = 0
+        self.value = None
+        self.expires_at = None
+
+    def _expire_if_needed(self):
+        if self.expires_at is not None and self.now >= self.expires_at:
+            self.value = None
+            self.expires_at = None
+
+    def advance(self, seconds):
+        self.now += seconds
+        self._expire_if_needed()
+
+    def set(self, key, value, *args):
+        self._expire_if_needed()
+        if 'NX' in args and self.value is not None:
+            return None
+        self.value = value
+        if 'EX' in args:
+            self.expires_at = self.now + int(args[args.index('EX') + 1])
+        return True
+
+    def expire(self, key, ttl):
+        self._expire_if_needed()
+        if self.value is None:
+            return False
+        self.expires_at = self.now + int(ttl)
+        return True
+
+    def eval(self, script, key_count, key, *args):
+        assert key_count == 1
+        assert key == 'users:authenticated-user:in_progress_memory_id'
+        self._expire_if_needed()
+        if "'NX'" in script:
+            conversation_id, ttl = args
+            if self.value == conversation_id:
+                self.expires_at = self.now + int(ttl)
+                return 1
+            if self.value is None:
+                self.value = conversation_id
+                self.expires_at = self.now + int(ttl)
+                return 2
+            return 0
+        if 'if current == ARGV[2]' in script:
+            conversation_id, processing_fence, ttl = args
+            if self.value == conversation_id:
+                self.value = processing_fence
+                self.expires_at = self.now + int(ttl)
+                return 1
+            if self.value == processing_fence:
+                return 2
+            return 0
+        raise AssertionError('unexpected Redis script')
+
+
 def test_capture_finalization_redis_claim_and_compare_delete_preserve_successor(monkeypatch):
     fake_redis = _CapturePointerRedis('capture-a')
     monkeypatch.setattr(conversations_router.redis_db, 'r', fake_redis)
@@ -646,5 +844,42 @@ def test_capture_finalization_redis_claim_and_compare_delete_preserve_successor(
             'authenticated-user', 'processing:capture-a'
         )
         is False
+    )
+    assert fake_redis.value == 'successor-capture'
+
+
+def test_active_capture_pointer_refresh_survives_five_minutes_but_abandoned_pointer_expires(monkeypatch):
+    fake_redis = _ExpiringCapturePointerRedis()
+    monkeypatch.setattr(conversations_router.redis_db, 'r', fake_redis)
+
+    conversations_router.redis_db.set_in_progress_conversation_id('authenticated-user', 'capture-a')
+    fake_redis.advance(295)
+    assert (
+        conversations_router.redis_db.refresh_in_progress_conversation_id('authenticated-user', 'capture-a')
+        == 'refreshed'
+    )
+    fake_redis.advance(10)
+    assert fake_redis.now > 300
+    assert (
+        conversations_router.redis_db.claim_in_progress_conversation_id('authenticated-user', 'capture-a') == 'claimed'
+    )
+
+    conversations_router.redis_db.set_in_progress_conversation_id('authenticated-user', 'abandoned-capture')
+    fake_redis.advance(301)
+    assert (
+        conversations_router.redis_db.claim_in_progress_conversation_id('authenticated-user', 'abandoned-capture')
+        == 'mismatch'
+    )
+
+
+def test_active_capture_pointer_refresh_never_overwrites_successor(monkeypatch):
+    fake_redis = _ExpiringCapturePointerRedis()
+    fake_redis.value = 'successor-capture'
+    fake_redis.expires_at = 300
+    monkeypatch.setattr(conversations_router.redis_db, 'r', fake_redis)
+
+    assert (
+        conversations_router.redis_db.refresh_in_progress_conversation_id('authenticated-user', 'capture-a')
+        == 'mismatch'
     )
     assert fake_redis.value == 'successor-capture'

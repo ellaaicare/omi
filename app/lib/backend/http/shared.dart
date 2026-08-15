@@ -120,11 +120,18 @@ Future<http.Response?> makeApiCall({
   Duration? timeout,
   int? retries,
   bool retryOnUnauthorized = true,
+  bool enforceAbsoluteTimeout = false,
   bool? requireAuthCheck,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   try {
+    final effectiveTimeout =
+        timeout ?? (method == 'GET' ? ApiClient.requestTimeoutRead : ApiClient.requestTimeoutWrite);
+    final effectiveRetries = retries ?? 1;
+    final absoluteDeadline = enforceAbsoluteTimeout
+        ? MonotonicRequestDeadline.forRequest(timeout: effectiveTimeout, retries: effectiveRetries)
+        : null;
     final shouldCheckAuth = requireAuthCheck ?? _isRequiredAuthCheck(url);
     Map<String, String> builtHeaders = await buildHeaders(
       requireAuthCheck: shouldCheckAuth,
@@ -133,15 +140,12 @@ Future<http.Response?> makeApiCall({
       exactAuthority: exactAuthority,
     );
 
-    final effectiveTimeout =
-        timeout ?? (method == 'GET' ? ApiClient.requestTimeoutRead : ApiClient.requestTimeoutWrite);
-    final effectiveRetries = retries ?? 1;
-
     http.Response response = await HttpPoolManager.instance.send(
       () => _buildRequest(url, builtHeaders, body, method),
       timeout: effectiveTimeout,
       retries: effectiveRetries,
       exactAuthority: exactAuthority,
+      absoluteDeadline: absoluteDeadline,
     );
 
     if (retryOnUnauthorized && shouldCheckAuth && response.statusCode == 401) {
@@ -159,6 +163,7 @@ Future<http.Response?> makeApiCall({
           timeout: effectiveTimeout,
           retries: 0,
           exactAuthority: exactAuthority,
+          absoluteDeadline: absoluteDeadline,
         );
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {

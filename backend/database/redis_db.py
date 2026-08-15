@@ -400,6 +400,36 @@ def set_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 3
     r.expire(f'users:{uid}:in_progress_memory_id', ttl)
 
 
+def refresh_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300) -> str:
+    """Refresh or recover an exact active capture pointer without overwriting a successor."""
+    key = f'users:{uid}:in_progress_memory_id'
+    result = r.eval(
+        """
+        local current = redis.call('GET', KEYS[1])
+        if current == ARGV[1] then
+            redis.call('EXPIRE', KEYS[1], ARGV[2])
+            return 1
+        end
+        if not current then
+            local restored = redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2], 'NX')
+            if restored then
+                return 2
+            end
+        end
+        return 0
+        """,
+        1,
+        key,
+        conversation_id,
+        ttl,
+    )
+    if result == 1:
+        return 'refreshed'
+    if result == 2:
+        return 'restored'
+    return 'mismatch'
+
+
 def claim_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300) -> str:
     """CAS the exact capture pointer to a processing fence without touching a successor."""
     key = f'users:{uid}:in_progress_memory_id'
@@ -427,6 +457,27 @@ def claim_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int =
     if result == 2:
         return 'already_claimed'
     return 'mismatch'
+
+
+def restore_in_progress_conversation_id_if_matches(uid: str, conversation_id: str, ttl: int = 300) -> bool:
+    """Restore an exact processing fence to a bounded active pointer after a pre-claim failure."""
+    key = f'users:{uid}:in_progress_memory_id'
+    processing_fence = f'processing:{conversation_id}'
+    restored = r.eval(
+        """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            return 1
+        end
+        return 0
+        """,
+        1,
+        key,
+        processing_fence,
+        conversation_id,
+        ttl,
+    )
+    return bool(restored)
 
 
 def remove_in_progress_conversation_id_if_matches(uid: str, expected_value: str) -> bool:

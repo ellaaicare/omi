@@ -62,6 +62,7 @@ Future<http.Response?> _defaultConversationFinalizationTransport({
       timeout: timeout,
       retries: retries,
       retryOnUnauthorized: retryOnUnauthorized,
+      enforceAbsoluteTimeout: true,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );

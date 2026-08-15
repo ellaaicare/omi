@@ -84,6 +84,7 @@ def process_in_progress_conversation(
     if pointer_claim == 'mismatch':
         raise HTTPException(status_code=409, detail="Conversation is no longer the active capture")
 
+    durable_claim_succeeded = False
     try:
         # Resolve optional context before the durable processing claim so an enrichment failure cannot strand the
         # conversation in processing.
@@ -95,6 +96,7 @@ def process_in_progress_conversation(
             resolved_geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
         claimed = conversations_db.claim_in_progress_conversation(uid, conversation_id)
+        durable_claim_succeeded = claimed
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -103,6 +105,7 @@ def process_in_progress_conversation(
         status = getattr(conversation.get('status'), 'value', conversation.get('status'))
         if not claimed:
             if status in settled_statuses:
+                durable_claim_succeeded = True
                 return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
             raise HTTPException(status_code=409, detail="Conversation processing claim was not acquired")
 
@@ -118,7 +121,10 @@ def process_in_progress_conversation(
         messages = trigger_external_integrations(uid, conversation)
         return CreateConversationResponse(conversation=conversation, messages=messages)
     finally:
-        redis_db.remove_in_progress_conversation_id_if_matches(uid, f'processing:{conversation_id}')
+        if durable_claim_succeeded:
+            redis_db.remove_in_progress_conversation_id_if_matches(uid, f'processing:{conversation_id}')
+        elif pointer_claim == 'claimed':
+            redis_db.restore_in_progress_conversation_id_if_matches(uid, conversation_id)
 
 
 @router.post('/v1/conversations/{conversation_id}/reprocess', response_model=Conversation, tags=['conversations'])

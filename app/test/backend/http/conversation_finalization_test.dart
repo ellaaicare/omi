@@ -347,6 +347,48 @@ void main() {
     expect(postCalls, 1);
   });
 
+  test('pool admission timeout prevents a queued finalization request from sending after release', () async {
+    final releasePool = Completer<void>();
+    final poolSaturated = Completer<void>();
+    var blockingRequests = 0;
+    var finalizationRequests = 0;
+    HttpPoolManager.instance.replaceClientForTesting(
+      _InspectingClient((request) async {
+        if (request.url.host == 'pool-saturation.ella.test') {
+          blockingRequests++;
+          if (blockingRequests == 10) poolSaturated.complete();
+          await releasePool.future;
+          return http.StreamedResponse(Stream.value(const <int>[]), 200);
+        }
+        finalizationRequests++;
+        return http.StreamedResponse(Stream.value(utf8.encode('late finalization request')), 200);
+      }),
+    );
+
+    final blockers = List<Future<http.Response>>.generate(
+      10,
+      (index) => HttpPoolManager.instance.send(
+        () => http.Request('GET', Uri.parse('https://pool-saturation.ella.test/$index')),
+        timeout: const Duration(seconds: 2),
+        retries: 0,
+      ),
+    );
+    await poolSaturated.future.timeout(const Duration(seconds: 1));
+
+    final result = await processInProgressConversation(
+      conversationId: conversationId,
+      statusPollInterval: Duration.zero,
+      statusPollTimeout: const Duration(milliseconds: 40),
+    );
+
+    expect(result, isNull);
+    expect(finalizationRequests, 0);
+    releasePool.complete();
+    await Future.wait(blockers);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(finalizationRequests, 0, reason: 'expired queued work must not produce late network side effects');
+  });
+
   test('hung response body obeys the monotonic deadline and performs no nested GET retry', () async {
     final authority = _CaptureGenerationAuthority('uid-a');
     var postCalls = 0;

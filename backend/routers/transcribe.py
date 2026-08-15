@@ -791,6 +791,7 @@ async def _stream_handler(
 
             # Continue with the existing conversation
             current_conversation_id = existing_conversation['id']
+            redis_db.refresh_in_progress_conversation_id(uid, current_conversation_id)
             print(
                 f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
                 uid,
@@ -813,6 +814,7 @@ async def _stream_handler(
         photos: List[ConversationPhoto],
         finished_at: datetime,
     ):
+        redis_db.refresh_in_progress_conversation_id(uid, conversation.id)
         updated_segments: List[TranscriptSegment] = []
         removed_ids: List[str] = []
 
@@ -1537,6 +1539,8 @@ async def _stream_handler(
                 )
                 await _create_new_in_progress_conversation()
                 continue
+
+            redis_db.refresh_in_progress_conversation_id(uid, current_conversation_id)
 
             # Check if conversation should be processed
             now = datetime.now(timezone.utc)
