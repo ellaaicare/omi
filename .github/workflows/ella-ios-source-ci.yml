@@ -3,6 +3,7 @@ name: Ella iOS Source CI
 on:
   pull_request:
     branches:
+      - codex/815-device-rejection-successor
       - feature/phase-a-testflight
       - main
     paths:
@@ -57,6 +58,25 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact checked-out head
+        working-directory: .
+        env:
+          ELLA_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          [[ "$ELLA_EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character head SHA." >&2
+            exit 1
+          }
+          actual_head_sha="$(git rev-parse HEAD)"
+          [[ "$actual_head_sha" == "$ELLA_EXPECTED_HEAD_SHA" ]] || {
+            echo "Expected exact head $ELLA_EXPECTED_HEAD_SHA, checked out $actual_head_sha." >&2
+            exit 1
+          }
+          echo "Verified exact source head: $actual_head_sha"
 
       - name: Verify credential-free source CI scope
         working-directory: .
@@ -139,6 +159,29 @@ jobs:
             -o "$RUNNER_TEMP/guardian-native-policy-tests"
           "$RUNNER_TEMP/guardian-native-policy-tests"
 
+      - name: Run Ella voice route native policy and static gates
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          swiftc -warnings-as-errors \
+            app/ios/Runner/EllaVoiceAudioRoutePolicy.swift \
+            app/ios/Tests/EllaVoiceAudioRoutePolicyTests.swift \
+            -o "$RUNNER_TEMP/ella-voice-audio-route-policy-tests"
+          "$RUNNER_TEMP/ella-voice-audio-route-policy-tests"
+
+          iphoneos_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun swiftc -typecheck -warnings-as-errors \
+            -sdk "$iphoneos_sdk" \
+            -target arm64-apple-ios15.0 \
+            app/ios/Runner/EllaVoiceAudioRoutePolicy.swift
+          xcrun swiftc -frontend -parse app/ios/Runner/AppDelegate.swift
+
+          swift format lint --strict \
+            app/ios/Runner/EllaVoiceAudioRoutePolicy.swift \
+            app/ios/Tests/EllaVoiceAudioRoutePolicyTests.swift
+          plutil -lint app/ios/Runner.xcodeproj/project.pbxproj
+
       - name: Run Guardian data-only production boundary tests
         working-directory: .
         run: |
@@ -179,6 +222,9 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Run app/test.sh setup and smoke tests
+        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
+
       - name: Enforce pinned Dart formatting for changed source
         run: |
           set -euo pipefail
@@ -197,6 +243,35 @@ jobs:
 
           dart format --output=none --set-exit-if-changed --line-length 120 "${changed_dart_files[@]}"
 
+      - name: Run exact voice route, V2V, and adapter contracts with zero skips
+        run: |
+          set -euo pipefail
+
+          voice_tests=(
+            test/ella/services/ella_voice_audio_route_test.dart
+            test/ella/services/v2v_client_test.dart
+            test/ella/account_isolation_test.dart
+          )
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            flutter test --no-pub --reporter=json "${voice_tests[@]}" \
+            | tee /tmp/ella-voice-route-tests.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          completed = []
+          for line in Path('/tmp/ella-voice-route-tests.jsonl').read_text().splitlines():
+              event = json.loads(line)
+              if event.get('type') == 'testDone' and not event.get('hidden', False):
+                  completed.append(event)
+
+          skipped = [event for event in completed if event.get('skipped', False)]
+          failed = [event for event in completed if event.get('result') != 'success']
+          print(f'Ella voice route/V2V/adapter tests: {len(completed)} passed, {len(skipped)} skipped')
+          if not completed or skipped or failed:
+              raise SystemExit('Voice route/V2V/adapter test gate did not pass with zero skips.')
+          PY
+
       - name: Verify protected test network sandbox
         run: |
           set -euo pipefail
@@ -206,9 +281,6 @@ jobs:
             echo "Network sandbox did not block outbound traffic." >&2
             exit 1
           fi
-
-      - name: Run app/test.sh setup and smoke tests
-        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
 
       - name: Enforce focused test collection counts
         run: |

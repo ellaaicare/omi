@@ -20,6 +20,37 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
+abstract interface class V2VMicrophoneRecorder {
+  Future<void> useEllaManagedAudioSession();
+  Future<bool> hasPermission();
+  Future<Stream<Uint8List>> startStream(RecordConfig config);
+  Future<String?> stop();
+  Future<void> dispose();
+}
+
+final class RecordV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
+  RecordV2VMicrophoneRecorder() : _recorder = AudioRecorder();
+
+  final AudioRecorder _recorder;
+
+  @override
+  Future<void> useEllaManagedAudioSession() async {
+    await _recorder.ios?.manageAudioSession(false);
+  }
+
+  @override
+  Future<bool> hasPermission() => _recorder.hasPermission();
+
+  @override
+  Future<Stream<Uint8List>> startStream(RecordConfig config) => _recorder.startStream(config);
+
+  @override
+  Future<String?> stop() => _recorder.stop();
+
+  @override
+  Future<void> dispose() => _recorder.dispose();
+}
+
 enum V2VSessionScopeKind { memory, dailyCard }
 
 @immutable
@@ -271,7 +302,7 @@ class V2VClient {
   }
 
   WebSocketChannel? _channel;
-  AudioRecorder? _recorder;
+  V2VMicrophoneRecorder? _recorder;
   StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
   AiConsentActiveSessionLease? _aiConsentLease;
@@ -306,6 +337,7 @@ class V2VClient {
   final Future<void> Function(V2VProtectedEgressBoundary boundary)? _beforeProtectedEgress;
   final void Function(V2VProtectedEgressBoundary boundary)? _onProtectedEgress;
   final Future<bool> Function()? _microphoneStarter;
+  final V2VMicrophoneRecorder Function() _microphoneRecorderFactory;
   final Future<bool> Function() _interactiveOutputEnforcer;
   final Future<bool> Function() _playbackOutputEnforcer;
   final Future<void> Function(Uint8List wavBytes)? _wavPlayback;
@@ -318,6 +350,7 @@ class V2VClient {
     @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
     @visibleForTesting Future<bool> Function()? microphoneStarter,
+    @visibleForTesting V2VMicrophoneRecorder Function()? microphoneRecorderFactory,
     @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
     @visibleForTesting Future<bool> Function()? playbackOutputEnforcer,
     @visibleForTesting Future<void> Function(Uint8List wavBytes)? wavPlayback,
@@ -326,6 +359,7 @@ class V2VClient {
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
         _microphoneStarter = microphoneStarter,
+        _microphoneRecorderFactory = microphoneRecorderFactory ?? RecordV2VMicrophoneRecorder.new,
         _interactiveOutputEnforcer = audibleOutputEnforcer ??
             (() => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.interactive)),
         _playbackOutputEnforcer = playbackOutputEnforcer ??
@@ -1227,7 +1261,8 @@ class V2VClient {
         return true;
       }
 
-      _recorder = AudioRecorder();
+      _recorder = _microphoneRecorderFactory();
+      await _recorder!.useEllaManagedAudioSession();
 
       final hasPermission = await _recorder!.hasPermission();
       if (!hasPermission) {
@@ -1251,12 +1286,28 @@ class V2VClient {
           autoGain: true,
           echoCancel: true,
           noiseSuppress: true,
+          iosConfig: IosRecordConfig(
+            categoryOptions: [
+              IosAudioCategoryOption.defaultToSpeaker,
+              IosAudioCategoryOption.allowBluetooth,
+              IosAudioCategoryOption.allowBluetoothA2DP,
+              IosAudioCategoryOption.allowAirPlay,
+            ],
+          ),
         ),
       );
       if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
         await _recorder?.stop();
         await _recorder?.dispose();
         _recorder = null;
+        return false;
+      }
+      if (!await _interactiveOutputEnforcer()) {
+        await _recorder?.stop();
+        await _recorder?.dispose();
+        _recorder = null;
+        Logger.error('[V2V] Mic start failed: Ella route verification rejected recorder session');
+        onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic unavailable'));
         return false;
       }
 
