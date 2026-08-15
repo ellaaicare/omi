@@ -152,6 +152,7 @@ jobs:
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
+            asyncpg==0.31.0 \
             python-multipart==0.0.9
           python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
           python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
