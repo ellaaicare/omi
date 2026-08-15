@@ -12,7 +12,9 @@ enum EllaVoiceAudioRouteUsage: String {
 enum EllaVoiceAudioRoutePort: Equatable {
   case speaker
   case receiver
-  case bluetooth
+  case bluetoothHFP
+  case bluetoothA2DP
+  case bluetoothLE
   case wired
   case airPlay
   case external
@@ -48,7 +50,7 @@ struct EllaVoiceAudioRouteSnapshot: Equatable {
 
   private static func isExternal(_ port: EllaVoiceAudioRoutePort) -> Bool {
     switch port {
-    case .bluetooth, .wired, .airPlay, .external:
+    case .bluetoothHFP, .bluetoothA2DP, .bluetoothLE, .wired, .airPlay, .external:
       return true
     case .speaker, .receiver:
       return false
@@ -190,8 +192,12 @@ struct EllaVoiceAudioRoutePolicy {
         return .speaker
       case .builtInReceiver:
         return .receiver
-      case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE:
-        return .bluetooth
+      case .bluetoothHFP:
+        return .bluetoothHFP
+      case .bluetoothA2DP:
+        return .bluetoothA2DP
+      case .bluetoothLE:
+        return .bluetoothLE
       case .headphones, .lineOut, .usbAudio:
         return .wired
       case .airPlay:

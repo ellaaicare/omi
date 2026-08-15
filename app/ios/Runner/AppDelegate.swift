@@ -313,27 +313,29 @@ extension FlutterError: Error {}
 
   private func ensureAudibleVoiceOutput(usage: String) -> [String: Any] {
       guard let routeUsage = EllaVoiceAudioRouteUsage(rawValue: usage) else {
-          var payload = currentAudioRoutePayload()
-          payload["success"] = false
-          payload["failureCode"] = EllaVoiceAudioRouteFailure.invalidUsage.rawValue
-          return payload
+          return [
+              "success": false,
+              "routeClassification": SystemEllaVoiceAudioSession().routeSnapshot().classification.rawValue,
+              "failureCode": EllaVoiceAudioRouteFailure.invalidUsage.rawValue,
+          ]
       }
 
       let outcome = EllaVoiceAudioRoutePolicy().apply(
           usage: routeUsage,
           session: SystemEllaVoiceAudioSession()
       )
-      var payload = currentAudioRoutePayload()
-      payload["success"] = outcome.success
-      payload["routeClassification"] = outcome.classification.rawValue
-      payload["usage"] = outcome.usage.rawValue
+      var payload: [String: Any] = [
+          "success": outcome.success,
+          "routeClassification": outcome.classification.rawValue,
+          "usage": outcome.usage.rawValue,
+      ]
       if let failure = outcome.failure {
           payload["failureCode"] = failure.rawValue
       }
       print(
           "AppDelegate: Ella audio route usage=\(outcome.usage.rawValue) " +
           "classification=\(outcome.classification.rawValue) " +
-          "success=\(outcome.success) failure=\(outcome.failure?.rawValue ?? \"none\")"
+          "success=\(outcome.success) failure=\(outcome.failure?.rawValue ?? "none")"
       )
       return payload
   }

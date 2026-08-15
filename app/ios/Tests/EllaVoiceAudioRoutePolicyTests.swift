@@ -85,13 +85,30 @@ private func testPlaybackWithoutExternalOutputSelectsSpeaker() throws {
 }
 
 private func testBluetoothPlaybackPreservesExternalOutput() throws {
-  let session = FakeAudioSession(outputs: [.bluetooth])
-  let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .playback, session: session)
+  for output in [EllaVoiceAudioRoutePort.bluetoothHFP, .bluetoothA2DP, .bluetoothLE] {
+    let session = FakeAudioSession(outputs: [output])
+    let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .playback, session: session)
 
-  try expect(outcome.success, "Bluetooth playback did not succeed")
-  try expect(outcome.classification == .external, "Bluetooth was not classified as external")
-  try expect(
-    !session.operations.contains(.selectSpeaker), "Bluetooth playback was displaced by the speaker")
+    try expect(outcome.success, "Bluetooth playback did not succeed")
+    try expect(outcome.classification == .external, "Bluetooth was not classified as external")
+    try expect(
+      !session.operations.contains(.selectSpeaker),
+      "Bluetooth playback was displaced by the speaker")
+  }
+}
+
+private func testInteractiveExternalRoutesRemainAuthoritative() throws {
+  let outputs: [EllaVoiceAudioRoutePort] = [.bluetoothHFP, .bluetoothA2DP, .airPlay]
+  for output in outputs {
+    let session = FakeAudioSession(outputs: [output])
+    let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .interactive, session: session)
+
+    try expect(outcome.success, "interactive external route did not succeed")
+    try expect(outcome.classification == .external, "interactive route was not external")
+    try expect(
+      session.operations == [.configure(.interactive), .resetOverride, .activate],
+      "interactive external route was displaced by the speaker")
+  }
 }
 
 private func testWiredPlaybackPreservesExternalOutput() throws {
@@ -116,7 +133,7 @@ private func testSpeakerSelectionFailureIsTypedAndFailsClosed() throws {
 }
 
 private func testExternalRouteLossIsTypedAndFailsClosed() throws {
-  let session = FakeAudioSession(outputs: [.bluetooth])
+  let session = FakeAudioSession(outputs: [.bluetoothHFP])
   session.losesExternalDuringConfiguration = true
   let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .playback, session: session)
 
@@ -152,6 +169,7 @@ private enum EllaVoiceAudioRoutePolicyTests {
     let tests: [() throws -> Void] = [
       testPlaybackWithoutExternalOutputSelectsSpeaker,
       testBluetoothPlaybackPreservesExternalOutput,
+      testInteractiveExternalRoutesRemainAuthoritative,
       testWiredPlaybackPreservesExternalOutput,
       testSpeakerSelectionFailureIsTypedAndFailsClosed,
       testExternalRouteLossIsTypedAndFailsClosed,

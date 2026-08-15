@@ -1111,8 +1111,7 @@ void main() {
   });
 
   test('missing synthesized file prepares playback before on-device fallback', () async {
-    var playbackPreparations = 0;
-    var onDeviceFallbacks = 0;
+    final playbackOrder = <String>[];
     final coordinator = StandardVoiceTurnCoordinator(
       streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) => _completedVoiceStream('Local reply'),
       synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async => null,
@@ -1123,14 +1122,13 @@ void main() {
       authority: _activeAuthority('uid-a', () => true),
       commitMessages: (_, __) => true,
       onReplyReady: (_) {},
-      preparePlayback: () async => playbackPreparations++,
+      preparePlayback: () async => playbackOrder.add('native.preparePlayback'),
       playFile: (_) async => fail('missing synthesis must not attempt file playback'),
-      speakOnDevice: (_) async => onDeviceFallbacks++,
+      speakOnDevice: (_) async => playbackOrder.add('flutterTts.configureVerifyAndSpeak'),
     );
 
     expect(result.usedOnDeviceTts, isTrue);
-    expect(playbackPreparations, 1);
-    expect(onDeviceFallbacks, 1);
+    expect(playbackOrder, ['native.preparePlayback', 'flutterTts.configureVerifyAndSpeak']);
   });
 
   test('typed backend failure is never committed or spoken by standard voice', () async {

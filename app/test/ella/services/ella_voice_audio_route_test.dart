@@ -5,6 +5,92 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_voice_audio_route.dart';
 
+class _FakeOnDeviceTtsAdapter implements OnDeviceTtsAdapter {
+  _FakeOnDeviceTtsAdapter(this.operations);
+
+  final List<String> operations;
+  VoidCallback? _completionHandler;
+  late IosTextToSpeechAudioCategory category;
+  late List<IosTextToSpeechAudioCategoryOptions> options;
+  late IosTextToSpeechAudioMode mode;
+
+  @override
+  Future<dynamic> setSharedInstance(bool sharedSession) async {
+    operations.add('tts.sharedInstance:$sharedSession');
+    return 1;
+  }
+
+  @override
+  Future<dynamic> autoStopSharedSession(bool autoStop) async {
+    operations.add('tts.autoStop:$autoStop');
+    return 1;
+  }
+
+  @override
+  Future<dynamic> setIosAudioCategory(
+    IosTextToSpeechAudioCategory category,
+    List<IosTextToSpeechAudioCategoryOptions> options,
+    IosTextToSpeechAudioMode mode,
+  ) async {
+    operations.add('tts.configureAudioSession');
+    this.category = category;
+    this.options = options;
+    this.mode = mode;
+    return 1;
+  }
+
+  @override
+  Future<dynamic> setLanguage(String language) async {
+    operations.add('tts.language');
+    return 1;
+  }
+
+  @override
+  Future<dynamic> setSpeechRate(double rate) async {
+    operations.add('tts.rate');
+    return 1;
+  }
+
+  @override
+  Future<dynamic> setPitch(double pitch) async {
+    operations.add('tts.pitch');
+    return 1;
+  }
+
+  @override
+  Future<dynamic> setVolume(double volume) async {
+    operations.add('tts.volume');
+    return 1;
+  }
+
+  @override
+  Future<dynamic> awaitSpeakCompletion(bool awaitCompletion) async {
+    operations.add('tts.awaitCompletion:$awaitCompletion');
+    return 1;
+  }
+
+  @override
+  void setCompletionHandler(VoidCallback handler) {
+    _completionHandler = handler;
+  }
+
+  @override
+  void setErrorHandler(void Function(dynamic message) handler) {}
+
+  @override
+  void setCancelHandler(VoidCallback handler) {}
+
+  @override
+  Future<dynamic> speak(String text) async {
+    operations.add('tts.speak');
+    _completionHandler?.call();
+    return 1;
+  }
+
+  @override
+  Future<dynamic> stop() async => 1;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -76,13 +162,67 @@ void main() {
     }
   });
 
-  test('on-device standard fallback uses playback spoken-audio instead of play-and-record', () {
+  test('on-device standard fallback uses Ella-compatible shared audio-session settings', () {
     final configuration = ElevenLabsTts.onDeviceIosAudioConfiguration;
 
-    expect(configuration.category, IosTextToSpeechAudioCategory.playback);
-    expect(configuration.mode, IosTextToSpeechAudioMode.spokenAudio);
+    expect(configuration.category, IosTextToSpeechAudioCategory.playAndRecord);
+    expect(configuration.mode, IosTextToSpeechAudioMode.defaultMode);
+    expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.defaultToSpeaker));
+    expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.allowBluetooth));
     expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP));
-    expect(configuration.options, isNot(contains(IosTextToSpeechAudioCategoryOptions.defaultToSpeaker)));
+    expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.allowAirPlay));
+  });
+
+  test('on-device TTS re-verifies Ella route after plugin setup immediately before speech', () async {
+    final operations = <String>[];
+    final adapter = _FakeOnDeviceTtsAdapter(operations);
+
+    await ElevenLabsTts.speakOnDevice(
+      'Audible reply',
+      adapter: adapter,
+      isIos: true,
+      audibleOutputEnforcer: () async {
+        operations.add('ella.verifyPlaybackRoute');
+        return true;
+      },
+    );
+
+    expect(adapter.category, IosTextToSpeechAudioCategory.playAndRecord);
+    expect(adapter.options, containsAll(ElevenLabsTts.onDeviceIosAudioConfiguration.options));
+    expect(adapter.mode, IosTextToSpeechAudioMode.defaultMode);
+    expect(operations, [
+      'tts.sharedInstance:true',
+      'tts.autoStop:false',
+      'tts.configureAudioSession',
+      'tts.language',
+      'tts.rate',
+      'tts.pitch',
+      'tts.volume',
+      'tts.awaitCompletion:false',
+      'ella.verifyPlaybackRoute',
+      'tts.speak',
+    ]);
+  });
+
+  test('on-device TTS fails closed without speaking when post-setup route verification fails', () async {
+    final operations = <String>[];
+    final adapter = _FakeOnDeviceTtsAdapter(operations);
+
+    await expectLater(
+      ElevenLabsTts.speakOnDevice(
+        'Do not speak',
+        adapter: adapter,
+        isIos: true,
+        audibleOutputEnforcer: () async {
+          operations.add('ella.verifyPlaybackRoute');
+          return false;
+        },
+      ),
+      throwsStateError,
+    );
+
+    expect(operations.last, 'ella.verifyPlaybackRoute');
+    expect(operations, isNot(contains('tts.speak')));
   });
 
   test('typed native route failure fails closed and reports the actual receiver', () async {
