@@ -104,9 +104,7 @@ void main() {
 
     await expectLater(
       sendEllaMessageStream('hello').toList(),
-      throwsA(
-        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable),
-      ),
+      throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable)),
     );
   });
 
@@ -145,12 +143,7 @@ void main() {
                 'text': 'Persisted question',
                 'created_at': '2026-08-09T02:59:00Z',
               },
-              {
-                'id': 'canonical-1',
-                'sender': 'ai',
-                'text': 'Persisted answer',
-                'created_at': '2026-08-09T03:00:00Z',
-              },
+              {'id': 'canonical-1', 'sender': 'ai', 'text': 'Persisted answer', 'created_at': '2026-08-09T03:00:00Z'},
             ],
           }),
           200,
@@ -190,12 +183,72 @@ void main() {
     expect(result.failure?.kind, ClientApiFailureKind.invalidResponse);
   });
 
+  test('V2V turn uses authenticated first-party canonical writeback and returns canonical messages', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await persistEllaV2VTurn(
+      uid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: DateTime.utc(2026, 8, 15, 20),
+      completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      exactAuthority: authority,
+      transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(Uri.parse(url).path, '/v1/ella/chat/voice-turns');
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        final request = jsonDecode(body) as Map<String, dynamic>;
+        expect(request['uid'], 'uid-a');
+        expect(request['session_id'], 'session-1');
+        expect(request['turn_id'], 'turn-000001');
+        expect(request['user_terminal'], isTrue);
+        expect(request['assistant_terminal'], isTrue);
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'session_id': 'session-1',
+            'turn_id': 'turn-000001',
+            'messages': [
+              {'id': 'canonical-user', 'sender': 'human', 'text': 'Question', 'created_at': '2026-08-15T20:00:00Z'},
+              {'id': 'canonical-assistant', 'sender': 'ai', 'text': 'Answer', 'created_at': '2026-08-15T20:00:02Z'},
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.map((message) => message.id), ['canonical-user', 'canonical-assistant']);
+    expect(result.value?.every((message) => message.fromVoice), isTrue);
+  });
+
+  test('V2V backend error body is neither accepted nor surfaced as content', () async {
+    const authority = _CurrentAuthority('uid-a');
+    const privateErrorBody = '{"detail":"private transcript must never be logged"}';
+    final result = await persistEllaV2VTurn(
+      uid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: DateTime.utc(2026, 8, 15, 20),
+      completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      exactAuthority: authority,
+      transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async =>
+          http.Response(privateErrorBody, 503),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.value, isNull);
+    expect(result.failure?.backendCode, isNull);
+    expect(result.failure.toString(), isNot(contains('private transcript')));
+  });
+
   test('Ella chat inactivity timeout cancels an otherwise silent stream', () async {
     final source = StreamController<ServerMessageChunk>();
-    final result = withEllaChatInactivityTimeout(
-      source.stream,
-      timeout: const Duration(milliseconds: 10),
-    ).toList();
+    final result = withEllaChatInactivityTimeout(source.stream, timeout: const Duration(milliseconds: 10)).toList();
 
     await expectLater(
       result,

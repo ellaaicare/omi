@@ -138,8 +138,14 @@ def test_chat_owner_token_supplies_subject_without_caller_uid(monkeypatch):
 
 def test_voice_owner_token_supplies_subject_without_caller_uid(monkeypatch):
     pool = _VoicePool()
+    token_claims = []
+
+    def create_token(**kwargs):
+        token_claims.append(kwargs)
+        return f"token-for-{kwargs['uid']}"
+
     monkeypatch.setattr(voice, "_pool", pool)
-    monkeypatch.setattr(voice, "create_session_token", lambda **kwargs: f"token-for-{kwargs['uid']}")
+    monkeypatch.setattr(voice, "create_session_token", create_token)
     monkeypatch.setitem(voice.V2V_PROVIDERS["grok-voice"], "key_check", lambda: True)
     client = _client(monkeypatch)
 
@@ -151,6 +157,8 @@ def test_voice_owner_token_supplies_subject_without_caller_uid(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["session_token"] == "token-for-uid-a"
+    assert response.json()["session_id"]
+    assert token_claims[0]["session_id"] == response.json()["session_id"]
     assert pool.fetchrow_calls[0][1] == ("uid-a",)
 
 

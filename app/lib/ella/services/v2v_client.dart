@@ -168,6 +168,8 @@ class V2VEvent {
     this.quotaState,
     this.quota,
     this.turnBoundary = false,
+    this.terminalTranscript = false,
+    this.eventId = '',
   });
 
   final String type;
@@ -178,6 +180,8 @@ class V2VEvent {
   final String? quotaState;
   final EllaQuota? quota;
   final bool turnBoundary;
+  final bool terminalTranscript;
+  final String eventId;
 }
 
 enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
@@ -679,7 +683,7 @@ class V2VClient {
         sessionData['voice_mode'] as String? ?? sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '';
     final sessionId = sessionData['session_id']?.toString().trim() ?? '';
     final confirmedScope = V2VResolvedSessionScope.tryParse(sessionData['session_scope']);
-    if (token.isEmpty || endpoint.isEmpty) {
+    if (token.isEmpty || endpoint.isEmpty || sessionId.isEmpty) {
       Logger.debug('[V2V] Invalid session data');
       if (_activeClient == this) _activeClient = null;
       return _completeReceipt(
@@ -1080,6 +1084,22 @@ class V2VClient {
     return null;
   }
 
+  static String _eventId(Map<String, dynamic> json) {
+    for (final key in ['event_id', 'response_id', 'item_id']) {
+      final value = json[key]?.toString().trim() ?? '';
+      if (value.isNotEmpty) return value;
+    }
+    for (final key in ['response', 'item']) {
+      final value = json[key];
+      if (value is Map) {
+        final nested = value.map((key, value) => MapEntry(key.toString(), value));
+        final id = nested['id']?.toString().trim() ?? '';
+        if (id.isNotEmpty) return id;
+      }
+    }
+    return '';
+  }
+
   static EllaVoicePolicyReason? _eventPolicyReason(Map<String, dynamic> json) {
     for (final key in ['reason', 'termination_reason', 'denial_reason', 'code', 'state']) {
       final reason = parseEllaVoicePolicyReason(json[key]);
@@ -1143,10 +1163,32 @@ class V2VClient {
         normalized == 'response_text' ||
         normalized == 'response.audio_transcript.delta' ||
         normalized == 'response.audio_transcript.done' ||
+        normalized == 'response.output_audio_transcript.delta' ||
+        normalized == 'response.output_audio_transcript.done' ||
         normalized == 'response.text.delta' ||
         normalized == 'response.text.done' ||
         normalized.contains('output_audio_transcription') ||
         (normalized.contains('assistant') && normalized.contains('transcript'));
+  }
+
+  static bool _isUserTerminalTranscriptEvent(String type) {
+    final normalized = type.toLowerCase();
+    return normalized == 'user_transcript' ||
+        normalized == 'input_transcript' ||
+        normalized == 'input_audio_transcription.completed' ||
+        normalized.endsWith('input_audio_transcription.completed') ||
+        normalized.endsWith('input_audio_transcription.done');
+  }
+
+  static bool _isAssistantTerminalTranscriptEvent(String type) {
+    final normalized = type.toLowerCase();
+    return normalized == 'assistant_transcript' ||
+        normalized == 'output_transcript' ||
+        normalized == 'response_text' ||
+        normalized == 'response.audio_transcript.done' ||
+        normalized == 'response.output_audio_transcript.done' ||
+        normalized == 'response.text.done' ||
+        normalized.endsWith('output_audio_transcription.done');
   }
 
   @visibleForTesting
@@ -1536,25 +1578,39 @@ class V2VClient {
 
     if (message is String) {
       // JSON event
-      Logger.debug('[V2V] JSON event: $message');
       try {
         final json = jsonDecode(message) as Map<String, dynamic>;
         final type = json['type'] as String? ?? 'unknown';
         final text = _eventText(json);
+        final eventId = _eventId(json);
 
         if (_isUserTranscriptEvent(type)) {
-          onEvent?.call(V2VEvent(type: 'user_transcript', text: text));
+          onEvent?.call(
+            V2VEvent(
+              type: 'user_transcript',
+              text: text,
+              terminalTranscript: _isUserTerminalTranscriptEvent(type),
+              eventId: eventId,
+            ),
+          );
           return;
         }
 
         if (_isAssistantTranscriptEvent(type)) {
-          onEvent?.call(V2VEvent(type: 'transcript', text: text));
+          onEvent?.call(
+            V2VEvent(
+              type: 'transcript',
+              text: text,
+              terminalTranscript: _isAssistantTerminalTranscriptEvent(type),
+              eventId: eventId,
+            ),
+          );
           return;
         }
 
         if (_isAudioDoneEvent(type)) {
           _scheduleFinishPlayback(type);
-          onEvent?.call(const V2VEvent(type: 'audio_done'));
+          onEvent?.call(V2VEvent(type: 'audio_done', eventId: eventId));
           return;
         }
 
@@ -1599,7 +1655,7 @@ class V2VClient {
             disconnect();
             break;
           case 'error':
-            Logger.error('[V2V] Server error: ${json['message'] ?? text}');
+            Logger.error('[V2V] Server error event');
             onEvent?.call(
               V2VEvent(
                 type: 'error',
@@ -1610,11 +1666,11 @@ class V2VClient {
             );
             break;
           default:
-            Logger.debug('[V2V] Unknown event: $type');
+            Logger.debug('[V2V] Unknown event received');
             onEvent?.call(V2VEvent(type: type, text: text));
         }
       } catch (e) {
-        Logger.debug('[V2V] Failed to parse JSON event: $e');
+        Logger.debug('[V2V] Failed to parse JSON event: ${e.runtimeType}');
       }
     }
   }

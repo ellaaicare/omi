@@ -28,7 +28,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -148,6 +148,38 @@ class EllaChatRequest(BaseModel):
     client_sent_at: str = ""
 
 
+class EllaVoiceTurnRequest(BaseModel):
+    uid: str = ""
+    session_id: str
+    turn_id: str
+    user_transcript: str
+    assistant_transcript: str
+    user_terminal: bool = False
+    assistant_terminal: bool = False
+    started_at: datetime
+    completed_at: datetime
+
+
+_VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_MAX_VOICE_TRANSCRIPT_CHARS = 20000
+
+
+def _validated_voice_turn(request: EllaVoiceTurnRequest) -> tuple[str, str]:
+    user_text = request.user_transcript.strip()
+    assistant_text = request.assistant_transcript.strip()
+    if not request.user_terminal or not request.assistant_terminal:
+        raise HTTPException(status_code=422, detail="terminal_voice_transcripts_required")
+    if not user_text or not assistant_text:
+        raise HTTPException(status_code=422, detail="complete_voice_transcripts_required")
+    if len(user_text) > _MAX_VOICE_TRANSCRIPT_CHARS or len(assistant_text) > _MAX_VOICE_TRANSCRIPT_CHARS:
+        raise HTTPException(status_code=422, detail="voice_transcript_too_large")
+    if not _VOICE_ID_PATTERN.fullmatch(request.session_id) or not _VOICE_ID_PATTERN.fullmatch(request.turn_id):
+        raise HTTPException(status_code=422, detail="invalid_voice_turn_identity")
+    if request.completed_at < request.started_at:
+        raise HTTPException(status_code=422, detail="invalid_voice_turn_time")
+    return user_text, assistant_text
+
+
 def _parse_client_sent_at(value: str = "") -> datetime:
     if value:
         try:
@@ -209,6 +241,43 @@ def _ios_chat_event(
     )
 
 
+def _ios_voice_event(
+    *,
+    uid: str,
+    session_id: str,
+    turn_id: str,
+    role: str,
+    text: str,
+    started_at: datetime,
+    ended_at: datetime,
+) -> CanonicalEventIn:
+    source_identity = f"ios_voice:{uid}:{session_id}:{turn_id}"
+    return CanonicalEventIn(
+        uid=uid,
+        canonical_identity=uid,
+        event_id=f"{source_identity}:{role}",
+        session_id=session_id,
+        channel="ios_voice",
+        provider="omi-ios-v2v",
+        role=role,
+        text=text,
+        started_at=started_at,
+        ended_at=ended_at,
+        privacy_scope="user_private",
+        scan_policy="none",
+        source_ref={
+            "source_identity": source_identity,
+            "message_id": f"{source_identity}:{role}",
+            "source": "ios_v2v_chat_writeback",
+        },
+        metadata={
+            "adapter": "ios-v2v-chat-writeback",
+            "terminal_transcript": True,
+            "turn_id": turn_id,
+        },
+    )
+
+
 async def _write_ios_chat_canonical_event(event: CanonicalEventIn) -> None:
     try:
         result = await _canonical_event_store.write_batch([event])
@@ -228,6 +297,59 @@ async def _write_ios_chat_canonical_event(event: CanonicalEventIn) -> None:
             event.event_id,
             exc,
         )
+
+
+@router.post("/chat/voice-turns")
+async def persist_v2v_voice_turn(
+    request: EllaVoiceTurnRequest,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    """Idempotently persist one complete V2V turn for canonical Chat hydration."""
+    uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Voice chat")
+    user_text, assistant_text = _validated_voice_turn(request)
+    source_identity = f"ios_voice:{uid}:{request.session_id}:{request.turn_id}"
+    events = [
+        _ios_voice_event(
+            uid=uid,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            role="user",
+            text=user_text,
+            started_at=request.started_at,
+            ended_at=request.completed_at,
+        ),
+        _ios_voice_event(
+            uid=uid,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            role="assistant",
+            text=assistant_text,
+            started_at=request.completed_at,
+            ended_at=request.completed_at,
+        ),
+    ]
+
+    write_result = await _canonical_event_store.write_batch(events)
+    stored = await _canonical_event_store.events_by_source_identity(uid=uid, source_identity=source_identity)
+    expected_ids = {event.event_id for event in events}
+    canonical = [
+        event
+        for event in stored
+        if event.get("event_id") in expected_ids
+        and event.get("session_id") == request.session_id
+        and event.get("channel") == "ios_voice"
+        and event.get("role") in {"user", "assistant"}
+    ]
+    if len(canonical) != 2 or {event.get("role") for event in canonical} != {"user", "assistant"}:
+        raise HTTPException(status_code=503, detail="canonical_voice_turn_unavailable")
+
+    return {
+        "ok": True,
+        "session_id": request.session_id,
+        "turn_id": request.turn_id,
+        "idempotent_replay": write_result.get("inserted", 0) == 0,
+        "messages": canonical_events_to_server_messages(canonical, limit=2),
+    }
 
 
 def _resolve_debug_level(header_value: str = None) -> int:

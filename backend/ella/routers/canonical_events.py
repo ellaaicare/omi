@@ -209,6 +209,10 @@ class CanonicalEventStore:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def events_by_source_identity(self, *, uid: str, source_identity: str) -> list[dict[str, Any]]:
+        """Read back one exact owner-bound source after an idempotent write."""
+        raise NotImplementedError
+
 
 class PostgresCanonicalEventStore(CanonicalEventStore):
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
@@ -378,6 +382,27 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         )
         return [_row_to_event(row) for row in rows]
 
+    async def events_by_source_identity(self, *, uid: str, source_identity: str) -> list[dict[str, Any]]:
+        pool = await _get_pool()
+        rows = await pool.fetch(
+            """
+            SELECT uid, canonical_identity, event_id, source_identity,
+                   session_id, channel, provider, role, text,
+                   started_at, ended_at, privacy_scope, scan_policy,
+                   source_ref, metadata, raw_event, inserted_at
+            FROM canonical_events
+            WHERE lower(uid) = lower($1) AND source_identity = $2
+            ORDER BY
+                started_at ASC,
+                CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
+                inserted_at ASC,
+                event_id ASC
+            """,
+            uid,
+            source_identity,
+        )
+        return [_row_to_event(row) for row in rows]
+
 
 class InMemoryCanonicalEventStore(CanonicalEventStore):
     def __init__(self):
@@ -451,6 +476,22 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
 
         events.sort(key=lambda item: (item["started_at"], role_order(item), item["inserted_at"], item["event_id"]))
         return [_row_to_event(event) for event in events[-limit:]]
+
+    async def events_by_source_identity(self, *, uid: str, source_identity: str) -> list[dict[str, Any]]:
+        events = [
+            event
+            for event in self._events.values()
+            if event["uid"].lower() == uid.lower() and event["source_identity"] == source_identity
+        ]
+        events.sort(
+            key=lambda item: (
+                item["started_at"],
+                0 if item["role"] == "user" else 1 if item["role"] == "assistant" else 2,
+                item["inserted_at"],
+                item["event_id"],
+            )
+        )
+        return [_row_to_event(event) for event in events]
 
 
 def _row_to_event(row: Any) -> dict[str, Any]:

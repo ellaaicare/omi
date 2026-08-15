@@ -32,12 +32,16 @@ typedef EllaChatHistoryTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
+  required String url,
+  required String body,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+
 const ellaChatInactivityTimeout = Duration(seconds: 75);
 
-Stream<T> withEllaChatInactivityTimeout<T>(
-  Stream<T> stream, {
-  Duration timeout = ellaChatInactivityTimeout,
-}) =>
+Stream<T> withEllaChatInactivityTimeout<T>(Stream<T> stream, {Duration timeout = ellaChatInactivityTimeout}) =>
     stream.timeout(
       timeout,
       onTimeout: (sink) {
@@ -61,6 +65,128 @@ Future<http.Response?> _defaultHistoryTransport({
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );
+
+Future<http.Response?> _defaultVoiceTurnTransport({
+  required String url,
+  required String body,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: _ellaDebugHeaders(routeSource: 'v2v-canonical-writeback'),
+      method: 'POST',
+      body: body,
+      timeout: const Duration(seconds: 10),
+      retries: 0,
+      requireAuthCheck: true,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
+  required String uid,
+  required String sessionId,
+  required String turnId,
+  required String userTranscript,
+  required String assistantTranscript,
+  required DateTime startedAt,
+  required DateTime completedAt,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaVoiceTurnTransport? transport,
+}) async {
+  if (uid.isEmpty ||
+      sessionId.isEmpty ||
+      turnId.isEmpty ||
+      userTranscript.trim().isEmpty ||
+      assistantTranscript.trim().isEmpty) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+  if (!exactAuthority.isExactCurrent() || exactAuthority.uid != uid) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  }
+
+  try {
+    final response = await (transport ?? _defaultVoiceTurnTransport)(
+      url: '${Env.apiBaseUrl}v1/ella/chat/voice-turns',
+      body: jsonEncode({
+        'uid': uid,
+        'session_id': sessionId,
+        'turn_id': turnId,
+        'user_transcript': userTranscript.trim(),
+        'assistant_transcript': assistantTranscript.trim(),
+        'user_terminal': true,
+        'assistant_terminal': true,
+        'started_at': startedAt.toUtc().toIso8601String(),
+        'completed_at': completedAt.toUtc().toIso8601String(),
+      }),
+      expectedAuthenticatedUid: uid,
+      exactAuthority: exactAuthority,
+    );
+    if (response == null || response.statusCode != 200) {
+      Logger.debug('[EllaChat] V2V canonical write failed: ${response?.statusCode}');
+      return EllaServiceResult.failure(
+        response == null
+            ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+            : ClientApiFailure.fromHttp(statusCode: response.statusCode),
+      );
+    }
+    if (!exactAuthority.isExactCurrent()) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+    }
+
+    final payload = jsonDecode(response.body);
+    if (payload is! Map<String, dynamic> ||
+        payload['ok'] != true ||
+        payload['session_id'] != sessionId ||
+        payload['turn_id'] != turnId ||
+        payload['messages'] is! List) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
+
+    final messages = <ServerMessage>[];
+    for (final raw in payload['messages'] as List<dynamic>) {
+      if (raw is! Map<String, dynamic>) continue;
+      final id = raw['id']?.toString() ?? '';
+      final text = raw['text']?.toString() ?? '';
+      final createdAt = DateTime.tryParse(raw['created_at']?.toString() ?? '');
+      final sender = switch (raw['sender']?.toString()) {
+        'human' => MessageSender.human,
+        'ai' => MessageSender.ai,
+        _ => null,
+      };
+      if (id.isEmpty || text.trim().isEmpty || createdAt == null || sender == null) continue;
+      messages.add(
+        ServerMessage(
+          id,
+          createdAt.toLocal(),
+          text,
+          sender,
+          MessageType.text,
+          null,
+          false,
+          [],
+          [],
+          [],
+          askForNps: false,
+          fromVoice: true,
+        ),
+      );
+    }
+    if (messages.length != 2 ||
+        messages.map((message) => message.id).toSet().length != 2 ||
+        messages.map((message) => message.sender).toSet().length != 2) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
+    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return EllaServiceResult.success(messages);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  } catch (error) {
+    Logger.debug('[EllaChat] V2V canonical response rejected: ${error.runtimeType}');
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+}
 
 /// Fetch chat history from the VPS proxy endpoint.
 /// Returns messages in chronological order (oldest first). A failed read is

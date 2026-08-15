@@ -561,10 +561,7 @@ void main() {
 
     test('assistant transcript alone does not close the microphone gate', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final events = <V2VEvent>[];
@@ -581,10 +578,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -599,10 +593,7 @@ void main() {
 
     test('PCM playback waits for WAV completion then restores the interactive route and mic', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final audioRoutes = <String>[];
@@ -635,10 +626,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -670,10 +658,7 @@ void main() {
 
     test('WAV playback failure reports the error and reopens the authorized mic', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final events = <V2VEvent>[];
@@ -700,10 +685,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -721,10 +703,7 @@ void main() {
 
     test('disconnect invalidates held WAV playback without reopening the mic', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final playbackEntered = Completer<void>();
@@ -749,10 +728,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -773,6 +749,30 @@ void main() {
   });
 
   group('V2VClient proxy event mapping', () {
+    test('preserves terminal transcript and provider event identity', () {
+      final events = <V2VEvent>[];
+      final client = V2VClient(onEvent: events.add);
+
+      client.handleMessageForTesting(
+        '{"type":"conversation.item.input_audio_transcription.completed",'
+        '"transcript":"Question","item_id":"user-item-1"}',
+      );
+      client.handleMessageForTesting(
+        '{"type":"response.output_audio_transcript.delta","delta":"Answer","response_id":"response-1"}',
+      );
+      client.handleMessageForTesting(
+        '{"type":"response.output_audio_transcript.done","transcript":"Answer","response_id":"response-1"}',
+      );
+
+      expect(events, hasLength(3));
+      expect(events[0].type, 'user_transcript');
+      expect(events[0].terminalTranscript, isTrue);
+      expect(events[0].eventId, 'user-item-1');
+      expect(events[1].terminalTranscript, isFalse);
+      expect(events[2].terminalTranscript, isTrue);
+      expect(events[2].eventId, 'response-1');
+    });
+
     test('maps transcript deltas as assistant transcripts', () {
       expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript'), isTrue);
       expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript_delta'), isTrue);

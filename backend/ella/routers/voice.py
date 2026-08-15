@@ -22,6 +22,7 @@ import logging
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
@@ -196,6 +197,7 @@ class VoiceSessionResponse(BaseModel):
     """Response containing session token and connection details."""
 
     session_token: str
+    session_id: str
     voice_endpoint: str
     expires_in: int  # seconds
     audio_format: dict
@@ -280,6 +282,7 @@ async def _inworld_tts(text: str, api_key: str, voice_id: str = "Serena") -> byt
 def create_session_token(
     uid: str,
     firebase_uid: str,
+    session_id: str,
     display_name: Optional[str] = None,
     voice_mode: str = "v3-rich",
     provider: str = "grok-voice",
@@ -307,6 +310,7 @@ def create_session_token(
     payload = {
         "uid": uid,
         "firebase_uid": firebase_uid,
+        "session_id": session_id,
         "name": display_name or "User",
         "voice_mode": voice_mode,
         "provider": provider,
@@ -483,9 +487,11 @@ async def create_voice_session(
         logger.warning(f"[FLOW:VOICE-SESSION] name lookup failed for {uid}: {e}")
 
     try:
+        session_id = str(uuid4())
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,
+            session_id=session_id,
             display_name=user_display_name,
             voice_mode=resolved_mode,
             provider=provider,
@@ -504,6 +510,7 @@ async def create_voice_session(
 
         return VoiceSessionResponse(
             session_token=token,
+            session_id=session_id,
             voice_endpoint=endpoint_with_mode,
             expires_in=SESSION_EXPIRY_HOURS * 3600,
             audio_format={
