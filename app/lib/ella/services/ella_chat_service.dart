@@ -88,6 +88,8 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
   required String uid,
   required String sessionId,
   required String turnId,
+  required String userEventId,
+  required String assistantEventId,
   required String userTranscript,
   required String assistantTranscript,
   required DateTime startedAt,
@@ -98,6 +100,8 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
   if (uid.isEmpty ||
       sessionId.isEmpty ||
       turnId.isEmpty ||
+      userEventId != '$turnId:user' ||
+      assistantEventId != '$turnId:assistant' ||
       userTranscript.trim().isEmpty ||
       assistantTranscript.trim().isEmpty) {
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
@@ -113,6 +117,8 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
         'uid': uid,
         'session_id': sessionId,
         'turn_id': turnId,
+        'user_event_id': userEventId,
+        'assistant_event_id': assistantEventId,
         'user_transcript': userTranscript.trim(),
         'assistant_transcript': assistantTranscript.trim(),
         'user_terminal': true,

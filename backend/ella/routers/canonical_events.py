@@ -209,8 +209,10 @@ class CanonicalEventStore:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
-    async def events_by_source_identity(self, *, uid: str, source_identity: str) -> list[dict[str, Any]]:
-        """Read back one exact owner-bound source after an idempotent write."""
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Read back exact owner-bound event ids after an idempotent write."""
         raise NotImplementedError
 
 
@@ -382,7 +384,9 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         )
         return [_row_to_event(row) for row in rows]
 
-    async def events_by_source_identity(self, *, uid: str, source_identity: str) -> list[dict[str, Any]]:
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
         pool = await _get_pool()
         rows = await pool.fetch(
             """
@@ -391,15 +395,18 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                    started_at, ended_at, privacy_scope, scan_policy,
                    source_ref, metadata, raw_event, inserted_at
             FROM canonical_events
-            WHERE lower(uid) = lower($1) AND source_identity = $2
+            WHERE event_id = ANY($1::text[])
+              AND source_identity = $2
+              AND uid = $3
             ORDER BY
                 started_at ASC,
                 CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
                 inserted_at ASC,
                 event_id ASC
             """,
-            uid,
+            event_ids,
             source_identity,
+            uid,
         )
         return [_row_to_event(row) for row in rows]
 
@@ -477,11 +484,14 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         events.sort(key=lambda item: (item["started_at"], role_order(item), item["inserted_at"], item["event_id"]))
         return [_row_to_event(event) for event in events[-limit:]]
 
-    async def events_by_source_identity(self, *, uid: str, source_identity: str) -> list[dict[str, Any]]:
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        expected_ids = set(event_ids)
         events = [
             event
             for event in self._events.values()
-            if event["uid"].lower() == uid.lower() and event["source_identity"] == source_identity
+            if event["event_id"] in expected_ids and event["uid"] == uid and event["source_identity"] == source_identity
         ]
         events.sort(
             key=lambda item: (

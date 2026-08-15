@@ -1,10 +1,69 @@
 import 'dart:async';
 
+class V2VTerminalTranscriptTurn {
+  const V2VTerminalTranscriptTurn({
+    required this.sessionId,
+    required this.turnId,
+    required this.userEventId,
+    required this.assistantEventId,
+    required this.userTranscript,
+    required this.assistantTranscript,
+    required this.startedAt,
+    required this.completedAt,
+  });
+
+  final String sessionId;
+  final String turnId;
+  final String userEventId;
+  final String assistantEventId;
+  final String userTranscript;
+  final String assistantTranscript;
+  final DateTime startedAt;
+  final DateTime completedAt;
+
+  static V2VTerminalTranscriptTurn? tryParse(Map<String, dynamic> value) {
+    if (value['contract_version'] != 1 || value['terminal'] != true) return null;
+    final sessionId = value['session_id']?.toString().trim() ?? '';
+    final turnId = value['turn_id']?.toString().trim() ?? '';
+    final userEventId = value['user_event_id']?.toString().trim() ?? '';
+    final assistantEventId = value['assistant_event_id']?.toString().trim() ?? '';
+    final userTranscript = value['user_text']?.toString().trim() ?? '';
+    final assistantTranscript = value['assistant_text']?.toString().trim() ?? '';
+    final startedAt = DateTime.tryParse(value['started_at']?.toString() ?? '')?.toUtc();
+    final completedAt = DateTime.tryParse(value['completed_at']?.toString() ?? '')?.toUtc();
+    final sessionPattern = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$');
+    final turnPattern = RegExp(r'^v2v-turn-[0-9a-f]{32}$');
+    if (!sessionPattern.hasMatch(sessionId) ||
+        !turnPattern.hasMatch(turnId) ||
+        userEventId != '$turnId:user' ||
+        assistantEventId != '$turnId:assistant' ||
+        userTranscript.isEmpty ||
+        assistantTranscript.isEmpty ||
+        startedAt == null ||
+        completedAt == null ||
+        completedAt.isBefore(startedAt)) {
+      return null;
+    }
+    return V2VTerminalTranscriptTurn(
+      sessionId: sessionId,
+      turnId: turnId,
+      userEventId: userEventId,
+      assistantEventId: assistantEventId,
+      userTranscript: userTranscript,
+      assistantTranscript: assistantTranscript,
+      startedAt: startedAt,
+      completedAt: completedAt,
+    );
+  }
+}
+
 class V2VTranscriptTurn {
   const V2VTranscriptTurn({
     required this.uid,
     required this.sessionId,
     required this.turnId,
+    required this.userEventId,
+    required this.assistantEventId,
     required this.userTranscript,
     required this.assistantTranscript,
     required this.startedAt,
@@ -14,6 +73,8 @@ class V2VTranscriptTurn {
   final String uid;
   final String sessionId;
   final String turnId;
+  final String userEventId;
+  final String assistantEventId;
   final String userTranscript;
   final String assistantTranscript;
   final DateTime startedAt;
@@ -23,102 +84,81 @@ class V2VTranscriptTurn {
 typedef V2VTranscriptTurnWriter = Future<bool> Function(V2VTranscriptTurn turn);
 
 class V2VTurnReconciler {
-  V2VTurnReconciler({
-    required V2VTranscriptTurnWriter writer,
-    DateTime Function()? clock,
-    void Function()? onWriteFailure,
-  })  : _writer = writer,
-        _clock = clock ?? DateTime.now,
+  V2VTurnReconciler({required V2VTranscriptTurnWriter writer, void Function()? onWriteFailure})
+      : _writer = writer,
         _onWriteFailure = onWriteFailure;
 
   final V2VTranscriptTurnWriter _writer;
-  final DateTime Function() _clock;
   final void Function()? _onWriteFailure;
   final Map<String, _V2VSessionTurns> _sessions = {};
   String _activeSessionId = '';
+
+  int get sessionCountForTesting => _sessions.length;
+
+  int pendingTurnCountForTesting(String sessionId) => _sessions[sessionId]?.pendingTurns.length ?? 0;
 
   bool beginSession({required String uid, required String sessionId, required bool Function() isAuthorityCurrent}) {
     final normalizedUid = uid.trim();
     final normalizedSessionId = sessionId.trim();
     if (normalizedUid.isEmpty || normalizedSessionId.isEmpty || !isAuthorityCurrent()) return false;
     final existing = _sessions[normalizedSessionId];
-    if (existing != null && existing.uid != normalizedUid) return false;
-    _sessions[normalizedSessionId] = existing ??
+    if (existing != null && (existing.uid != normalizedUid || existing.unauthorized)) return false;
+    final state = existing ??
         _V2VSessionTurns(uid: normalizedUid, sessionId: normalizedSessionId, isAuthorityCurrent: isAuthorityCurrent);
+    state
+      ..isAuthorityCurrent = isAuthorityCurrent
+      ..ended = false;
+    _sessions[normalizedSessionId] = state;
     _activeSessionId = normalizedSessionId;
+    if (state.pendingTurns.isNotEmpty) _signal(state);
     return true;
   }
 
   void endSession(String sessionId) {
-    if (_activeSessionId == sessionId) _activeSessionId = '';
-  }
-
-  void beginUserTurn(String sessionId) {
-    final state = _authorizedActiveState(sessionId);
+    final normalizedSessionId = sessionId.trim();
+    if (_activeSessionId == normalizedSessionId) _activeSessionId = '';
+    final state = _sessions[normalizedSessionId];
     if (state == null) return;
-    state.userGeneration++;
+    state.ended = true;
+    if (!state.isAuthorityCurrent()) state.unauthorized = true;
+    _maybeEvict(state);
   }
 
-  void addUserTerminal(String sessionId, String text, {String eventId = ''}) {
+  void addTerminalTurn(String sessionId, V2VTerminalTranscriptTurn terminal) {
     final state = _authorizedActiveState(sessionId);
-    final normalized = text.trim();
-    if (state == null || normalized.isEmpty) return;
-    final normalizedEventId = eventId.trim();
-    if (normalizedEventId.isNotEmpty && !state.userEventIds.add(normalizedEventId)) return;
-    final repeatsLastTerminal = state.userTerminals.isNotEmpty && state.userTerminals.last.text == normalized;
-    final repeatsCurrentGeneration =
-        state.userGeneration > 0 && state.userGeneration == state.lastAcceptedUserGeneration;
-    final repeatsUnidentifiedPendingTurn =
-        state.userGeneration == 0 && state.userTerminals.length >= state.assistantTerminals.length;
-    if (repeatsLastTerminal && (repeatsCurrentGeneration || repeatsUnidentifiedPendingTurn)) {
+    if (state == null || terminal.sessionId != state.sessionId) return;
+    if (state.turnIds.contains(terminal.turnId) ||
+        state.userEventIds.contains(terminal.userEventId) ||
+        state.assistantEventIds.contains(terminal.assistantEventId)) {
       return;
     }
-    state.lastAcceptedUserGeneration = state.userGeneration;
-    state.userTerminals.add(_TerminalTranscript(normalized, _clock()));
-    _signal(state);
-  }
-
-  void addAssistantFragment(String sessionId, String text) {
-    final state = _authorizedActiveState(sessionId);
-    if (state == null || text.isEmpty) return;
-    state.assistantStartedAt ??= _clock();
-    state.assistantBuffer.write(text);
-  }
-
-  void discardNonterminalAssistant(String sessionId) {
-    final state = _authorizedActiveState(sessionId);
-    if (state == null) return;
-    state.assistantBuffer.clear();
-    state.assistantStartedAt = null;
-  }
-
-  void markAssistantTerminal(String sessionId, {String finalText = '', String eventId = ''}) {
-    final state = _authorizedActiveState(sessionId);
-    if (state == null) return;
-    final normalizedEventId = eventId.trim();
-    if (normalizedEventId.isNotEmpty && !state.assistantEventIds.add(normalizedEventId)) return;
-
-    final normalizedFinal = finalText.trim();
-    final accumulated = state.assistantBuffer.toString().trim();
-    final terminalText = normalizedFinal.isEmpty
-        ? accumulated
-        : accumulated.isEmpty || normalizedFinal.startsWith(accumulated)
-            ? normalizedFinal
-            : accumulated;
-    state.assistantBuffer.clear();
-    if (terminalText.isEmpty) {
-      state.assistantStartedAt = null;
-      return;
-    }
-    state.assistantTerminals.add(_TerminalTranscript(terminalText, _clock(), startedAt: state.assistantStartedAt));
-    state.assistantStartedAt = null;
+    state.turnIds.add(terminal.turnId);
+    state.userEventIds.add(terminal.userEventId);
+    state.assistantEventIds.add(terminal.assistantEventId);
+    state.pendingTurns.add(
+      V2VTranscriptTurn(
+        uid: state.uid,
+        sessionId: state.sessionId,
+        turnId: terminal.turnId,
+        userEventId: terminal.userEventId,
+        assistantEventId: terminal.assistantEventId,
+        userTranscript: terminal.userTranscript,
+        assistantTranscript: terminal.assistantTranscript,
+        startedAt: terminal.startedAt,
+        completedAt: terminal.completedAt,
+      ),
+    );
     _signal(state);
   }
 
   void retryAuthorizedPending() {
-    for (final state in _sessions.values) {
-      if (!state.isAuthorityCurrent()) continue;
-      _signal(state);
+    for (final state in _sessions.values.toList()) {
+      if (!state.isAuthorityCurrent()) {
+        state.unauthorized = true;
+        _maybeEvict(state);
+        continue;
+      }
+      if (state.pendingTurns.isNotEmpty) _signal(state);
     }
   }
 
@@ -127,18 +167,23 @@ class V2VTurnReconciler {
       final pending = _sessions.values.map((state) => state.drainFuture).whereType<Future<void>>().toList();
       if (pending.isEmpty) return;
       await Future.wait(pending);
-      if (_sessions.values.every((state) => state.drainFuture == null)) return;
     }
   }
 
   _V2VSessionTurns? _authorizedActiveState(String sessionId) {
     if (sessionId.isEmpty || sessionId != _activeSessionId) return null;
     final state = _sessions[sessionId];
-    if (state == null || !state.isAuthorityCurrent()) return null;
+    if (state == null || state.ended || state.unauthorized || !state.isAuthorityCurrent()) return null;
     return state;
   }
 
   void _signal(_V2VSessionTurns state) {
+    if (state.unauthorized || state.pendingTurns.isEmpty) return;
+    if (!state.isAuthorityCurrent()) {
+      state.unauthorized = true;
+      _maybeEvict(state);
+      return;
+    }
     state.revision++;
     if (state.drainFuture != null) {
       state.rerunRequested = true;
@@ -154,33 +199,25 @@ class V2VTurnReconciler {
       future.whenComplete(() {
         if (!identical(state.drainFuture, future)) return;
         state.drainFuture = null;
-        if (state.rerunRequested) {
+        if (state.rerunRequested && !state.unauthorized && state.pendingTurns.isNotEmpty) {
           state.rerunRequested = false;
           _scheduleDrain(state);
+          return;
         }
+        state.rerunRequested = false;
+        _maybeEvict(state);
       }),
     );
   }
 
   Future<void> _drain(_V2VSessionTurns state) async {
-    while (state.nextTurnIndex < state.userTerminals.length && state.nextTurnIndex < state.assistantTerminals.length) {
-      if (!state.isAuthorityCurrent()) return;
+    while (state.pendingTurns.isNotEmpty) {
+      if (!state.isAuthorityCurrent()) {
+        state.unauthorized = true;
+        return;
+      }
       if (state.failedAtRevision == state.revision) return;
-      final index = state.nextTurnIndex;
-      final user = state.userTerminals[index];
-      final assistant = state.assistantTerminals[index];
-      final startedAt = [user.startedAt, assistant.startedAt].reduce((a, b) => a.isBefore(b) ? a : b);
-      final completedAt = [user.completedAt, assistant.completedAt].reduce((a, b) => a.isAfter(b) ? a : b);
-      final turn = V2VTranscriptTurn(
-        uid: state.uid,
-        sessionId: state.sessionId,
-        turnId: 'turn-${(index + 1).toString().padLeft(6, '0')}',
-        userTranscript: user.text,
-        assistantTranscript: assistant.text,
-        startedAt: startedAt,
-        completedAt: completedAt,
-      );
-
+      final turn = state.pendingTurns.first;
       final attemptRevision = state.revision;
       var committed = false;
       try {
@@ -188,14 +225,24 @@ class V2VTurnReconciler {
       } catch (_) {
         committed = false;
       }
-      if (!state.isAuthorityCurrent()) return;
+      if (!state.isAuthorityCurrent()) {
+        state.unauthorized = true;
+        return;
+      }
       if (!committed) {
         state.failedAtRevision = attemptRevision;
         _onWriteFailure?.call();
         return;
       }
       state.failedAtRevision = -1;
-      state.nextTurnIndex++;
+      state.pendingTurns.removeAt(0);
+    }
+  }
+
+  void _maybeEvict(_V2VSessionTurns state) {
+    if (state.drainFuture != null) return;
+    if (state.unauthorized || (state.ended && state.pendingTurns.isEmpty)) {
+      _sessions.remove(state.sessionId);
     }
   }
 }
@@ -205,26 +252,15 @@ class _V2VSessionTurns {
 
   final String uid;
   final String sessionId;
-  final bool Function() isAuthorityCurrent;
-  final List<_TerminalTranscript> userTerminals = [];
-  final List<_TerminalTranscript> assistantTerminals = [];
+  bool Function() isAuthorityCurrent;
+  final List<V2VTranscriptTurn> pendingTurns = [];
+  final Set<String> turnIds = {};
   final Set<String> userEventIds = {};
   final Set<String> assistantEventIds = {};
-  final StringBuffer assistantBuffer = StringBuffer();
-  DateTime? assistantStartedAt;
-  int userGeneration = 0;
-  int lastAcceptedUserGeneration = -1;
-  int nextTurnIndex = 0;
   int revision = 0;
   int failedAtRevision = -1;
   bool rerunRequested = false;
+  bool ended = false;
+  bool unauthorized = false;
   Future<void>? drainFuture;
-}
-
-class _TerminalTranscript {
-  _TerminalTranscript(this.text, this.completedAt, {DateTime? startedAt}) : startedAt = startedAt ?? completedAt;
-
-  final String text;
-  final DateTime startedAt;
-  final DateTime completedAt;
 }

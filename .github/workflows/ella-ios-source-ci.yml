@@ -3,6 +3,7 @@ name: Ella iOS Source CI
 on:
   pull_request:
     branches:
+      - codex/815-device-rejection-successor
       - feature/phase-a-testflight
       - main
     paths:
@@ -13,9 +14,11 @@ on:
       - backend/ella/routers/chat.py
       - backend/ella/routers/voice.py
       - backend/ella/routers/callbacks.py
+      - backend/ella/routers/canonical_events.py
       - backend/tests/unit/test_ella_guardian_delivery.py
       - backend/tests/unit/test_ella_canonical_context.py
       - backend/tests/unit/test_ella_user_route_auth.py
+      - backend/tests/unit/test_ella_v2v_turn_persistence.py
       - backend/utils/ella/exact_firebase_auth.py
       - backend/utils/ella/scanner.py
       - backend/utils/notifications.py
@@ -100,7 +103,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_ella_v2v_turn_persistence.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -154,6 +157,7 @@ jobs:
           python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
           python -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -214,7 +218,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=45
+          expected_issue_test_count=46
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -222,7 +226,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=72
+          expected_app_test_count=73
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -278,11 +282,12 @@ jobs:
             test/ella/services/guardian_mode_api_test.dart
             test/ella/pages/ella_voice_quota_states_test.dart
             test/ella/services/v2v_client_test.dart
+            test/ella/services/v2v_turn_reconciler_test.dart
             test/ella/services/voice_session_startup_guard_test.dart
             test/ella/widgets/v2v_fallback_dialog_test.dart
           )
 
-          expected_focused_test_count=25
+          expected_focused_test_count=26
           if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
             echo "Focused source test manifest count drifted." >&2
             exit 1

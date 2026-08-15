@@ -4,9 +4,18 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 
-from ella.routers import chat
+from ella.routers import canonical_events, chat
 from ella.routers.canonical_events import InMemoryCanonicalEventStore
 from utils.ella.canonical_context import canonical_events_to_server_messages
+
+
+class _ReadbackPool:
+    def __init__(self):
+        self.calls = []
+
+    async def fetch(self, query, *args):
+        self.calls.append((query, args))
+        return []
 
 
 def _request(**overrides):
@@ -15,6 +24,8 @@ def _request(**overrides):
         "uid": "uid-a",
         "session_id": "session-1",
         "turn_id": "turn-000001",
+        "user_event_id": "turn-000001:user",
+        "assistant_event_id": "turn-000001:assistant",
         "user_transcript": "Durable user turn",
         "assistant_transcript": "Durable assistant turn",
         "user_terminal": True,
@@ -47,6 +58,37 @@ def test_v2v_turn_write_is_idempotent_and_returns_existing_canonical_content(mon
     assert len(store._events) == 2
 
 
+def test_v2v_turn_readback_uses_leading_event_id_index_with_exact_owner_binding(monkeypatch):
+    pool = _ReadbackPool()
+
+    async def get_pool():
+        return pool
+
+    monkeypatch.setattr(canonical_events, "_get_pool", get_pool)
+    store = canonical_events.PostgresCanonicalEventStore()
+    event_ids = [
+        "v2v-turn-00000000000000000000000000000001:user",
+        "v2v-turn-00000000000000000000000000000001:assistant",
+    ]
+
+    result = asyncio.run(
+        store.events_by_event_ids(
+            uid="uid-a",
+            source_identity="ios_voice:uid-a:session-1:turn-1",
+            event_ids=event_ids,
+        )
+    )
+
+    assert result == []
+    assert len(pool.calls) == 1
+    query, args = pool.calls[0]
+    assert "event_id = ANY($1::text[])" in query
+    assert "source_identity = $2" in query
+    assert "uid = $3" in query
+    assert "lower(uid)" not in query
+    assert args == (event_ids, "ios_voice:uid-a:session-1:turn-1", "uid-a")
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -55,6 +97,7 @@ def test_v2v_turn_write_is_idempotent_and_returns_existing_canonical_content(mon
         {"user_terminal": False},
         {"assistant_terminal": False},
         {"session_id": "cross/authority"},
+        {"assistant_event_id": "turn-000001:user"},
     ],
 )
 def test_v2v_turn_rejects_partial_nonterminal_or_invalid_identity_without_writes(monkeypatch, overrides):

@@ -189,6 +189,8 @@ void main() {
       uid: 'uid-a',
       sessionId: 'session-1',
       turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
       userTranscript: 'Question',
       assistantTranscript: 'Answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),
@@ -202,6 +204,8 @@ void main() {
         expect(request['uid'], 'uid-a');
         expect(request['session_id'], 'session-1');
         expect(request['turn_id'], 'turn-000001');
+        expect(request['user_event_id'], 'turn-000001:user');
+        expect(request['assistant_event_id'], 'turn-000001:assistant');
         expect(request['user_terminal'], isTrue);
         expect(request['assistant_terminal'], isTrue);
         return http.Response(
@@ -231,6 +235,8 @@ void main() {
       uid: 'uid-a',
       sessionId: 'session-1',
       turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
       userTranscript: 'Question',
       assistantTranscript: 'Answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),

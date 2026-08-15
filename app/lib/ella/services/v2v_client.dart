@@ -16,6 +16,7 @@ import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
+import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
@@ -168,8 +169,7 @@ class V2VEvent {
     this.quotaState,
     this.quota,
     this.turnBoundary = false,
-    this.terminalTranscript = false,
-    this.eventId = '',
+    this.terminalTurn,
   });
 
   final String type;
@@ -180,8 +180,7 @@ class V2VEvent {
   final String? quotaState;
   final EllaQuota? quota;
   final bool turnBoundary;
-  final bool terminalTranscript;
-  final String eventId;
+  final V2VTerminalTranscriptTurn? terminalTurn;
 }
 
 enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
@@ -1084,22 +1083,6 @@ class V2VClient {
     return null;
   }
 
-  static String _eventId(Map<String, dynamic> json) {
-    for (final key in ['event_id', 'response_id', 'item_id']) {
-      final value = json[key]?.toString().trim() ?? '';
-      if (value.isNotEmpty) return value;
-    }
-    for (final key in ['response', 'item']) {
-      final value = json[key];
-      if (value is Map) {
-        final nested = value.map((key, value) => MapEntry(key.toString(), value));
-        final id = nested['id']?.toString().trim() ?? '';
-        if (id.isNotEmpty) return id;
-      }
-    }
-    return '';
-  }
-
   static EllaVoicePolicyReason? _eventPolicyReason(Map<String, dynamic> json) {
     for (final key in ['reason', 'termination_reason', 'denial_reason', 'code', 'state']) {
       final reason = parseEllaVoicePolicyReason(json[key]);
@@ -1146,49 +1129,12 @@ class V2VClient {
   }
 
   static bool _isUserTranscriptEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'user_transcript' ||
-        normalized == 'input_transcript' ||
-        normalized == 'input_audio_transcription.completed' ||
-        normalized.contains('input_audio_transcription') ||
-        (normalized.contains('user') && normalized.contains('transcript'));
+    return type.toLowerCase() == 'user_transcript';
   }
 
   static bool _isAssistantTranscriptEvent(String type) {
     final normalized = type.toLowerCase();
-    return normalized == 'transcript' ||
-        normalized == 'transcript_delta' ||
-        normalized == 'assistant_transcript' ||
-        normalized == 'output_transcript' ||
-        normalized == 'response_text' ||
-        normalized == 'response.audio_transcript.delta' ||
-        normalized == 'response.audio_transcript.done' ||
-        normalized == 'response.output_audio_transcript.delta' ||
-        normalized == 'response.output_audio_transcript.done' ||
-        normalized == 'response.text.delta' ||
-        normalized == 'response.text.done' ||
-        normalized.contains('output_audio_transcription') ||
-        (normalized.contains('assistant') && normalized.contains('transcript'));
-  }
-
-  static bool _isUserTerminalTranscriptEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'user_transcript' ||
-        normalized == 'input_transcript' ||
-        normalized == 'input_audio_transcription.completed' ||
-        normalized.endsWith('input_audio_transcription.completed') ||
-        normalized.endsWith('input_audio_transcription.done');
-  }
-
-  static bool _isAssistantTerminalTranscriptEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'assistant_transcript' ||
-        normalized == 'output_transcript' ||
-        normalized == 'response_text' ||
-        normalized == 'response.audio_transcript.done' ||
-        normalized == 'response.output_audio_transcript.done' ||
-        normalized == 'response.text.done' ||
-        normalized.endsWith('output_audio_transcription.done');
+    return normalized == 'transcript';
   }
 
   @visibleForTesting
@@ -1197,26 +1143,12 @@ class V2VClient {
   }
 
   static bool _isAudioDoneEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'audio_done' ||
-        normalized == 'response.audio.done' ||
-        normalized == 'output_audio.done' ||
-        normalized == 'audio.done';
-  }
-
-  static bool _isResponseCompleteEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'turn_complete' || normalized == 'response.done';
+    return type.toLowerCase() == 'audio_done';
   }
 
   @visibleForTesting
   static bool treatsAsAudioDoneEvent(String type) {
     return _isAudioDoneEvent(type);
-  }
-
-  @visibleForTesting
-  static bool treatsAsResponseCompleteEvent(String type) {
-    return _isResponseCompleteEvent(type);
   }
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
@@ -1582,40 +1514,30 @@ class V2VClient {
         final json = jsonDecode(message) as Map<String, dynamic>;
         final type = json['type'] as String? ?? 'unknown';
         final text = _eventText(json);
-        final eventId = _eventId(json);
+
+        if (type == 'transcript_turn') {
+          final terminalTurn = V2VTerminalTranscriptTurn.tryParse(json);
+          if (terminalTurn == null) {
+            Logger.debug('[V2V] Ignoring invalid terminal transcript contract');
+            return;
+          }
+          onEvent?.call(V2VEvent(type: 'transcript_turn', terminalTurn: terminalTurn));
+          return;
+        }
 
         if (_isUserTranscriptEvent(type)) {
-          onEvent?.call(
-            V2VEvent(
-              type: 'user_transcript',
-              text: text,
-              terminalTranscript: _isUserTerminalTranscriptEvent(type),
-              eventId: eventId,
-            ),
-          );
+          onEvent?.call(V2VEvent(type: 'user_transcript', text: text));
           return;
         }
 
         if (_isAssistantTranscriptEvent(type)) {
-          onEvent?.call(
-            V2VEvent(
-              type: 'transcript',
-              text: text,
-              terminalTranscript: _isAssistantTerminalTranscriptEvent(type),
-              eventId: eventId,
-            ),
-          );
+          onEvent?.call(V2VEvent(type: 'transcript', text: text));
           return;
         }
 
         if (_isAudioDoneEvent(type)) {
           _scheduleFinishPlayback(type);
-          onEvent?.call(V2VEvent(type: 'audio_done', eventId: eventId));
-          return;
-        }
-
-        if (_isResponseCompleteEvent(type)) {
-          _scheduleFinishPlayback(type);
+          onEvent?.call(const V2VEvent(type: 'audio_done'));
           return;
         }
 

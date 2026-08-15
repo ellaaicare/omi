@@ -1031,9 +1031,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     switch (event.type) {
       case 'user_transcript':
-        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) && event.terminalTranscript) {
-          _v2vTurnReconciler.addUserTerminal(_activeSessionId, event.text ?? '', eventId: event.eventId);
-        }
         setState(() {
           _lastUserText = event.text ?? '';
         });
@@ -1041,23 +1038,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         break;
       case 'transcript':
         final delta = event.text ?? '';
-        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-          if (event.terminalTranscript) {
-            _v2vTurnReconciler.markAssistantTerminal(
-              _activeSessionId,
-              finalText: delta,
-              eventId: event.eventId,
-            );
-          } else {
-            _v2vTurnReconciler.addAssistantFragment(_activeSessionId, delta);
-          }
-        }
-        if (event.terminalTranscript && delta.startsWith(_lastEllaText)) {
-          _lastEllaText = delta;
-        } else if (!event.terminalTranscript) {
-          // The proxy's custom transcript event is a streaming delta.
-          _lastEllaText += delta;
-        }
+        _lastEllaText += delta;
         setState(() {
           _ellaDisplayText = _lastEllaText;
           _orbState = VoiceOrbState.speaking;
@@ -1065,10 +1046,20 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         });
         _scrollToBottom();
         break;
-      case 'audio_done':
+      case 'transcript_turn':
+        final terminalTurn = event.terminalTurn;
+        if (terminalTurn == null) break;
         if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-          _v2vTurnReconciler.markAssistantTerminal(_activeSessionId, eventId: event.eventId);
+          _v2vTurnReconciler.addTerminalTurn(_activeSessionId, terminalTurn);
         }
+        setState(() {
+          _lastUserText = terminalTurn.userTranscript;
+          _lastEllaText = terminalTurn.assistantTranscript;
+          _ellaDisplayText = terminalTurn.assistantTranscript;
+        });
+        _scrollToBottom();
+        break;
+      case 'audio_done':
         // Audio is now being played via just_audio — wait for playback_complete
         setState(() {
           _statusText = context.l10n.voiceEllaSpeaking;
@@ -1085,9 +1076,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         break;
       case 'speech_started':
-        // User started talking — discard only an interrupted, nonterminal response.
-        _v2vTurnReconciler.discardNonterminalAssistant(_activeSessionId);
-        _v2vTurnReconciler.beginUserTurn(_activeSessionId);
         _lastEllaText = '';
         setState(() {
           _orbState = VoiceOrbState.listening;
@@ -1472,6 +1460,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       expectedUid: turn.uid,
       sessionId: turn.sessionId,
       turnId: turn.turnId,
+      userEventId: turn.userEventId,
+      assistantEventId: turn.assistantEventId,
       userTranscript: turn.userTranscript,
       assistantTranscript: turn.assistantTranscript,
       startedAt: turn.startedAt,

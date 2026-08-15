@@ -152,6 +152,8 @@ class EllaVoiceTurnRequest(BaseModel):
     uid: str = ""
     session_id: str
     turn_id: str
+    user_event_id: str
+    assistant_event_id: str
     user_transcript: str
     assistant_transcript: str
     user_terminal: bool = False
@@ -175,6 +177,11 @@ def _validated_voice_turn(request: EllaVoiceTurnRequest) -> tuple[str, str]:
         raise HTTPException(status_code=422, detail="voice_transcript_too_large")
     if not _VOICE_ID_PATTERN.fullmatch(request.session_id) or not _VOICE_ID_PATTERN.fullmatch(request.turn_id):
         raise HTTPException(status_code=422, detail="invalid_voice_turn_identity")
+    if (
+        request.user_event_id != f"{request.turn_id}:user"
+        or request.assistant_event_id != f"{request.turn_id}:assistant"
+    ):
+        raise HTTPException(status_code=422, detail="invalid_voice_event_identity")
     if request.completed_at < request.started_at:
         raise HTTPException(status_code=422, detail="invalid_voice_turn_time")
     return user_text, assistant_text
@@ -246,6 +253,7 @@ def _ios_voice_event(
     uid: str,
     session_id: str,
     turn_id: str,
+    event_id: str,
     role: str,
     text: str,
     started_at: datetime,
@@ -255,7 +263,7 @@ def _ios_voice_event(
     return CanonicalEventIn(
         uid=uid,
         canonical_identity=uid,
-        event_id=f"{source_identity}:{role}",
+        event_id=event_id,
         session_id=session_id,
         channel="ios_voice",
         provider="omi-ios-v2v",
@@ -313,6 +321,7 @@ async def persist_v2v_voice_turn(
             uid=uid,
             session_id=request.session_id,
             turn_id=request.turn_id,
+            event_id=request.user_event_id,
             role="user",
             text=user_text,
             started_at=request.started_at,
@@ -322,6 +331,7 @@ async def persist_v2v_voice_turn(
             uid=uid,
             session_id=request.session_id,
             turn_id=request.turn_id,
+            event_id=request.assistant_event_id,
             role="assistant",
             text=assistant_text,
             started_at=request.completed_at,
@@ -330,8 +340,12 @@ async def persist_v2v_voice_turn(
     ]
 
     write_result = await _canonical_event_store.write_batch(events)
-    stored = await _canonical_event_store.events_by_source_identity(uid=uid, source_identity=source_identity)
     expected_ids = {event.event_id for event in events}
+    stored = await _canonical_event_store.events_by_event_ids(
+        uid=uid,
+        source_identity=source_identity,
+        event_ids=sorted(expected_ids),
+    )
     canonical = [
         event
         for event in stored

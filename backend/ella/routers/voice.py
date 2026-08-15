@@ -60,7 +60,8 @@ router = APIRouter(prefix="/v1/voice", tags=["voice"])
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
 ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
-SESSION_EXPIRY_HOURS = int(os.getenv("ELLA_SESSION_EXPIRY_HOURS", "1"))
+SESSION_EXPIRY_MINUTES = int(os.getenv("ELLA_SESSION_EXPIRY_MINUTES", "25"))
+VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_TTS_VOICE_ID = os.getenv("XAI_TTS_VOICE_ID", "eve")
@@ -308,15 +309,20 @@ def create_session_token(
         raise HTTPException(status_code=500, detail="Session secret not configured")
 
     payload = {
+        "sub": firebase_uid,
         "uid": uid,
         "firebase_uid": firebase_uid,
-        "session_id": session_id,
         "name": display_name or "User",
         "voice_mode": voice_mode,
         "provider": provider,
+        "isolated_runtime": False,
         "context_url": f"{ELLA_API_BASE}/v1/users/{uid}/context",
         "callback_url": f"{ELLA_API_BASE}/v1/ella/voice-session",
-        "exp": datetime.utcnow() + timedelta(hours=SESSION_EXPIRY_HOURS),
+        "aud": VOICE_SESSION_AUDIENCE,
+        "jti": session_id,
+        "correlation_id": str(uuid4()),
+        "entitlement_revision": 1,
+        "exp": datetime.utcnow() + timedelta(minutes=SESSION_EXPIRY_MINUTES),
         "iat": datetime.utcnow(),
         "iss": "omi-backend",
     }
@@ -504,7 +510,7 @@ async def create_voice_session(
         _elapsed = int((time.time() - _start) * 1000)
         print(
             f"[FLOW:VOICE-SESSION] uid={uid} provider={provider} mode={resolved_mode} "
-            f"endpoint={endpoint} expiry={SESSION_EXPIRY_HOURS}h latency={_elapsed}ms",
+            f"endpoint={endpoint} expiry={SESSION_EXPIRY_MINUTES}m latency={_elapsed}ms",
             flush=True,
         )
 
@@ -512,7 +518,7 @@ async def create_voice_session(
             session_token=token,
             session_id=session_id,
             voice_endpoint=endpoint_with_mode,
-            expires_in=SESSION_EXPIRY_HOURS * 3600,
+            expires_in=SESSION_EXPIRY_MINUTES * 60,
             audio_format={
                 "sample_rate": 24000,
                 "channels": 1,

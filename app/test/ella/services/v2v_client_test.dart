@@ -9,6 +9,7 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 
 void main() {
   group('typed voice policy outcomes', () {
@@ -749,42 +750,67 @@ void main() {
   });
 
   group('V2VClient proxy event mapping', () {
-    test('preserves terminal transcript and provider event identity', () {
+    test('parses exact proxy ordering with audio done before two identical terminal turns', () {
+      final events = <V2VEvent>[];
+      final client = V2VClient(onEvent: events.add);
+
+      for (final ordinal in [1, 2]) {
+        final suffix = ordinal.toRadixString(16).padLeft(32, '0');
+        client.handleMessageForTesting('{"type":"user_transcript","text":"yes"}');
+        client.handleMessageForTesting('{"type":"transcript","text":"Answer $ordinal"}');
+        client.handleMessageForTesting('{"type":"audio_done"}');
+        client.handleMessageForTesting(
+          '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+          '"session_id":"session-jti-1","turn_id":"v2v-turn-$suffix",'
+          '"user_event_id":"v2v-turn-$suffix:user",'
+          '"assistant_event_id":"v2v-turn-$suffix:assistant",'
+          '"user_text":"yes","assistant_text":"Answer $ordinal",'
+          '"started_at":"2026-08-15T20:00:00Z","completed_at":"2026-08-15T20:00:02Z"}',
+        );
+      }
+
+      expect(events.map((event) => event.type).where((type) => type != 'v2v_debug'), [
+        'user_transcript',
+        'transcript',
+        'audio_done',
+        'transcript_turn',
+        'user_transcript',
+        'transcript',
+        'audio_done',
+        'transcript_turn',
+      ]);
+      final terminalTurns = events.map((event) => event.terminalTurn).whereType<V2VTerminalTranscriptTurn>().toList();
+      expect(terminalTurns.map((turn) => turn.userTranscript), ['yes', 'yes']);
+      expect(terminalTurns.map((turn) => turn.turnId).toSet(), hasLength(2));
+    });
+
+    test('accepts only custom proxy transcript events, not raw provider frames', () {
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript'), isTrue);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript_delta'), isFalse);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('response.output_audio_transcript.done'), isFalse);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('user_transcript'), isFalse);
+    });
+
+    test('accepts only the proxy audio completion frame', () {
+      expect(V2VClient.treatsAsAudioDoneEvent('audio_done'), isTrue);
+      expect(V2VClient.treatsAsAudioDoneEvent('response.audio.done'), isFalse);
+      expect(V2VClient.treatsAsAudioDoneEvent('response.done'), isFalse);
+    });
+
+    test('drops malformed terminal turns instead of inferring a partial boundary', () {
       final events = <V2VEvent>[];
       final client = V2VClient(onEvent: events.add);
 
       client.handleMessageForTesting(
-        '{"type":"conversation.item.input_audio_transcription.completed",'
-        '"transcript":"Question","item_id":"user-item-1"}',
+        '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+        '"session_id":"session-jti-1","turn_id":"v2v-turn-invalid",'
+        '"user_text":"Question","assistant_text":"Partial"}',
       );
       client.handleMessageForTesting(
-        '{"type":"response.output_audio_transcript.delta","delta":"Answer","response_id":"response-1"}',
-      );
-      client.handleMessageForTesting(
-        '{"type":"response.output_audio_transcript.done","transcript":"Answer","response_id":"response-1"}',
+        '{"type":"response.output_audio_transcript.done","transcript":"Partial","response_id":"raw-provider"}',
       );
 
-      expect(events, hasLength(3));
-      expect(events[0].type, 'user_transcript');
-      expect(events[0].terminalTranscript, isTrue);
-      expect(events[0].eventId, 'user-item-1');
-      expect(events[1].terminalTranscript, isFalse);
-      expect(events[2].terminalTranscript, isTrue);
-      expect(events[2].eventId, 'response-1');
-    });
-
-    test('maps transcript deltas as assistant transcripts', () {
-      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript'), isTrue);
-      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript_delta'), isTrue);
-      expect(V2VClient.treatsAsAssistantTranscriptEvent('response.audio_transcript.delta'), isTrue);
-      expect(V2VClient.treatsAsAssistantTranscriptEvent('user_transcript'), isFalse);
-    });
-
-    test('separates audio completion from generic response completion', () {
-      expect(V2VClient.treatsAsAudioDoneEvent('response.audio.done'), isTrue);
-      expect(V2VClient.treatsAsAudioDoneEvent('response.done'), isFalse);
-      expect(V2VClient.treatsAsResponseCompleteEvent('response.done'), isTrue);
-      expect(V2VClient.treatsAsResponseCompleteEvent('audio_done'), isFalse);
+      expect(events.where((event) => event.type == 'transcript_turn'), isEmpty);
     });
 
     test('parses identifier-only memory reinterpretation events', () {

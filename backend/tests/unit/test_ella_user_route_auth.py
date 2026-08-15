@@ -162,6 +162,55 @@ def test_voice_owner_token_supplies_subject_without_caller_uid(monkeypatch):
     assert pool.fetchrow_calls[0][1] == ("uid-a",)
 
 
+def test_voice_session_token_matches_active_proxy_required_claims_and_returns_jti(monkeypatch):
+    pool = _VoicePool()
+    monkeypatch.setattr(voice, "_pool", pool)
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "proxy-contract-secret-32-bytes-minimum")
+    monkeypatch.setitem(voice.V2V_PROVIDERS["grok-voice"], "key_check", lambda: True)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/session",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"provider": "grok-voice"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    claims = voice.jwt.decode(
+        payload["session_token"],
+        "proxy-contract-secret-32-bytes-minimum",
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience="ella-voice-proxy",
+        options={
+            "require": [
+                "exp",
+                "iat",
+                "iss",
+                "aud",
+                "sub",
+                "uid",
+                "jti",
+                "voice_mode",
+                "provider",
+                "isolated_runtime",
+                "correlation_id",
+                "entitlement_revision",
+            ]
+        },
+    )
+    assert payload["session_id"] == claims["jti"]
+    assert claims["sub"] == claims["uid"] == "uid-a"
+    assert claims["aud"] == "ella-voice-proxy"
+    assert claims["voice_mode"] == "v4"
+    assert claims["provider"] == "grok-voice"
+    assert claims["isolated_runtime"] is False
+    assert claims["entitlement_revision"] == 1
+    assert isinstance(claims["correlation_id"], str) and claims["correlation_id"]
+    assert "session_id" not in claims
+
+
 def test_user_routes_reject_uid_mismatch_before_provider_or_context_work(monkeypatch):
     pool = _VoicePool()
     chat_calls = []
