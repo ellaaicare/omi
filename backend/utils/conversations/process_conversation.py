@@ -99,6 +99,14 @@ class CaptureFinalizationEffectRunner:
         self.conversation_id = conversation_id
         self.generation, self.owner_token, self.claim_token = capture_finalization
 
+    def operation_token(self, effect_id: str) -> str:
+        return conversations_db.capture_finalization_effect_operation_token(
+            self.conversation_id,
+            self.generation,
+            self.owner_token,
+            effect_id,
+        )
+
     def run(
         self,
         effect_id: str,
@@ -332,6 +340,8 @@ def mark_unexpected_conversation_processing_failed(
     conversation: Conversation,
     capture_finalization: Optional[Tuple[str, str, str]] = None,
 ) -> bool:
+    if conversation.status == ConversationStatus.completed:
+        return False
     if conversation.status == ConversationStatus.failed and conversation.processing_error:
         return False
     mark_conversation_processing_failed(
@@ -502,17 +512,10 @@ def _extract_memories(
     # Delete old memories for this conversation (if reprocessing)
     # Also get the IDs to delete from Pinecone
     existing_memory_ids = memories_db.get_memory_ids_for_conversation(uid, conversation.id)
-    for memory_id in existing_memory_ids:
-        _run_side_effect(
-            effect_runner,
-            f'memories:delete_vector:{memory_id}',
-            lambda _, current_memory_id=memory_id: delete_memory_vector(uid, current_memory_id),
-        )
-    _run_side_effect(
-        effect_runner,
-        'memories:delete_existing',
-        lambda _: memories_db.delete_memories_for_conversation(uid, conversation.id),
-    )
+    if not effect_runner:
+        for memory_id in existing_memory_ids:
+            delete_memory_vector(uid, memory_id)
+        memories_db.delete_memories_for_conversation(uid, conversation.id)
 
     new_memories: List[Memory] = []
 
@@ -605,6 +608,22 @@ def _extract_memories(
             lambda _, current_memory_id=memory_id: memories_db.delete_memory(uid, current_memory_id),
         )
 
+    if effect_runner:
+        replacement_ids = {memory.id for memory in parsed_memories}
+        for memory_id in existing_memory_ids:
+            if memory_id in replacement_ids:
+                continue
+            _run_side_effect(
+                effect_runner,
+                f'memories:delete_vector:{memory_id}',
+                lambda _, current_memory_id=memory_id: delete_memory_vector(uid, current_memory_id),
+            )
+            _run_side_effect(
+                effect_runner,
+                f'memories:delete:{memory_id}',
+                lambda _, current_memory_id=memory_id: memories_db.delete_memory(uid, current_memory_id),
+            )
+
     if len(parsed_memories) == 0:
         print(f"No memories extracted for conversation {conversation.id}")
         return
@@ -632,7 +651,11 @@ def _extract_memories(
         _run_side_effect(
             effect_runner,
             'memories:usage',
-            lambda _: record_usage(uid, memories_created=len(parsed_memories)),
+            lambda operation_token: record_usage(
+                uid,
+                memories_created=len(parsed_memories),
+                idempotency_key=operation_token,
+            ),
         )
 
         try:
@@ -650,11 +673,12 @@ def _extract_memories(
                 _run_side_effect(
                     effect_runner,
                     f'memories:knowledge_graph:{memory_db_obj.id}',
-                    lambda _, memory=memory_db_obj: extract_knowledge_from_memory(
+                    lambda operation_token, memory=memory_db_obj: extract_knowledge_from_memory(
                         uid,
                         memory.content,
                         memory.id,
                         user_name,
+                        idempotency_key=operation_token,
                     ),
                 )
                 _run_side_effect(
@@ -730,18 +754,28 @@ def _save_action_items(
         action_items_data.append(action_item_data)
 
     if action_items_data:
-        # Delete existing action items for this conversation first (in case of reprocessing)
-        _run_side_effect(
-            effect_runner,
-            'action_items:delete_existing',
-            lambda _: action_items_db.delete_action_items_for_conversation(uid, conversation.id),
-        )
-        # Save new action items
-        action_item_ids = _run_side_effect(
-            effect_runner,
-            'action_items:create',
-            lambda _: action_items_db.create_action_items_batch(uid, action_items_data),
-        )
+        if effect_runner:
+            action_item_ids = _run_side_effect(
+                effect_runner,
+                'action_items:create',
+                lambda operation_token: action_items_db.create_action_items_batch(
+                    uid,
+                    action_items_data,
+                    idempotency_key=operation_token,
+                ),
+            )
+            _run_side_effect(
+                effect_runner,
+                'action_items:delete_existing',
+                lambda _: action_items_db.delete_action_items_for_conversation(
+                    uid,
+                    conversation.id,
+                    preserve_ids=action_item_ids,
+                ),
+            )
+        else:
+            action_items_db.delete_action_items_for_conversation(uid, conversation.id)
+            action_item_ids = action_items_db.create_action_items_batch(uid, action_items_data)
         print(f"Saved {len(action_item_ids)} action items for conversation {conversation.id}")
 
         # Send FCM data messages for action items with due dates
@@ -751,11 +785,12 @@ def _save_action_items(
                 _run_side_effect(
                     effect_runner,
                     f'action_items:notify:{action_item_id}',
-                    lambda _, current_id=action_item_id, current_item=action_item: send_action_item_data_message(
+                    lambda operation_token, current_id=action_item_id, current_item=action_item: send_action_item_data_message(
                         user_id=uid,
                         action_item_id=current_id,
                         description=current_item.description,
                         due_at=current_item.due_at.isoformat(),
+                        idempotency_key=operation_token,
                     ),
                 )
 
@@ -921,7 +956,11 @@ def process_conversation(
             _run_side_effect(
                 effect_runner,
                 'usage:insights',
-                lambda _: record_usage(uid, insights_gained=insights_gained),
+                lambda operation_token: record_usage(
+                    uid,
+                    insights_gained=insights_gained,
+                    idempotency_key=operation_token,
+                ),
             )
 
         _trigger_apps(
@@ -968,7 +1007,11 @@ def process_conversation(
             audio_files = _run_side_effect(
                 effect_runner,
                 'audio:create_files',
-                lambda _: conversations_db.create_audio_files_from_chunks(uid, conversation.id),
+                lambda operation_token: conversations_db.create_audio_files_from_chunks(
+                    uid,
+                    conversation.id,
+                    idempotency_key=operation_token or None,
+                ),
                 encode=lambda files: [audio_file.dict() for audio_file in files],
                 decode=lambda files: [AudioFile(**audio_file) for audio_file in (files or [])],
             )
@@ -996,6 +1039,17 @@ def process_conversation(
     if not capture_finalization:
         conversation.status = ConversationStatus.completed
         conversations_db.upsert_conversation(uid, conversation.dict())
+    else:
+        conversation.status = ConversationStatus.completed
+        generation, owner_token, claim_token = capture_finalization
+        if not conversations_db.upsert_conversation_if_capture_finalizer(
+            uid,
+            conversation.dict(),
+            generation,
+            owner_token,
+            claim_token,
+        ):
+            raise RuntimeError('Capture finalization lease was lost before result persistence')
 
     # Update folder conversation count before the final capture result checkpoint. The
     # durable per-effect receipt makes this resumable if the worker dies.
@@ -1058,18 +1112,6 @@ def process_conversation(
                 target=fire_postprocess_webhook,
                 args=(uid, conversation),
             ).start()
-
-    if capture_finalization:
-        conversation.status = ConversationStatus.completed
-        generation, owner_token, claim_token = capture_finalization
-        if not conversations_db.upsert_conversation_if_capture_finalizer(
-            uid,
-            conversation.dict(),
-            generation,
-            owner_token,
-            claim_token,
-        ):
-            raise RuntimeError('Capture finalization lease was lost before result persistence')
 
     print('process_conversation completed conversation.id=', conversation.id)
     return conversation

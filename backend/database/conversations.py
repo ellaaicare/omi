@@ -19,7 +19,7 @@ from models.conversation import (
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
-from ._client import db
+from ._client import db, document_id_from_seed
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
 from utils.other.storage import list_audio_chunks
 
@@ -80,6 +80,21 @@ def _capture_finalization_claim_is_live(
         and conversation.get('capture_state') == 'finalizing'
         and conversation.get('capture_finalization_claim_token') == claim_token
         and not _capture_lease_expired(conversation, now, field='capture_finalization_lease_expires_at')
+    )
+
+
+def capture_finalization_effect_operation_token(
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    effect_id: str,
+) -> str:
+    """Return the stable sink identity shared by every retry of an effect."""
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f'omi:capture-finalization:{conversation_id}:{generation}:{owner_token}:{effect_id}',
+        )
     )
 
 
@@ -1433,11 +1448,11 @@ def _claim_capture_finalization_effect_transaction(
             'result': receipt.get('result'),
         }
 
-    operation_token = receipt.get('operation_token') or str(
-        uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"omi:capture-finalization:{conversation.get('id')}:{generation}:{owner_token}:{effect_id}",
-        )
+    operation_token = receipt.get('operation_token') or capture_finalization_effect_operation_token(
+        conversation.get('id'),
+        generation,
+        owner_token,
+        effect_id,
     )
     effects[effect_id] = {
         **receipt,
@@ -1736,6 +1751,7 @@ def update_conversation_if_active_summary_version(
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,
+    idempotency_key: Optional[str] = None,
 ) -> List[AudioFile]:
     """
     Create audio file records by merging chunks from a conversation.
@@ -1766,7 +1782,13 @@ def create_audio_files_from_chunks(
             time_gap = chunk['timestamp'] - prev_chunk['timestamp']
             if time_gap > 30:
                 # Gap detected, finalize current group
-                audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+                audio_file = _finalize_audio_file_group(
+                    uid,
+                    conversation_id,
+                    current_group,
+                    audio_files,
+                    idempotency_key=idempotency_key,
+                )
                 if audio_file:
                     audio_files.append(audio_file)
                 current_group = [chunk]
@@ -1775,15 +1797,29 @@ def create_audio_files_from_chunks(
 
     # Finalize last group
     if current_group:
-        audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+        audio_file = _finalize_audio_file_group(
+            uid,
+            conversation_id,
+            current_group,
+            audio_files,
+            idempotency_key=idempotency_key,
+        )
         if audio_file:
             audio_files.append(audio_file)
 
     return audio_files
 
 
+def capture_audio_file_id(idempotency_key: str, group_index: int) -> str:
+    return document_id_from_seed(f'{idempotency_key}:audio-file:{group_index}')
+
+
 def _finalize_audio_file_group(
-    uid: str, conversation_id: str, chunk_group: List[dict], existing_files: List[AudioFile]
+    uid: str,
+    conversation_id: str,
+    chunk_group: List[dict],
+    existing_files: List[AudioFile],
+    idempotency_key: Optional[str] = None,
 ) -> Optional[AudioFile]:
     """
     Create an AudioFile record that references chunks (no merging).
@@ -1801,7 +1837,7 @@ def _finalize_audio_file_group(
         return None
 
     # Generate file ID
-    file_id = str(uuid.uuid4())
+    file_id = capture_audio_file_id(idempotency_key, len(existing_files)) if idempotency_key else str(uuid.uuid4())
 
     # Extract timestamps
     timestamps = [chunk['timestamp'] for chunk in chunk_group]

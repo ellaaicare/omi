@@ -369,7 +369,13 @@ def send_new_app_review_notification(
     send_notification(app_owner_uid, title, body, data)
 
 
-def send_action_item_data_message(user_id: str, action_item_id: str, description: str, due_at: str):
+def send_action_item_data_message(
+    user_id: str,
+    action_item_id: str,
+    description: str,
+    due_at: str,
+    idempotency_key: str = None,
+):
     """
     Sends a data-only FCM message for action item reminder scheduling.
     The app receives this in the background and schedules a local notification.
@@ -380,8 +386,9 @@ def send_action_item_data_message(user_id: str, action_item_id: str, description
         'action_item_id': action_item_id,
         'description': description,
         'due_at': due_at,
+        'idempotency_key': idempotency_key or action_item_id,
     }
-    tag = _generate_tag(f"{user_id}:action_item_reminder:{action_item_id}")
+    tag = _generate_tag(f"{user_id}:action_item_reminder:{idempotency_key or action_item_id}")
     _send_to_user(user_id, tag, data=data, is_background=True, priority='high')
 
 

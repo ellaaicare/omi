@@ -19,6 +19,8 @@ os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-project")
 os.environ.setdefault("ENCRYPTION_SECRET", "test-encryption-secret-32-bytes-long")
 
+import database.user_usage as user_usage_db
+
 if "redis" not in sys.modules:
     redis_stub = types.ModuleType("redis")
 
@@ -1724,6 +1726,255 @@ def test_capture_effect_successful_claim_then_expiry_reclaim_deduplicates_resume
     assert deliveries == {'stable-effect-operation'}
 
 
+@pytest.mark.parametrize('sink_name', ['action_items', 'usage', 'audio'])
+def test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent(monkeypatch, sink_name):
+    state = {
+        'live_claim': 'claim-a',
+        'completed': False,
+        'operation_token': f'stable-{sink_name}-operation',
+    }
+    state_lock = threading.Lock()
+    predecessor_paused = threading.Event()
+    successor_completed = threading.Event()
+    attempts = []
+    logical_writes = set()
+    usage_total = 0
+
+    def claim_effect(uid, conversation_id, generation, owner_token, claim_token, effect_id):
+        with state_lock:
+            if state['completed']:
+                return {'outcome': 'completed', 'operation_token': state['operation_token'], 'result': None}
+            if claim_token != state['live_claim']:
+                return {'outcome': 'lost'}
+            return {'outcome': 'claimed', 'operation_token': state['operation_token']}
+
+    def complete_effect(*args):
+        claim_token = args[4]
+        operation_token = args[6]
+        with state_lock:
+            if claim_token != state['live_claim'] or operation_token != state['operation_token']:
+                return False
+            state['completed'] = True
+            return True
+
+    def internal_sink(operation_token):
+        nonlocal usage_total
+        with state_lock:
+            attempts.append(operation_token)
+            if sink_name == 'action_items':
+                logical_writes.update(
+                    conversation_processor.action_items_db.capture_action_item_ids(operation_token, 2)
+                )
+            elif sink_name == 'usage':
+                receipt_id = user_usage_db.usage_idempotency_receipt_id(operation_token)
+                if receipt_id not in logical_writes:
+                    logical_writes.add(receipt_id)
+                    usage_total += 1
+            else:
+                logical_writes.update(
+                    conversation_processor.conversations_db.capture_audio_file_id(operation_token, index)
+                    for index in range(2)
+                )
+
+    monkeypatch.setattr(conversation_processor.conversations_db, 'claim_capture_finalization_effect', claim_effect)
+    monkeypatch.setattr(
+        conversation_processor.conversations_db, 'complete_capture_finalization_effect', complete_effect
+    )
+
+    predecessor = conversation_processor.CaptureFinalizationEffectRunner(
+        'authenticated-user', 'capture-a', ('generation-a', 'owner-a', 'claim-a')
+    )
+    successor = conversation_processor.CaptureFinalizationEffectRunner(
+        'authenticated-user', 'capture-a', ('generation-a', 'owner-a', 'claim-b')
+    )
+
+    def paused_sink(operation_token):
+        predecessor_paused.set()
+        assert successor_completed.wait(timeout=2)
+        return internal_sink(operation_token)
+
+    failures = []
+    predecessor_thread = threading.Thread(
+        target=lambda: _capture_failure(failures, predecessor.run, f'internal:{sink_name}', paused_sink)
+    )
+    predecessor_thread.start()
+    assert predecessor_paused.wait(timeout=2)
+
+    with state_lock:
+        state['live_claim'] = 'claim-b'
+    successor.run(f'internal:{sink_name}', internal_sink)
+    successor_completed.set()
+    predecessor_thread.join(timeout=2)
+
+    assert not predecessor_thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], conversation_processor.CaptureFinalizationLeaseLost)
+    assert attempts == [state['operation_token'], state['operation_token']]
+    assert len(logical_writes) == (1 if sink_name == 'usage' else 2)
+    assert usage_total == (1 if sink_name == 'usage' else 0)
+
+
+def _capture_failure(failures, operation, *args):
+    try:
+        operation(*args)
+    except Exception as error:
+        failures.append(error)
+
+
+def test_capture_usage_sink_receipt_and_increment_commit_atomically_once():
+    class UsageTransaction:
+        def __init__(self):
+            self.sets = []
+
+        def set(self, ref, data, **kwargs):
+            self.sets.append((ref, data, kwargs))
+
+    hourly_ref = _FakeDocumentRef()
+    missing_receipt = _FakeDocumentRef()
+    transaction = UsageTransaction()
+    assert user_usage_db._apply_hourly_usage_once_transaction(
+        transaction,
+        hourly_ref,
+        missing_receipt,
+        {'insights_gained': 1},
+        {'idempotency_key': 'stable-usage-operation'},
+    )
+    assert [entry[0] for entry in transaction.sets] == [hourly_ref, missing_receipt]
+    assert transaction.sets[0][2] == {'merge': True}
+
+    duplicate = UsageTransaction()
+    assert not user_usage_db._apply_hourly_usage_once_transaction(
+        duplicate,
+        hourly_ref,
+        _FakeDocumentRef({'idempotency_key': 'stable-usage-operation'}),
+        {'insights_gained': 1},
+        {'idempotency_key': 'stable-usage-operation'},
+    )
+    assert duplicate.sets == []
+
+
+def test_capture_completed_result_is_fetchable_before_webhooks_and_lost_ack_recovery_is_idempotent(monkeypatch):
+    conversation = _long_conversation()
+    conversation.id = 'capture-a'
+    durable = {
+        **conversation.dict(),
+        'capture_protocol_version': 2,
+        'capture_generation': 'generation-a',
+        'capture_owner_token': 'owner-a',
+        'capture_state': 'finalizing',
+        'capture_finalization_claim_token': 'claim-a',
+    }
+    state = {'durable': durable, 'live_claim': 'claim-a', 'effects': {}}
+    attempts = {'created': [], 'postprocess': []}
+    deliveries = {'created': set(), 'postprocess': set()}
+
+    monkeypatch.setattr(
+        conversation_processor,
+        '_get_structured',
+        lambda *args, **kwargs: (Structured(title='Durable result'), True),
+    )
+    monkeypatch.setattr(conversation_processor, 'update_personas_async', lambda uid: None)
+
+    def claim_effect(uid, conversation_id, generation, owner_token, claim_token, effect_id):
+        assert claim_token == state['live_claim']
+        receipt = state['effects'].get(effect_id, {})
+        if receipt.get('state') == 'completed':
+            return {'outcome': 'completed', **receipt}
+        operation_token = receipt.get(
+            'operation_token'
+        ) or conversation_processor.conversations_db.capture_finalization_effect_operation_token(
+            conversation_id, generation, owner_token, effect_id
+        )
+        state['effects'][effect_id] = {
+            **receipt,
+            'state': 'claimed',
+            'claim_token': claim_token,
+            'operation_token': operation_token,
+        }
+        return {'outcome': 'claimed', 'operation_token': operation_token}
+
+    def complete_effect(
+        uid,
+        conversation_id,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+    ):
+        receipt = state['effects'][effect_id]
+        if claim_token != state['live_claim'] or receipt['claim_token'] != claim_token:
+            return False
+        if effect_id == 'webhook:postprocess' and claim_token == 'claim-a':
+            return False
+        receipt.update({'state': 'completed', 'result': result})
+        return True
+
+    def persist_result(uid, payload, generation, owner_token, claim_token):
+        assert claim_token == state['live_claim']
+        capture_fields = {key: value for key, value in state['durable'].items() if key.startswith('capture_')}
+        state['durable'] = {**payload, **capture_fields, 'capture_finalization_claim_token': claim_token}
+        return True
+
+    def receive(kind, operation_token, webhook_conversation):
+        fetched = dict(state['durable'])
+        assert fetched['status'] == ConversationStatus.completed.value
+        assert fetched['capture_state'] == 'finalizing'
+        assert fetched['structured']['title'] == 'Durable result'
+        assert webhook_conversation.status == ConversationStatus.completed
+        attempts[kind].append(operation_token)
+        deliveries[kind].add(operation_token)
+
+    monkeypatch.setattr(conversation_processor.conversations_db, 'claim_capture_finalization_effect', claim_effect)
+    monkeypatch.setattr(
+        conversation_processor.conversations_db, 'complete_capture_finalization_effect', complete_effect
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db, 'upsert_conversation_if_capture_finalizer', persist_result
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        'conversation_created_webhook',
+        lambda uid, current, idempotency_key=None: receive('created', idempotency_key, current),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        'fire_postprocess_webhook',
+        lambda uid, current, idempotency_key=None, synchronous=False: receive('postprocess', idempotency_key, current),
+    )
+
+    with pytest.raises(conversation_processor.CaptureFinalizationLeaseLost):
+        conversation_processor.process_conversation(
+            'authenticated-user',
+            'en',
+            conversation,
+            force_process=True,
+            capture_finalization=('generation-a', 'owner-a', 'claim-a'),
+        )
+    assert not conversation_processor.mark_unexpected_conversation_processing_failed(
+        'authenticated-user',
+        Conversation(**state['durable']),
+        capture_finalization=('generation-a', 'owner-a', 'claim-a'),
+    )
+
+    state['live_claim'] = 'claim-b'
+    state['durable']['capture_finalization_claim_token'] = 'claim-b'
+    recovered = conversation_processor.process_conversation(
+        'authenticated-user',
+        'en',
+        Conversation(**state['durable']),
+        force_process=True,
+        capture_finalization=('generation-a', 'owner-a', 'claim-b'),
+    )
+
+    assert recovered.status == ConversationStatus.completed
+    assert len(deliveries['created']) == 1
+    assert len(deliveries['postprocess']) == 1
+    assert len(attempts['created']) == 1
+    assert attempts['postprocess'] == [attempts['postprocess'][0], attempts['postprocess'][0]]
+
+
 def test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_nodes():
     repo_root = Path(__file__).resolve().parents[3]
     workflow = (repo_root / '.github/workflows/ella-ios-source-ci.yml').read_text()
@@ -1731,14 +1982,19 @@ def test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_
     assert inventory_match is not None
     inventory = re.findall(r"'([^']+test_conversation_processing_failures\.py::[^']+)'", inventory_match['body'])
 
-    assert len(inventory) == 36
-    assert len(set(inventory)) == 36
+    assert len(inventory) == 41
+    assert len(set(inventory)) == 41
     required_nodes = {
         'test_capture_effect_claim_after_successful_guard_rejects_expired_predecessor',
         'test_capture_finalization_resumes_after_result_persistence_at_every_terminal_boundary',
         'test_capture_finalization_effect_paths_reject_wrong_owner_generation_and_claim_token',
         'test_capture_effect_reclaim_reuses_stable_idempotency_token',
         'test_capture_effect_successful_claim_then_expiry_reclaim_deduplicates_resumed_predecessor',
+        'test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent[action_items]',
+        'test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent[usage]',
+        'test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent[audio]',
+        'test_capture_usage_sink_receipt_and_increment_commit_atomically_once',
+        'test_capture_completed_result_is_fetchable_before_webhooks_and_lost_ack_recovery_is_idempotent',
         'test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[completed]',
         'test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[failed]',
         'test_capture_drain_barrier_waits_for_copied_final_provider_tail_before_finalization_claim',
@@ -1753,12 +2009,18 @@ def test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_
     intentional_paths = {
         'backend/database/chat.py',
         'backend/database/conversations.py',
+        'backend/database/action_items.py',
+        'backend/database/folders.py',
+        'backend/database/user_usage.py',
         'backend/routers/conversations.py',
         'backend/routers/pusher.py',
         'backend/routers/transcribe.py',
         'backend/utils/app_integrations.py',
+        'backend/utils/analytics.py',
         'backend/utils/conversations/process_conversation.py',
         'backend/utils/ella/postprocess.py',
+        'backend/utils/llm/knowledge_graph.py',
+        'backend/utils/notifications.py',
         'backend/utils/stt/streaming.py',
         'backend/utils/webhooks.py',
         'backend/tests/unit/test_conversation_processing_failures.py',
@@ -1788,7 +2050,7 @@ def test_capture_finalization_route_reclaims_durable_result_and_finishes_missing
 
     assert response.status_code == 200
     assert response.json()['conversation']['status'] == status.value
-    assert state['processes'] == 0
+    assert state['processes'] == (1 if status == ConversationStatus.completed else 0)
     assert state['integrations'] == (1 if status == ConversationStatus.completed else 0)
     assert state['conversations']['capture-a']['capture_state'] == 'terminal'
 

@@ -739,7 +739,12 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            if conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}:
+            if (
+                capture_finalization
+                and conversation.status != ConversationStatus.failed
+                or not capture_finalization
+                and conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}
+            ):
                 conversation = await asyncio.to_thread(
                     process_conversation,
                     uid,

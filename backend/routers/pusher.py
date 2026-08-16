@@ -139,7 +139,12 @@ async def _process_conversation_task(
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             # Run blocking operations in thread pool to avoid blocking event loop
-            if conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}:
+            if (
+                capture_finalization
+                and conversation.status != ConversationStatus.failed
+                or not capture_finalization
+                and conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}
+            ):
                 conversation = await asyncio.to_thread(
                     process_conversation,
                     uid,

@@ -220,7 +220,7 @@ def process_in_progress_conversation(
         if resolved_geolocation:
             conversation.geolocation = resolved_geolocation
 
-        if conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}:
+        if conversation.status != ConversationStatus.failed:
             conversation = process_conversation(
                 uid,
                 conversation.language,
