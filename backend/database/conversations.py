@@ -562,6 +562,14 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+class PendingConversationSummaryReconciliationError(RuntimeError):
+    """A summary writer cannot supersede an unfinished canonical publication."""
+
+
+SUMMARY_WRITEBACK_RECEIPT_FIELD = 'summary_writeback_receipt'
+SUMMARY_WRITEBACK_PENDING = 'pending_reconciliation'
+
+
 def _update_conversation_if_active_summary_version_transaction(
     transaction,
     conversation_ref,
@@ -573,6 +581,13 @@ def _update_conversation_if_active_summary_version_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
+    receipt = conversation.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+    if (
+        SUMMARY_WRITEBACK_RECEIPT_FIELD in update_data
+        and update_data.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) is None
+        and receipt.get('status') == SUMMARY_WRITEBACK_PENDING
+    ):
+        raise PendingConversationSummaryReconciliationError('canonical_summary_reconciliation_pending')
     if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
         return False
     doc_level = conversation.get('data_protection_level', 'standard')
@@ -613,6 +628,70 @@ def update_conversation_if_active_summary_version(
         uid,
         expected_active_summary_version_id,
         update_data,
+    )
+
+
+def _update_conversation_with_builder_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    """Read and update one conversation and optional correction audit atomically."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return None
+    stored_conversation = snapshot.to_dict() or {}
+    conversation = _prepare_conversation_for_read(stored_conversation, uid) or {}
+    update_data, result = update_builder(conversation)
+    if update_data:
+        doc_level = stored_conversation.get('data_protection_level', 'standard')
+        prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+        transaction.update(conversation_ref, prepared_data)
+    correction_audit = result.get('correction_audit') if isinstance(result, dict) else None
+    if correction_id and correction_audit:
+        correction_ref = conversation_ref.collection('corrections').document(correction_id)
+        transaction.set(correction_ref, correction_audit, merge=True)
+    return {
+        'conversation': conversation,
+        'update_data': update_data,
+        'result': result,
+    }
+
+
+@transactional
+def _update_conversation_with_builder(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    return _update_conversation_with_builder_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        update_builder,
+        correction_id,
+    )
+
+
+def update_conversation_with_builder(
+    uid: str,
+    conversation_id: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_with_builder(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        update_builder,
+        correction_id,
     )
 
 

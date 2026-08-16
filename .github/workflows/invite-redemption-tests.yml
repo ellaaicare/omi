@@ -109,6 +109,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -170,7 +180,8 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 160
+          echo "observed invite-redemption collection count: $collected"
+          test "$collected" -eq 161
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
