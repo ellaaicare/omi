@@ -53,6 +53,7 @@ Future<http.Response?> _defaultConversationCorrectionTransport({
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
       timeout: timeout,
+      retries: 0,
     );
 
 Future<http.Response?> _defaultConversationDeleteTransport({
@@ -327,10 +328,15 @@ class ConversationCorrectionSubmission {
 }
 
 class PendingConversationCorrectionIdentityStore {
-  const PendingConversationCorrectionIdentityStore();
+  const PendingConversationCorrectionIdentityStore({
+    this.maxEntriesPerConversation = 8,
+    this.retention = const Duration(days: 7),
+  });
 
   static const _storagePrefix = 'pending_conversation_correction_v1_';
   static final Map<String, Future<void>> _inFlightByStorageKey = {};
+  final int maxEntriesPerConversation;
+  final Duration retention;
 
   Future<T> _serialized<T>(String storageKey, Future<T> Function() operation) async {
     while (true) {
@@ -382,10 +388,12 @@ class PendingConversationCorrectionIdentityStore {
     String? summaryTitle,
     String? summaryOverview,
     String? appSummary,
+    DateTime? now,
   }) {
     final storageKey = _storageKey(uid: uid, conversationId: conversationId);
     return _serialized(storageKey, () async {
       final preferences = SharedPreferencesUtil();
+      final currentTime = (now ?? DateTime.now()).toUtc();
       final fingerprint = _payloadFingerprint(
         correctionText: correctionText,
         summaryTitle: summaryTitle,
@@ -393,34 +401,92 @@ class PendingConversationCorrectionIdentityStore {
         appSummary: appSummary,
       );
       final persisted = preferences.getString(storageKey);
+      final identities = <Map<String, dynamic>>[];
       if (persisted.isNotEmpty) {
         try {
           final decoded = jsonDecode(persisted);
-          if (decoded is Map &&
-              decoded['uid'] == uid &&
-              decoded['conversation_id'] == conversationId &&
-              decoded['payload_fingerprint'] == fingerprint) {
-            final correctionId = decoded['correction_id']?.toString().trim() ?? '';
-            if (correctionId.isNotEmpty) return correctionId;
+          if (decoded is Map && decoded['uid'] == uid && decoded['conversation_id'] == conversationId) {
+            final rawIdentities = decoded['identities'];
+            if (rawIdentities is List) {
+              identities.addAll(rawIdentities.whereType<Map>().map((entry) => Map<String, dynamic>.from(entry)));
+            } else if (decoded['payload_fingerprint'] != null && decoded['correction_id'] != null) {
+              // Preserve the prior single-record format during the bounded v2 migration.
+              identities.add({
+                'payload_fingerprint': decoded['payload_fingerprint'],
+                'correction_id': decoded['correction_id'],
+                'created_at_ms': currentTime.millisecondsSinceEpoch,
+                'last_used_at_ms': currentTime.millisecondsSinceEpoch,
+              });
+            }
           }
         } on FormatException {
-          // Replace corrupt local state with a new durable identity.
+          // Corrupt local state is replaced below without exposing its contents.
+        }
+      }
+
+      final cutoffMs = currentTime.subtract(retention).millisecondsSinceEpoch;
+      identities.removeWhere((entry) {
+        final correctionId = entry['correction_id']?.toString().trim() ?? '';
+        final entryFingerprint = entry['payload_fingerprint']?.toString().trim() ?? '';
+        final lastUsedAt = entry['last_used_at_ms'];
+        return correctionId.isEmpty || entryFingerprint.isEmpty || lastUsedAt is! int || lastUsedAt < cutoffMs;
+      });
+      for (final identity in identities) {
+        if (identity['payload_fingerprint'] == fingerprint) {
+          identity['last_used_at_ms'] = currentTime.millisecondsSinceEpoch;
+          await _saveIdentities(
+            preferences: preferences,
+            storageKey: storageKey,
+            uid: uid,
+            conversationId: conversationId,
+            identities: identities,
+          );
+          return identity['correction_id'].toString();
         }
       }
 
       final correctionId = const Uuid().v4();
-      final saved = await preferences.saveString(
-        storageKey,
-        jsonEncode({
-          'uid': uid,
-          'conversation_id': conversationId,
-          'payload_fingerprint': fingerprint,
-          'correction_id': correctionId,
-        }),
+      identities.add({
+        'payload_fingerprint': fingerprint,
+        'correction_id': correctionId,
+        'created_at_ms': currentTime.millisecondsSinceEpoch,
+        'last_used_at_ms': currentTime.millisecondsSinceEpoch,
+      });
+      identities.sort(
+        (left, right) => (right['last_used_at_ms'] as int).compareTo(left['last_used_at_ms'] as int),
       );
-      if (!saved) throw StateError('Unable to persist correction identity');
+      final boundedMaxEntries = maxEntriesPerConversation.clamp(1, 64);
+      if (identities.length > boundedMaxEntries) {
+        identities.removeRange(boundedMaxEntries, identities.length);
+      }
+      await _saveIdentities(
+        preferences: preferences,
+        storageKey: storageKey,
+        uid: uid,
+        conversationId: conversationId,
+        identities: identities,
+      );
       return correctionId;
     });
+  }
+
+  Future<void> _saveIdentities({
+    required SharedPreferencesUtil preferences,
+    required String storageKey,
+    required String uid,
+    required String conversationId,
+    required List<Map<String, dynamic>> identities,
+  }) async {
+    final saved = await preferences.saveString(
+      storageKey,
+      jsonEncode({
+        'version': 2,
+        'uid': uid,
+        'conversation_id': conversationId,
+        'identities': identities,
+      }),
+    );
+    if (!saved) throw StateError('Unable to persist correction identity');
   }
 
   Future<void> clearIfTerminal({
@@ -435,8 +501,27 @@ class PendingConversationCorrectionIdentityStore {
       if (persisted.isEmpty) return;
       try {
         final decoded = jsonDecode(persisted);
-        if (decoded is Map && decoded['correction_id'] == correctionId) {
+        if (decoded is! Map || decoded['uid'] != uid || decoded['conversation_id'] != conversationId) {
           await preferences.remove(storageKey);
+          return;
+        }
+        final rawIdentities = decoded['identities'];
+        if (rawIdentities is! List) {
+          if (decoded['correction_id'] == correctionId) await preferences.remove(storageKey);
+          return;
+        }
+        final identities = rawIdentities.whereType<Map>().map((entry) => Map<String, dynamic>.from(entry)).toList();
+        identities.removeWhere((entry) => entry['correction_id'] == correctionId);
+        if (identities.isEmpty) {
+          await preferences.remove(storageKey);
+        } else {
+          await _saveIdentities(
+            preferences: preferences,
+            storageKey: storageKey,
+            uid: uid,
+            conversationId: conversationId,
+            identities: identities,
+          );
         }
       } on FormatException {
         await preferences.remove(storageKey);
@@ -454,6 +539,7 @@ Future<ConversationCorrectionSubmission?> submitConversationCorrection({
   String? appSummary,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  Duration requestTimeout = conversationCorrectionSubmitBudget,
   ConversationCorrectionTransport transport = _defaultConversationCorrectionTransport,
   void Function(String message) debugLog = Logger.debug,
 }) async {
@@ -462,23 +548,29 @@ Future<ConversationCorrectionSubmission?> submitConversationCorrection({
   final expectedUid = expectedAuthenticatedUid ?? authority?.uid;
   if (authority == null || expectedUid == null || expectedUid.isEmpty || authority.uid != expectedUid) return null;
   final encodedConversationId = Uri.encodeComponent(conversationId);
-  final response = await transport(
-    url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/corrections',
-    method: 'POST',
-    body: jsonEncode({
-      'correction_id': correctionId,
-      'correction_text': correctionText,
-      'source': 'ios',
-      'summary_context': {
-        if (summaryTitle != null) 'title': summaryTitle,
-        if (summaryOverview != null) 'overview': summaryOverview,
-        if (appSummary != null) 'app_summary': appSummary,
-      },
-    }),
-    expectedAuthenticatedUid: expectedUid,
-    exactAuthority: authority,
-    timeout: null,
-  );
+  if (requestTimeout <= Duration.zero) return null;
+  http.Response? response;
+  try {
+    response = await transport(
+      url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/corrections',
+      method: 'POST',
+      body: jsonEncode({
+        'correction_id': correctionId,
+        'correction_text': correctionText,
+        'source': 'ios',
+        'summary_context': {
+          if (summaryTitle != null) 'title': summaryTitle,
+          if (summaryOverview != null) 'overview': summaryOverview,
+          if (appSummary != null) 'app_summary': appSummary,
+        },
+      }),
+      expectedAuthenticatedUid: expectedUid,
+      exactAuthority: authority,
+      timeout: requestTimeout,
+    ).timeout(requestTimeout);
+  } on TimeoutException {
+    return null;
+  }
   if (response == null) return null;
   debugLog('submitConversationCorrection: status=${response.statusCode}');
   if (response.statusCode != 200 && response.statusCode != 201 && response.statusCode != 202) return null;
@@ -702,6 +794,7 @@ Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
 // overhead, one reclaimable attempt, and a further 30s client margin. The
 // first poll is immediate.
 const conversationCorrectionBackendTerminalBound = Duration(seconds: 150);
+const conversationCorrectionSubmitBudget = Duration(seconds: 30);
 const conversationCorrectionClientPollMargin = Duration(seconds: 30);
 const conversationCorrectionClientPollBudget = Duration(seconds: 330);
 

@@ -122,6 +122,19 @@ CORRECTION_OBSERVER_WORK_INLINE_WITHOUT_BACKGROUND = os.getenv(
     "no",
 }
 _canonical_event_store = PostgresCanonicalEventStore()
+_CORRECTION_RECEIPT_STATUSES = {
+    "submitted",
+    "queued",
+    "retry_queued",
+    "processing",
+    "canonical_pending",
+    "applied",
+    "undone",
+    "consent_revoked",
+    "direct_apply_failed",
+    "direct_apply_disabled",
+    "queue_failed",
+}
 
 
 class _CorrectionDeadline:
@@ -601,6 +614,7 @@ async def _apply_corrected_summary(
     active_summary_version_id: Optional[str],
     corrected: dict[str, Any],
     retry_attempt_token: Optional[str] = None,
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> dict[str, Any]:
     return await apply_summary_update(
         uid=uid,
@@ -612,7 +626,32 @@ async def _apply_corrected_summary(
         correction_id=correction_id,
         require_based_on_match=True,
         require_canonical=True,
-        canonical_egress_guard=lambda: require_current_ai_consent(uid),
+        canonical_egress_guard=(
+            (
+                lambda: _guard_canonical_publication(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    retry_attempt_token=retry_attempt_token,
+                )
+            )
+            if retry_attempt_token
+            else lambda: require_current_ai_consent(uid)
+        ),
+        canonical_egress_completion=(
+            (
+                lambda confirmed: _complete_canonical_publication(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    retry_attempt_token=retry_attempt_token,
+                    confirmed=confirmed,
+                )
+            )
+            if retry_attempt_token
+            else None
+        ),
+        canonical_timeout_provider=deadline.require_remaining if deadline is not None else None,
         correction_attempt_token=retry_attempt_token,
         correction_source_compare_and_set=(
             (
@@ -642,12 +681,185 @@ def _audit_ref(uid: str, conversation_id: str, correction_id: str):
     )
 
 
+def _claim_canonical_publication_in_transaction(
+    transaction,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: str,
+    claimed_at: str,
+) -> str:
+    """Claim the external publication at the final synchronous egress boundary."""
+
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("status") or "") not in {"processing", "canonical_pending"}
+    ):
+        return "stale_attempt"
+    lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
+    claim_time = _parse_correction_timestamp(claimed_at)
+    if lease_expires_at is None or claim_time is None or lease_expires_at <= claim_time:
+        return "lease_expired"
+    publication_state = str(audit.get("canonical_publication_state") or "")
+    if publication_state == "completed":
+        return "already_completed"
+    if publication_state == "inflight":
+        return "already_inflight"
+    transaction.set(
+        audit_ref,
+        {
+            "canonical_publication_state": "inflight",
+            "canonical_publication_attempt_token": retry_attempt_token,
+            "canonical_publication_started_at": claimed_at,
+            "updated_at": claimed_at,
+        },
+        merge=True,
+    )
+    return "claimed"
+
+
+@transactional
+def _claim_canonical_publication_transaction(transaction, audit_ref, **kwargs) -> str:
+    return _claim_canonical_publication_in_transaction(transaction, audit_ref, **kwargs)
+
+
+def _claim_canonical_publication(
+    *, uid: str, conversation_id: str, correction_id: str, retry_attempt_token: str
+) -> str:
+    return _claim_canonical_publication_transaction(
+        db.transaction(),
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+        claimed_at=_now_iso(),
+    )
+
+
+def _complete_canonical_publication_in_transaction(
+    transaction,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: str,
+    confirmed: bool,
+    completed_at: str,
+) -> str:
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("canonical_publication_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("canonical_publication_state") or "") != "inflight"
+    ):
+        return "stale_attempt"
+    transaction.set(
+        audit_ref,
+        {
+            "canonical_publication_state": "completed" if confirmed else "failed",
+            "canonical_publication_completed_at": completed_at,
+            "canonical_publication_confirmed": confirmed,
+            "updated_at": completed_at,
+        },
+        merge=True,
+    )
+    return "completed"
+
+
+@transactional
+def _complete_canonical_publication_transaction(transaction, audit_ref, **kwargs) -> str:
+    return _complete_canonical_publication_in_transaction(transaction, audit_ref, **kwargs)
+
+
+def _complete_canonical_publication(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: str,
+    confirmed: bool,
+) -> str:
+    return _complete_canonical_publication_transaction(
+        db.transaction(),
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+        confirmed=confirmed,
+        completed_at=_now_iso(),
+    )
+
+
+def _guard_canonical_publication(
+    *, uid: str, conversation_id: str, correction_id: str, retry_attempt_token: str
+) -> bool:
+    # Both checks run inside the canonical writer's thread. The second is the
+    # last operation before external publication after the durable claim.
+    require_current_ai_consent(uid)
+    claim_status = _claim_canonical_publication(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+    )
+    if claim_status == "already_completed":
+        return False
+    if claim_status != "claimed":
+        raise CanonicalSummaryWriteUnconfirmedError(f"canonical_publication_{claim_status}")
+    try:
+        require_current_ai_consent(uid)
+    except Exception:
+        _complete_canonical_publication(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            retry_attempt_token=retry_attempt_token,
+            confirmed=False,
+        )
+        raise
+    return True
+
+
 def _read_correction_audit(uid: str, conversation_id: str, correction_id: str) -> dict[str, Any]:
     snapshot = _audit_ref(uid, conversation_id, correction_id).get()
     if not getattr(snapshot, "exists", False):
         return {}
     value = snapshot.to_dict() or {}
     return value if isinstance(value, dict) else {}
+
+
+def _validate_correction_receipt_audit(
+    audit: dict[str, Any], *, uid: str, conversation_id: str, correction_id: str
+) -> None:
+    if not audit:
+        return
+    expected_trace_id = f"correction:{conversation_id}:{correction_id}"
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("status") or "") not in _CORRECTION_RECEIPT_STATUSES
+        or (audit.get("trace_id") is not None and str(audit.get("trace_id") or "") != expected_trace_id)
+    ):
+        raise HTTPException(status_code=404, detail="Correction not found")
 
 
 def _audit_request_fingerprint(audit: dict[str, Any]) -> str:
@@ -998,6 +1210,12 @@ def _correction_receipt(
         raise HTTPException(status_code=404, detail="Conversation not found")
     _require_unlocked_conversation(conversation)
     audit = _read_correction_audit(uid, conversation_id, correction_id)
+    _validate_correction_receipt_audit(
+        audit,
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+    )
     before, corrected = _correction_summary_versions(conversation, correction_id)
     if not audit and corrected is None:
         raise HTTPException(status_code=404, detail="Correction not found")
@@ -1248,9 +1466,11 @@ async def _emit_canonical_correction_event(
     submitted_at: str,
     active_summary_version_id: Optional[str],
     proposal_id: Optional[str],
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> None:
     if not CORRECTION_CANONICAL_EVENT_ENABLED:
         return
+    deadline = deadline or _CorrectionDeadline()
     event = CanonicalEventIn(
         uid=uid,
         canonical_identity=uid,
@@ -1290,8 +1510,11 @@ async def _emit_canonical_correction_event(
         },
     )
     try:
-        result = await _canonical_event_store.write_batch([event])
-        _append_correction_event(
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        result = await deadline.run_async(lambda: _canonical_event_store.write_batch([event]))
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        await deadline.run_blocking(
+            _append_correction_event,
             uid,
             conversation_id,
             correction_id,
@@ -1304,12 +1527,16 @@ async def _emit_canonical_correction_event(
                 "write_result": result,
             },
         )
-        _persist_correction_audit(
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        await deadline.run_blocking(
+            _persist_correction_audit,
             uid,
             conversation_id,
             correction_id,
             {"canonical_event_completed": True, "updated_at": _now_iso()},
         )
+    except (HTTPException, TimeoutError):
+        raise
     except Exception as exc:
         logger.warning(
             "Failed to emit canonical correction event",
@@ -1348,21 +1575,33 @@ async def _run_correction_propagation_for_submission(
     trace_id: str,
     request: ConversationCorrectionRequest,
     source_conversation: dict[str, Any],
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> None:
     if not CORRECTION_PROPAGATION_ENABLED:
         return
+    deadline = deadline or _CorrectionDeadline()
+
+    def propagation_egress_guard() -> None:
+        deadline.require_remaining()
+        require_current_ai_consent(uid)
+
     try:
-        run = run_correction_propagation(
+        run = await deadline.run_blocking(
+            run_correction_propagation,
             uid=uid,
             source_conversation={**source_conversation, "id": conversation_id},
             correction_id=correction_id,
             trace_id=trace_id,
             correction_text=request.correction_text,
             correction_type=_correction_category(request.correction_text, request.summary_context),
+            egress_guard=propagation_egress_guard,
         )
         payload = propagation_run_to_dict(run)
-        _persist_correction_propagation_run(uid, conversation_id, correction_id, payload)
-        _append_correction_event(
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        await deadline.run_blocking(_persist_correction_propagation_run, uid, conversation_id, correction_id, payload)
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        await deadline.run_blocking(
+            _append_correction_event,
             uid,
             conversation_id,
             correction_id,
@@ -1377,7 +1616,9 @@ async def _run_correction_propagation_for_submission(
                 "skipped_count": run.skipped_count,
             },
         )
-        _persist_correction_audit(
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        await deadline.run_blocking(
+            _persist_correction_audit,
             uid,
             conversation_id,
             correction_id,
@@ -1390,6 +1631,8 @@ async def _run_correction_propagation_for_submission(
                 "updated_at": _now_iso(),
             },
         )
+    except (HTTPException, TimeoutError):
+        raise
     except Exception as exc:
         logger.exception(
             "Correction propagation run failed",
@@ -1421,8 +1664,11 @@ async def _run_correction_observer_work(
     submitted_at: str,
     active_summary_version_id: Optional[str],
     proposal_id: Optional[str],
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> None:
-    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    deadline = deadline or _CorrectionDeadline()
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    audit = await deadline.run_blocking(_read_correction_audit, uid, conversation_id, correction_id)
     canonical_completed = audit.get("canonical_event_completed") is True or _audit_has_completed_stage(
         audit, "canonical_event_emitted"
     )
@@ -1437,9 +1683,11 @@ async def _run_correction_observer_work(
             submitted_at=submitted_at,
             active_summary_version_id=active_summary_version_id,
             proposal_id=proposal_id,
+            deadline=deadline,
         )
 
-    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    audit = await deadline.run_blocking(_read_correction_audit, uid, conversation_id, correction_id)
     propagation_completed = audit.get("propagation_completed") is True or _audit_has_completed_stage(
         audit, "propagation_run_completed"
     )
@@ -1451,6 +1699,7 @@ async def _run_correction_observer_work(
             trace_id=trace_id,
             request=request,
             source_conversation=source_conversation,
+            deadline=deadline,
         )
 
 
@@ -1581,16 +1830,20 @@ async def _run_post_source_correction_side_effects(
     segment_count: int,
     submitted_at: str,
     active_summary_version_id: Optional[str],
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> Optional[str]:
     """Run only incomplete downstream work after the source summary CAS succeeds."""
 
-    require_current_ai_consent(uid)
-    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    deadline = deadline or _CorrectionDeadline()
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    audit = await deadline.run_blocking(_read_correction_audit, uid, conversation_id, correction_id)
     proposal_id = str(audit.get("proposal_id") or "") or None
     proposal_completed = bool(proposal_id) or _audit_has_completed_stage(audit, "proposal_created")
     if not proposal_completed:
         try:
-            proposal_id = _create_summary_correction_proposal(
+            await deadline.run_blocking(require_current_ai_consent, uid)
+            proposal_id = await deadline.run_blocking(
+                _create_summary_correction_proposal,
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
@@ -1603,13 +1856,17 @@ async def _run_post_source_correction_side_effects(
             )
             if proposal_id:
                 created_at = _now_iso()
-                _persist_correction_audit(
+                await deadline.run_blocking(require_current_ai_consent, uid)
+                await deadline.run_blocking(
+                    _persist_correction_audit,
                     uid,
                     conversation_id,
                     correction_id,
                     {"proposal_id": proposal_id, "proposal_completed": True, "updated_at": created_at},
                 )
-                _append_correction_event(
+                await deadline.run_blocking(require_current_ai_consent, uid)
+                await deadline.run_blocking(
+                    _append_correction_event,
                     uid,
                     conversation_id,
                     correction_id,
@@ -1621,6 +1878,8 @@ async def _run_post_source_correction_side_effects(
                         "proposal_id": proposal_id,
                     },
                 )
+        except (HTTPException, TimeoutError):
+            raise
         except Exception:
             logger.exception(
                 "Failed to create summary correction proposal",
@@ -1633,7 +1892,7 @@ async def _run_post_source_correction_side_effects(
                 {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id},
             )
 
-    require_current_ai_consent(uid)
+    await deadline.run_blocking(require_current_ai_consent, uid)
     await _run_correction_observer_work(
         uid=uid,
         conversation_id=conversation_id,
@@ -1645,6 +1904,7 @@ async def _run_post_source_correction_side_effects(
         submitted_at=submitted_at,
         active_summary_version_id=active_summary_version_id,
         proposal_id=proposal_id,
+        deadline=deadline,
     )
     return proposal_id
 
@@ -1668,7 +1928,9 @@ async def _submit_correction_to_n8n(
     structured: dict[str, Any],
     transcript: str,
     segment_count: int,
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> dict[str, Any]:
+    deadline = deadline or _CorrectionDeadline()
     webhook_url = f"{ELLA_CONFIG.n8n_base_url.rstrip('/')}/webhook/conversation-correction"
     payload = {
         "uid": uid,
@@ -1684,9 +1946,10 @@ async def _submit_correction_to_n8n(
         "transcript": transcript,
         "segments_count": segment_count,
     }
-    require_current_ai_consent(uid)
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.post(webhook_url, json=payload)
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    async with httpx.AsyncClient(timeout=min(20.0, deadline.require_remaining())) as client:
+        await deadline.run_blocking(require_current_ai_consent, uid)
+        response = await deadline.run_async(lambda: client.post(webhook_url, json=payload))
     try:
         response_body = response.json()
     except Exception:
@@ -1798,6 +2061,7 @@ async def _run_direct_correction_apply(
                 active_summary_version_id=active_summary_version_id,
                 corrected=corrected_summary,
                 retry_attempt_token=retry_attempt_token,
+                deadline=deadline,
             )
         )
         if apply_result.get("canonical_confirmed") is not True:
@@ -1865,6 +2129,7 @@ async def _run_direct_correction_apply(
                     segment_count=segment_count,
                     submitted_at=submitted_at,
                     active_summary_version_id=active_summary_version_id,
+                    deadline=deadline,
                 )
             )
         except Exception:
@@ -2248,15 +2513,18 @@ async def _submit_conversation_correction(
         )
 
     try:
-        queue_result = await _submit_correction_to_n8n(
-            uid=uid,
-            conversation_id=conversation_id,
-            correction_id=correction_id,
-            trace_id=trace_id,
-            request=request,
-            structured=structured,
-            transcript=transcript,
-            segment_count=segment_count,
+        queue_result = await deadline.run_async(
+            lambda: _submit_correction_to_n8n(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                request=request,
+                structured=structured,
+                transcript=transcript,
+                segment_count=segment_count,
+                deadline=deadline,
+            )
         )
     except Exception as exc:
         logger.exception(
@@ -2443,6 +2711,11 @@ def _correction_work_lease_is_reclaimable(audit: dict[str, Any], *, now: datetim
         return False
     if audit_status in {"queued", "processing", "retry_queued"} and not audit.get("retry_attempt_token"):
         return False
+    publication_state = str(audit.get("canonical_publication_state") or "")
+    if publication_state == "inflight":
+        return False
+    if publication_state == "completed" and audit_status == "canonical_pending":
+        return True
     lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
     return lease_expires_at is None or lease_expires_at <= now.astimezone(timezone.utc)
 
@@ -2481,9 +2754,17 @@ def _claim_failed_correction_retry_in_transaction(
         return "identity_mismatch"
     audit_status = str(audit.get("status") or "")
     if audit_status in {"submitted", "queued", "processing", "retry_queued", "canonical_pending"}:
+        if str(audit.get("canonical_publication_state") or "") == "inflight":
+            return "already_queued"
         lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
         retry_now = _parse_correction_timestamp(retry_queued_at)
-        if lease_expires_at is not None and retry_now is not None and lease_expires_at > retry_now:
+        publication_completed = str(audit.get("canonical_publication_state") or "") == "completed"
+        if (
+            not publication_completed
+            and lease_expires_at is not None
+            and retry_now is not None
+            and lease_expires_at > retry_now
+        ):
             return "already_queued"
     elif audit_status not in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
         return "not_retryable"
@@ -2655,9 +2936,17 @@ def _claim_canonical_reconciliation_in_transaction(
         return "version_drift"
     if str(audit.get("status") or "") == "applied":
         return "already_applied"
+    publication_state = str(audit.get("canonical_publication_state") or "")
+    if publication_state == "inflight":
+        return "already_queued"
     lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
     retry_now = _parse_correction_timestamp(retry_queued_at)
-    if lease_expires_at is not None and retry_now is not None and lease_expires_at > retry_now:
+    if (
+        publication_state != "completed"
+        and lease_expires_at is not None
+        and retry_now is not None
+        and lease_expires_at > retry_now
+    ):
         return "already_queued"
     transaction.set(
         audit_ref,
@@ -2732,6 +3021,8 @@ def _finish_canonical_reconciliation_in_transaction(
         return "stale_attempt"
     if str(audit.get("status") or "") in {"applied", "undone", "consent_revoked"}:
         return "already_terminal"
+    if str(audit.get("canonical_publication_state") or "") == "inflight":
+        return "publication_inflight"
     _, corrected = _correction_summary_versions(conversation, correction_id)
     corrected_id = str(corrected.get("id") or "") if corrected else ""
     if (
@@ -2824,6 +3115,8 @@ def _record_failed_correction_attempt_in_transaction(
         return "identity_mismatch"
     if retry_attempt_token and str(audit.get("retry_attempt_token") or "") != retry_attempt_token:
         return "stale_attempt"
+    if str(audit.get("canonical_publication_state") or "") == "inflight":
+        return "publication_inflight"
     _, corrected = _correction_summary_versions(conversation, correction_id)
     corrected_id = str(corrected.get("id") or "") if corrected else ""
     if corrected_id and str(conversation.get("active_summary_version_id") or "") == corrected_id:
@@ -2895,11 +3188,18 @@ def _reconcile_committed_correction(
         return None
     enrichment = conversation.get("enrichment_state") or {}
     audit_apply_result = audit.get("direct_apply_result") or {}
-    canonical_confirmed = bool(
-        str(enrichment.get("trace_id") or "") == trace_id
-        and enrichment.get("status") == "writeback_applied"
-        and enrichment.get("canonical_status") == "completed"
-    ) or bool(isinstance(audit_apply_result, dict) and audit_apply_result.get("canonical_confirmed") is True)
+    canonical_confirmed = (
+        bool(
+            str(enrichment.get("trace_id") or "") == trace_id
+            and enrichment.get("status") == "writeback_applied"
+            and enrichment.get("canonical_status") == "completed"
+        )
+        or bool(isinstance(audit_apply_result, dict) and audit_apply_result.get("canonical_confirmed") is True)
+        or bool(
+            audit.get("canonical_publication_state") == "completed"
+            and audit.get("canonical_publication_confirmed") is True
+        )
+    )
     status_value = (
         "applied" if canonical_confirmed or str(audit.get("status") or "") == "applied" else "canonical_pending"
     )
@@ -3022,12 +3322,19 @@ async def _retry_failed_conversation_correction(
 
         enrichment = conversation.get("enrichment_state") or {}
         audit_apply_result = audit.get("direct_apply_result") or {}
-        canonical_already_confirmed = bool(
-            isinstance(enrichment, dict)
-            and str(enrichment.get("trace_id") or "") == trace_id
-            and enrichment.get("status") == "writeback_applied"
-            and enrichment.get("canonical_status") == "completed"
-        ) or bool(isinstance(audit_apply_result, dict) and audit_apply_result.get("canonical_confirmed") is True)
+        canonical_already_confirmed = (
+            bool(
+                isinstance(enrichment, dict)
+                and str(enrichment.get("trace_id") or "") == trace_id
+                and enrichment.get("status") == "writeback_applied"
+                and enrichment.get("canonical_status") == "completed"
+            )
+            or bool(isinstance(audit_apply_result, dict) and audit_apply_result.get("canonical_confirmed") is True)
+            or bool(
+                audit.get("canonical_publication_state") == "completed"
+                and audit.get("canonical_publication_confirmed") is True
+            )
+        )
         if canonical_already_confirmed:
             apply_result = dict(audit_apply_result) if isinstance(audit_apply_result, dict) else {}
             apply_result.setdefault("status", "ok")
@@ -3045,6 +3352,7 @@ async def _retry_failed_conversation_correction(
                         active_summary_version_id=recorded_base_version_id,
                         corrected=corrected,
                         retry_attempt_token=reconciliation_attempt_token,
+                        deadline=deadline,
                     )
                 )
                 if apply_result.get("canonical_confirmed") is not True:
@@ -3190,6 +3498,7 @@ async def _retry_failed_conversation_correction(
                 segment_count=segment_count,
                 submitted_at=submitted_at,
                 active_summary_version_id=recorded_base_version_id,
+                deadline=deadline,
             )
         except HTTPException as error:
             detail = error.detail if isinstance(error.detail, dict) else {}

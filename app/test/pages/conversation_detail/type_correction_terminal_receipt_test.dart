@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -97,6 +98,7 @@ void main() {
       String? appSummary,
       String? expectedAuthenticatedUid,
       ExactAccountAuthorityVerifier? exactAuthority,
+      required Duration requestTimeout,
     }) {
       submittedCorrectionIds.add(correctionId);
       return submitConversationCorrection(
@@ -108,6 +110,7 @@ void main() {
         appSummary: appSummary,
         expectedAuthenticatedUid: expectedAuthenticatedUid,
         exactAuthority: exactAuthority,
+        requestTimeout: requestTimeout,
         debugLog: logs.add,
         transport: ({
           required url,
@@ -142,12 +145,14 @@ void main() {
       required String correctionId,
       required String expectedAuthenticatedUid,
       required ExactAccountAuthorityVerifier exactAuthority,
+      required Duration pollBudget,
     }) {
       return pollConversationCorrectionReceipt(
         conversationId: conversationId,
         correctionId: correctionId,
         expectedAuthenticatedUid: expectedAuthenticatedUid,
         exactAuthority: exactAuthority,
+        pollBudget: pollBudget,
         maxAttempts: 3,
         wait: (_) async {},
         fetchReceipt: ({
@@ -278,6 +283,7 @@ void main() {
               appSummary,
               expectedAuthenticatedUid,
               exactAuthority,
+              required requestTimeout,
             }) async {
               logs.add('submit status=202');
               return ConversationCorrectionSubmission(
@@ -293,6 +299,7 @@ void main() {
               required correctionId,
               required expectedAuthenticatedUid,
               required exactAuthority,
+              required pollBudget,
             }) async {
               logs.add('receipt status=200');
               return ConversationCorrectionReceipt(
@@ -427,7 +434,7 @@ void main() {
     expect(afterRestart, concurrentIds.first);
   });
 
-  test('changed correction payload gets a new identity and stale terminal cleanup cannot clear it', () async {
+  test('payload identities survive A to B to B and A to B to A interleaving', () async {
     const store = PendingConversationCorrectionIdentityStore();
     final original = await store.acquire(
       uid: 'owner-1',
@@ -441,20 +448,118 @@ void main() {
       correctionText: 'Changed correction.',
       summaryTitle: 'Before',
     );
-    await store.clearIfTerminal(
-      uid: 'owner-1',
-      conversationId: 'conversation-changed',
-      correctionId: original,
-    );
     final changedReplay = await const PendingConversationCorrectionIdentityStore().acquire(
       uid: 'owner-1',
       conversationId: 'conversation-changed',
       correctionText: 'Changed correction.',
       summaryTitle: 'Before',
     );
+    final originalReplay = await const PendingConversationCorrectionIdentityStore().acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionText: 'Original correction.',
+      summaryTitle: 'Before',
+    );
+    await store.clearIfTerminal(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionId: changed,
+    );
+    final originalAfterChangedCleanup = await const PendingConversationCorrectionIdentityStore().acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionText: 'Original correction.',
+      summaryTitle: 'Before',
+    );
 
     expect(changed, isNot(original));
     expect(changedReplay, changed);
+    expect(originalReplay, original);
+    expect(originalAfterChangedCleanup, original);
+  });
+
+  test('identity store is account scoped, bounded, and expires stale fingerprints', () async {
+    const boundedStore = PendingConversationCorrectionIdentityStore(maxEntriesPerConversation: 2);
+    final started = DateTime.utc(2026, 8, 1);
+    final a = await boundedStore.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-cleanup',
+      correctionText: 'Payload A',
+      now: started,
+    );
+    await boundedStore.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-cleanup',
+      correctionText: 'Payload B',
+      now: started.add(const Duration(minutes: 1)),
+    );
+    final c = await boundedStore.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-cleanup',
+      correctionText: 'Payload C',
+      now: started.add(const Duration(minutes: 2)),
+    );
+    final aAfterBoundedCleanup = await boundedStore.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-cleanup',
+      correctionText: 'Payload A',
+      now: started.add(const Duration(minutes: 3)),
+    );
+    final otherOwner = await boundedStore.acquire(
+      uid: 'owner-2',
+      conversationId: 'conversation-cleanup',
+      correctionText: 'Payload C',
+      now: started.add(const Duration(minutes: 3)),
+    );
+
+    const expiringStore = PendingConversationCorrectionIdentityStore(retention: Duration(hours: 1));
+    final expiring = await expiringStore.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-expiry',
+      correctionText: 'Expiring payload',
+      now: started,
+    );
+    final afterExpiry = await expiringStore.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-expiry',
+      correctionText: 'Expiring payload',
+      now: started.add(const Duration(hours: 2)),
+    );
+
+    expect(aAfterBoundedCleanup, isNot(a));
+    expect(otherOwner, isNot(c));
+    expect(afterExpiry, isNot(expiring));
+  });
+
+  test('stalled submit transport consumes only its supplied end-to-end remaining budget', () async {
+    final authority = _ExactAuthority('owner-1');
+    Duration? observedTimeout;
+    final stopwatch = Stopwatch()..start();
+    final submission = await submitConversationCorrection(
+      conversationId: 'conversation-stalled-submit',
+      correctionId: 'correction-stalled-submit',
+      correctionText: 'Correct this private summary.',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      requestTimeout: const Duration(milliseconds: 20),
+      debugLog: (_) {},
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        required timeout,
+      }) async {
+        observedTimeout = timeout;
+        await Completer<http.Response?>().future;
+        return null;
+      },
+    );
+
+    expect(submission, isNull);
+    expect(observedTimeout, const Duration(milliseconds: 20));
+    expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 200)));
   });
 
   test('submission fails closed when response correction id differs from submitted id', () async {

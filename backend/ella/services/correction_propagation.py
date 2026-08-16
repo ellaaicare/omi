@@ -354,6 +354,7 @@ def run_correction_propagation(
     dry_run: bool = False,
     limit: int = 25,
     min_confidence: float | None = None,
+    egress_guard: Callable[[], None] | None = None,
 ) -> CorrectionPropagationRun:
     started = _now()
     monotonic_start = time.monotonic()
@@ -366,7 +367,11 @@ def run_correction_propagation(
     )
     candidate_limit = max(1, min(int(limit or 25), 100))
     loader = candidate_loader or _load_related_conversations
+    if egress_guard is not None:
+        egress_guard()
     candidates = loader(uid, source_conversation, limit=candidate_limit)
+    if egress_guard is not None:
+        egress_guard()
     source_time = _conversation_time(source_conversation)
     source_terms = _terms(correction_text, _summary_text(source_conversation), _transcript_text(source_conversation))
     decisions: list[CorrectionPropagationDecision] = []
@@ -375,6 +380,8 @@ def run_correction_propagation(
     honcho_fact_proposal_count = 0
 
     for candidate in candidates:
+        if egress_guard is not None:
+            egress_guard()
         candidate_id = _conversation_id(candidate)
         if candidate_id == source_id:
             decisions.append(
@@ -468,6 +475,8 @@ def run_correction_propagation(
             proposal_count += 1
             continue
 
+        if egress_guard is not None:
+            egress_guard()
         try:
             result = create_proposal(
                 session_claims=_claims(uid, trace_id),
@@ -493,6 +502,8 @@ def run_correction_propagation(
             )
             proposal_count += 1
             if fact_candidate is not None:
+                if egress_guard is not None:
+                    egress_guard()
                 fact_result = create_honcho_fact_candidate_proposal(fact_candidate, create_proposal=create_proposal)
                 fact_proposal = fact_result.get("proposal") or {}
                 fact_proposal_id = str(fact_proposal.get("proposal_id") or "")
@@ -519,6 +530,8 @@ def run_correction_propagation(
                     )
                 )
         except Exception as exc:
+            if egress_guard is not None:
+                egress_guard()
             decisions.append(
                 CorrectionPropagationDecision(
                     conversation_id=candidate_id,

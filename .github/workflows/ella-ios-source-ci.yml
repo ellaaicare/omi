@@ -26,6 +26,7 @@ on:
       - backend/ella/services/runtime_resolver.py
       - backend/ella/services/ai_consent.py
       - backend/ella/services/consent_authority.py
+      - backend/ella/services/correction_propagation.py
       - backend/ella/services/hermes_cloud.py
       - backend/ella/services/hermes_cloud_policy.py
       - backend/ella/services/hermes_cloud_staged_attestation.py
@@ -79,8 +80,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify immutable source head receipt
+        working-directory: .
+        env:
+          ELLA_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          [[ "$ELLA_EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact immutable head SHA." >&2
+            exit 1
+          }
+          actual_head="$(git rev-parse HEAD)"
+          [[ "$actual_head" == "$ELLA_EXPECTED_HEAD_SHA" ]] || {
+            echo "Source CI checkout mismatch: expected $ELLA_EXPECTED_HEAD_SHA, got $actual_head." >&2
+            exit 1
+          }
+          echo "ELLA_SOURCE_HEAD_SHA=$actual_head" >> "$GITHUB_ENV"
+          echo "Immutable source head: $actual_head"
+          {
+            echo "### Ella iOS Source CI receipt"
+            echo
+            echo "Immutable source head: \`$actual_head\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify credential-free source CI scope
         working-directory: .
@@ -124,7 +150,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/main.py|backend/database/authority_advisory_lock.py|backend/database/ella_provisioning.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/runtime_targets.py|backend/database/voice_canary.py|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/consent_authority.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/main.py|backend/database/authority_advisory_lock.py|backend/database/ella_provisioning.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/runtime_targets.py|backend/database/voice_canary.py|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -197,6 +223,7 @@ jobs:
             backend/ella/routers/corrections.py \
             backend/ella/services/ai_consent.py \
             backend/ella/services/consent_authority.py \
+            backend/ella/services/correction_propagation.py \
             backend/ella/services/hermes_cloud.py \
             backend/ella/services/hermes_cloud_policy.py \
             backend/ella/services/hermes_cloud_staged_attestation.py \
@@ -237,11 +264,17 @@ jobs:
             "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_terminalizes_background_retry_and_receipt_recovery_without_provider_egress"
             "tests/unit/test_ella_conversation_corrections.py::test_initial_submission_transaction_is_stable_across_crash_and_response_loss"
             "tests/unit/test_ella_conversation_corrections.py::test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_writer"
+            "tests/unit/test_ella_conversation_corrections.py::test_timed_out_canonical_worker_blocks_reclaim_until_late_completion_and_publishes_once"
+            "tests/unit/test_ella_conversation_corrections.py::test_revocation_at_final_canonical_and_downstream_boundaries_prevents_all_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_propagation_revalidates_before_related_transcript_read_and_proposal_write"
+            "tests/unit/test_ella_conversation_corrections.py::test_receipt_audit_identity_or_status_mismatch_fails_closed_without_echo"
+            "tests/unit/test_ella_conversation_corrections.py::test_n8n_submission_is_bounded_by_the_existing_monotonic_deadline"
+            "tests/unit/test_ella_conversation_corrections.py::test_hosted_source_ci_checks_out_and_receipts_exact_pull_request_head_with_scans_preserved"
           )
           for required_id in "${required_correction_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 80
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 86
           python -m pytest \
             tests/unit/test_ella_correction_startup_contract.py \
             tests/unit/test_ella_correction_runtime_resolver.py \

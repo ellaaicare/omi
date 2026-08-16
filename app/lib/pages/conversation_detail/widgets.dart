@@ -988,6 +988,7 @@ typedef CorrectionSubmitter = Future<ConversationCorrectionSubmission?> Function
   String? appSummary,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  required Duration requestTimeout,
 });
 
 typedef CorrectionReceiptPoller = Future<ConversationCorrectionReceipt?> Function({
@@ -995,6 +996,7 @@ typedef CorrectionReceiptPoller = Future<ConversationCorrectionReceipt?> Functio
   required String correctionId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
+  required Duration pollBudget,
 });
 
 class CorrectSummarySheet extends StatefulWidget {
@@ -1035,6 +1037,8 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
     final correctionText = _controller.text.trim();
     if (correctionText.isEmpty || _isSubmitting) return;
 
+    final operationStopwatch = Stopwatch()..start();
+    Duration remainingBudget() => conversationCorrectionClientPollBudget - operationStopwatch.elapsed;
     setState(() => _isSubmitting = true);
     final authority = widget.authorityProvider();
     ConversationCorrectionReceipt? terminalReceipt;
@@ -1049,23 +1053,36 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
           appSummary: widget.appSummary,
         );
         if (!authority.isExactCurrent()) throw StateError('Exact account authority changed before correction submit');
-        final submission = await widget.submitter(
-          conversationId: widget.conversation.id,
-          correctionId: correctionId,
-          correctionText: correctionText,
-          summaryTitle: widget.conversation.structured.title,
-          summaryOverview: widget.conversation.structured.overview,
-          appSummary: widget.appSummary,
-          expectedAuthenticatedUid: authority.uid,
-          exactAuthority: authority,
-        );
+        final remainingBeforeSubmit = remainingBudget();
+        if (remainingBeforeSubmit <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
+        final submitBudget = remainingBeforeSubmit < conversationCorrectionSubmitBudget
+            ? remainingBeforeSubmit
+            : conversationCorrectionSubmitBudget;
+        final submission = await widget
+            .submitter(
+              conversationId: widget.conversation.id,
+              correctionId: correctionId,
+              correctionText: correctionText,
+              summaryTitle: widget.conversation.structured.title,
+              summaryOverview: widget.conversation.structured.overview,
+              appSummary: widget.appSummary,
+              expectedAuthenticatedUid: authority.uid,
+              exactAuthority: authority,
+              requestTimeout: submitBudget,
+            )
+            .timeout(submitBudget);
         if (submission != null && submission.conversationId == widget.conversation.id && authority.isExactCurrent()) {
-          terminalReceipt = await widget.receiptPoller(
-            conversationId: submission.conversationId,
-            correctionId: submission.correctionId,
-            expectedAuthenticatedUid: authority.uid,
-            exactAuthority: authority,
-          );
+          final pollBudget = remainingBudget();
+          if (pollBudget <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
+          terminalReceipt = await widget
+              .receiptPoller(
+                conversationId: submission.conversationId,
+                correctionId: submission.correctionId,
+                expectedAuthenticatedUid: authority.uid,
+                exactAuthority: authority,
+                pollBudget: pollBudget,
+              )
+              .timeout(pollBudget);
           if (terminalReceipt != null && !terminalReceipt.isPending) {
             await widget.correctionIdentityStore.clearIfTerminal(
               uid: authority.uid,

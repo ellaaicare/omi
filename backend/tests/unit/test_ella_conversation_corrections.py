@@ -1,7 +1,9 @@
 import asyncio
 import importlib.util
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -301,7 +303,13 @@ def test_correction_receipt_exposes_old_and_new_summary_and_real_propagation_cou
         def get(self):
             return SimpleNamespace(
                 exists=True,
-                to_dict=lambda: {"status": "applied", "applied_at": "2026-07-23T17:00:00+00:00"},
+                to_dict=lambda: {
+                    "uid": "uid-1",
+                    "conversation_id": "conv-1",
+                    "correction_id": "corr-1",
+                    "status": "applied",
+                    "applied_at": "2026-07-23T17:00:00+00:00",
+                },
             )
 
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
@@ -510,7 +518,16 @@ def test_correction_receipt_exposes_unknown_propagation_state_and_ignores_other_
 
     class AuditRef:
         def get(self):
-            return SimpleNamespace(exists=True, to_dict=lambda: {"applied_at": "2026-07-23T17:00:00+00:00"})
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "uid": "uid-1",
+                    "conversation_id": "conv-1",
+                    "correction_id": "corr-1",
+                    "status": "processing",
+                    "applied_at": "2026-07-23T17:00:00+00:00",
+                },
+            )
 
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
     monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
@@ -526,7 +543,7 @@ def test_correction_receipt_exposes_unknown_propagation_state_and_ignores_other_
         correction_id="corr-1",
     )
 
-    assert receipt.status == "pending"
+    assert receipt.status == "processing"
     assert receipt.propagation_status == "unknown"
     assert receipt.propagation_applied_count is None
     assert receipt.propagation_reverted_count is None
@@ -814,6 +831,9 @@ def test_repeated_undo_returns_same_recorded_undo_version_without_writing(monkey
             return SimpleNamespace(
                 exists=True,
                 to_dict=lambda: {
+                    "uid": "uid-1",
+                    "conversation_id": "conv-1",
+                    "correction_id": "corr-1",
                     "status": "undone",
                     "applied_at": "2026-07-23T17:00:00+00:00",
                     "undone_at": "2026-07-23T18:00:00+00:00",
@@ -1078,6 +1098,8 @@ def test_apply_corrected_summary_uses_shared_direct_writeback_service(monkeypatc
 
     assert result["active_summary_version_id"] == "corrected-v1"
     canonical_egress_guard = captured.pop("canonical_egress_guard")
+    assert captured.pop("canonical_egress_completion") is None
+    assert captured.pop("canonical_timeout_provider") is None
     assert callable(canonical_egress_guard)
     assert captured == {
         "uid": "user-123",
@@ -4033,6 +4055,7 @@ def test_correction_terminal_sla_caps_provider_and_matches_client_budget_with_ma
         _backend_path.parent / "app" / "lib" / "backend" / "http" / "api" / "conversations.dart"
     ).read_text(encoding="utf-8")
     assert "conversationCorrectionBackendTerminalBound = Duration(seconds: 150)" in client_source
+    assert "conversationCorrectionSubmitBudget = Duration(seconds: 30)" in client_source
     assert "conversationCorrectionClientPollMargin = Duration(seconds: 30)" in client_source
     assert "conversationCorrectionClientPollBudget = Duration(seconds: 330)" in client_source
     assert "final stopwatch = Stopwatch()..start()" in client_source
@@ -4569,3 +4592,321 @@ def test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_w
         assert time.monotonic() - blocking_started < 0.04
 
     asyncio.run(assert_blocking_deadline_returns_without_waiting_for_worker())
+
+
+def test_timed_out_canonical_worker_blocks_reclaim_until_late_completion_and_publishes_once(monkeypatch):
+    correction_id = "late-canonical"
+    trace_id = f"correction:conv-1:{correction_id}"
+    conversation_ref = _MutableCorrectionAuditRef(
+        {
+            "id": "conv-1",
+            "active_summary_version_id": "corrected-v2",
+            "summary_versions": [
+                {"id": "base-v1", "is_active": False},
+                {
+                    "id": "corrected-v2",
+                    "correction_id": correction_id,
+                    "based_on_version_id": "base-v1",
+                    "is_active": True,
+                },
+            ],
+            "enrichment_state": {
+                "status": "writeback_pending_canonical",
+                "pending": True,
+                "trace_id": trace_id,
+                "canonical_status": "pending",
+            },
+            "correction_state": {"correction_id": correction_id, "status": "canonical_pending"},
+        }
+    )
+    audit_ref = _MutableCorrectionAuditRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": correction_id,
+            "trace_id": trace_id,
+            "status": "canonical_pending",
+            "active_summary_version_id": "base-v1",
+            "retry_attempt_token": "attempt-a",
+            "retry_lease_expires_at": "2999-01-01T00:00:00+00:00",
+        }
+    )
+
+    class Transaction:
+        def set(self, ref, payload, merge=False):
+            ref.set(payload, merge=merge)
+
+    def guard(token):
+        status = corrections._claim_canonical_publication_in_transaction(
+            Transaction(),
+            audit_ref,
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            retry_attempt_token=token,
+            claimed_at="2026-08-16T01:00:00+00:00",
+        )
+        if status == "already_completed":
+            return False
+        if status != "claimed":
+            raise corrections.CanonicalSummaryWriteUnconfirmedError(status)
+        return True
+
+    def complete(token, confirmed):
+        return corrections._complete_canonical_publication_in_transaction(
+            Transaction(),
+            audit_ref,
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            retry_attempt_token=token,
+            confirmed=confirmed,
+            completed_at="2026-08-16T01:03:00+00:00",
+        )
+
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    publications = []
+
+    def canonical_writer(*args, **kwargs):
+        writer_started.set()
+        assert release_writer.wait(timeout=1)
+        publications.append(kwargs["trace_id"])
+        return {"ok": True, "inserted": 1}
+
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation_ref.value)
+
+    async def publish(token):
+        return await summary_writeback.write_conversation_summary(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            summary_kind="corrected_enriched",
+            trace_id=trace_id,
+            require_canonical=True,
+            canonical_writer=canonical_writer,
+            canonical_egress_guard=lambda: guard(token),
+            canonical_egress_completion=lambda confirmed: complete(token, confirmed),
+            correction_source_compare_and_set=lambda update: "updated",
+        )
+
+    async def scenario():
+        stale_task = asyncio.create_task(publish("attempt-a"))
+        for _ in range(100):
+            if writer_started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert writer_started.is_set()
+        stale_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stale_task
+
+        audit_ref.value["retry_lease_expires_at"] = "2026-08-16T01:00:01+00:00"
+        blocked_reclaim = corrections._claim_canonical_reconciliation_in_transaction(
+            Transaction(),
+            conversation_ref,
+            audit_ref,
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            recorded_base_version_id="base-v1",
+            retry_queued_at="2026-08-16T01:02:00+00:00",
+            retry_lease_expires_at="2026-08-16T01:04:30+00:00",
+            retry_attempt_token="attempt-b",
+        )
+        assert blocked_reclaim == "already_queued"
+        assert (
+            corrections._correction_work_lease_is_reclaimable(
+                audit_ref.value, now=datetime(2026, 8, 16, 1, 2, tzinfo=timezone.utc)
+            )
+            is False
+        )
+
+        release_writer.set()
+        for _ in range(100):
+            if audit_ref.value.get("canonical_publication_state") == "completed":
+                break
+            await asyncio.sleep(0.001)
+        assert audit_ref.value["canonical_publication_state"] == "completed"
+
+        completed_reclaim = corrections._claim_canonical_reconciliation_in_transaction(
+            Transaction(),
+            conversation_ref,
+            audit_ref,
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            recorded_base_version_id="base-v1",
+            retry_queued_at="2026-08-16T01:03:01+00:00",
+            retry_lease_expires_at="2026-08-16T01:05:31+00:00",
+            retry_attempt_token="attempt-b",
+        )
+        assert completed_reclaim == "claimed"
+        replay = await publish("attempt-b")
+        assert replay["canonical_confirmed"] is True
+
+    asyncio.run(scenario())
+    assert publications == [trace_id]
+
+
+def test_revocation_at_final_canonical_and_downstream_boundaries_prevents_all_egress(monkeypatch):
+    consent_checks = 0
+    completion = []
+
+    def revoke_after_claim(uid):
+        nonlocal consent_checks
+        consent_checks += 1
+        if consent_checks == 2:
+            raise HTTPException(status_code=403, detail={"code": "ai_consent_required"})
+
+    monkeypatch.setattr(corrections, "require_current_ai_consent", revoke_after_claim)
+    monkeypatch.setattr(corrections, "_claim_canonical_publication", lambda **kwargs: "claimed")
+    monkeypatch.setattr(
+        corrections,
+        "_complete_canonical_publication",
+        lambda **kwargs: completion.append(kwargs["confirmed"]) or "completed",
+    )
+    with pytest.raises(HTTPException):
+        corrections._guard_canonical_publication(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id="corr-1",
+            retry_attempt_token="attempt-1",
+        )
+    assert completion == [False]
+
+    downstream_writes = []
+    consent_checks = 0
+    monkeypatch.setattr(corrections, "_read_correction_audit", lambda *args: {})
+    monkeypatch.setattr(
+        corrections,
+        "_create_summary_correction_proposal",
+        lambda **kwargs: downstream_writes.append("proposal") or "proposal-1",
+    )
+    with pytest.raises(HTTPException):
+        asyncio.run(
+            corrections._run_post_source_correction_side_effects(
+                uid="owner-1",
+                conversation_id="conv-1",
+                correction_id="corr-1",
+                trace_id="correction:conv-1:corr-1",
+                request=corrections.ConversationCorrectionRequest(correction_text="Private correction."),
+                source_conversation=_conversation(),
+                structured=_conversation()["structured"],
+                transcript="private related transcript",
+                segment_count=1,
+                submitted_at="2026-08-16T01:00:00+00:00",
+                active_summary_version_id="base-v1",
+            )
+        )
+    assert downstream_writes == []
+
+
+def test_propagation_revalidates_before_related_transcript_read_and_proposal_write():
+    source = {**_conversation(), "id": "source", "uid": "owner-1"}
+    related = {**_conversation(), "id": "related", "uid": "owner-1"}
+    guard_calls = 0
+    proposals = []
+
+    def guard():
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 3:
+            raise HTTPException(status_code=403, detail={"code": "ai_consent_required"})
+
+    with pytest.raises(HTTPException):
+        corrections.run_correction_propagation(
+            uid="owner-1",
+            source_conversation=source,
+            correction_id="corr-1",
+            trace_id="correction:source:corr-1",
+            correction_text="Correct the retained attribution.",
+            correction_type="identity",
+            candidate_loader=lambda *args, **kwargs: [related],
+            create_proposal=lambda **kwargs: proposals.append(kwargs) or {"created": True, "proposal": {}},
+            min_confidence=0.0,
+            egress_guard=guard,
+        )
+    assert proposals == []
+
+
+def test_receipt_audit_identity_or_status_mismatch_fails_closed_without_echo(monkeypatch):
+    mismatches = [
+        ("uid", "other-owner"),
+        ("conversation_id", "other-conversation"),
+        ("correction_id", "other-correction"),
+        ("trace_id", "correction:other:identity"),
+        ("status", "invented_status"),
+    ]
+    for field, value in mismatches:
+        audit = {
+            "uid": "owner-secret",
+            "conversation_id": "conversation-secret",
+            "correction_id": "correction-secret",
+            "trace_id": "correction:conversation-secret:correction-secret",
+            "status": "queued",
+        }
+        audit[field] = value
+        monkeypatch.setattr(corrections, "_read_correction_audit", lambda *args, current=audit: current)
+        with pytest.raises(HTTPException) as error:
+            corrections._correction_receipt(
+                uid="owner-secret",
+                conversation_id="conversation-secret",
+                correction_id="correction-secret",
+                conversation=_conversation(),
+            )
+        assert error.value.status_code == 404
+        assert error.value.detail == "Correction not found"
+        assert "owner-secret" not in str(error.value.detail)
+        assert "conversation-secret" not in str(error.value.detail)
+        assert "correction-secret" not in str(error.value.detail)
+
+
+def test_n8n_submission_is_bounded_by_the_existing_monotonic_deadline(monkeypatch):
+    observed_timeouts = []
+
+    class SlowClient:
+        def __init__(self, *, timeout):
+            observed_timeouts.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, json):
+            await asyncio.sleep(0.2)
+            raise AssertionError("stalled n8n request must be cancelled by the shared deadline")
+
+    monkeypatch.setattr(corrections.httpx, "AsyncClient", SlowClient)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            corrections._submit_correction_to_n8n(
+                uid="owner-1",
+                conversation_id="conv-1",
+                correction_id="corr-1",
+                trace_id="correction:conv-1:corr-1",
+                request=corrections.ConversationCorrectionRequest(correction_text="Private correction."),
+                structured=_conversation()["structured"],
+                transcript="private transcript",
+                segment_count=1,
+                deadline=corrections._CorrectionDeadline(budget_seconds=0.01),
+            )
+        )
+    assert time.monotonic() - started < 0.1
+    assert observed_timeouts and observed_timeouts[0] <= 0.01
+
+
+def test_hosted_source_ci_checks_out_and_receipts_exact_pull_request_head_with_scans_preserved():
+    workflow = (_backend_path.parent / ".github" / "workflows" / "ella-ios-source-ci.yml").read_text(encoding="utf-8")
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
+    assert "ELLA_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
+    assert '[[ "$actual_head" == "$ELLA_EXPECTED_HEAD_SHA" ]]' in workflow
+    assert "Immutable source head:" in workflow
+    assert "GITHUB_STEP_SUMMARY" in workflow
+    assert "refs/remotes/pull/" not in workflow
+    assert "Diff and signing artifact scan" in workflow
+    assert "secret_patterns=" in workflow
+    assert "forbidden_artifact_paths=" in workflow

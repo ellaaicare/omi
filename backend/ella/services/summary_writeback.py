@@ -29,6 +29,44 @@ class ConcurrentConversationSummaryChangeError(RuntimeError):
     pass
 
 
+def _publish_canonical_summary(
+    *,
+    canonical_writer: Callable[..., dict],
+    uid: str,
+    canonical_conversation: dict[str, Any],
+    summary_source: str,
+    summary_kind: str,
+    trace_id: Optional[str],
+    canonical_egress_guard: Optional[Callable[[], Optional[bool]]],
+    canonical_egress_completion: Optional[Callable[[bool], None]],
+    canonical_timeout_provider: Optional[Callable[[], float]],
+) -> dict[str, Any]:
+    """Fence, publish, and record completion within one uncancellable thread."""
+
+    should_publish = canonical_egress_guard() if canonical_egress_guard is not None else True
+    if should_publish is False:
+        return {"ok": True, "inserted": 0, "duplicates": 1, "fenced_replay": True}
+
+    writer_kwargs: dict[str, Any] = {
+        "summary_source": summary_source,
+        "summary_kind": summary_kind,
+        "trace_id": trace_id,
+    }
+    try:
+        if canonical_timeout_provider is not None:
+            writer_kwargs["timeout"] = max(0.001, canonical_timeout_provider())
+        result = canonical_writer(uid, canonical_conversation, **writer_kwargs)
+    except Exception:
+        if canonical_egress_completion is not None:
+            canonical_egress_completion(False)
+        raise
+
+    confirmed = isinstance(result, dict) and result.get("ok") is True
+    if canonical_egress_completion is not None:
+        canonical_egress_completion(confirmed)
+    return result
+
+
 async def write_conversation_summary(
     *,
     uid: str,
@@ -51,7 +89,9 @@ async def write_conversation_summary(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
-    canonical_egress_guard: Optional[Callable[[], None]] = None,
+    canonical_egress_guard: Optional[Callable[[], Optional[bool]]] = None,
+    canonical_egress_completion: Optional[Callable[[bool], None]] = None,
+    canonical_timeout_provider: Optional[Callable[[], float]] = None,
     correction_attempt_token: Optional[str] = None,
     correction_source_compare_and_set: Optional[Callable[[dict[str, Any]], str]] = None,
 ) -> dict[str, Any]:
@@ -90,16 +130,18 @@ async def write_conversation_summary(
             'id': conversation_id,
             'enrichment_state': confirmed_state,
         }
-        if canonical_egress_guard is not None:
-            canonical_egress_guard()
         try:
             canonical_result = await asyncio.to_thread(
-                canonical_writer,
-                uid,
-                canonical_conversation,
+                _publish_canonical_summary,
+                canonical_writer=canonical_writer,
+                uid=uid,
+                canonical_conversation=canonical_conversation,
                 summary_source=summary_source,
                 summary_kind=summary_kind,
                 trace_id=trace_id,
+                canonical_egress_guard=canonical_egress_guard,
+                canonical_egress_completion=canonical_egress_completion,
+                canonical_timeout_provider=canonical_timeout_provider,
             )
             if not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True:
                 raise RuntimeError('canonical_write_unconfirmed')
@@ -269,16 +311,18 @@ async def write_conversation_summary(
         canonical_conversation['correction_state'] = confirmed_correction_state
     canonical_result: Optional[dict[str, Any]] = None
     canonical_error: Optional[Exception] = None
-    if canonical_egress_guard is not None:
-        canonical_egress_guard()
     try:
         canonical_result = await asyncio.to_thread(
-            canonical_writer,
-            uid,
-            canonical_conversation,
+            _publish_canonical_summary,
+            canonical_writer=canonical_writer,
+            uid=uid,
+            canonical_conversation=canonical_conversation,
             summary_source=summary_source,
             summary_kind=summary_kind,
             trace_id=trace_id,
+            canonical_egress_guard=canonical_egress_guard,
+            canonical_egress_completion=canonical_egress_completion,
+            canonical_timeout_provider=canonical_timeout_provider,
         )
         if require_canonical and (not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True):
             raise RuntimeError('canonical_write_unconfirmed')
