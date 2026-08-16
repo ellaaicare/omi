@@ -1170,10 +1170,14 @@ void main() {
     expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
-  test('continuous necklace boundary replaces the socket before exact processing', () async {
+  test('continuous necklace boundary finalizes before replacement connect or buffered replay', () async {
+    await _grantCaptureEgressAuthority('uid-a');
     final authority = _CaptureAuthority('uid-a');
     final initialSocket = _FakeTranscriptSocket();
     final replacementSocket = _FakeTranscriptSocket();
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    final replacementEntered = Completer<void>();
     final conversations = ConversationProvider();
     addTearDown(conversations.dispose);
     var socketPreparations = 0;
@@ -1187,6 +1191,7 @@ void main() {
       captureConsentAuthorityEnsurer: () async => true,
       deviceTranscriptionSocketPreparer: (_, {required force}) async {
         socketPreparations++;
+        if (socketPreparations == 2 && !replacementEntered.isCompleted) replacementEntered.complete();
         return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
       },
       deviceCaptureStarter: () async {
@@ -1200,8 +1205,10 @@ void main() {
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(conversationId, 'pre-boundary-necklace');
-        expect(socketPreparations, 2, reason: 'the replacement socket must own capture before processing');
+        expect(socketPreparations, 1, reason: 'replacement connect must remain fenced until A is terminal');
         processCalls++;
+        processEntered.complete();
+        await processGate.future;
         return CreateConversationResponse(
           messages: const [],
           conversation: _conversation(
@@ -1218,12 +1225,82 @@ void main() {
     await provider.streamDeviceRecording(device: necklace);
     provider.segments = [_segment('local-pre-boundary', 'Local words before the boundary')];
 
-    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+    await processEntered.future;
+    expect(replacementEntered.isCompleted, isFalse);
+    expect(socketPreparations, 1);
+
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 10], codec: BleAudioCodec.pcm8);
+    expect(replacementSocket.pure.sent, isEmpty);
+
+    processGate.complete();
+    await replacementEntered.future;
+    expect(await boundary, isTrue);
     expect(processCalls, 1);
     expect(socketPreparations, 2);
+    expect(replacementSocket.pure.sent, [
+      [10],
+    ]);
     expect(transportStarts, 1, reason: 'BLE capture must continue without a physical restart');
     expect(provider.recordingState, RecordingState.deviceRecord);
     expect(provider.segments, isEmpty, reason: 'the replacement socket starts a fresh local moment');
+  });
+
+  test('ambiguous necklace finalization fails closed before replacement connect or replay', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('ambiguous-boundary', 'Words before an ambiguous POST timeout')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processEntered.complete();
+        await processGate.future;
+        return null;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    initialSocket.pure.sent.clear();
+
+    final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+    await processEntered.future;
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 10], codec: BleAudioCodec.pcm8);
+    expect(socketPreparations, 1);
+
+    processGate.complete();
+    expect(await boundary, isFalse);
+    expect(socketPreparations, 1, reason: 'unknown POST outcome cannot be treated as resumable authority');
+    expect(initialSocket.pure.sent, isEmpty);
+    expect(replacementSocket.pure.sent, isEmpty);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 1);
   });
 
   test(
@@ -1336,7 +1413,10 @@ void main() {
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         processCalls++;
-        return CreateConversationResponse(messages: const [], conversation: _conversation(conversationId, 'done'));
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(conversationId, 'done', status: ConversationStatus.completed),
+        );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
@@ -1352,7 +1432,7 @@ void main() {
 
     replacementGate.complete(replacementSocket.service);
     expect(await boundary, isFalse);
-    expect(processCalls, 0, reason: 'the old conversation cannot finalize after replacement replay failed');
+    expect(processCalls, 1, reason: 'A must be terminal before replacement replay is attempted');
     expect(replacementSocket.pure.sent, isEmpty);
     expect(provider.recordingState, RecordingState.error);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
@@ -1389,6 +1469,13 @@ void main() {
       },
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         return [_conversation('overflow-boundary', 'Words before overflow')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(conversationId, 'done', status: ConversationStatus.completed),
+        );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
@@ -1441,6 +1528,13 @@ void main() {
       },
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         return [_conversation('failed-boundary', 'Words before replacement failure')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(conversationId, 'done', status: ConversationStatus.completed),
+        );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);

@@ -757,6 +757,7 @@ class _ExpiringCaptureAuthorityRedis:
         self.now = 0
         self.pointer = pointer
         self.authority = authority
+        self.rollback = None
         self.pointer_expires_at = 300 if pointer is not None else None
 
     def _expire_if_needed(self):
@@ -768,22 +769,57 @@ class _ExpiringCaptureAuthorityRedis:
         self.now += seconds
         self._expire_if_needed()
 
+    def legacy_refresh(self, conversation_id, ttl=300):
+        """Model the pre-generation pointer-only restore used by old workers."""
+        self._expire_if_needed()
+        if self.pointer == conversation_id:
+            self.pointer_expires_at = self.now + ttl
+            return 'refreshed'
+        if self.pointer is None:
+            self.pointer = conversation_id
+            self.pointer_expires_at = self.now + ttl
+            return 'restored'
+        return 'mismatch'
+
     def eval(self, script, key_count, *keys_and_args):
         keys = keys_and_args[:key_count]
         args = keys_and_args[key_count:]
-        assert keys == (
+        expected_keys = (
             'users:authenticated-user:in_progress_memory_id',
             'users:authenticated-user:capture_stream_authority',
         )
+        if key_count == 3:
+            expected_keys += ('users:authenticated-user:capture_stream_authority_rollback',)
+        assert keys == expected_keys
         self._expire_if_needed()
 
         if 'capture_authority:acquire' in script:
             conversation_id, ttl, authority = args
             if self.pointer is not None:
-                return 0
+                predecessor_id = self.pointer.removeprefix('terminal:')
+                if (
+                    not self.pointer.startswith('terminal:')
+                    or self.authority is None
+                    or not self.authority.startswith('terminal:')
+                    or not self.authority.endswith(f':{predecessor_id}')
+                ):
+                    return 0
+                self.rollback = f'{self.pointer}|{self.authority}'
+            elif self.authority is not None and self.authority.startswith('terminal:'):
+                predecessor_id = self.authority.rsplit(':', 1)[-1]
+                self.rollback = f'terminal:{predecessor_id}|{self.authority}'
+            else:
+                self.rollback = None
             self.pointer = conversation_id
             self.pointer_expires_at = self.now + int(ttl)
             self.authority = authority
+            return 1
+
+        if 'capture_authority:confirm_acquire' in script:
+            conversation_id, authority = args
+            if self.pointer != conversation_id or self.authority != authority:
+                return 0
+            self.rollback = None
             return 1
 
         if 'capture_authority:adopt' in script:
@@ -791,7 +827,13 @@ class _ExpiringCaptureAuthorityRedis:
             if self.pointer not in {None, conversation_id}:
                 return 0
             if self.authority is not None:
-                if not self.authority.startswith('active:') or not self.authority.endswith(f':{conversation_id}'):
+                active_match = self.authority.startswith('active:') and self.authority.endswith(f':{conversation_id}')
+                legacy_successor = (
+                    self.pointer == conversation_id
+                    and self.authority.startswith('terminal:')
+                    and not self.authority.endswith(f':{conversation_id}')
+                )
+                if not active_match and not legacy_successor:
                     return 0
             self.pointer = conversation_id
             self.pointer_expires_at = self.now + int(ttl)
@@ -859,9 +901,15 @@ class _ExpiringCaptureAuthorityRedis:
 
         if 'capture_authority:terminalize' in script:
             conversation_id, processing_fence = args
+            terminal_fence = f'terminal:{conversation_id}'
             if self.authority is not None and self.authority.startswith('terminal:'):
-                if self.authority.endswith(f':{conversation_id}') and self.pointer is None:
-                    return 2
+                if self.authority.endswith(f':{conversation_id}'):
+                    if self.pointer is None:
+                        self.pointer = terminal_fence
+                        self.pointer_expires_at = None
+                        return 2
+                    if self.pointer == terminal_fence:
+                        return 2
                 return 0
             if self.pointer not in {None, conversation_id, processing_fence}:
                 return 0
@@ -874,7 +922,7 @@ class _ExpiringCaptureAuthorityRedis:
             else:
                 generation_and_conversation = f'legacy:{conversation_id}'
             self.authority = f'terminal:{generation_and_conversation}'
-            self.pointer = None
+            self.pointer = terminal_fence
             self.pointer_expires_at = None
             return 1
 
@@ -882,9 +930,13 @@ class _ExpiringCaptureAuthorityRedis:
             conversation_id, authority = args
             if self.pointer != conversation_id or self.authority != authority:
                 return 0
-            self.pointer = None
+            if self.rollback is not None:
+                self.pointer, self.authority = self.rollback.split('|', 1)
+            else:
+                self.pointer = None
+                self.authority = None
             self.pointer_expires_at = None
-            self.authority = None
+            self.rollback = None
             return 1
 
         raise AssertionError('unexpected Redis script')
@@ -1202,16 +1254,93 @@ def test_capture_finalization_terminal_release_blocks_stale_generation_restorati
         conversations_router.redis_db.terminalize_in_progress_conversation_id('authenticated-user', 'capture-a')
         == 'terminalized'
     )
-    assert fake_redis.pointer is None
+    assert fake_redis.pointer == 'terminal:capture-a'
     assert fake_redis.authority == 'terminal:generation-a:capture-a'
 
     assert stream.refresh('capture-a', 'stale_post_stop_refresh') is False
     assert stream.lost is True
-    assert fake_redis.pointer is None
+    assert fake_redis.pointer == 'terminal:capture-a'
     assert (
         stream.rotate('capture-a', 'capture-a-next', lambda: pytest.fail('stale stream installed a stub'), 'lifecycle')
         is False
     )
+
+
+def test_capture_finalization_interleaves_replacement_and_legacy_restore_behind_terminal_fence(monkeypatch):
+    fake_redis = _ExpiringCaptureAuthorityRedis()
+    monkeypatch.setattr(capture_authority.redis_db, 'r', fake_redis)
+    stream_a = capture_authority.CaptureStreamAuthority('authenticated-user', 'generation-a')
+
+    assert stream_a.acquire('capture-a', lambda: None, 'initial_acquisition') is True
+    assert (
+        conversations_router.redis_db.claim_in_progress_conversation_id('authenticated-user', 'capture-a') == 'claimed'
+    )
+
+    replacement_during_finalization = capture_authority.CaptureStreamAuthority(
+        'authenticated-user',
+        'generation-too-early',
+    )
+    assert replacement_during_finalization.adopt('capture-a', 'resume') is False
+    assert fake_redis.pointer == 'processing:capture-a'
+    assert fake_redis.authority == 'finalizing:generation-a:capture-a'
+
+    assert (
+        conversations_router.redis_db.terminalize_in_progress_conversation_id('authenticated-user', 'capture-a')
+        == 'terminalized'
+    )
+    assert fake_redis.pointer == 'terminal:capture-a'
+    assert fake_redis.legacy_refresh('capture-a') == 'mismatch'
+    assert fake_redis.pointer == 'terminal:capture-a'
+    assert fake_redis.authority == 'terminal:generation-a:capture-a'
+
+    successor = capture_authority.CaptureStreamAuthority('authenticated-user', 'generation-b')
+    installed = []
+    assert successor.acquire('capture-b', lambda: installed.append('capture-b'), 'initial_acquisition') is True
+    assert installed == ['capture-b']
+    assert fake_redis.pointer == 'capture-b'
+    assert fake_redis.authority == 'active:generation-b:capture-b'
+    assert fake_redis.rollback is None
+
+    assert fake_redis.legacy_refresh('capture-a') == 'mismatch'
+    assert stream_a.refresh('capture-a', 'stale_worker_after_successor') is False
+    assert fake_redis.pointer == 'capture-b'
+    assert fake_redis.authority == 'active:generation-b:capture-b'
+
+    # A pointer-only rollout worker may create a fresh successor with an
+    # unconditional legacy SET. A current worker may adopt that different id,
+    # but never the terminal predecessor itself.
+    fake_redis.pointer = 'capture-c'
+    fake_redis.pointer_expires_at = fake_redis.now + 300
+    fake_redis.authority = 'terminal:generation-a:capture-a'
+    current_after_legacy_successor = capture_authority.CaptureStreamAuthority(
+        'authenticated-user',
+        'generation-c',
+    )
+    assert current_after_legacy_successor.adopt('capture-c', 'resume') is True
+    assert fake_redis.pointer == 'capture-c'
+    assert fake_redis.authority == 'active:generation-c:capture-c'
+
+
+def test_capture_finalization_failed_successor_install_restores_terminal_fence(monkeypatch):
+    fake_redis = _ExpiringCaptureAuthorityRedis(
+        pointer='terminal:capture-a',
+        authority='terminal:generation-a:capture-a',
+    )
+    fake_redis.pointer_expires_at = None
+    monkeypatch.setattr(capture_authority.redis_db, 'r', fake_redis)
+    successor = capture_authority.CaptureStreamAuthority('authenticated-user', 'generation-b')
+
+    with pytest.raises(RuntimeError, match='stub install failed'):
+        successor.acquire(
+            'capture-b',
+            lambda: (_ for _ in ()).throw(RuntimeError('stub install failed')),
+            'initial_acquisition',
+        )
+
+    assert fake_redis.pointer == 'terminal:capture-a'
+    assert fake_redis.authority == 'terminal:generation-a:capture-a'
+    assert fake_redis.rollback is None
+    assert fake_redis.legacy_refresh('capture-a') == 'mismatch'
 
 
 @pytest.mark.parametrize('ordering', [('stop', 'disconnect'), ('disconnect', 'stop')])
@@ -1232,7 +1361,7 @@ def test_capture_finalization_stop_disconnect_ordering_converges_terminal(monkey
             # Transport teardown does not release stream authority. Before POST it stays
             # active; after POST it must not reopen the terminal generation.
             if stop_has_run:
-                assert fake_redis.pointer is None
+                assert fake_redis.pointer == 'terminal:capture-a'
                 assert fake_redis.authority == 'terminal:generation-a:capture-a'
             else:
                 assert fake_redis.pointer == 'capture-a'
@@ -1253,5 +1382,5 @@ def test_capture_finalization_stop_disconnect_ordering_converges_terminal(monkey
 
     assert stream.refresh('capture-a', 'post_stop_checkpoint') is False
     assert losses == [('post_stop_checkpoint', 'capture-a')]
-    assert fake_redis.pointer is None
+    assert fake_redis.pointer == 'terminal:capture-a'
     assert fake_redis.authority == 'terminal:generation-a:capture-a'

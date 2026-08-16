@@ -406,27 +406,72 @@ def acquire_capture_stream_authority(
     conversation_id: str,
     ttl: int = 300,
 ) -> str:
-    """Install a new stream generation only while the bounded active pointer is absent."""
+    """Install a new stream generation while no active pointer owns the slot."""
     pointer_key = f'users:{uid}:in_progress_memory_id'
     authority_key = f'users:{uid}:capture_stream_authority'
+    rollback_key = f'users:{uid}:capture_stream_authority_rollback'
     result = r.eval(
         """
         -- capture_authority:acquire
-        if redis.call('GET', KEYS[1]) then
-            return 0
+        local pointer = redis.call('GET', KEYS[1])
+        local authority = redis.call('GET', KEYS[2])
+        if pointer then
+            local terminal_pointer = string.sub(pointer, 1, 9) == 'terminal:'
+            local terminal_authority = authority and string.sub(authority, 1, 9) == 'terminal:'
+            local predecessor_id = terminal_pointer and string.sub(pointer, 10) or ''
+            local predecessor_suffix = ':' .. predecessor_id
+            local same_predecessor = terminal_authority
+                and string.sub(authority, -string.len(predecessor_suffix)) == predecessor_suffix
+            if not terminal_pointer or not same_predecessor then
+                return 0
+            end
+            redis.call('SET', KEYS[3], pointer .. '|' .. authority)
+        elseif authority and string.sub(authority, 1, 9) == 'terminal:' then
+            local predecessor_id = string.match(authority, '([^:]+)$')
+            if not predecessor_id then
+                return 0
+            end
+            redis.call('SET', KEYS[3], 'terminal:' .. predecessor_id .. '|' .. authority)
+        else
+            redis.call('DEL', KEYS[3])
         end
         redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
         redis.call('SET', KEYS[2], ARGV[3])
         return 1
         """,
-        2,
+        3,
         pointer_key,
         authority_key,
+        rollback_key,
         conversation_id,
         ttl,
         f'active:{generation_id}:{conversation_id}',
     )
     return 'acquired' if result == 1 else 'mismatch'
+
+
+def confirm_capture_stream_authority(uid: str, generation_id: str, conversation_id: str) -> bool:
+    """Discard a predecessor rollback record after the successor stub is durable."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
+    rollback_key = f'users:{uid}:capture_stream_authority_rollback'
+    confirmed = r.eval(
+        """
+        -- capture_authority:confirm_acquire
+        if redis.call('GET', KEYS[1]) == ARGV[1] and redis.call('GET', KEYS[2]) == ARGV[2] then
+            redis.call('DEL', KEYS[3])
+            return 1
+        end
+        return 0
+        """,
+        3,
+        pointer_key,
+        authority_key,
+        rollback_key,
+        conversation_id,
+        f'active:{generation_id}:{conversation_id}',
+    )
+    return bool(confirmed)
 
 
 def adopt_capture_stream_authority(
@@ -450,7 +495,9 @@ def adopt_capture_stream_authority(
         if authority then
             local active = string.sub(authority, 1, 7) == 'active:'
             local same_conversation = string.sub(authority, -string.len(suffix)) == suffix
-            if not active or not same_conversation then
+            local terminal_predecessor = string.sub(authority, 1, 9) == 'terminal:' and not same_conversation
+            local legacy_successor = pointer == ARGV[1] and terminal_predecessor
+            if not ((active and same_conversation) or legacy_successor) then
                 return 0
             end
         end
@@ -622,7 +669,7 @@ def restore_in_progress_conversation_id_if_matches(uid: str, conversation_id: st
 
 
 def terminalize_in_progress_conversation_id(uid: str, conversation_id: str) -> str:
-    """Persist terminal authority and remove only the matching active/processing pointer."""
+    """Persist terminal authority and a legacy-compatible terminal pointer fence."""
     pointer_key = f'users:{uid}:in_progress_memory_id'
     authority_key = f'users:{uid}:capture_stream_authority'
     processing_fence = f'processing:{conversation_id}'
@@ -632,9 +679,14 @@ def terminalize_in_progress_conversation_id(uid: str, conversation_id: str) -> s
         local current = redis.call('GET', KEYS[1])
         local authority = redis.call('GET', KEYS[2])
         local suffix = ':' .. ARGV[1]
+        local terminal_fence = 'terminal:' .. ARGV[1]
         if authority and string.sub(authority, 1, 9) == 'terminal:'
             and string.sub(authority, -string.len(suffix)) == suffix then
             if not current then
+                redis.call('SET', KEYS[1], terminal_fence)
+                return 2
+            end
+            if current == terminal_fence then
                 return 2
             end
             return 0
@@ -658,9 +710,7 @@ def terminalize_in_progress_conversation_id(uid: str, conversation_id: str) -> s
             authority = 'legacy:' .. ARGV[1]
         end
         redis.call('SET', KEYS[2], 'terminal:' .. authority)
-        if current then
-            redis.call('DEL', KEYS[1])
-        end
+        redis.call('SET', KEYS[1], terminal_fence)
         return 1
         """,
         2,
@@ -677,22 +727,35 @@ def terminalize_in_progress_conversation_id(uid: str, conversation_id: str) -> s
 
 
 def release_capture_stream_authority_if_matches(uid: str, generation_id: str, conversation_id: str) -> bool:
-    """Remove only a just-acquired generation whose durable stub installation failed."""
+    """Remove a failed acquisition, restoring its terminal predecessor when present."""
     pointer_key = f'users:{uid}:in_progress_memory_id'
     authority_key = f'users:{uid}:capture_stream_authority'
+    rollback_key = f'users:{uid}:capture_stream_authority_rollback'
     released = r.eval(
         """
         -- capture_authority:release_failed_acquire
         if redis.call('GET', KEYS[1]) == ARGV[1] and redis.call('GET', KEYS[2]) == ARGV[2] then
-            redis.call('DEL', KEYS[1])
-            redis.call('DEL', KEYS[2])
+            local rollback = redis.call('GET', KEYS[3])
+            if rollback then
+                local separator = string.find(rollback, '|', 1, true)
+                if not separator then
+                    return 0
+                end
+                redis.call('SET', KEYS[1], string.sub(rollback, 1, separator - 1))
+                redis.call('SET', KEYS[2], string.sub(rollback, separator + 1))
+            else
+                redis.call('DEL', KEYS[1])
+                redis.call('DEL', KEYS[2])
+            end
+            redis.call('DEL', KEYS[3])
             return 1
         end
         return 0
         """,
-        2,
+        3,
         pointer_key,
         authority_key,
+        rollback_key,
         conversation_id,
         f'active:{generation_id}:{conversation_id}',
     )
@@ -724,7 +787,10 @@ def get_in_progress_conversation_id(uid: str) -> str:
     conversation_id = r.get(f'users:{uid}:in_progress_memory_id')
     if not conversation_id:
         return ''
-    return conversation_id.decode()
+    decoded = conversation_id.decode()
+    if decoded.startswith(('processing:', 'terminal:')):
+        return ''
+    return decoded
 
 
 def set_conversation_meeting_id(conversation_id: str, meeting_id: str, ttl: int = 86400):

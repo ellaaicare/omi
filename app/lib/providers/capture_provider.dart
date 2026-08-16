@@ -1639,7 +1639,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _replaceDeviceCaptureSocket(
     _DeviceCaptureSession session, {
     required String reason,
-    Future<void> Function()? afterOldSocketStopped,
+    Future<bool> Function()? afterOldSocketStopped,
   }) async {
     if (!_isDeviceCaptureCurrent(session)) return false;
     final device = _recordingDevice;
@@ -1658,7 +1658,11 @@ class CaptureProvider extends ChangeNotifier
     try {
       oldSocket.unsubscribe(this);
       await oldSocket.stop(reason: reason);
-      await afterOldSocketStopped?.call();
+      final mayConnectReplacement = await afterOldSocketStopped?.call() ?? true;
+      if (!mayConnectReplacement) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement authority is ambiguous');
+        return false;
+      }
       if (!_isDeviceCaptureCurrent(session)) return false;
       final replacement = await _ensureDeviceSocketConnection(device, force: true);
       if (!_isDeviceCaptureCurrent(session)) {
@@ -2685,22 +2689,31 @@ class CaptureProvider extends ChangeNotifier
         return false;
       }
 
-      String? conversationId;
+      var finalized = false;
       _replacingTranscriptionSocket = true;
       try {
         final replaced = await _replaceDeviceCaptureSocket(
           session,
           reason: 'continuous necklace moment boundary',
           afterOldSocketStopped: () async {
-            conversationId = await _awaitInProgressConversationId(
+            final conversationId = await _awaitInProgressConversationId(
               operation,
               maxAttempts: 12,
               retryDelay: const Duration(milliseconds: 500),
             );
+            final exactConversationId = (conversationId ?? '').trim();
+            if (exactConversationId.isEmpty || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
+
+            // The replacement must not connect (and therefore cannot adopt or
+            // send to this conversation) until its terminal result is known.
+            // BLE frames remain inside the bounded replacement buffer while
+            // the exact-authority POST and polling complete.
+            finalized = await _forceProcessingConversationId(exactConversationId, operation);
             final boundaryBuffer = session.socketReplacementBuffer;
-            if (!_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return;
+            if (!finalized || !_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return false;
             await _resetStateVariables();
             _beginNextContinuousDeviceMoment(boundaryBuffer);
+            return true;
           },
         );
         if (!replaced || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
@@ -2708,9 +2721,6 @@ class CaptureProvider extends ChangeNotifier
         _replacingTranscriptionSocket = false;
       }
 
-      final exactConversationId = (conversationId ?? '').trim();
-      if (exactConversationId.isEmpty) return false;
-      final finalized = await _forceProcessingConversationId(exactConversationId, operation);
       if (finalized && _isDeviceCaptureCurrent(session)) {
         _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
       }

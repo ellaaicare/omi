@@ -77,6 +77,12 @@ class CaptureStreamAuthority:
                 conversation_id,
             )
             raise
+        if not redis_db.confirm_capture_stream_authority(
+            self.uid,
+            self.generation_id,
+            conversation_id,
+        ):
+            return self._lose(f'{checkpoint}_confirmation', conversation_id)
         return True
 
     def rotate(
