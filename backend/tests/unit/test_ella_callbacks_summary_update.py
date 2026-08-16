@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from pathlib import Path
@@ -41,6 +43,8 @@ from ella.services.canonical_summary_source import (  # noqa: E402
     canonical_source_from_payload,
     canonical_source_sha256,
 )
+from ella.routers.canonical_events import _should_accept_canonical_summary_replacement  # noqa: E402
+from utils.ella.canonical_omi import build_omi_canonical_event  # noqa: E402
 
 
 def _service_authority(uid: str):
@@ -626,6 +630,7 @@ def _cas_conversation():
     return {
         "started_at": "2026-08-15T12:00:00Z",
         "finished_at": "2026-08-15T12:01:00Z",
+        "created_at": "2026-08-15T11:59:00Z",
         "structured": {
             "title": "Original",
             "overview": "Original overview",
@@ -635,6 +640,12 @@ def _cas_conversation():
         "transcript_segments": [{"speaker": "Other", "text": "private transcript"}],
         "summary_versions": [{"id": "original-v1", "is_active": True}],
         "active_summary_version_id": "original-v1",
+        "enrichment_state": {"status": "original", "pending": False},
+        "internal_assessment": {"risk_level": "original"},
+        "ella_tags": ["original"],
+        "ella_signal": {"signal": "original"},
+        "source": "omi",
+        "status": "completed",
     }
 
 
@@ -657,6 +668,7 @@ def _cas_update():
 
 def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
     writes = []
+    transaction_lock = threading.Lock()
 
     async def no_assessment(_uid, _conversation_id):
         return None
@@ -672,22 +684,23 @@ def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
         }
 
     def transact(_uid, _conversation_id, builder, correction_id=None):
-        if interleave is not None:
-            # Emulate Firestore's optimistic retry: the first transaction read
-            # passes CAS, a concurrent writer wins before commit, and the
-            # transaction callback reruns against the winning document.
-            builder(copy.deepcopy(conversation))
-            interleave(conversation)
-        before = copy.deepcopy(conversation)
-        update_data, result = builder(copy.deepcopy(conversation))
-        if update_data:
-            writes.append(copy.deepcopy(update_data))
-        for key, value in update_data.items():
-            if key.startswith("structured."):
-                conversation.setdefault("structured", {})[key.split(".", 1)[1]] = value
-            else:
-                conversation[key] = value
-        return {"conversation": before, "update_data": update_data, "result": result}
+        with transaction_lock:
+            if interleave is not None:
+                # Emulate Firestore's optimistic retry: the first transaction read
+                # passes CAS, a concurrent writer wins before commit, and the
+                # transaction callback reruns against the winning document.
+                builder(copy.deepcopy(conversation))
+                interleave(conversation)
+            before = copy.deepcopy(conversation)
+            update_data, result = builder(copy.deepcopy(conversation))
+            if update_data:
+                writes.append(copy.deepcopy(update_data))
+            for key, value in update_data.items():
+                if key.startswith("structured."):
+                    conversation.setdefault("structured", {})[key.split(".", 1)[1]] = value
+                else:
+                    conversation[key] = value
+            return {"conversation": before, "update_data": update_data, "result": result}
 
     monkeypatch.setattr(callbacks, "_fetch_internal_assessment", no_assessment)
     monkeypatch.setattr(callbacks.conversations_db, "build_summary_version_update", version_update)
@@ -698,6 +711,27 @@ def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
         lambda _uid, _conversation_id: copy.deepcopy(conversation),
     )
     return writes
+
+
+def _canonical_publication_tuple(conversation):
+    return {
+        key: copy.deepcopy(conversation.get(key))
+        for key in (
+            "started_at",
+            "finished_at",
+            "created_at",
+            "structured",
+            "transcript_segments",
+            "summary_versions",
+            "active_summary_version_id",
+            "enrichment_state",
+            "internal_assessment",
+            "ella_tags",
+            "ella_signal",
+            "source",
+            "status",
+        )
+    }
 
 
 def _cas_client(uid="uid-a"):
@@ -719,6 +753,37 @@ def test_canonical_source_fixture_vectors_match_hermes_contract_data():
         )
         assert canonical_source_bytes(source).decode("utf-8") == vector["canonical_json"]
         assert canonical_source_sha256(source) == vector["sha256"]
+
+
+def test_canonical_summary_event_carries_the_durable_publication_fence():
+    conversation = _cas_conversation()
+    conversation["id"] = "conversation-a"
+    conversation["canonical_summary_publication_sequence"] = 7
+    conversation["canonical_summary_publication_sha256"] = "a" * 64
+
+    event = build_omi_canonical_event("uid-a", conversation)
+
+    assert event["source_ref"]["canonical_summary_publication_sequence"] == 7
+    assert event["source_ref"]["canonical_summary_publication_sha256"] == "a" * 64
+    assert event["metadata"]["canonical_summary_publication_sequence"] == 7
+    assert event["metadata"]["canonical_summary_publication_sha256"] == "a" * 64
+
+
+def test_canonical_summary_publication_fence_rejects_late_or_conflicting_repair_images():
+    def publication(sequence=None, sha256=None):
+        metadata = {"adapter": "omi-enriched-conversation"}
+        if sequence is not None:
+            metadata["canonical_summary_publication_sequence"] = sequence
+            metadata["canonical_summary_publication_sha256"] = sha256
+        return {"channel": "omi", "metadata": metadata}
+
+    existing = publication(3, "c" * 64)
+    assert _should_accept_canonical_summary_replacement(existing, publication(4, "d" * 64)) is True
+    assert _should_accept_canonical_summary_replacement(existing, publication(3, "c" * 64)) is True
+    assert _should_accept_canonical_summary_replacement(existing, publication(2, "b" * 64)) is False
+    assert _should_accept_canonical_summary_replacement(existing, publication(3, "d" * 64)) is False
+    assert _should_accept_canonical_summary_replacement(existing, publication()) is False
+    assert _should_accept_canonical_summary_replacement(publication(), publication(1, "a" * 64)) is True
 
 
 def test_firestore_conversation_payload_matches_canonical_datetime_segment_and_transcript_representation():
@@ -905,33 +970,63 @@ def test_completed_response_loss_retry_returns_same_receipt_without_republish(mo
     assert len(canonical_calls) == 1
 
 
-@pytest.mark.parametrize("change", ["source", "active_version", "post_image"])
-def test_finalize_conflict_never_acknowledges_or_publishes_later_content(monkeypatch, change):
+@pytest.mark.parametrize(
+    "change",
+    [
+        "started_at",
+        "finished_at",
+        "created_at",
+        "structured",
+        "transcript_segments",
+        "summary_versions",
+        "active_summary_version_id",
+        "enrichment_state",
+        "internal_assessment",
+        "ella_tags",
+        "ella_signal",
+        "source",
+        "status",
+    ],
+)
+def test_post_publication_drift_repairs_every_canonical_field_before_terminal_supersession(monkeypatch, change):
     monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
     conversation = _cas_conversation()
     writes = _install_atomic_cas_fake(monkeypatch, conversation)
     transact = callbacks.conversations_db.update_conversation_with_builder
-    published_titles = []
+    publications = []
+    interleaved = [False]
 
     def interleave_later_writer(*args, **kwargs):
-        if getattr(args[2], "__name__", "") == "finalize":
-            if change == "source":
-                conversation["structured"]["title"] = "Later writer B"
-            elif change == "active_version":
-                conversation["active_summary_version_id"] = "later-v3"
-                conversation["summary_versions"] = [
-                    {"id": "winner-v2", "is_active": False, "title": "Winning summary"},
-                    {"id": "later-v3", "is_active": True, "title": "Winning summary"},
-                ]
-            else:
-                conversation["internal_assessment"] = {"risk_level": "later-writer-B"}
+        if getattr(args[2], "__name__", "") == "finalize" and not interleaved[0]:
+            interleaved[0] = True
+            replacements = {
+                "started_at": "2026-08-15T11:58:00Z",
+                "finished_at": "2026-08-15T12:02:00Z",
+                "created_at": "2026-08-15T11:57:00Z",
+                "structured": {
+                    "title": "Later writer B",
+                    "overview": "Later overview",
+                    "emoji": "🛡️",
+                    "category": "work",
+                },
+                "transcript_segments": [{"speaker": "Other", "text": "later transcript"}],
+                "summary_versions": [{"id": "later-v3", "is_active": True, "title": "Later writer B"}],
+                "active_summary_version_id": "later-v3",
+                "enrichment_state": {"status": "later_writer", "pending": False, "source": "other"},
+                "internal_assessment": {"risk_level": "later-writer-B"},
+                "ella_tags": ["later_writer_b"],
+                "ella_signal": {"signal": "later-writer-B"},
+                "source": "later-source",
+                "status": "later-status",
+            }
+            conversation[change] = copy.deepcopy(replacements[change])
         return transact(*args, **kwargs)
 
     monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", interleave_later_writer)
     monkeypatch.setattr(
         callbacks,
         "write_omi_canonical_event",
-        lambda _uid, current, **_kwargs: published_titles.append(current["structured"]["title"]) or {"ok": True},
+        lambda _uid, current, **_kwargs: publications.append(copy.deepcopy(current)) or {"ok": True},
     )
 
     response = _cas_client().patch(
@@ -942,9 +1037,204 @@ def test_finalize_conflict_never_acknowledges_or_publishes_later_content(monkeyp
 
     assert response.status_code == 409
     assert "X-Ella-CAS-Applied" not in response.headers
-    assert published_titles == ["Winning summary"]
-    assert conversation["structured"]["title"] == ("Later writer B" if change == "source" else "Winning summary")
-    assert len(writes) == 1
+    assert len(publications) == 2
+    assert publications[0].get(change) != publications[1].get(change)
+    assert _canonical_publication_tuple(publications[0]) != _canonical_publication_tuple(conversation)
+    assert _canonical_publication_tuple(publications[1]) == _canonical_publication_tuple(conversation)
+    assert conversation["summary_writeback_receipt"]["status"] == "superseded"
+    assert conversation["summary_writeback_receipt"]["canonical_status"] == "superseded"
+    assert len(writes) == 3
+
+
+def test_terminal_supersession_is_exact_retry_safe_and_unblocks_later_cas_and_legacy_writers(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    transact = callbacks.conversations_db.update_conversation_with_builder
+    publications = []
+    interleaved = [False]
+
+    def interleave_once(*args, **kwargs):
+        if getattr(args[2], "__name__", "") == "finalize" and not interleaved[0]:
+            interleaved[0] = True
+            conversation["internal_assessment"] = {"risk_level": "later-winner"}
+        return transact(*args, **kwargs)
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", interleave_once)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda _uid, current, **_kwargs: publications.append(copy.deepcopy(current)) or {"ok": True},
+    )
+    client = _cas_client()
+    original_source = _cas_token(conversation)
+    original_headers = _cas_headers(original_source)
+    first = client.patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=original_headers,
+    )
+    publication_count_after_repair = len(publications)
+    exact_retry = client.patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=original_headers,
+    )
+
+    assert first.status_code == exact_retry.status_code == 409
+    assert exact_retry.json() == {"detail": "Canonical summary operation conflict"}
+    assert len(publications) == publication_count_after_repair == 2
+    assert conversation["summary_writeback_receipt"]["status"] == "superseded"
+
+    later = _cas_update()
+    later.title = "Later CAS winner"
+    current_source = _cas_token(conversation)
+    later_cas = client.patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=later.model_dump(),
+        headers=_cas_headers(
+            current_source,
+            operation_token="d" * 64,
+            source_version=str(conversation["finished_at"]),
+        ),
+    )
+    assert later_cas.status_code == 200
+    assert later_cas.json()["status"] == "completed"
+    assert conversation["summary_writeback_receipt"]["token"] == "d" * 64
+
+    def legacy_update(_uid, _conversation_id, expected_active_version, update_data):
+        if str(conversation.get("active_summary_version_id") or "") != str(expected_active_version or ""):
+            return False
+        for key, value in update_data.items():
+            if key.startswith("structured."):
+                conversation.setdefault("structured", {})[key.split(".", 1)[1]] = value
+            else:
+                conversation[key] = value
+        return True
+
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_OPTIONAL)
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_if_active_summary_version", legacy_update)
+    legacy = _cas_update()
+    legacy.title = "Later legacy winner"
+    legacy_response = client.patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=legacy.model_dump(),
+    )
+    assert legacy_response.status_code == 200
+    assert conversation["structured"]["title"] == "Later legacy winner"
+    assert conversation["summary_writeback_receipt"] is None
+    assert len(writes) == 5
+
+
+@pytest.mark.parametrize("failure_point", ["before_commit", "lost_ack"])
+def test_supersession_finalize_crash_or_lost_ack_is_retry_safe(monkeypatch, failure_point):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    _install_atomic_cas_fake(monkeypatch, conversation)
+    transact = callbacks.conversations_db.update_conversation_with_builder
+    interleaved = [False]
+    terminal_failure = [False]
+    publications = []
+
+    def fail_terminalize_once(*args, **kwargs):
+        builder_name = getattr(args[2], "__name__", "")
+        if builder_name == "finalize" and not interleaved[0]:
+            interleaved[0] = True
+            conversation["ella_signal"] = {"signal": "post-publication-winner"}
+        if builder_name == "terminalize" and not terminal_failure[0]:
+            terminal_failure[0] = True
+            if failure_point == "before_commit":
+                raise RuntimeError("synthetic terminalize crash")
+            result = transact(*args, **kwargs)
+            raise RuntimeError("synthetic terminalize acknowledgement loss")
+        return transact(*args, **kwargs)
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", fail_terminalize_once)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda _uid, current, **_kwargs: publications.append(copy.deepcopy(current)) or {"ok": True},
+    )
+    headers = _cas_headers(_cas_token(conversation))
+    client = _cas_client()
+    first = client.patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+    retry = client.patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+
+    assert first.status_code == 202
+    assert retry.status_code == 409
+    assert conversation["summary_writeback_receipt"]["status"] == "superseded"
+    assert _canonical_publication_tuple(publications[-1]) == _canonical_publication_tuple(conversation)
+    assert len(publications) == (3 if failure_point == "before_commit" else 2)
+
+
+def test_concurrent_exact_retries_share_one_fenced_repair_and_terminalize_once(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    _install_atomic_cas_fake(monkeypatch, conversation)
+    transact = callbacks.conversations_db.update_conversation_with_builder
+    interleaved = [False]
+
+    def interleave_once(*args, **kwargs):
+        if getattr(args[2], "__name__", "") == "finalize" and not interleaved[0]:
+            interleaved[0] = True
+            conversation["ella_tags"] = ["concurrent-repair-winner"]
+        return transact(*args, **kwargs)
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", interleave_once)
+    canonical_calls = [0]
+
+    def leave_repair_pending(_uid, _current, **_kwargs):
+        canonical_calls[0] += 1
+        return {"ok": canonical_calls[0] == 1}
+
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", leave_repair_pending)
+    headers = _cas_headers(_cas_token(conversation))
+    first = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+    assert first.status_code == 202
+    assert conversation["summary_writeback_receipt"]["canonical_status"] == "supersession_pending"
+
+    repair_barrier = threading.Barrier(2)
+    logical_publications = {}
+    publication_lock = threading.Lock()
+
+    def fenced_repair(_uid, current, **_kwargs):
+        repair_barrier.wait(timeout=10)
+        fence = (
+            current["canonical_summary_publication_sequence"],
+            current["canonical_summary_publication_sha256"],
+        )
+        with publication_lock:
+            logical_publications[fence] = _canonical_publication_tuple(current)
+        return {"ok": True}
+
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", fenced_repair)
+
+    def exact_retry():
+        return _cas_client().patch(
+            "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+            json=_cas_update().model_dump(),
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = [future.result(timeout=20) for future in [executor.submit(exact_retry) for _ in range(2)]]
+
+    assert [response.status_code for response in responses] == [409, 409]
+    assert len(logical_publications) == 1
+    assert next(iter(logical_publications.values())) == _canonical_publication_tuple(conversation)
+    assert conversation["summary_writeback_receipt"]["status"] == "superseded"
 
 
 def test_later_cas_writer_after_completion_gets_412_and_cannot_replay_old_receipt(monkeypatch):

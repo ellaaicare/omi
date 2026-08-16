@@ -72,6 +72,15 @@ receipt; a later CAS replaces it only after passing its new source comparison.
 Finalize compares the current document against the receipt's post-image and
 active-version fences, not receipt fields against themselves.
 
+If any canonical-published field changes after the first canonical write but
+before receipt finalization, the service durably claims the current complete
+post-image with a higher publication sequence, republishes that image, and only
+then marks the original receipt terminally `superseded`. The original request
+and every exact retry receive `409`; later CAS and legacy writers are unblocked
+only after the canonical row is restored. A repair crash or lost acknowledgement
+leaves the receipt retryable, and the canonical ledger rejects a late repair
+whose publication sequence is older or whose same-sequence image digest differs.
+
 If the Firestore client loses the transaction response and an exact receipt
 cannot be read back, the endpoint returns an explicit retryable `503`
 outcome-unknown response. It does not claim zero writes. No required-canonical

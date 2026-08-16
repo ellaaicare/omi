@@ -1,9 +1,11 @@
 import asyncio
 import copy
 import importlib.util
+import json
 import os
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -308,6 +310,7 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
     original = {
         "started_at": datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
         "finished_at": datetime(2026, 8, 15, 12, 1, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 8, 15, 11, 59, tzinfo=timezone.utc),
         "structured": {
             "title": "Original",
             "overview": "Original overview",
@@ -317,6 +320,8 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         "transcript_segments": [{"speaker": "Other", "text": "private transcript"}],
         "summary_versions": [{"id": "original-v1", "is_active": True}],
         "active_summary_version_id": "original-v1",
+        "source": "omi",
+        "status": "completed",
         "data_protection_level": "standard",
     }
     conversation_ref.set(copy.deepcopy(original))
@@ -328,11 +333,64 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         )
     )
     barrier = threading.Barrier(2)
+    publication_lock = threading.Lock()
+    canonical_publications = []
+    contenders = {
+        "A": {
+            "marker": "contender-alpha-only",
+            "emoji": "🅰️",
+            "category": "personal",
+            "tags": ["winner_alpha"],
+            "signal": {"winner": "alpha"},
+            "assessment": {"risk_level": "alpha"},
+        },
+        "B": {
+            "marker": "contender-bravo-only",
+            "emoji": "🅱️",
+            "category": "work",
+            "tags": ["winner_bravo"],
+            "signal": {"winner": "bravo"},
+            "assessment": {"risk_level": "bravo"},
+        },
+    }
+
+    def publish(_uid, current, **kwargs):
+        with publication_lock:
+            canonical_publications.append(
+                {
+                    "structured": copy.deepcopy(current["structured"]),
+                    "transcript_segments": copy.deepcopy(current["transcript_segments"]),
+                    "started_at": current["started_at"],
+                    "finished_at": current["finished_at"],
+                    "created_at": current["created_at"],
+                    "summary_versions": copy.deepcopy(current["summary_versions"]),
+                    "active_summary_version_id": current["active_summary_version_id"],
+                    "enrichment_state": copy.deepcopy(current["enrichment_state"]),
+                    "internal_assessment": copy.deepcopy(current["internal_assessment"]),
+                    "ella_tags": copy.deepcopy(current["ella_tags"]),
+                    "ella_signal": copy.deepcopy(current["ella_signal"]),
+                    "source": current["source"],
+                    "status": current["status"],
+                    "summary_source": kwargs["summary_source"],
+                    "summary_kind": kwargs["summary_kind"],
+                    "trace_id": kwargs["trace_id"],
+                }
+            )
+        return {"ok": True}
 
     def contender(label):
+        contender_data = contenders[label]
+
+        async def fetch_assessment(_uid, _conversation_id):
+            return contender_data["assessment"]
+
         # Synchronize before either Firestore transaction begins. Blocking from
         # inside the callback deadlocks against the emulator's transaction lock.
+        # Give A a deterministic head start after both requests are live; the
+        # emulator otherwise permits symmetric abort/retry livelock on macOS.
         barrier.wait(timeout=10)
+        if label == "B":
+            time.sleep(0.25)
         return asyncio.run(
             writeback.write_conversation_summary_cas(
                 uid=uid,
@@ -342,13 +400,17 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
                 source_version="2026-08-15 12:01:00+00:00",
                 payload_sha256=("a" if label == "A" else "b") * 64,
                 title=f"Winner {label}",
-                overview=f"[Ella] Complete winning overview from contender {label} with stable source data.",
-                emoji="🧠",
-                category="personal",
-                summary_source="hermes_parallel",
-                summary_kind="hermes_enriched",
+                overview=f"[Ella] Complete winning overview {contender_data['marker']} with stable source data.",
+                emoji=contender_data["emoji"],
+                category=contender_data["category"],
+                summary_source=f"hermes_parallel_{label.lower()}",
+                summary_kind=f"hermes_enriched_{label.lower()}",
                 correction_id=f"correction-{label}",
-                canonical_writer=lambda *args, **kwargs: {"ok": True},
+                trace_id=f"trace-{label}",
+                ella_tags=contender_data["tags"],
+                ella_signal=contender_data["signal"],
+                internal_assessment_fetcher=fetch_assessment,
+                canonical_writer=publish,
             )
         )
 
@@ -373,6 +435,7 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
                 writeback.CanonicalSummaryReconciliationPendingError,
             ),
         )
+        assert len(canonical_publications) == 1
 
         stored = conversation_ref.get().to_dict()
         winning_title = stored["structured"]["title"]
@@ -393,5 +456,30 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         assert len(corrections) == 1
         assert corrections[0].id == f"correction-{winning_label}"
         assert corrections[0].to_dict()["applied_summary_version_id"] == active["id"]
+        winner = contenders[winning_label]
+        loser_label = "B" if winning_label == "A" else "A"
+        publication = canonical_publications[0]
+        assert publication["structured"] == {
+            "title": f"Winner {winning_label}",
+            "overview": f"[Ella] Complete winning overview {winner['marker']} with stable source data.",
+            "emoji": winner["emoji"],
+            "category": winner["category"],
+        }
+        assert publication["transcript_segments"] == original["transcript_segments"]
+        assert publication["started_at"] == original["started_at"]
+        assert publication["finished_at"] == original["finished_at"]
+        assert publication["created_at"] == original["created_at"]
+        assert publication["summary_versions"] == stored["summary_versions"]
+        assert publication["active_summary_version_id"] == stored["active_summary_version_id"]
+        assert publication["enrichment_state"] == stored["enrichment_state"]
+        assert publication["internal_assessment"] == winner["assessment"]
+        assert publication["ella_tags"] == winner["tags"]
+        assert publication["ella_signal"] == winner["signal"]
+        assert publication["source"] == original["source"]
+        assert publication["status"] == original["status"]
+        assert publication["summary_source"] == f"hermes_parallel_{winning_label.lower()}"
+        assert publication["summary_kind"] == f"hermes_enriched_{winning_label.lower()}"
+        assert publication["trace_id"] == f"trace-{winning_label}"
+        assert contenders[loser_label]["marker"] not in json.dumps(publication, default=str)
     finally:
         conversation_ref.delete()

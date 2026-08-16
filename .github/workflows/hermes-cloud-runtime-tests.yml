@@ -60,6 +60,7 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/canonical_summary_source.py"
       - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/voice_honcho.py"
@@ -94,6 +95,7 @@ on:
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
+      - "backend/tests/fixtures/ella_canonical_source_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -192,6 +194,7 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/canonical_summary_source.py"
       - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/voice_honcho.py"
@@ -226,6 +229,7 @@ on:
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
+      - "backend/tests/fixtures/ella_canonical_source_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -785,7 +789,7 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 64
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 80
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_conversation_corrections.py -v
@@ -845,20 +849,24 @@ jobs:
           emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker run --rm -d \
             --name "${emulator_name}" \
-            -p 127.0.0.1:9999:9999 \
+            -p 127.0.0.1::8080 \
             gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:cda01b8c880e9161992c3fd61d7d0e153b4dd073aa4a9d62ad79243907cf8dd4 \
-            gcloud beta emulators firestore start --host-port=0.0.0.0:9999 --quiet
+            gcloud beta emulators firestore start --host-port=0.0.0.0:8080 --quiet
           cleanup_emulator() {
             docker rm -f "${emulator_name}" >/dev/null 2>&1 || true
           }
           trap cleanup_emulator EXIT
+          emulator_port="$(docker port "${emulator_name}" 8080/tcp | awk -F: 'END {print $NF}')"
+          test -n "${emulator_port}"
+          export FIRESTORE_EMULATOR_HOST="127.0.0.1:${emulator_port}"
+          echo "isolated Firestore emulator: ${FIRESTORE_EMULATOR_HOST}"
           for attempt in {1..30}; do
-            if curl --silent --fail http://127.0.0.1:9999/ >/dev/null 2>&1; then
+            if curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null 2>&1; then
               break
             fi
             sleep 1
           done
-          curl --silent --fail http://127.0.0.1:9999/ >/dev/null
+          curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null
           ELLA_FIRESTORE_EMULATOR_TESTS=true \
             python -m pytest tests/unit/test_conversation_summary_cas.py -v
 
