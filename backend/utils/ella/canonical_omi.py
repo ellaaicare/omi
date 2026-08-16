@@ -10,6 +10,10 @@ from typing import Any, Optional
 import requests
 
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
+CANONICAL_PUBLICATION_FENCES_URL = os.getenv(
+    "ELLA_CANONICAL_PUBLICATION_FENCES_URL",
+    f"{CANONICAL_EVENTS_URL.rsplit('/', 1)[0]}/publication-fences/reserve",
+)
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
 
@@ -107,6 +111,25 @@ def _active_summary_version_id(conversation: Any) -> Optional[str]:
     return str(value) if value else None
 
 
+def _active_summary_ancestor_ids(conversation: Any) -> list[str]:
+    """Return the immutable lineage preceding the active summary version."""
+
+    versions = _summary_versions(conversation)
+    by_id = {str(version.get("id") or ""): version for version in versions if str(version.get("id") or "")}
+    active_id = _active_summary_version_id(conversation)
+    ancestors: list[str] = []
+    seen = {active_id} if active_id else set()
+    cursor = active_id
+    while cursor and len(ancestors) < 256:
+        parent = str((by_id.get(cursor) or {}).get("based_on_version_id") or "")
+        if not parent or parent in seen:
+            break
+        ancestors.append(parent)
+        seen.add(parent)
+        cursor = parent
+    return ancestors
+
+
 def _summary_text(structured: dict[str, Any]) -> str:
     title = str(structured.get("title") or "").strip()
     overview = str(structured.get("overview") or "").strip()
@@ -122,6 +145,7 @@ def build_omi_canonical_event(
     summary_source: str = "observer",
     summary_kind: str = "observer_enriched",
     trace_id: Optional[str] = None,
+    publication_fence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build one idempotent canonical event for the active OMI summary."""
     conversation_id = str(_object_get(conversation, "id") or "")
@@ -162,6 +186,7 @@ def build_omi_canonical_event(
             "structured": structured,
             "summary_versions": _summary_versions(conversation),
             "active_summary_version_id": active_summary_version_id,
+            "summary_version_ancestor_ids": _active_summary_ancestor_ids(conversation),
             "enrichment_state": _model_to_dict(_object_get(conversation, "enrichment_state")),
             "internal_assessment": _model_to_dict(_object_get(conversation, "internal_assessment")),
             "ella_tags": _object_get(conversation, "ella_tags") or [],
@@ -173,6 +198,8 @@ def build_omi_canonical_event(
             "status": _enum_value(_object_get(conversation, "status")),
         },
     }
+    if publication_fence:
+        event["metadata"]["publication_fence"] = _json_safe(publication_fence)
     return _json_safe(event)
 
 
@@ -184,6 +211,7 @@ def write_omi_canonical_event(
     summary_kind: str = "observer_enriched",
     trace_id: Optional[str] = None,
     timeout: Optional[float] = None,
+    publication_fence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Best-effort synchronous write to the local canonical ledger endpoint."""
     if not CANONICAL_OMI_WRITE_ENABLED:
@@ -195,6 +223,7 @@ def write_omi_canonical_event(
         summary_source=summary_source,
         summary_kind=summary_kind,
         trace_id=trace_id,
+        publication_fence=publication_fence,
     )
     started = time.time()
     response = requests.post(
@@ -209,3 +238,22 @@ def write_omi_canonical_event(
     payload = response.json()
     payload["latency_ms"] = elapsed_ms
     return payload
+
+
+def reserve_omi_canonical_publication(
+    publication_fence: dict[str, Any], *, timeout: Optional[float] = None
+) -> dict[str, Any]:
+    """Durably advance the canonical sink authority before releasing a reclaimed worker."""
+    if not CANONICAL_OMI_WRITE_ENABLED:
+        return {"ok": False, "skipped": True, "reason": "disabled"}
+
+    response = requests.post(
+        CANONICAL_PUBLICATION_FENCES_URL,
+        json=_json_safe(publication_fence),
+        headers={"Content-Type": "application/json"},
+        timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"canonical_publication_fence_http_{response.status_code}: {response.text[:200]}")
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {"ok": False, "reason": "invalid_response"}

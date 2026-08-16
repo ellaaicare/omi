@@ -251,6 +251,12 @@ class CanonicalEventsBatch(BaseModel):
     events: list[CanonicalEventIn] = Field(default_factory=list)
 
 
+class CanonicalPublicationFenceReservationIn(BaseModel):
+    scope: str = Field(min_length=1, strict=True)
+    attempt_token: str = Field(min_length=1, strict=True)
+    generation: int = Field(ge=1, le=999_999_999_999_999_999, strict=True)
+
+
 class SessionCompleteIn(BaseModel):
     uid: Optional[str] = None
     canonical_identity: Optional[str] = None
@@ -294,6 +300,9 @@ class CanonicalEventStore:
     async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
         raise NotImplementedError
 
+    async def reserve_publication_fence(self, reservation: CanonicalPublicationFenceReservationIn) -> dict[str, Any]:
+        raise NotImplementedError
+
     async def timeline(
         self,
         *,
@@ -312,6 +321,69 @@ class CanonicalEventStore:
 
 
 class PostgresCanonicalEventStore(CanonicalEventStore):
+    @staticmethod
+    async def _ensure_publication_fence_table(conn) -> None:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS canonical_publication_fences (
+                scope TEXT PRIMARY KEY,
+                generation BIGINT NOT NULL CHECK (generation > 0),
+                attempt_token TEXT NOT NULL,
+                reserved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """)
+
+    async def reserve_publication_fence(self, reservation: CanonicalPublicationFenceReservationIn) -> dict[str, Any]:
+        """Advance the authoritative sink generation before reclaimed work is released."""
+
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await self._ensure_publication_fence_table(conn)
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO canonical_publication_fences (
+                        scope, generation, attempt_token, reserved_at
+                    )
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (scope) DO UPDATE SET
+                        generation = EXCLUDED.generation,
+                        attempt_token = EXCLUDED.attempt_token,
+                        reserved_at = EXCLUDED.reserved_at
+                    WHERE
+                        canonical_publication_fences.generation < EXCLUDED.generation
+                        OR (
+                            canonical_publication_fences.generation = EXCLUDED.generation
+                            AND canonical_publication_fences.attempt_token = EXCLUDED.attempt_token
+                        )
+                    RETURNING generation, attempt_token
+                    """,
+                    reservation.scope,
+                    reservation.generation,
+                    reservation.attempt_token,
+                )
+                if row is None:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT generation, attempt_token
+                        FROM canonical_publication_fences
+                        WHERE scope = $1
+                        FOR UPDATE
+                        """,
+                        reservation.scope,
+                    )
+                authoritative_generation = int(row["generation"]) if row is not None else 0
+                authoritative_token = str(row["attempt_token"]) if row is not None else ""
+                confirmed = (
+                    authoritative_generation == reservation.generation
+                    and authoritative_token == reservation.attempt_token
+                )
+                return {
+                    "ok": confirmed,
+                    "scope": reservation.scope,
+                    "generation": authoritative_generation,
+                    "attempt_token": authoritative_token,
+                }
+
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         if not events:
             return {"ok": True, "inserted": 0, "duplicates": 0, "events": []}
@@ -321,7 +393,59 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         statuses: list[dict[str, Any]] = []
         async with pool.acquire() as conn:
             async with conn.transaction():
+                if any((event.metadata or {}).get("publication_fence") is not None for event in events):
+                    await self._ensure_publication_fence_table(conn)
                 for item in normalized_events:
+                    publication_fence = item.get("metadata", {}).get("publication_fence")
+                    if publication_fence is not None:
+                        scope = publication_fence.get("scope") if isinstance(publication_fence, dict) else None
+                        attempt_token = (
+                            publication_fence.get("attempt_token") if isinstance(publication_fence, dict) else None
+                        )
+                        generation = (
+                            publication_fence.get("generation") if isinstance(publication_fence, dict) else None
+                        )
+                        valid_fence = bool(
+                            isinstance(scope, str)
+                            and scope
+                            and isinstance(attempt_token, str)
+                            and attempt_token
+                            and isinstance(generation, int)
+                            and not isinstance(generation, bool)
+                            and 0 < generation <= 999_999_999_999_999_999
+                        )
+                        authority = None
+                        if valid_fence:
+                            authority = await conn.fetchrow(
+                                """
+                                SELECT generation, attempt_token
+                                FROM canonical_publication_fences
+                                WHERE scope = $1
+                                FOR UPDATE
+                                """,
+                                scope,
+                            )
+                        if (
+                            authority is None
+                            or int(authority["generation"]) != generation
+                            or str(authority["attempt_token"]) != attempt_token
+                        ):
+                            statuses.append(
+                                {
+                                    "event_id": item["event_id"],
+                                    "source_identity": item["source_identity"],
+                                    "active_summary_version_id": item.get("metadata", {}).get(
+                                        "active_summary_version_id"
+                                    ),
+                                    "existing_active_summary_version_id": None,
+                                    "inserted": False,
+                                    "updated": False,
+                                    "duplicate": False,
+                                    "stale": True,
+                                    "reason": "publication_fence_stale",
+                                }
+                            )
+                            continue
                     conflict_clause = (
                         """
                         DO UPDATE SET
@@ -339,6 +463,40 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             source_ref = EXCLUDED.source_ref,
                             metadata = EXCLUDED.metadata,
                             raw_event = EXCLUDED.raw_event
+                        WHERE
+                            (canonical_events.metadata->>'active_summary_version_id') IS NULL
+                            OR (
+                                (EXCLUDED.metadata->>'active_summary_version_id') IS NOT NULL
+                                AND (canonical_events.metadata->>'active_summary_version_id')
+                                    <> (EXCLUDED.metadata->>'active_summary_version_id')
+                                AND (EXCLUDED.metadata->'summary_version_ancestor_ids')
+                                    ? (canonical_events.metadata->>'active_summary_version_id')
+                            )
+                            OR (
+                                (canonical_events.metadata->>'active_summary_version_id')
+                                    = (EXCLUDED.metadata->>'active_summary_version_id')
+                                AND (EXCLUDED.metadata->'publication_fence'->>'scope') IS NOT NULL
+                                AND (
+                                    (canonical_events.metadata->'publication_fence'->>'scope') IS NULL
+                                    OR (canonical_events.metadata->'publication_fence'->>'scope')
+                                        = (EXCLUDED.metadata->'publication_fence'->>'scope')
+                                )
+                                AND COALESCE(
+                                    CASE
+                                        WHEN (EXCLUDED.metadata->'publication_fence'->>'generation')
+                                            ~ '^[0-9]{1,18}$'
+                                        THEN (EXCLUDED.metadata->'publication_fence'->>'generation')::bigint
+                                    END,
+                                    0
+                                ) > COALESCE(
+                                    CASE
+                                        WHEN (canonical_events.metadata->'publication_fence'->>'generation')
+                                            ~ '^[0-9]{1,18}$'
+                                        THEN (canonical_events.metadata->'publication_fence'->>'generation')::bigint
+                                    END,
+                                    0
+                                )
+                            )
                         """
                         if _should_replace_existing_event(item)
                         else "DO NOTHING"
@@ -375,22 +533,59 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         _stable_json(item["metadata"]),
                         _stable_json(item["raw_event"]),
                     )
+                    existing_active_version_id = None
+                    stale = False
+                    duplicate = row is None and not _should_replace_existing_event(item)
+                    if row is None and _should_replace_existing_event(item):
+                        existing_active_version_id = await conn.fetchval(
+                            """
+                            SELECT metadata->>'active_summary_version_id'
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                        )
+                        exact_replay = await conn.fetchval(
+                            """
+                            SELECT raw_event = $3::jsonb
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                            _stable_json(item["raw_event"]),
+                        )
+                        incoming_active_version_id = str(
+                            item.get("metadata", {}).get("active_summary_version_id") or ""
+                        )
+                        duplicate = bool(
+                            incoming_active_version_id
+                            and incoming_active_version_id == str(existing_active_version_id or "")
+                            and exact_replay is True
+                        )
+                        stale = not duplicate
                     statuses.append(
                         {
                             "event_id": item["event_id"],
                             "source_identity": item["source_identity"],
+                            "active_summary_version_id": item.get("metadata", {}).get("active_summary_version_id"),
+                            "existing_active_summary_version_id": existing_active_version_id,
                             "inserted": bool(row and row["inserted"]),
                             "updated": bool(row and not row["inserted"]),
+                            "duplicate": duplicate,
+                            "stale": stale,
                         }
                     )
 
         inserted_count = sum(1 for status in statuses if status["inserted"])
         updated_count = sum(1 for status in statuses if status.get("updated"))
         return {
-            "ok": True,
+            "ok": not any(status.get("stale") for status in statuses),
             "inserted": inserted_count,
             "updated": updated_count,
-            "duplicates": len(statuses) - inserted_count - updated_count,
+            "duplicates": sum(1 for status in statuses if status.get("duplicate")),
+            "stale": sum(1 for status in statuses if status.get("stale")),
             "events": statuses,
         }
 
@@ -685,6 +880,11 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         corrections, retries, or downstream enrichment.
         """
         return await default_store.write_batch(batch.events)
+
+    @router.post("/v1/ella/publication-fences/reserve")
+    async def reserve_publication_fence(reservation: CanonicalPublicationFenceReservationIn):
+        """Reserve the only correction generation currently allowed to publish."""
+        return await default_store.reserve_publication_fence(reservation)
 
     @router.post("/v1/ella/sessions/{session_id}/complete")
     async def complete_session(session_id: str, completion: SessionCompleteIn):

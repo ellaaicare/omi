@@ -22,6 +22,7 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/memory_correction_receipt.dart';
+import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
@@ -31,6 +32,7 @@ import 'package:omi/pages/conversation_detail/widgets/summarized_apps_sheet.dart
 import 'package:omi/pages/conversations/widgets/move_to_folder_sheet.dart';
 import 'package:omi/pages/settings/developer.dart';
 import 'package:omi/providers/folder_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/folders/folder_icon_mapper.dart';
@@ -41,6 +43,44 @@ import 'package:omi/widgets/extensions/string.dart';
 import 'maps_util.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/widgets/ella_source_indicator.dart';
+
+String correctionTerminalFailureMessage(
+  AppLocalizations l10n,
+  ConversationCorrectionReceipt? receipt,
+) {
+  switch (receipt?.failureCode) {
+    case 'ai_consent_required':
+      return l10n.aiConsentNotAllowedStatus;
+    case 'self_hosted_runtime_target_mode_required':
+    case 'self_hosted_runtime_target_mode_missing':
+    case 'self_hosted_runtime_target_identity_missing':
+    case 'self_hosted_runtime_target_lineage_stale':
+    case 'self_hosted_runtime_authority_unavailable':
+    case 'hermes_cloud_runtime_required':
+    case 'hermes_cloud_runtime_authority_changed':
+    case 'hermes_cloud_runtime_target_identity_missing':
+    case 'hermes_cloud_not_provisioned':
+    case 'runtime_ownership_mismatch':
+    case 'runtime_not_ready':
+      return l10n.memoryCorrectionRuntimeUnavailable;
+    case 'active_summary_version_changed':
+    case 'concurrentconversationsummarychangeerror':
+      return l10n.memoryCorrectionMemoryChanged;
+    case 'direct_apply_disabled':
+    case 'queue_failed':
+      return l10n.memoryCorrectionServiceUnavailable;
+  }
+
+  switch (receipt?.status) {
+    case 'direct_apply_disabled':
+    case 'queue_failed':
+      return l10n.memoryCorrectionServiceUnavailable;
+    case 'direct_apply_failed':
+      return l10n.memoryCorrectionFailed;
+    default:
+      return l10n.memoryCorrectionFailed;
+  }
+}
 
 // Highlight search matches with current result highlighting
 List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int currentResultIndex = -1}) {
@@ -63,15 +103,17 @@ List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int curr
 
     bool isCurrentResult = currentResultIndex >= 0 && matchCount == currentResultIndex;
 
-    spans.add(TextSpan(
-      text: text.substring(index, index + searchQuery.length),
-      style: TextStyle(
-        backgroundColor:
-            isCurrentResult ? EllaColors.warning.withValues(alpha: 0.85) : EllaColors.teal.withValues(alpha: 0.35),
-        color: EllaColors.ink,
-        fontWeight: FontWeight.bold,
+    spans.add(
+      TextSpan(
+        text: text.substring(index, index + searchQuery.length),
+        style: TextStyle(
+          backgroundColor:
+              isCurrentResult ? EllaColors.warning.withValues(alpha: 0.85) : EllaColors.teal.withValues(alpha: 0.35),
+          color: EllaColors.ink,
+          fontWeight: FontWeight.bold,
+        ),
       ),
-    ));
+    );
 
     matchCount++;
     start = index + searchQuery.length;
@@ -147,10 +189,7 @@ class GetSummaryWidgets extends StatelessWidget {
             ),
             // Duration chip
             if (conversation.transcriptSegments.isNotEmpty && _getDuration(context, conversation).isNotEmpty)
-              _buildChip(
-                label: _getDuration(context, conversation),
-                icon: Icons.timelapse,
-              ),
+              _buildChip(label: _getDuration(context, conversation), icon: Icons.timelapse),
             // Folder chip
             _buildFolderChip(
               context: context,
@@ -229,11 +268,7 @@ class GetSummaryWidgets extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 4),
-            Icon(
-              Icons.arrow_drop_down,
-              size: 16,
-              color: folder != null ? folder.colorValue : EllaColors.textTertiary,
-            ),
+            Icon(Icons.arrow_drop_down, size: 16, color: folder != null ? folder.colorValue : EllaColors.textTertiary),
           ],
         ),
       ),
@@ -250,19 +285,11 @@ class GetSummaryWidgets extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            icon,
-            size: 14,
-            color: EllaColors.textTertiary,
-          ),
+          Icon(icon, size: 14, color: EllaColors.textTertiary),
           const SizedBox(width: 6),
           Text(
             label,
-            style: const TextStyle(
-              color: EllaColors.textTertiary,
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-            ),
+            style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13, fontWeight: FontWeight.w500),
           ),
         ],
       ),
@@ -295,10 +322,7 @@ class GetSummaryWidgets extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       if (titleDisplayValue.isEllaGenerated) ...[
-                        const Padding(
-                          padding: EdgeInsets.only(top: 8),
-                          child: EllaSourceIndicator(size: 18),
-                        ),
+                        const Padding(padding: EdgeInsets.only(top: 8), child: EllaSourceIndicator(size: 18)),
                         const SizedBox(width: 8),
                       ],
                       Expanded(
@@ -333,123 +357,129 @@ class ActionItemsListWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
-      return Column(
-        children: [
-          provider.conversation.structured.actionItems.isNotEmpty
-              ? Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      context.l10n.actionItems,
-                      style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 26),
-                    ),
-                    IconButton(
-                      onPressed: () {
-                        Clipboard.setData(ClipboardData(
-                          text:
-                              '- ${provider.conversation.structured.actionItems.map((e) => e.description.decodeString).join('\n- ')}',
-                        ));
-                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                          content: Text(context.l10n.actionItemsCopiedToClipboard),
-                          duration: const Duration(seconds: 2),
-                        ));
-                        MixpanelManager().copiedConversationDetails(provider.conversation, source: 'Action Items');
-                      },
-                      icon: const Icon(Icons.copy_rounded, color: EllaColors.textSecondary, size: 20),
-                    )
-                  ],
-                )
-              : const SizedBox.shrink(),
-          ListView.builder(
-            itemCount: provider.conversation.structured.actionItems.where((e) => !e.deleted).length,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemBuilder: (context, idx) {
-              var item = provider.conversation.structured.actionItems.where((e) => !e.deleted).toList()[idx];
-              return Dismissible(
-                key: Key(item.description),
-                direction: DismissDirection.endToStart,
-                background: Container(
-                  alignment: Alignment.centerRight,
-                  padding: const EdgeInsets.only(right: 20.0),
-                  color: Colors.red,
-                  child: const Icon(Icons.delete, color: Colors.white),
-                ),
-                onDismissed: (direction) {
-                  var tempItem = provider.conversation.structured.actionItems[idx];
-                  var tempIdx = idx;
-                  provider.deleteActionItem(idx);
-                  provider.deleteActionItemPermanently(tempItem, tempIdx);
-                  MixpanelManager().deletedActionItem(provider.conversation);
-                  // ScaffoldMessenger.of(context)
-                  //     .showSnackBar(
-                  //       SnackBar(
-                  //         content: const Text('Action Item deleted successfully 🗑️'),
-                  //         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                  //         action: SnackBarAction(
-                  //           label: 'Undo',
-                  //           textColor: Colors.white,
-                  //           onPressed: () {
-                  //             provider.undoDeleteActionItem(idx);
-                  //           },
-                  //         ),
-                  //       ),
-                  //     )
-                  //     .closed
-                  //     .then((reason) {
-                  //   if (reason != SnackBarClosedReason.action) {
-                  //     provider.deleteActionItemPermanently(tempItem, tempIdx);
-                  //     MixpanelManager().deletedActionItem(provider.conversation);
-                  //   }
-                  // });
-                },
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 10, bottom: 2),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+    return Consumer<ConversationDetailProvider>(
+      builder: (context, provider, child) {
+        return Column(
+          children: [
+            provider.conversation.structured.actionItems.isNotEmpty
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6.0),
-                        child: SizedBox(
-                          height: 22.0,
-                          width: 22.0,
-                          child: Checkbox(
-                            shape: const CircleBorder(),
-                            value: item.completed,
-                            onChanged: (value) {
-                              if (value != null) {
-                                context.read<ConversationDetailProvider>().updateActionItemState(value, idx);
-                                setConversationActionItemState(provider.conversation.id, [idx], [value]);
-                                if (value) {
-                                  MixpanelManager().checkedActionItem(provider.conversation, idx);
-                                } else {
-                                  MixpanelManager().uncheckedActionItem(provider.conversation, idx);
-                                }
-                              }
-                            },
-                          ),
-                        ),
+                      Text(
+                        context.l10n.actionItems,
+                        style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 26),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: SelectionArea(
-                          child: Text(
-                            item.description.decodeString,
-                            style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16, height: 1.3),
-                          ),
-                        ),
+                      IconButton(
+                        onPressed: () {
+                          Clipboard.setData(
+                            ClipboardData(
+                              text:
+                                  '- ${provider.conversation.structured.actionItems.map((e) => e.description.decodeString).join('\n- ')}',
+                            ),
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(context.l10n.actionItemsCopiedToClipboard),
+                              duration: const Duration(seconds: 2),
+                            ),
+                          );
+                          MixpanelManager().copiedConversationDetails(provider.conversation, source: 'Action Items');
+                        },
+                        icon: const Icon(Icons.copy_rounded, color: EllaColors.textSecondary, size: 20),
                       ),
                     ],
+                  )
+                : const SizedBox.shrink(),
+            ListView.builder(
+              itemCount: provider.conversation.structured.actionItems.where((e) => !e.deleted).length,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemBuilder: (context, idx) {
+                var item = provider.conversation.structured.actionItems.where((e) => !e.deleted).toList()[idx];
+                return Dismissible(
+                  key: Key(item.description),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                    alignment: Alignment.centerRight,
+                    padding: const EdgeInsets.only(right: 20.0),
+                    color: Colors.red,
+                    child: const Icon(Icons.delete, color: Colors.white),
                   ),
-                ),
-              );
-            },
-          ),
-        ],
-      );
-    });
+                  onDismissed: (direction) {
+                    var tempItem = provider.conversation.structured.actionItems[idx];
+                    var tempIdx = idx;
+                    provider.deleteActionItem(idx);
+                    provider.deleteActionItemPermanently(tempItem, tempIdx);
+                    MixpanelManager().deletedActionItem(provider.conversation);
+                    // ScaffoldMessenger.of(context)
+                    //     .showSnackBar(
+                    //       SnackBar(
+                    //         content: const Text('Action Item deleted successfully 🗑️'),
+                    //         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                    //         action: SnackBarAction(
+                    //           label: 'Undo',
+                    //           textColor: Colors.white,
+                    //           onPressed: () {
+                    //             provider.undoDeleteActionItem(idx);
+                    //           },
+                    //         ),
+                    //       ),
+                    //     )
+                    //     .closed
+                    //     .then((reason) {
+                    //   if (reason != SnackBarClosedReason.action) {
+                    //     provider.deleteActionItemPermanently(tempItem, tempIdx);
+                    //     MixpanelManager().deletedActionItem(provider.conversation);
+                    //   }
+                    // });
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 10, bottom: 2),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6.0),
+                          child: SizedBox(
+                            height: 22.0,
+                            width: 22.0,
+                            child: Checkbox(
+                              shape: const CircleBorder(),
+                              value: item.completed,
+                              onChanged: (value) {
+                                if (value != null) {
+                                  context.read<ConversationDetailProvider>().updateActionItemState(value, idx);
+                                  setConversationActionItemState(provider.conversation.id, [idx], [value]);
+                                  if (value) {
+                                    MixpanelManager().checkedActionItem(provider.conversation, idx);
+                                  } else {
+                                    MixpanelManager().uncheckedActionItem(provider.conversation, idx);
+                                  }
+                                }
+                              },
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: SelectionArea(
+                            child: Text(
+                              item.description.decodeString,
+                              style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16, height: 1.3),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 }
 
@@ -498,73 +528,78 @@ class ReprocessDiscardedWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
-      if (provider.loadingReprocessConversation && provider.reprocessConversationId == provider.conversation.id) {
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.only(top: 18.0),
-            child: Row(
+    return Consumer<ConversationDetailProvider>(
+      builder: (context, provider, child) {
+        if (provider.loadingReprocessConversation && provider.reprocessConversationId == provider.conversation.id) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 18.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  const CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary)),
+                  const SizedBox(width: 16),
+                  Text(
+                    provider.conversation.discarded
+                        ? context.l10n.summarizingConversation
+                        : context.l10n.resummarizingConversation,
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        return ListView(
+          shrinkWrap: true,
+          children: [
+            const SizedBox(height: 32),
+            Text(
+              context.l10n.nothingInterestingRetry,
+              style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 20),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                const CircularProgressIndicator(
-                  valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
-                ),
-                const SizedBox(width: 16),
-                Text(
-                  provider.conversation.discarded
-                      ? context.l10n.summarizingConversation
-                      : context.l10n.resummarizingConversation,
-                  style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
+                Container(
+                  decoration: BoxDecoration(
+                    border: const GradientBoxBorder(
+                      gradient: LinearGradient(
+                        colors: [
+                          Color.fromARGB(127, 208, 208, 208),
+                          Color.fromARGB(127, 188, 99, 121),
+                          Color.fromARGB(127, 86, 101, 182),
+                          Color.fromARGB(127, 126, 190, 236),
+                        ],
+                      ),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: MaterialButton(
+                    onPressed: () async {
+                      await provider.reprocessConversation();
+                    },
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+                      child: Text(
+                        context.l10n.summarize,
+                        style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
-          ),
+            const SizedBox(height: 32),
+          ],
         );
-      }
-      return ListView(
-        shrinkWrap: true,
-        children: [
-          const SizedBox(height: 32),
-          Text(
-            context.l10n.nothingInterestingRetry,
-            style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 20),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  border: const GradientBoxBorder(
-                    gradient: LinearGradient(colors: [
-                      Color.fromARGB(127, 208, 208, 208),
-                      Color.fromARGB(127, 188, 99, 121),
-                      Color.fromARGB(127, 86, 101, 182),
-                      Color.fromARGB(127, 126, 190, 236)
-                    ]),
-                    width: 2,
-                  ),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: MaterialButton(
-                  onPressed: () async {
-                    await provider.reprocessConversation();
-                  },
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-                      child: Text(context.l10n.summarize,
-                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16))),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-        ],
-      );
-    });
+      },
+    );
   }
 }
 
@@ -613,7 +648,9 @@ class AppResultDetailWidget extends StatelessWidget {
                           },
                           child: RichText(
                             text: TextSpan(
-                                style: const TextStyle(color: Colors.grey), text: context.l10n.noSummaryForApp),
+                              style: const TextStyle(color: Colors.grey),
+                              text: context.l10n.noSummaryForApp,
+                            ),
                           ),
                         ),
                       ),
@@ -623,10 +660,7 @@ class AppResultDetailWidget extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       if (displayValue.isEllaGenerated) ...[
-                        const Padding(
-                          padding: EdgeInsets.only(top: 3),
-                          child: EllaSourceIndicator(),
-                        ),
+                        const Padding(padding: EdgeInsets.only(top: 3), child: EllaSourceIndicator()),
                         const SizedBox(width: 7),
                       ],
                       Expanded(
@@ -654,11 +688,7 @@ class AppResultDetailWidget extends StatelessWidget {
                     CachedNetworkImage(
                       imageUrl: app!.getImageUrl(),
                       imageBuilder: (context, imageProvider) {
-                        return CircleAvatar(
-                          backgroundColor: Colors.white,
-                          radius: 12,
-                          backgroundImage: imageProvider,
-                        );
+                        return CircleAvatar(backgroundColor: Colors.white, radius: 12, backgroundImage: imageProvider);
                       },
                       errorWidget: (context, url, error) {
                         return const CircleAvatar(
@@ -722,10 +752,7 @@ class AppResultDetailWidget extends StatelessWidget {
             // keeps its post-session receipt-discovery wiring (#327/#329).
             MemoryTalkButton(conversation: conversation),
             const SizedBox(height: 12),
-            _TypeCorrectionLink(
-              conversation: conversation,
-              appSummary: content,
-            ),
+            _TypeCorrectionLink(conversation: conversation, appSummary: content),
           ],
         ],
       ),
@@ -740,12 +767,7 @@ typedef MemoryTalkRouteOpener = Future<void> Function(
 );
 
 class MemoryTalkButton extends StatefulWidget {
-  const MemoryTalkButton({
-    required this.conversation,
-    this.routeOpener,
-    this.receiptDiscovery,
-    super.key,
-  });
+  const MemoryTalkButton({required this.conversation, this.routeOpener, this.receiptDiscovery, super.key});
 
   final ServerConversation conversation;
   final MemoryTalkRouteOpener? routeOpener;
@@ -885,10 +907,7 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
             },
             child: Ink(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              decoration: BoxDecoration(
-                color: EllaColors.primary,
-                borderRadius: BorderRadius.circular(18),
-              ),
+              decoration: BoxDecoration(color: EllaColors.primary, borderRadius: BorderRadius.circular(18)),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -896,11 +915,7 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
                   const SizedBox(width: 8),
                   Text(
                     context.l10n.memoryTalkAction,
-                    style: const TextStyle(
-                      color: EllaColors.paper,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
+                    style: const TextStyle(color: EllaColors.paper, fontSize: 14, fontWeight: FontWeight.w700),
                   ),
                 ],
               ),
@@ -924,10 +939,7 @@ class _TypeCorrectionLink extends StatelessWidget {
   final ServerConversation conversation;
   final String appSummary;
 
-  const _TypeCorrectionLink({
-    required this.conversation,
-    required this.appSummary,
-  });
+  const _TypeCorrectionLink({required this.conversation, required this.appSummary});
 
   @override
   Widget build(BuildContext context) {
@@ -941,9 +953,10 @@ class _TypeCorrectionLink extends StatelessWidget {
             context: context,
             isScrollControlled: true,
             backgroundColor: Colors.transparent,
-            builder: (context) => _CorrectSummarySheet(
+            builder: (context) => CorrectSummarySheet(
               conversation: conversation,
               appSummary: appSummary,
+              onApplied: context.read<ConversationDetailProvider>().refreshConversation,
             ),
           );
         },
@@ -956,11 +969,7 @@ class _TypeCorrectionLink extends StatelessWidget {
               const SizedBox(width: 6),
               Text(
                 context.l10n.memoryTypeCorrection,
-                style: const TextStyle(
-                  color: EllaColors.tealDeep,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: const TextStyle(color: EllaColors.tealDeep, fontSize: 14, fontWeight: FontWeight.w700),
               ),
             ],
           ),
@@ -970,20 +979,51 @@ class _TypeCorrectionLink extends StatelessWidget {
   }
 }
 
-class _CorrectSummarySheet extends StatefulWidget {
+typedef CorrectionSubmitter = Future<ConversationCorrectionSubmission?> Function({
+  required String conversationId,
+  required String correctionId,
+  required String correctionText,
+  String? summaryTitle,
+  String? summaryOverview,
+  String? appSummary,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  required Duration requestTimeout,
+});
+
+typedef CorrectionReceiptPoller = Future<ConversationCorrectionReceipt?> Function({
+  required String conversationId,
+  required String correctionId,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  required Duration pollBudget,
+});
+
+class CorrectSummarySheet extends StatefulWidget {
   final ServerConversation conversation;
   final String appSummary;
+  final CorrectionSubmitter submitter;
+  final CorrectionReceiptPoller receiptPoller;
+  final PendingConversationCorrectionIdentityStore correctionIdentityStore;
+  final ExactAccountAuthorityVerifier? Function() authorityProvider;
+  final Future<void> Function()? onApplied;
 
-  const _CorrectSummarySheet({
+  const CorrectSummarySheet({
     required this.conversation,
     required this.appSummary,
+    this.submitter = submitConversationCorrection,
+    this.receiptPoller = pollConversationCorrectionReceipt,
+    this.correctionIdentityStore = const PendingConversationCorrectionIdentityStore(),
+    this.authorityProvider = WalOwnerAuthority.operationEntry,
+    this.onApplied,
+    super.key,
   });
 
   @override
-  State<_CorrectSummarySheet> createState() => _CorrectSummarySheetState();
+  State<CorrectSummarySheet> createState() => _CorrectSummarySheetState();
 }
 
-class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
+class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
 
@@ -997,33 +1037,84 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     final correctionText = _controller.text.trim();
     if (correctionText.isEmpty || _isSubmitting) return;
 
+    final operationStopwatch = Stopwatch()..start();
+    Duration remainingBudget() => conversationCorrectionClientPollBudget - operationStopwatch.elapsed;
     setState(() => _isSubmitting = true);
-    final messenger = ScaffoldMessenger.of(context);
-    final navigator = Navigator.of(context);
-
-    final ok = await submitConversationCorrection(
-      conversationId: widget.conversation.id,
-      correctionText: correctionText,
-      summaryTitle: widget.conversation.structured.title,
-      summaryOverview: widget.conversation.structured.overview,
-      appSummary: widget.appSummary,
-    );
+    final authority = widget.authorityProvider();
+    ConversationCorrectionReceipt? terminalReceipt;
+    try {
+      if (authority != null && authority.uid.isNotEmpty && authority.isExactCurrent()) {
+        final correctionId = await widget.correctionIdentityStore.acquire(
+          uid: authority.uid,
+          conversationId: widget.conversation.id,
+          correctionText: correctionText,
+          summaryTitle: widget.conversation.structured.title,
+          summaryOverview: widget.conversation.structured.overview,
+          appSummary: widget.appSummary,
+        );
+        if (!authority.isExactCurrent()) throw StateError('Exact account authority changed before correction submit');
+        final remainingBeforeSubmit = remainingBudget();
+        if (remainingBeforeSubmit <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
+        final submitBudget = remainingBeforeSubmit < conversationCorrectionSubmitBudget
+            ? remainingBeforeSubmit
+            : conversationCorrectionSubmitBudget;
+        final submission = await widget
+            .submitter(
+              conversationId: widget.conversation.id,
+              correctionId: correctionId,
+              correctionText: correctionText,
+              summaryTitle: widget.conversation.structured.title,
+              summaryOverview: widget.conversation.structured.overview,
+              appSummary: widget.appSummary,
+              expectedAuthenticatedUid: authority.uid,
+              exactAuthority: authority,
+              requestTimeout: submitBudget,
+            )
+            .timeout(submitBudget);
+        if (submission != null && submission.conversationId == widget.conversation.id && authority.isExactCurrent()) {
+          final pollBudget = remainingBudget();
+          if (pollBudget <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
+          terminalReceipt = await widget
+              .receiptPoller(
+                conversationId: submission.conversationId,
+                correctionId: submission.correctionId,
+                expectedAuthenticatedUid: authority.uid,
+                exactAuthority: authority,
+                pollBudget: pollBudget,
+              )
+              .timeout(pollBudget);
+          if (terminalReceipt != null && !terminalReceipt.isPending) {
+            await widget.correctionIdentityStore.clearIfTerminal(
+              uid: authority.uid,
+              conversationId: widget.conversation.id,
+              correctionId: correctionId,
+            );
+          }
+        }
+      }
+    } catch (_) {
+      // Fail closed without logging correction text or transport response bodies.
+    }
 
     if (!mounted) return;
-    setState(() => _isSubmitting = false);
-
-    if (ok) {
+    if (terminalReceipt?.isApplied == true) {
+      if (widget.onApplied != null) await widget.onApplied!();
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
       HapticFeedback.mediumImpact();
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Correction submitted. Ella will recheck this summary.')),
-      );
-      navigator.pop();
-    } else {
-      HapticFeedback.lightImpact();
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Could not submit correction yet. Please try again later.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.memoryCorrectionApplied)));
+      Navigator.of(context).pop();
+      return;
     }
+
+    setState(() => _isSubmitting = false);
+    HapticFeedback.lightImpact();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        key: ValueKey('type-correction-terminal-${terminalReceipt?.status ?? 'unavailable'}'),
+        content: Text(correctionTerminalFailureMessage(context.l10n, terminalReceipt)),
+      ),
+    );
   }
 
   @override
@@ -1048,32 +1139,22 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                 child: Container(
                   width: 44,
                   height: 4,
-                  decoration: BoxDecoration(
-                    color: EllaColors.bgTertiary,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
+                  decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(999)),
                 ),
               ),
               const SizedBox(height: 20),
               Text(
                 context.l10n.memoryTypeCorrection,
-                style: TextStyle(
-                  color: EllaColors.textPrimary,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 8),
               const Text(
                 'Tell Ella what was wrong in your own words. The conversation ID and current summary are attached in the background.',
-                style: TextStyle(
-                  color: EllaColors.textSecondary,
-                  fontSize: 15,
-                  height: 1.35,
-                ),
+                style: TextStyle(color: EllaColors.textSecondary, fontSize: 15, height: 1.35),
               ),
               const SizedBox(height: 16),
               TextField(
+                key: const ValueKey('type-correction-input'),
                 controller: _controller,
                 autofocus: true,
                 minLines: 4,
@@ -1103,6 +1184,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
+                  key: const ValueKey('type-correction-submit'),
                   onPressed: _isSubmitting ? null : _submit,
                   style: FilledButton.styleFrom(
                     backgroundColor: EllaColors.primary,
@@ -1155,7 +1237,7 @@ class GetAppsWidgets extends StatelessWidget {
                       currentResultIndex: currentResultIndex,
                     ),
                   ],
-                  const SizedBox(height: 8)
+                  const SizedBox(height: 8),
                 ],
         );
       },
@@ -1219,115 +1301,103 @@ class GetGeolocationWidgets extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Selector<ConversationDetailProvider, Geolocation?>(selector: (context, provider) {
-      if (provider.conversation.discarded) return null;
-      return provider.conversation.geolocation;
-    }, builder: (context, geolocation, child) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: geolocation == null
-            ? []
-            : [
-                const SizedBox(height: 12),
-                GestureDetector(
-                  onTap: () async {
-                    MapsUtil.launchMap(geolocation.latitude!, geolocation.longitude!);
-                  },
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: SizedBox(
-                      height: 200,
-                      child: Stack(
-                        children: [
-                          // Map Image
-                          CachedNetworkImage(
-                            imageBuilder: (context, imageProvider) {
-                              return Container(
-                                height: 200,
+    return Selector<ConversationDetailProvider, Geolocation?>(
+      selector: (context, provider) {
+        if (provider.conversation.discarded) return null;
+        return provider.conversation.geolocation;
+      },
+      builder: (context, geolocation, child) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: geolocation == null
+              ? []
+              : [
+                  const SizedBox(height: 12),
+                  GestureDetector(
+                    onTap: () async {
+                      MapsUtil.launchMap(geolocation.latitude!, geolocation.longitude!);
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: SizedBox(
+                        height: 200,
+                        child: Stack(
+                          children: [
+                            // Map Image
+                            CachedNetworkImage(
+                              imageBuilder: (context, imageProvider) {
+                                return Container(
+                                  height: 200,
+                                  decoration: BoxDecoration(
+                                    image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
+                                  ),
+                                );
+                              },
+                              errorWidget: (context, url, error) {
+                                return Container(
+                                  height: 200,
+                                  color: const Color(0xFF2A2A2A),
+                                  child: Center(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        const Icon(Icons.location_off, size: 40, color: Colors.grey),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          context.l10n.couldNotLoadMap,
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(color: Colors.grey),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                              imageUrl: MapsUtil.getMapImageUrl(geolocation.latitude!, geolocation.longitude!),
+                            ),
+                            // Gradient blur overlay from bottom
+                            Positioned(
+                              bottom: 0,
+                              left: 0,
+                              right: 0,
+                              child: Container(
+                                height: 80,
                                 decoration: BoxDecoration(
-                                  image: DecorationImage(
-                                    image: imageProvider,
-                                    fit: BoxFit.cover,
+                                  gradient: LinearGradient(
+                                    begin: Alignment.bottomCenter,
+                                    end: Alignment.topCenter,
+                                    colors: [Colors.black.withValues(alpha: 0.6), Colors.black.withValues(alpha: 0.0)],
                                   ),
-                                ),
-                              );
-                            },
-                            errorWidget: (context, url, error) {
-                              return Container(
-                                height: 200,
-                                color: const Color(0xFF2A2A2A),
-                                child: Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      const Icon(Icons.location_off, size: 40, color: Colors.grey),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        context.l10n.couldNotLoadMap,
-                                        textAlign: TextAlign.center,
-                                        style: const TextStyle(color: Colors.grey),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                            imageUrl: MapsUtil.getMapImageUrl(
-                              geolocation.latitude!,
-                              geolocation.longitude!,
-                            ),
-                          ),
-                          // Gradient blur overlay from bottom
-                          Positioned(
-                            bottom: 0,
-                            left: 0,
-                            right: 0,
-                            child: Container(
-                              height: 80,
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.bottomCenter,
-                                  end: Alignment.topCenter,
-                                  colors: [
-                                    Colors.black.withValues(alpha: 0.6),
-                                    Colors.black.withValues(alpha: 0.0),
-                                  ],
                                 ),
                               ),
                             ),
-                          ),
-                          // Location text at bottom left
-                          Positioned(
-                            bottom: 16,
-                            left: 16,
-                            right: 16,
-                            child: Text(
-                              _getShortAddress(context, geolocation.address?.decodeString),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w500,
-                                shadows: [
-                                  Shadow(
-                                    offset: Offset(0, 1),
-                                    blurRadius: 2,
-                                    color: Colors.black,
-                                  ),
-                                ],
+                            // Location text at bottom left
+                            Positioned(
+                              bottom: 16,
+                              left: 16,
+                              right: 16,
+                              child: Text(
+                                _getShortAddress(context, geolocation.address?.decodeString),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w500,
+                                  shadows: [Shadow(offset: Offset(0, 1), blurRadius: 2, color: Colors.black)],
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 16),
-              ],
-      );
-    });
+                  const SizedBox(height: 16),
+                ],
+        );
+      },
+    );
   }
 }
 
@@ -1340,41 +1410,37 @@ class GetSheetTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
-      return Column(
-        children: [
-          ListTile(
-            title: provider.conversation.discarded
-                ? Text(
-                    context.l10n.discardedConversation,
-                    style: Theme.of(context).textTheme.labelLarge,
-                  )
-                : EllaSourceText(
-                    provider.conversation.structured.title,
-                    style: Theme.of(context).textTheme.labelLarge,
-                  ),
-            leading: const Icon(Icons.description),
-            trailing: IconButton(
-              icon: const Icon(Icons.cancel_outlined),
-              onPressed: () {
-                Navigator.of(context).pop(true);
-              },
+    return Consumer<ConversationDetailProvider>(
+      builder: (context, provider, child) {
+        return Column(
+          children: [
+            ListTile(
+              title: provider.conversation.discarded
+                  ? Text(context.l10n.discardedConversation, style: Theme.of(context).textTheme.labelLarge)
+                  : EllaSourceText(
+                      provider.conversation.structured.title,
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+              leading: const Icon(Icons.description),
+              trailing: IconButton(
+                icon: const Icon(Icons.cancel_outlined),
+                onPressed: () {
+                  Navigator.of(context).pop(true);
+                },
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-        ],
-      );
-    });
+            const SizedBox(height: 8),
+          ],
+        );
+      },
+    );
   }
 }
 
 class GetDevToolsOptions extends StatefulWidget {
   final ServerConversation conversation;
 
-  const GetDevToolsOptions({
-    super.key,
-    required this.conversation,
-  });
+  const GetDevToolsOptions({super.key, required this.conversation});
 
   @override
   State<GetDevToolsOptions> createState() => _GetDevToolsOptionsState();
@@ -1391,115 +1457,109 @@ class _GetDevToolsOptionsState extends State<GetDevToolsOptions> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(children: [
-      Card(
-        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
-        child: ListTile(
-          title: Text(context.l10n.triggerConversationIntegration),
-          leading: loadingAppIntegrationTest
-              ? const SizedBox(
-                  height: 24,
-                  width: 24,
-                  child: CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                  ),
-                )
-              : const Icon(Icons.send_to_mobile_outlined),
-          onTap: () {
-            changeLoadingAppIntegrationTest(true);
-            if (SharedPreferencesUtil().webhookOnConversationCreated.isEmpty) {
-              showDialog(
-                context: context,
-                builder: (c) => getDialog(
-                  context,
-                  () {
-                    Navigator.pop(context);
-                  },
-                  () {
-                    Navigator.pop(context);
-                    routeToPage(context, const DeveloperSettingsPage());
-                  },
-                  context.l10n.webhookUrlNotSet,
-                  context.l10n.setWebhookUrlInSettings,
-                  okButtonText: context.l10n.settings,
-                ),
-              );
-              changeLoadingAppIntegrationTest(false);
-              return;
-            } else {
-              webhookOnConversationCreatedCall(widget.conversation, returnRawBody: true).then((response) {
+    return Column(
+      children: [
+        Card(
+          shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
+          child: ListTile(
+            title: Text(context.l10n.triggerConversationIntegration),
+            leading: loadingAppIntegrationTest
+                ? const SizedBox(
+                    height: 24,
+                    width: 24,
+                    child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
+                  )
+                : const Icon(Icons.send_to_mobile_outlined),
+            onTap: () {
+              changeLoadingAppIntegrationTest(true);
+              if (SharedPreferencesUtil().webhookOnConversationCreated.isEmpty) {
                 showDialog(
                   context: context,
                   builder: (c) => getDialog(
                     context,
-                    () => Navigator.pop(context),
-                    () => Navigator.pop(context),
-                    context.l10n.result,
-                    response,
-                    okButtonText: context.l10n.ok,
-                    singleButton: true,
+                    () {
+                      Navigator.pop(context);
+                    },
+                    () {
+                      Navigator.pop(context);
+                      routeToPage(context, const DeveloperSettingsPage());
+                    },
+                    context.l10n.webhookUrlNotSet,
+                    context.l10n.setWebhookUrlInSettings,
+                    okButtonText: context.l10n.settings,
                   ),
                 );
                 changeLoadingAppIntegrationTest(false);
-              });
-            }
-          },
+                return;
+              } else {
+                webhookOnConversationCreatedCall(widget.conversation, returnRawBody: true).then((response) {
+                  showDialog(
+                    context: context,
+                    builder: (c) => getDialog(
+                      context,
+                      () => Navigator.pop(context),
+                      () => Navigator.pop(context),
+                      context.l10n.result,
+                      response,
+                      okButtonText: context.l10n.ok,
+                      singleButton: true,
+                    ),
+                  );
+                  changeLoadingAppIntegrationTest(false);
+                });
+              }
+            },
+          ),
         ),
-      ),
-      Card(
-        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
-        child: ListTile(
-          title: Text(context.l10n.testConversationPrompt),
-          leading: const Icon(Icons.chat),
-          trailing: const Icon(Icons.arrow_forward_ios, size: 20),
-          onTap: () {
-            routeToPage(context, TestPromptsPage(conversation: widget.conversation));
-          },
+        Card(
+          shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
+          child: ListTile(
+            title: Text(context.l10n.testConversationPrompt),
+            leading: const Icon(Icons.chat),
+            trailing: const Icon(Icons.arrow_forward_ios, size: 20),
+            onTap: () {
+              routeToPage(context, TestPromptsPage(conversation: widget.conversation));
+            },
+          ),
         ),
-      ),
-      // widget.memory.postprocessing?.status == MemoryPostProcessingStatus.completed
-      // widget.memory.postprocessing?.status != MemoryPostProcessingStatus.not_started
-      //     ? Card(
-      //         shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
-      //         child: ListTile(
-      //           title: const Text('Compare Transcripts Models'),
-      //           leading: const Icon(Icons.chat),
-      //           trailing: const Icon(Icons.arrow_forward_ios, size: 20),
-      //           onTap: () {
-      //             routeToPage(context, CompareTranscriptsPage(memory: widget.memory));
-      //           },
-      //         ),
-      //       )
-      //     : const SizedBox.shrink(),
-    ]);
+        // widget.memory.postprocessing?.status == MemoryPostProcessingStatus.completed
+        // widget.memory.postprocessing?.status != MemoryPostProcessingStatus.not_started
+        //     ? Card(
+        //         shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
+        //         child: ListTile(
+        //           title: const Text('Compare Transcripts Models'),
+        //           leading: const Icon(Icons.chat),
+        //           trailing: const Icon(Icons.arrow_forward_ios, size: 20),
+        //           onTap: () {
+        //             routeToPage(context, CompareTranscriptsPage(memory: widget.memory));
+        //           },
+        //         ),
+        //       )
+        //     : const SizedBox.shrink(),
+      ],
+    );
   }
 }
 
 _copyContent(BuildContext context, String content) {
   Clipboard.setData(ClipboardData(text: content));
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text(context.l10n.transcriptCopiedToClipboard)),
-  );
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.transcriptCopiedToClipboard)));
   HapticFeedback.lightImpact();
   Navigator.pop(context);
 }
 
 _getLoadingIndicator() {
   return const SizedBox(
-      width: 24,
-      height: 24,
-      child: CircularProgressIndicator(
-        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-      ));
+    width: 24,
+    height: 24,
+    child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
+  );
 }
 
 class GetShareOptions extends StatefulWidget {
   final ServerConversation conversation;
 
-  const GetShareOptions({
-    super.key,
-    required this.conversation,
-  });
+  const GetShareOptions({super.key, required this.conversation});
 
   @override
   State<GetShareOptions> createState() => _GetShareOptionsState();
@@ -1547,9 +1607,9 @@ class _GetShareOptionsState extends State<GetShareOptions> {
               changeLoadingShareConversationViaURL(true);
               bool shared = await setConversationVisibility(widget.conversation.id);
               if (!shared) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(context.l10n.conversationUrlCouldNotBeShared)),
-                );
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text(context.l10n.conversationUrlCouldNotBeShared)));
                 return;
               }
               String content =
@@ -1633,7 +1693,7 @@ class _GetShareOptionsState extends State<GetShareOptions> {
                         }
                         changeLoadingShareSummary(false);
                       },
-                    )
+                    ),
             ],
           ),
         ),
@@ -1660,7 +1720,7 @@ class _GetShareOptionsState extends State<GetShareOptions> {
                             ? widget.conversation.appResults[0].content.trim()
                             : widget.conversation.structured.toString(),
                       ),
-                    )
+                    ),
             ],
           ),
         ),

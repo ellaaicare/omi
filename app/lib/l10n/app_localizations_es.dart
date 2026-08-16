@@ -8510,7 +8510,18 @@ class AppLocalizationsEs extends AppLocalizations {
   String get memoryCorrectionApplied => 'Memory updated';
 
   @override
-  String get memoryCorrectionFailed => 'Ella couldn\'t update this memory';
+  String get memoryCorrectionFailed => 'Ella no pudo actualizar este recuerdo';
+
+  @override
+  String get memoryCorrectionRuntimeUnavailable =>
+      'Ella no puede acceder a tu servicio de correcciones en este momento';
+
+  @override
+  String get memoryCorrectionMemoryChanged => 'Este recuerdo cambió antes de que Ella pudiera aplicar tu corrección';
+
+  @override
+  String get memoryCorrectionServiceUnavailable =>
+      'El servicio de correcciones de Ella no está disponible temporalmente';
 
   @override
   String get memoryCorrectionReview => 'Review';
