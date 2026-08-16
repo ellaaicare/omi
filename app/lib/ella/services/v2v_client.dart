@@ -8,7 +8,6 @@ import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -189,6 +188,20 @@ enum V2VProtectedEgressBoundary { providerRegistry, session, websocket, micropho
 
 typedef V2VBeforeTransportActivation = Future<bool> Function(String sessionId);
 
+class V2VWebSocketTransport {
+  const V2VWebSocketTransport({
+    required this.ready,
+    required this.stream,
+    required this.send,
+    required this.close,
+  });
+
+  final Future<void> ready;
+  final Stream<dynamic> stream;
+  final void Function(dynamic data) send;
+  final Future<void> Function() close;
+}
+
 /// Redacted connection result safe to show in UI and persist in debug logs.
 /// It intentionally excludes session tokens, endpoint URLs, and response bodies.
 class V2VConnectionReceipt {
@@ -275,7 +288,7 @@ class V2VClient {
     _activeClient = null;
   }
 
-  WebSocketChannel? _channel;
+  V2VWebSocketTransport? _channel;
   AudioRecorder? _recorder;
   StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
@@ -315,6 +328,11 @@ class V2VClient {
   final Future<bool> Function() _playbackOutputEnforcer;
   final Future<void> Function(Uint8List wavBytes)? _wavPlayback;
   final bool Function()? _liveChannelForTesting;
+  final Future<V2VConnectionReceipt?> Function(String provider)? _providerRegistryValidator;
+  final Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)?
+      _sessionCreator;
+  final Future<void> Function()? _audioSessionConfigurator;
+  final V2VWebSocketTransport Function(Uri uri)? _webSocketConnector;
   final Duration _playbackMicCooldown;
 
   V2VClient({
@@ -327,6 +345,11 @@ class V2VClient {
     @visibleForTesting Future<bool> Function()? playbackOutputEnforcer,
     @visibleForTesting Future<void> Function(Uint8List wavBytes)? wavPlayback,
     @visibleForTesting bool Function()? liveChannelForTesting,
+    @visibleForTesting Future<V2VConnectionReceipt?> Function(String provider)? providerRegistryValidator,
+    @visibleForTesting
+    Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)? sessionCreator,
+    @visibleForTesting Future<void> Function()? audioSessionConfigurator,
+    @visibleForTesting V2VWebSocketTransport Function(Uri uri)? webSocketConnector,
     @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
@@ -338,6 +361,10 @@ class V2VClient {
             (() => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback)),
         _wavPlayback = wavPlayback,
         _liveChannelForTesting = liveChannelForTesting,
+        _providerRegistryValidator = providerRegistryValidator,
+        _sessionCreator = sessionCreator,
+        _audioSessionConfigurator = audioSessionConfigurator,
+        _webSocketConnector = webSocketConnector,
         _playbackMicCooldown = playbackMicCooldown;
 
   bool get isConnected => _isConnected;
@@ -649,7 +676,7 @@ class V2VClient {
       if (invalid != null) return invalid;
       return stopForAuthorityLoss();
     }
-    final registryFailure = await _validateProviderRegistry(provider);
+    final registryFailure = await (_providerRegistryValidator?.call(provider) ?? _validateProviderRegistry(provider));
     final registryInvalid = await stopIfStartupInvalid(V2VConnectionStage.providerRegistry);
     if (registryInvalid != null) return registryInvalid;
     if (registryFailure != null) {
@@ -666,7 +693,16 @@ class V2VClient {
       if (invalid != null) return invalid;
       return stopForAuthorityLoss();
     }
-    final sessionResult = await _createSession(uid, provider, sessionScope);
+    final sessionResult = _sessionCreator == null
+        ? await _createSession(uid, provider, sessionScope)
+        : _V2VSessionResult(
+            data: await _sessionCreator!(uid, provider, sessionScope),
+            receipt: V2VConnectionReceipt(
+              connected: false,
+              provider: provider,
+              stage: V2VConnectionStage.session,
+            ),
+          );
     final sessionInvalid = await stopIfStartupInvalid(
       V2VConnectionStage.session,
       voiceMode: sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '',
@@ -729,7 +765,7 @@ class V2VClient {
 
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
-      await _configureAudioSession();
+      await (_audioSessionConfigurator?.call() ?? _configureAudioSession());
       final invalid = await stopIfStartupInvalid(V2VConnectionStage.audioSession, voiceMode: confirmedVoiceMode);
       if (invalid != null) return invalid;
     } catch (error) {
@@ -756,7 +792,7 @@ class V2VClient {
         if (invalid != null) return invalid;
         return stopForAuthorityLoss(voiceMode: confirmedVoiceMode);
       }
-      _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl), pingInterval: const Duration(seconds: 30));
+      _channel = _webSocketConnector?.call(Uri.parse(wsUrl)) ?? _connectWebSocket(Uri.parse(wsUrl));
 
       await _channel!.ready.timeout(const Duration(seconds: 12));
       final websocketInvalid = await stopIfStartupInvalid(V2VConnectionStage.websocket, voiceMode: confirmedVoiceMode);
@@ -862,7 +898,7 @@ class V2VClient {
     _wsSub = null;
 
     try {
-      await _channel?.sink.close();
+      await _channel?.close();
     } catch (_) {}
     _channel = null;
 
@@ -924,6 +960,18 @@ class V2VClient {
   }
 
   // --- Audio session ---
+
+  V2VWebSocketTransport _connectWebSocket(Uri uri) {
+    final channel = IOWebSocketChannel.connect(uri, pingInterval: const Duration(seconds: 30));
+    return V2VWebSocketTransport(
+      ready: channel.ready,
+      stream: channel.stream,
+      send: channel.sink.add,
+      close: () async {
+        await channel.sink.close();
+      },
+    );
+  }
 
   Future<void> _configureAudioSession() async {
     final session = await AudioSession.instance;
@@ -1259,7 +1307,7 @@ class V2VClient {
         }
         if (_isConnected && _channel != null && !_micMuted && !_isPlaying && !_micSuspendedForPlayback) {
           _onProtectedEgress?.call(V2VProtectedEgressBoundary.microphoneFrame);
-          _channel!.sink.add(data);
+          _channel!.send(data);
           _micChunksSent++;
           _micBytesSent += data.length;
           if (_micChunksSent % 50 == 0) {

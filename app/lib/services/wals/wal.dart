@@ -40,6 +40,13 @@ class WalOwner {
     return digest.toString().substring(0, 24);
   }
 
+  String get authorityFingerprint {
+    final digest = sha256.convert(
+      utf8.encode('$uid\n$profileBindingId\n$bindingRevision\n$consentReceiptId\n$authorityGenerationAtCapture'),
+    );
+    return digest.toString();
+  }
+
   bool matches(WalOwner other) =>
       uid == other.uid &&
       profileBindingId == other.profileBindingId &&

@@ -46,6 +46,29 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
 
+Future<bool> armEllaVoiceTranscriptSessionBeforeTransport({
+  required V2VTurnReconciler reconciler,
+  required String authenticatedUid,
+  required String sessionId,
+  required bool persistTranscriptTurns,
+  required bool Function() isStartupCurrent,
+  @visibleForTesting ActiveWalAuthority? Function(String authenticatedUid)? authorityCapture,
+}) async {
+  if (sessionId.isEmpty || !isStartupCurrent()) return false;
+  if (!persistTranscriptTurns) return true;
+  final activeAuthority =
+      authorityCapture?.call(authenticatedUid) ?? WalOwnerAuthority.active(authenticatedUid: authenticatedUid);
+  if (activeAuthority == null) return false;
+  final armed = await reconciler.beginSession(
+    uid: activeAuthority.uid,
+    ownerNamespace: activeAuthority.owner.storageNamespace,
+    authorityFingerprint: activeAuthority.owner.authorityFingerprint,
+    sessionId: sessionId,
+    isAuthorityCurrent: activeAuthority.isCurrent,
+  );
+  return armed && activeAuthority.isCurrent() && isStartupCurrent();
+}
+
 @visibleForTesting
 class VoicePhoneCaptureTakeoverCoordinator {
   Future<bool>? _activeTakeover;
@@ -802,18 +825,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       sessionScope: _sessionScope,
       shouldContinue: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
       beforeTransportActivation: (sessionId) async {
-        if (sessionId.isEmpty || !hasCurrentStartupAuthority() || !identical(_v2vClient, client)) return false;
-        var transcriptSessionReady = true;
-        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-          final activeAuthority = WalOwnerAuthority.active(authenticatedUid: authority!.uid);
-          transcriptSessionReady = activeAuthority != null &&
-              await _v2vTurnReconciler.beginSession(
-                uid: activeAuthority.uid,
-                ownerNamespace: activeAuthority.owner.storageNamespace,
-                sessionId: sessionId,
-                isAuthorityCurrent: activeAuthority.isCurrent,
-              );
-        }
+        final transcriptSessionReady = await armEllaVoiceTranscriptSessionBeforeTransport(
+          reconciler: _v2vTurnReconciler,
+          authenticatedUid: authority!.uid,
+          sessionId: sessionId,
+          persistTranscriptTurns: EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope),
+          isStartupCurrent: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
+        );
         if (!transcriptSessionReady || !hasCurrentStartupAuthority() || !identical(_v2vClient, client)) {
           if (transcriptSessionReady) _v2vTurnReconciler.endSession(sessionId);
           return false;

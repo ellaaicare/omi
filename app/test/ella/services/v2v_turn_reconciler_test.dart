@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -6,17 +7,21 @@ import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 
 const ownerNamespaceA = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const ownerNamespaceB = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+const authorityFingerprintA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const authorityFingerprintB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 Future<bool> beginSession(
   V2VTurnReconciler reconciler, {
   String uid = 'uid-a',
   String ownerNamespace = ownerNamespaceA,
+  String authorityFingerprint = authorityFingerprintA,
   required String sessionId,
   required bool Function() isAuthorityCurrent,
 }) =>
     reconciler.beginSession(
       uid: uid,
       ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
       sessionId: sessionId,
       isAuthorityCurrent: isAuthorityCurrent,
     );
@@ -40,11 +45,18 @@ V2VTerminalTranscriptTurn terminalTurn({
   );
 }
 
-V2VTranscriptTurn ownedTurn({required String sessionId, required int ordinal}) {
+V2VTranscriptTurn ownedTurn({
+  required String sessionId,
+  required int ordinal,
+  String uid = 'uid-a',
+  String ownerNamespace = ownerNamespaceA,
+  String authorityFingerprint = authorityFingerprintA,
+}) {
   final terminal = terminalTurn(sessionId: sessionId, ordinal: ordinal);
   return V2VTranscriptTurn(
-    uid: 'uid-a',
-    ownerNamespace: ownerNamespaceA,
+    uid: uid,
+    ownerNamespace: ownerNamespace,
+    authorityFingerprint: authorityFingerprint,
     sessionId: terminal.sessionId,
     turnId: terminal.turnId,
     userEventId: terminal.userEventId,
@@ -63,13 +75,29 @@ class _SlowHydrationStore implements V2VTurnDurableStore {
   final Future<void> releaseHydration;
 
   @override
-  Future<void> clearOwner({required String uid, required String ownerNamespace}) =>
-      delegate.clearOwner(uid: uid, ownerNamespace: ownerNamespace);
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) =>
+      delegate.clearOwner(
+        uid: uid,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+      );
 
   @override
-  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace}) async {
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
     await releaseHydration;
-    return delegate.load(uid: uid, ownerNamespace: ownerNamespace);
+    return delegate.load(
+      uid: uid,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
   }
 
   @override
@@ -84,17 +112,29 @@ class _BlockingPutStore implements V2VTurnDurableStore {
 
   final Future<void> releasePut;
   final MemoryV2VTurnDurableStore delegate = MemoryV2VTurnDurableStore();
-  final List<(String, String)> clearedOwners = [];
+  final List<(String, String, String)> clearedOwners = [];
 
   @override
-  Future<void> clearOwner({required String uid, required String ownerNamespace}) async {
-    clearedOwners.add((uid, ownerNamespace));
-    await delegate.clearOwner(uid: uid, ownerNamespace: ownerNamespace);
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
+    clearedOwners.add((uid, ownerNamespace, authorityFingerprint));
+    await delegate.clearOwner(
+      uid: uid,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
   }
 
   @override
-  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace}) =>
-      delegate.load(uid: uid, ownerNamespace: ownerNamespace);
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) =>
+      delegate.load(uid: uid, ownerNamespace: ownerNamespace, authorityFingerprint: authorityFingerprint);
 
   @override
   Future<void> put(V2VTranscriptTurn turn) async {
@@ -303,7 +343,12 @@ void main() {
 
       expect(laterAcceptances, everyElement(isTrue));
       expect(
-        (await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA)).map((turn) => turn.turnId),
+        (await store.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+        ))
+            .map((turn) => turn.turnId),
         [
           'v2v-turn-00000000000000000000000000000001',
           'v2v-turn-00000000000000000000000000000002',
@@ -331,7 +376,14 @@ void main() {
         'v2v-turn-00000000000000000000000000000002',
         'v2v-turn-00000000000000000000000000000003',
       ]);
-      expect(await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      expect(
+        await store.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+        ),
+        isEmpty,
+      );
     });
 
     test('listener and microphone wait for slow large outbox hydration and session arming', () async {
@@ -371,7 +423,14 @@ void main() {
       expect(order, ['hydrate-started', 'session-armed', 'listener-attached', 'microphone-started']);
 
       await reconciler.settle();
-      expect(await backingStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      expect(
+        await backingStore.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+        ),
+        isEmpty,
+      );
     });
 
     test('failed session arming attaches neither listener nor microphone', () async {
@@ -420,8 +479,15 @@ void main() {
       expect(await acceptance, isFalse);
       await reconciler.settle();
       expect(writes, 0);
-      expect(store.clearedOwners, [('uid-a', ownerNamespaceA)]);
-      expect(await store.delegate.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      expect(store.clearedOwners, [('uid-a', ownerNamespaceA, authorityFingerprintA)]);
+      expect(
+        await store.delegate.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+        ),
+        isEmpty,
+      );
       expect(reconciler.sessionCountForTesting, 0);
     });
 
@@ -506,7 +572,14 @@ void main() {
         expect(retried.map((turn) => '${turn.sessionId}:${turn.turnId}'), [
           'session-1:v2v-turn-00000000000000000000000000000001',
         ]);
-        expect(await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+        expect(
+          await store.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          isEmpty,
+        );
       } finally {
         await directory.delete(recursive: true);
       }
@@ -529,7 +602,11 @@ void main() {
         await firstPage.settle();
         firstPage.endSession('session-1');
 
-        final durableAfterFailure = await failedStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA);
+        final durableAfterFailure = await failedStore.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+        );
         expect(durableAfterFailure.map((turn) => turn.turnId), [
           'v2v-turn-00000000000000000000000000000001',
         ]);
@@ -550,7 +627,268 @@ void main() {
         expect(committed.map((turn) => '${turn.sessionId}:${turn.turnId}'), [
           'session-1:v2v-turn-00000000000000000000000000000001',
         ]);
-        expect(await nextPageStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+        expect(
+          await nextPageStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          isEmpty,
+        );
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('second file-store instance recovers while the first reconciler network write is still in flight', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-process-death-');
+      try {
+        final firstWriteStarted = Completer<void>();
+        final releaseFirstWrite = Completer<void>();
+        final firstPage = V2VTurnReconciler(
+          durableStore: FileV2VTurnDurableStore(baseDirectory: directory),
+          writer: (_) async {
+            firstWriteStarted.complete();
+            await releaseFirstWrite.future;
+            return false;
+          },
+        );
+        await beginSession(firstPage, sessionId: 'session-1', isAuthorityCurrent: () => true);
+        expect(
+          await firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1)),
+          isTrue,
+        );
+        await firstWriteStarted.future;
+
+        final recovered = <V2VTranscriptTurn>[];
+        final relaunchedPage = V2VTurnReconciler(
+          durableStore: FileV2VTurnDurableStore(baseDirectory: directory),
+          writer: (turn) async {
+            recovered.add(turn);
+            return true;
+          },
+        );
+        await beginSession(relaunchedPage, sessionId: 'session-2', isAuthorityCurrent: () => true);
+        await relaunchedPage.settle();
+
+        expect(recovered.map((turn) => turn.turnId), [
+          'v2v-turn-00000000000000000000000000000001',
+        ]);
+        final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        expect(
+          await restartedStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          isEmpty,
+        );
+
+        releaseFirstWrite.complete();
+        await firstPage.settle();
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('same coarse owner cannot hydrate a turn from a prior exact authority generation', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-authority-generation-');
+      try {
+        final store = FileV2VTurnDurableStore(baseDirectory: directory);
+        await store.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
+
+        final authorityBWrites = <V2VTranscriptTurn>[];
+        final authorityBPage = V2VTurnReconciler(
+          durableStore: FileV2VTurnDurableStore(baseDirectory: directory),
+          writer: (turn) async {
+            authorityBWrites.add(turn);
+            return true;
+          },
+        );
+        await beginSession(
+          authorityBPage,
+          authorityFingerprint: authorityFingerprintB,
+          sessionId: 'authority-b',
+          isAuthorityCurrent: () => true,
+        );
+        await authorityBPage.settle();
+
+        expect(authorityBWrites, isEmpty);
+        expect(
+          await store.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          hasLength(1),
+        );
+        expect(
+          await store.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+          isEmpty,
+        );
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('manifest and every record persist and verify the exact authority fingerprint', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-fingerprint-');
+      try {
+        final store = FileV2VTurnDurableStore(baseDirectory: directory);
+        await store.put(ownedTurn(sessionId: 'session-1', ordinal: 1));
+        final manifest = File(
+          '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/pending_turns.json',
+        );
+        final decoded = Map<String, dynamic>.from(jsonDecode(await manifest.readAsString()) as Map);
+        expect(decoded['version'], 2);
+        expect(decoded['authority_fingerprint'], authorityFingerprintA);
+        final records = decoded['turns'] as List;
+        expect(Map<String, dynamic>.from(records.single as Map)['authority_fingerprint'], authorityFingerprintA);
+
+        final tamperedRecord = Map<String, dynamic>.from(records.single as Map)
+          ..['authority_fingerprint'] = authorityFingerprintB;
+        decoded['turns'] = [tamperedRecord];
+        await manifest.writeAsString(jsonEncode(decoded), flush: true);
+
+        await expectLater(
+          store.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          throwsA(isA<FormatException>()),
+        );
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('legacy coarse manifest is deleted without replay under an exact authority', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-legacy-');
+      try {
+        final ownerDirectory = Directory('${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA')
+          ..createSync(recursive: true);
+        final legacyManifest = File('${ownerDirectory.path}/pending_turns.json');
+        legacyManifest.writeAsStringSync(jsonEncode({
+          'version': 1,
+          'uid': 'uid-a',
+          'owner_namespace': ownerNamespaceA,
+          'turns': [ownedTurn(sessionId: 'legacy-session', ordinal: 1).toJson()..remove('authority_fingerprint')],
+        }));
+
+        final store = FileV2VTurnDurableStore(baseDirectory: directory);
+        expect(
+          await store.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+          isEmpty,
+        );
+        expect(legacyManifest.existsSync(), isFalse);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('failed unauthorized deletion retries autonomously with bounded backoff', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-cleanup-retry-');
+      try {
+        var authorityCurrent = true;
+        var deleteAttempts = 0;
+        final store = FileV2VTurnDurableStore(
+          baseDirectory: directory,
+          beforeCleanupDeleteForTesting: (_) async {
+            deleteAttempts++;
+            if (deleteAttempts < 3) throw const FileSystemException('injected cleanup failure');
+          },
+        );
+        final reconciler = V2VTurnReconciler(
+          durableStore: store,
+          writer: (_) async => false,
+          unauthorizedCleanupRetryDelays: const [Duration.zero, Duration.zero, Duration.zero],
+        );
+        await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
+        await reconciler.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1));
+        await reconciler.settle();
+
+        authorityCurrent = false;
+        reconciler.retryAuthorizedPending();
+        await reconciler.settle();
+
+        expect(deleteAttempts, 3);
+        expect(reconciler.sessionCountForTesting, 0);
+        expect(
+          await FileV2VTurnDurableStore(baseDirectory: directory).load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          isEmpty,
+        );
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('cleanup marker survives failure and a new store instance clears only that exact authority', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-cleanup-restart-');
+      try {
+        final failingStore = FileV2VTurnDurableStore(
+          baseDirectory: directory,
+          beforeCleanupDeleteForTesting: (_) async => throw const FileSystemException('injected cleanup failure'),
+        );
+        await failingStore.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
+        await failingStore.put(
+          ownedTurn(
+            sessionId: 'authority-b',
+            ordinal: 2,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+        );
+        await expectLater(
+          failingStore.clearOwner(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+        final cleanupMarker = File(
+          '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/cleanup_required.json',
+        );
+        expect(cleanupMarker.existsSync(), isTrue);
+        final markerJson = Map<String, dynamic>.from(jsonDecode(await cleanupMarker.readAsString()) as Map);
+        expect(markerJson['authority_fingerprint'], authorityFingerprintA);
+        expect(markerJson.containsKey('turns'), isFalse);
+
+        final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        final authorityBTurns = await restartedStore.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintB,
+        );
+        expect(authorityBTurns.map((turn) => turn.sessionId), ['authority-b']);
+        expect(
+          await restartedStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          isEmpty,
+        );
+        expect(
+          await restartedStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+          hasLength(1),
+        );
       } finally {
         await directory.delete(recursive: true);
       }
@@ -582,20 +920,42 @@ void main() {
           ownerBPage,
           uid: 'uid-b',
           ownerNamespace: ownerNamespaceB,
+          authorityFingerprint: authorityFingerprintB,
           sessionId: 'session-2',
           isAuthorityCurrent: () => true,
         );
         await ownerBPage.settle();
 
         expect(crossOwnerWrites, isEmpty);
-        expect(await ownerAStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), hasLength(1));
-        expect(await ownerBStore.load(uid: 'uid-b', ownerNamespace: ownerNamespaceB), isEmpty);
+        expect(
+          await ownerAStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          hasLength(1),
+        );
+        expect(
+          await ownerBStore.load(
+            uid: 'uid-b',
+            ownerNamespace: ownerNamespaceB,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+          isEmpty,
+        );
 
         authorityCurrent = false;
         firstPage.retryAuthorizedPending();
         await firstPage.settle();
         expect(firstPage.sessionCountForTesting, 0);
-        expect(await ownerAStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+        expect(
+          await ownerAStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          isEmpty,
+        );
       } finally {
         await directory.delete(recursive: true);
       }
@@ -611,7 +971,11 @@ void main() {
         await store.put(first);
         await expectLater(store.put(overflow), throwsStateError);
 
-        final retained = await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA);
+        final retained = await store.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+        );
         expect(retained.map((turn) => turn.turnId), [first.turnId]);
       } finally {
         await directory.delete(recursive: true);

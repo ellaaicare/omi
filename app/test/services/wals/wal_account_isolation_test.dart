@@ -260,6 +260,8 @@ void main() {
       consentReceiptId: original.consentReceiptId,
       authorityGenerationAtCapture: original.authorityGenerationAtCapture + 1,
     );
+    expect(original.storageNamespace, newerGeneration.storageNamespace);
+    expect(original.authorityFingerprint, isNot(newerGeneration.authorityFingerprint));
     expect(original.matches(newerGeneration), isFalse);
 
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';

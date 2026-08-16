@@ -10,6 +10,75 @@ import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+
+class _HydrationGateStore implements V2VTurnDurableStore {
+  _HydrationGateStore(this.delegate, this.releaseHydration);
+
+  final V2VTurnDurableStore delegate;
+  final Future<void> releaseHydration;
+  String loadedAuthorityFingerprint = '';
+
+  @override
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) =>
+      delegate.clearOwner(
+        uid: uid,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+      );
+
+  @override
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
+    loadedAuthorityFingerprint = authorityFingerprint;
+    await releaseHydration;
+    return delegate.load(
+      uid: uid,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
+  }
+
+  @override
+  Future<void> put(V2VTranscriptTurn turn) => delegate.put(turn);
+
+  @override
+  Future<void> remove(V2VTranscriptTurn turn) => delegate.remove(turn);
+}
+
+Future<void> _grantOperationalAuthority(String uid) async {
+  final preferences = SharedPreferencesUtil()..uid = uid;
+  preferences.verifiedPersonaId = 'persona-a';
+  preferences.acceptAiConsent(
+    receiptId: 'aicr_$uid',
+    uid: uid,
+    profileBindingId: 'profile-$uid',
+    serverDecidedAt: '2026-08-15T00:00:00Z',
+  );
+  await preferences.saveEllaProvisioningReceipt(uid, {
+    'state': 'ready',
+    'binding_state': 'active',
+    'binding_revision': 3,
+    'effective_policy_revision': 'policy-3',
+  });
+  await preferences.markEllaProvisioningVerified(uid);
+  preferences.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: 'aicr_$uid',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-$uid',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+}
 
 void main() {
   group('typed voice policy outcomes', () {
@@ -397,6 +466,134 @@ void main() {
       expect(receipt.stage, V2VConnectionStage.providerRegistry);
       expect(receipt.errorCode, 'connection_cancelled');
       expect(client.isConnected, isFalse);
+      await client.disconnect();
+    });
+
+    test('connect arms the page exact-authority outbox before synchronous buffered transcript delivery and mic',
+        () async {
+      await _grantOperationalAuthority('uid-a');
+      final activeAuthority = WalOwnerAuthority.active(
+        preferences: SharedPreferencesUtil(),
+        authenticatedUid: 'uid-a',
+      );
+      expect(activeAuthority, isNotNull);
+
+      final backingStore = MemoryV2VTurnDurableStore();
+      final owner = activeAuthority!.owner;
+      final testAuthority = ActiveWalAuthority(
+        owner: owner,
+        consent: activeAuthority.consent,
+        currentCheck: () {
+          final currentOwner = WalOwnerAuthority.currentOwner(
+            preferences: SharedPreferencesUtil(),
+            authenticatedUid: 'uid-a',
+          );
+          return currentOwner != null &&
+              owner.matches(currentOwner) &&
+              activeAuthority.consent.isCurrent(preferences: SharedPreferencesUtil());
+        },
+      );
+      final baseTime = DateTime.utc(2026, 8, 15, 20);
+      for (var ordinal = 1; ordinal <= 200; ordinal++) {
+        final turnId = 'v2v-turn-${ordinal.toRadixString(16).padLeft(32, '0')}';
+        await backingStore.put(
+          V2VTranscriptTurn(
+            uid: owner.uid,
+            ownerNamespace: owner.storageNamespace,
+            authorityFingerprint: owner.authorityFingerprint,
+            sessionId: 'restored-session',
+            turnId: turnId,
+            userEventId: '$turnId:user',
+            assistantEventId: '$turnId:assistant',
+            userTranscript: 'Restored question',
+            assistantTranscript: 'Restored answer',
+            startedAt: baseTime.add(Duration(seconds: ordinal * 2)),
+            completedAt: baseTime.add(Duration(seconds: ordinal * 2 + 1)),
+          ),
+        );
+      }
+      final releaseHydration = Completer<void>();
+      final gatedStore = _HydrationGateStore(backingStore, releaseHydration.future);
+      final reconciler = V2VTurnReconciler(durableStore: gatedStore, writer: (_) async => false);
+      const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+          '"session_id":"session-jti-1","turn_id":"v2v-turn-ffffffffffffffffffffffffffffffff",'
+          '"user_event_id":"v2v-turn-ffffffffffffffffffffffffffffffff:user",'
+          '"assistant_event_id":"v2v-turn-ffffffffffffffffffffffffffffffff:assistant",'
+          '"user_text":"Question","assistant_text":"Answer",'
+          '"started_at":"2026-08-15T20:10:00Z","completed_at":"2026-08-15T20:10:02Z"}';
+      late final StreamController<dynamic> websocketController;
+      websocketController = StreamController<dynamic>(
+        sync: true,
+        onListen: () => websocketController.add(terminalFrame),
+      );
+      final order = <String>[];
+      var armedSessionId = '';
+      Future<bool>? terminalAcceptance;
+      late final V2VClient client;
+      client = V2VClient(
+        onEvent: (event) {
+          if (event.type != 'transcript_turn') return;
+          order.add('terminal-delivered');
+          expect(armedSessionId, 'session-jti-1');
+          terminalAcceptance = reconciler.addTerminalTurn(armedSessionId, event.terminalTurn!);
+        },
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice',
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'session-jti-1',
+        },
+        audioSessionConfigurator: () async {},
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: websocketController.stream,
+          send: (_) {},
+          close: websocketController.close,
+        ),
+        microphoneStarter: () async {
+          order.add('microphone-started');
+          return true;
+        },
+      );
+
+      final connect = client.connect(
+        provider: 'grok-voice',
+        beforeTransportActivation: (sessionId) async {
+          order.add('hydration-started');
+          final armed = await armEllaVoiceTranscriptSessionBeforeTransport(
+            reconciler: reconciler,
+            authenticatedUid: 'uid-a',
+            sessionId: sessionId,
+            persistTranscriptTurns: true,
+            isStartupCurrent: () => true,
+            authorityCapture: (_) => testAuthority,
+          );
+          if (armed) armedSessionId = sessionId;
+          order.add('session-armed');
+          return armed;
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(order, ['hydration-started']);
+      expect(gatedStore.loadedAuthorityFingerprint, owner.authorityFingerprint);
+      releaseHydration.complete();
+      final receipt = await connect;
+      expect(receipt.connected, isTrue);
+      expect(terminalAcceptance, isNotNull);
+      expect(await terminalAcceptance!, isTrue);
+      expect(order, ['hydration-started', 'session-armed', 'terminal-delivered', 'microphone-started']);
+      expect(
+        (await backingStore.load(
+          uid: owner.uid,
+          ownerNamespace: owner.storageNamespace,
+          authorityFingerprint: owner.authorityFingerprint,
+        ))
+            .map((turn) => turn.turnId),
+        contains('v2v-turn-ffffffffffffffffffffffffffffffff'),
+      );
       await client.disconnect();
     });
 

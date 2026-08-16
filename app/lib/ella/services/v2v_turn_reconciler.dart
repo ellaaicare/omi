@@ -69,6 +69,7 @@ class V2VTranscriptTurn {
   const V2VTranscriptTurn({
     required this.uid,
     required this.ownerNamespace,
+    required this.authorityFingerprint,
     required this.sessionId,
     required this.turnId,
     required this.userEventId,
@@ -81,6 +82,7 @@ class V2VTranscriptTurn {
 
   final String uid;
   final String ownerNamespace;
+  final String authorityFingerprint;
   final String sessionId;
   final String turnId;
   final String userEventId;
@@ -93,6 +95,7 @@ class V2VTranscriptTurn {
   Map<String, dynamic> toJson() => {
         'uid': uid,
         'owner_namespace': ownerNamespace,
+        'authority_fingerprint': authorityFingerprint,
         'session_id': sessionId,
         'turn_id': turnId,
         'user_event_id': userEventId,
@@ -107,6 +110,7 @@ class V2VTranscriptTurn {
     Object? value, {
     required String expectedUid,
     required String expectedOwnerNamespace,
+    required String expectedAuthorityFingerprint,
   }) {
     if (value is! Map) return null;
     final json = Map<String, dynamic>.from(value);
@@ -122,12 +126,16 @@ class V2VTranscriptTurn {
       'started_at': json['started_at'],
       'completed_at': json['completed_at'],
     });
-    if (terminal == null || json['uid'] != expectedUid || json['owner_namespace'] != expectedOwnerNamespace) {
+    if (terminal == null ||
+        json['uid'] != expectedUid ||
+        json['owner_namespace'] != expectedOwnerNamespace ||
+        json['authority_fingerprint'] != expectedAuthorityFingerprint) {
       return null;
     }
     return V2VTranscriptTurn(
       uid: expectedUid,
       ownerNamespace: expectedOwnerNamespace,
+      authorityFingerprint: expectedAuthorityFingerprint,
       sessionId: terminal.sessionId,
       turnId: terminal.turnId,
       userEventId: terminal.userEventId,
@@ -155,27 +163,40 @@ Future<bool> activateV2VTransportInOrder({
 }
 
 abstract interface class V2VTurnDurableStore {
-  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace});
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  });
 
   Future<void> put(V2VTranscriptTurn turn);
 
   Future<void> remove(V2VTranscriptTurn turn);
 
-  Future<void> clearOwner({required String uid, required String ownerNamespace});
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  });
 }
 
 class MemoryV2VTurnDurableStore implements V2VTurnDurableStore {
   final Map<String, List<V2VTranscriptTurn>> _turnsByOwner = {};
 
-  String _key(String uid, String ownerNamespace) => '$uid\n$ownerNamespace';
+  String _key(String uid, String ownerNamespace, String authorityFingerprint) =>
+      '$uid\n$ownerNamespace\n$authorityFingerprint';
 
   @override
-  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace}) async =>
-      List<V2VTranscriptTurn>.of(_turnsByOwner[_key(uid, ownerNamespace)] ?? const []);
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async =>
+      List<V2VTranscriptTurn>.of(_turnsByOwner[_key(uid, ownerNamespace, authorityFingerprint)] ?? const []);
 
   @override
   Future<void> put(V2VTranscriptTurn turn) async {
-    final turns = _turnsByOwner.putIfAbsent(_key(turn.uid, turn.ownerNamespace), () => []);
+    final turns = _turnsByOwner.putIfAbsent(_key(turn.uid, turn.ownerNamespace, turn.authorityFingerprint), () => []);
     final existing = turns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
     if (existing == null) {
       turns.add(turn);
@@ -186,15 +207,19 @@ class MemoryV2VTurnDurableStore implements V2VTurnDurableStore {
 
   @override
   Future<void> remove(V2VTranscriptTurn turn) async {
-    final key = _key(turn.uid, turn.ownerNamespace);
+    final key = _key(turn.uid, turn.ownerNamespace, turn.authorityFingerprint);
     final turns = _turnsByOwner[key];
     turns?.removeWhere((candidate) => candidate.samePayload(turn));
     if (turns?.isEmpty == true) _turnsByOwner.remove(key);
   }
 
   @override
-  Future<void> clearOwner({required String uid, required String ownerNamespace}) async {
-    _turnsByOwner.remove(_key(uid, ownerNamespace));
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
+    _turnsByOwner.remove(_key(uid, ownerNamespace, authorityFingerprint));
   }
 }
 
@@ -203,25 +228,52 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     Directory? baseDirectory,
     this.maxPendingTurns = 256,
     this.maxManifestBytes = 16 * 1024 * 1024,
+    this.maxCleanupNamespacesPerLoad = 64,
+    Future<void> Function(Directory directory)? beforeCleanupDeleteForTesting,
   })  : assert(maxPendingTurns > 0),
         assert(maxManifestBytes > 0),
+        assert(maxCleanupNamespacesPerLoad > 0),
+        _beforeCleanupDelete = beforeCleanupDeleteForTesting,
         _configuredBaseDirectory = baseDirectory;
 
-  static const int _manifestVersion = 1;
+  static const int _manifestVersion = 2;
+  static const String _readyStatus = 'ready';
+  static const String _cleanupRequiredStatus = 'cleanup_required';
   static final RegExp _ownerNamespacePattern = RegExp(r'^[0-9a-f]{24}$');
+  static final RegExp _authorityFingerprintPattern = RegExp(r'^[0-9a-f]{64}$');
 
   final Directory? _configuredBaseDirectory;
   final int maxPendingTurns;
   final int maxManifestBytes;
+  final int maxCleanupNamespacesPerLoad;
+  final Future<void> Function(Directory directory)? _beforeCleanupDelete;
   static Future<void> _operationTail = Future<void>.value();
 
   @override
-  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace}) =>
-      _serialized(() async => List<V2VTranscriptTurn>.of(await _read(uid: uid, ownerNamespace: ownerNamespace)));
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) =>
+      _serialized(() async {
+        await _discardLegacyCoarseManifest(ownerNamespace);
+        await _retryMarkedCleanup(uid, ownerNamespace);
+        return List<V2VTranscriptTurn>.of(
+          await _read(
+            uid: uid,
+            ownerNamespace: ownerNamespace,
+            authorityFingerprint: authorityFingerprint,
+          ),
+        );
+      });
 
   @override
   Future<void> put(V2VTranscriptTurn turn) => _serialized(() async {
-        final turns = await _read(uid: turn.uid, ownerNamespace: turn.ownerNamespace);
+        final turns = await _read(
+          uid: turn.uid,
+          ownerNamespace: turn.ownerNamespace,
+          authorityFingerprint: turn.authorityFingerprint,
+        );
         final existing = turns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
         if (existing == null) {
           turns.add(turn);
@@ -230,28 +282,62 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
         } else {
           return;
         }
-        await _write(uid: turn.uid, ownerNamespace: turn.ownerNamespace, turns: turns);
+        await _write(
+          uid: turn.uid,
+          ownerNamespace: turn.ownerNamespace,
+          authorityFingerprint: turn.authorityFingerprint,
+          status: _readyStatus,
+          turns: turns,
+        );
       });
 
   @override
   Future<void> remove(V2VTranscriptTurn turn) => _serialized(() async {
-        final turns = await _read(uid: turn.uid, ownerNamespace: turn.ownerNamespace);
+        final turns = await _read(
+          uid: turn.uid,
+          ownerNamespace: turn.ownerNamespace,
+          authorityFingerprint: turn.authorityFingerprint,
+        );
         final originalLength = turns.length;
         turns.removeWhere((candidate) => candidate.samePayload(turn));
         if (turns.length == originalLength) return;
-        await _write(uid: turn.uid, ownerNamespace: turn.ownerNamespace, turns: turns);
+        await _write(
+          uid: turn.uid,
+          ownerNamespace: turn.ownerNamespace,
+          authorityFingerprint: turn.authorityFingerprint,
+          status: _readyStatus,
+          turns: turns,
+        );
       });
 
   @override
-  Future<void> clearOwner({required String uid, required String ownerNamespace}) => _serialized(() async {
-        await _read(uid: uid, ownerNamespace: ownerNamespace);
-        final directory = await _ownerDirectory(ownerNamespace);
-        final manifest = File('${directory.path}/pending_turns.json');
-        final backup = File('${manifest.path}.bak');
-        final temporary = File('${manifest.path}.tmp');
-        for (final file in [manifest, backup, temporary]) {
-          if (await file.exists()) await file.delete();
-        }
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) =>
+      _serialized(() async {
+        final turns = await _read(
+          uid: uid,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: authorityFingerprint,
+        );
+        final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
+        if (!await directory.exists()) return;
+        await _writeCleanupMarker(
+          directory: directory,
+          uid: uid,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: authorityFingerprint,
+        );
+        await _write(
+          uid: uid,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: authorityFingerprint,
+          status: _cleanupRequiredStatus,
+          turns: turns,
+        );
+        await _deleteAuthorityDirectory(directory);
       });
 
   Future<T> _serialized<T>(Future<T> Function() operation) {
@@ -272,9 +358,21 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     return Directory('${base.path}/ella_v2v_turn_outbox/$ownerNamespace');
   }
 
-  Future<List<V2VTranscriptTurn>> _read({required String uid, required String ownerNamespace}) async {
+  Future<Directory> _authorityDirectory(String ownerNamespace, String authorityFingerprint) async {
+    if (!_authorityFingerprintPattern.hasMatch(authorityFingerprint)) {
+      throw ArgumentError.value(authorityFingerprint, 'authorityFingerprint');
+    }
+    final ownerDirectory = await _ownerDirectory(ownerNamespace);
+    return Directory('${ownerDirectory.path}/$authorityFingerprint');
+  }
+
+  Future<List<V2VTranscriptTurn>> _read({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
     if (uid.trim().isEmpty) throw ArgumentError.value(uid, 'uid');
-    final directory = await _ownerDirectory(ownerNamespace);
+    final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
     final manifest = File('${directory.path}/pending_turns.json');
     final backup = File('${manifest.path}.bak');
     Object? lastError;
@@ -287,6 +385,8 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
         if (json['version'] != _manifestVersion ||
             json['uid'] != uid ||
             json['owner_namespace'] != ownerNamespace ||
+            json['authority_fingerprint'] != authorityFingerprint ||
+            !const {_readyStatus, _cleanupRequiredStatus}.contains(json['status']) ||
             json['turns'] is! List) {
           throw const FormatException('Mismatched V2V outbox manifest');
         }
@@ -299,6 +399,7 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
             value,
             expectedUid: uid,
             expectedOwnerNamespace: ownerNamespace,
+            expectedAuthorityFingerprint: authorityFingerprint,
           );
           if (turn == null ||
               !turnIds.add(turn.turnId) ||
@@ -307,6 +408,10 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
             throw const FormatException('Invalid V2V outbox turn');
           }
           turns.add(turn);
+        }
+        if (json['status'] == _cleanupRequiredStatus) {
+          await _deleteAuthorityDirectory(directory);
+          return [];
         }
         return turns;
       } catch (error) {
@@ -320,17 +425,22 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
   Future<void> _write({
     required String uid,
     required String ownerNamespace,
+    required String authorityFingerprint,
+    required String status,
     required List<V2VTranscriptTurn> turns,
   }) async {
+    if (!const {_readyStatus, _cleanupRequiredStatus}.contains(status)) throw ArgumentError.value(status, 'status');
     if (turns.length > maxPendingTurns) throw StateError('V2V outbox capacity reached');
     final encoded = jsonEncode({
       'version': _manifestVersion,
       'uid': uid,
       'owner_namespace': ownerNamespace,
+      'authority_fingerprint': authorityFingerprint,
+      'status': status,
       'turns': turns.map((turn) => turn.toJson()).toList(),
     });
     if (utf8.encode(encoded).length > maxManifestBytes) throw StateError('V2V outbox byte capacity reached');
-    final directory = await _ownerDirectory(ownerNamespace);
+    final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
     await directory.create(recursive: true);
     final manifest = File('${directory.path}/pending_turns.json');
     final backup = File('${manifest.path}.bak');
@@ -354,6 +464,62 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
       rethrow;
     }
   }
+
+  Future<void> _discardLegacyCoarseManifest(String ownerNamespace) async {
+    final ownerDirectory = await _ownerDirectory(ownerNamespace);
+    for (final name in const ['pending_turns.json', 'pending_turns.json.bak', 'pending_turns.json.tmp']) {
+      final file = File('${ownerDirectory.path}/$name');
+      if (await file.exists()) await file.delete();
+    }
+  }
+
+  Future<void> _retryMarkedCleanup(String uid, String ownerNamespace) async {
+    final ownerDirectory = await _ownerDirectory(ownerNamespace);
+    if (!await ownerDirectory.exists()) return;
+    var cleanupAttempts = 0;
+    await for (final entity in ownerDirectory.list(followLinks: false)) {
+      if (entity is! Directory) continue;
+      final fingerprint = entity.uri.pathSegments.where((segment) => segment.isNotEmpty).last;
+      if (!_authorityFingerprintPattern.hasMatch(fingerprint)) continue;
+      final marker = File('${entity.path}/cleanup_required.json');
+      if (!await marker.exists()) continue;
+      final decoded = jsonDecode(await marker.readAsString());
+      if (decoded is! Map) continue;
+      final json = Map<String, dynamic>.from(decoded);
+      if (json['version'] == _manifestVersion &&
+          json['uid'] == uid &&
+          json['owner_namespace'] == ownerNamespace &&
+          json['authority_fingerprint'] == fingerprint &&
+          json['status'] == _cleanupRequiredStatus &&
+          cleanupAttempts < maxCleanupNamespacesPerLoad) {
+        cleanupAttempts++;
+        await _deleteAuthorityDirectory(entity);
+      }
+    }
+  }
+
+  Future<void> _writeCleanupMarker({
+    required Directory directory,
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
+    final marker = File('${directory.path}/cleanup_required.json');
+    await marker.writeAsString(
+      jsonEncode({
+        'version': _manifestVersion,
+        'uid': uid,
+        'owner_namespace': ownerNamespace,
+        'authority_fingerprint': authorityFingerprint,
+      }),
+      flush: true,
+    );
+  }
+
+  Future<void> _deleteAuthorityDirectory(Directory directory) async {
+    await _beforeCleanupDelete?.call(directory);
+    if (await directory.exists()) await directory.delete(recursive: true);
+  }
 }
 
 class V2VTurnReconciler {
@@ -361,13 +527,22 @@ class V2VTurnReconciler {
     required V2VTranscriptTurnWriter writer,
     V2VTurnDurableStore? durableStore,
     void Function()? onWriteFailure,
+    List<Duration> unauthorizedCleanupRetryDelays = const [
+      Duration(milliseconds: 100),
+      Duration(milliseconds: 500),
+      Duration(seconds: 2),
+      Duration(seconds: 10),
+      Duration(seconds: 30),
+    ],
   })  : _durableStore = durableStore ?? MemoryV2VTurnDurableStore(),
         _writer = writer,
-        _onWriteFailure = onWriteFailure;
+        _onWriteFailure = onWriteFailure,
+        _unauthorizedCleanupRetryDelays = List<Duration>.unmodifiable(unauthorizedCleanupRetryDelays);
 
   final V2VTurnDurableStore _durableStore;
   final V2VTranscriptTurnWriter _writer;
   final void Function()? _onWriteFailure;
+  final List<Duration> _unauthorizedCleanupRetryDelays;
   final Map<String, _V2VSessionTurns> _sessions = {};
   String _activeSessionId = '';
 
@@ -378,21 +553,28 @@ class V2VTurnReconciler {
   Future<bool> beginSession({
     required String uid,
     required String ownerNamespace,
+    required String authorityFingerprint,
     required String sessionId,
     required bool Function() isAuthorityCurrent,
   }) async {
     final normalizedUid = uid.trim();
     final normalizedOwnerNamespace = ownerNamespace.trim();
+    final normalizedAuthorityFingerprint = authorityFingerprint.trim();
     final normalizedSessionId = sessionId.trim();
     if (normalizedUid.isEmpty ||
         !FileV2VTurnDurableStore._ownerNamespacePattern.hasMatch(normalizedOwnerNamespace) ||
+        !FileV2VTurnDurableStore._authorityFingerprintPattern.hasMatch(normalizedAuthorityFingerprint) ||
         normalizedSessionId.isEmpty ||
         !isAuthorityCurrent()) {
       return false;
     }
     late final List<V2VTranscriptTurn> restored;
     try {
-      restored = await _durableStore.load(uid: normalizedUid, ownerNamespace: normalizedOwnerNamespace);
+      restored = await _durableStore.load(
+        uid: normalizedUid,
+        ownerNamespace: normalizedOwnerNamespace,
+        authorityFingerprint: normalizedAuthorityFingerprint,
+      );
     } catch (_) {
       _onWriteFailure?.call();
       return false;
@@ -404,11 +586,16 @@ class V2VTurnReconciler {
         () => _V2VSessionTurns(
           uid: normalizedUid,
           ownerNamespace: normalizedOwnerNamespace,
+          authorityFingerprint: normalizedAuthorityFingerprint,
           sessionId: turn.sessionId,
           isAuthorityCurrent: isAuthorityCurrent,
         )..ended = true,
       );
-      if (restoredState.uid != normalizedUid || restoredState.ownerNamespace != normalizedOwnerNamespace) return false;
+      if (restoredState.uid != normalizedUid ||
+          restoredState.ownerNamespace != normalizedOwnerNamespace ||
+          restoredState.authorityFingerprint != normalizedAuthorityFingerprint) {
+        return false;
+      }
       restoredState.isAuthorityCurrent = isAuthorityCurrent;
       if (!_rememberTurn(restoredState, turn)) return false;
     }
@@ -416,6 +603,7 @@ class V2VTurnReconciler {
     if (existing != null &&
         (existing.uid != normalizedUid ||
             existing.ownerNamespace != normalizedOwnerNamespace ||
+            existing.authorityFingerprint != normalizedAuthorityFingerprint ||
             existing.unauthorized)) {
       return false;
     }
@@ -423,6 +611,7 @@ class V2VTurnReconciler {
         _V2VSessionTurns(
           uid: normalizedUid,
           ownerNamespace: normalizedOwnerNamespace,
+          authorityFingerprint: normalizedAuthorityFingerprint,
           sessionId: normalizedSessionId,
           isAuthorityCurrent: isAuthorityCurrent,
         );
@@ -461,6 +650,7 @@ class V2VTurnReconciler {
     final turn = V2VTranscriptTurn(
       uid: state.uid,
       ownerNamespace: state.ownerNamespace,
+      authorityFingerprint: state.authorityFingerprint,
       sessionId: state.sessionId,
       turnId: terminal.turnId,
       userEventId: terminal.userEventId,
@@ -508,6 +698,7 @@ class V2VTurnReconciler {
         for (final state in _sessions.values)
           for (final enqueueFuture in state.enqueueFutures) enqueueFuture.then<void>((_) {}),
         ..._sessions.values.map((state) => state.drainFuture).whereType<Future<void>>(),
+        ..._sessions.values.map((state) => state.cleanupRetryFuture).whereType<Future<void>>(),
       ];
       if (pending.isEmpty) return;
       await Future.wait(pending);
@@ -546,10 +737,16 @@ class V2VTurnReconciler {
       future.whenComplete(() {
         if (!identical(state.drainFuture, future)) return;
         state.drainFuture = null;
-        if (state.rerunRequested && !state.unauthorized && state.pendingTurns.isNotEmpty) {
+        if (state.rerunRequested) {
           state.rerunRequested = false;
-          _scheduleDrain(state);
-          return;
+          if (state.unauthorized && state.unauthorizedClearPending) {
+            _scheduleUnauthorizedCleanupRetry(state);
+            return;
+          }
+          if (state.pendingTurns.isNotEmpty) {
+            _scheduleDrain(state);
+            return;
+          }
         }
         state.rerunRequested = false;
         _maybeEvict(state);
@@ -610,6 +807,7 @@ class V2VTurnReconciler {
     state
       ..unauthorized = true
       ..unauthorizedClearPending = true;
+    if (state.cleanupRetryFuture != null) return;
     if (state.enqueueFutures.isNotEmpty) {
       state.rerunRequested = true;
       return;
@@ -624,13 +822,28 @@ class V2VTurnReconciler {
 
   Future<void> _clearUnauthorized(_V2VSessionTurns state) async {
     try {
-      await _durableStore.clearOwner(uid: state.uid, ownerNamespace: state.ownerNamespace);
+      await _durableStore.clearOwner(
+        uid: state.uid,
+        ownerNamespace: state.ownerNamespace,
+        authorityFingerprint: state.authorityFingerprint,
+      );
       final sameOwnerStates = _sessions.values
-          .where((candidate) => candidate.uid == state.uid && candidate.ownerNamespace == state.ownerNamespace)
+          .where(
+            (candidate) =>
+                candidate.uid == state.uid &&
+                candidate.ownerNamespace == state.ownerNamespace &&
+                candidate.authorityFingerprint == state.authorityFingerprint,
+          )
           .toList();
       for (final candidate in sameOwnerStates) {
         candidate.unauthorized = true;
         candidate.unauthorizedClearPending = false;
+        candidate.cleanupRetryAttempt = 0;
+        candidate.cleanupRetryTimer?.cancel();
+        candidate.cleanupRetryTimer = null;
+        if (candidate.cleanupRetryCompleter?.isCompleted == false) candidate.cleanupRetryCompleter!.complete();
+        candidate.cleanupRetryCompleter = null;
+        candidate.cleanupRetryFuture = null;
         candidate.pendingTurns.clear();
         candidate.failedAtRevision = -1;
         _maybeEvict(candidate);
@@ -639,7 +852,27 @@ class V2VTurnReconciler {
       state.unauthorizedClearPending = true;
       state.failedAtRevision = state.revision;
       _onWriteFailure?.call();
+      state.rerunRequested = true;
     }
+  }
+
+  void _scheduleUnauthorizedCleanupRetry(_V2VSessionTurns state) {
+    if (!state.unauthorizedClearPending || state.cleanupRetryFuture != null) return;
+    if (state.cleanupRetryAttempt >= _unauthorizedCleanupRetryDelays.length) return;
+    final delay = _unauthorizedCleanupRetryDelays[state.cleanupRetryAttempt++];
+    final completer = Completer<void>();
+    state.cleanupRetryCompleter = completer;
+    state.cleanupRetryFuture = completer.future;
+    state.cleanupRetryTimer = Timer(delay, () {
+      state.cleanupRetryTimer = null;
+      state.cleanupRetryCompleter = null;
+      state.cleanupRetryFuture = null;
+      if (state.unauthorizedClearPending && state.enqueueFutures.isEmpty && state.drainFuture == null) {
+        state.revision++;
+        _scheduleDrain(state);
+      }
+      completer.complete();
+    });
   }
 
   Future<bool> _enqueueAcceptedTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) async {
@@ -702,12 +935,14 @@ class _V2VSessionTurns {
   _V2VSessionTurns({
     required this.uid,
     required this.ownerNamespace,
+    required this.authorityFingerprint,
     required this.sessionId,
     required this.isAuthorityCurrent,
   });
 
   final String uid;
   final String ownerNamespace;
+  final String authorityFingerprint;
   final String sessionId;
   bool Function() isAuthorityCurrent;
   final List<V2VTranscriptTurn> pendingTurns = [];
@@ -720,6 +955,10 @@ class _V2VSessionTurns {
   bool ended = false;
   bool unauthorized = false;
   bool unauthorizedClearPending = false;
+  int cleanupRetryAttempt = 0;
+  Timer? cleanupRetryTimer;
+  Completer<void>? cleanupRetryCompleter;
+  Future<void>? cleanupRetryFuture;
   final Set<Future<bool>> enqueueFutures = {};
   Future<void>? drainFuture;
 }
