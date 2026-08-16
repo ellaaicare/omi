@@ -19,7 +19,7 @@ from models.conversation import (
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
-from ._client import db
+from ._client import db, document_id_from_seed
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
 from utils.other.storage import list_audio_chunks
 
@@ -36,6 +36,86 @@ conversation_enriched_summary_kinds = {
     'recovered_enriched',
 }
 conversation_processing_retry_lease_seconds = 900
+capture_protocol_version = 2
+capture_authority_lease_seconds = 30
+capture_finalization_lease_seconds = 15
+capture_authority_collection = 'capture_authority'
+capture_authority_document = 'current'
+
+
+def _capture_authority_ref(uid: str):
+    return (
+        db.collection('users')
+        .document(uid)
+        .collection(capture_authority_collection)
+        .document(capture_authority_document)
+    )
+
+
+def _capture_tuple_matches(data: Dict[str, Any], conversation_id: str, generation: str, owner_token: str) -> bool:
+    return bool(
+        data.get('protocol_version') == capture_protocol_version
+        and data.get('conversation_id') == conversation_id
+        and data.get('generation') == generation
+        and data.get('owner_token') == owner_token
+    )
+
+
+def _capture_lease_expired(data: Dict[str, Any], now: datetime, field: str = 'lease_expires_at') -> bool:
+    expires_at = data.get(field)
+    return not isinstance(expires_at, datetime) or _ensure_timezone_aware(expires_at) <= _ensure_timezone_aware(now)
+
+
+def _capture_finalization_claim_is_live(
+    conversation: Dict[str, Any],
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: datetime,
+) -> bool:
+    return bool(
+        conversation.get('capture_protocol_version') == capture_protocol_version
+        and conversation.get('capture_generation') == generation
+        and conversation.get('capture_owner_token') == owner_token
+        and conversation.get('capture_state') == 'finalizing'
+        and conversation.get('capture_finalization_claim_token') == claim_token
+        and not _capture_lease_expired(conversation, now, field='capture_finalization_lease_expires_at')
+    )
+
+
+def capture_finalization_effect_operation_token(
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    effect_id: str,
+) -> str:
+    """Return the stable sink identity shared by every retry of an effect."""
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f'omi:capture-finalization:{conversation_id}:{generation}:{owner_token}:{effect_id}',
+        )
+    )
+
+
+def _capture_metadata(
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    state: str,
+    now: datetime,
+    *,
+    lease_seconds: int = capture_authority_lease_seconds,
+) -> Dict[str, Any]:
+    return {
+        'protocol_version': capture_protocol_version,
+        'conversation_id': conversation_id,
+        'generation': generation,
+        'owner_token': owner_token,
+        'state': state,
+        'lease_expires_at': now + timedelta(seconds=max(1, lease_seconds)),
+        'updated_at': now,
+    }
 
 
 def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -457,6 +537,317 @@ def upsert_conversation(uid: str, conversation_data: dict):
     conversation_ref.set(conversation_data)
 
 
+def _upsert_conversation_if_capture_finalizer_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    conversation_data: dict,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Write finalization output only while this exact durable lease still owns it."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    current = snapshot.to_dict() or {}
+    if not _capture_finalization_claim_is_live(
+        current,
+        generation,
+        owner_token,
+        claim_token,
+        now or datetime.now(timezone.utc),
+    ):
+        return False
+
+    durable = copy.deepcopy(conversation_data)
+    durable.pop('audio_base64_url', None)
+    durable.pop('photos', None)
+    for field in (
+        'capture_protocol_version',
+        'capture_generation',
+        'capture_owner_token',
+        'capture_state',
+        'capture_lease_expires_at',
+        'capture_drained_at',
+        'capture_finalization_claim_token',
+        'capture_finalization_lease_expires_at',
+        'capture_finalization_attempt_count',
+        'capture_finalization_started_at',
+        'capture_finalization_effects',
+    ):
+        if field in current:
+            durable[field] = current[field]
+    level = current.get('data_protection_level', durable.get('data_protection_level', 'standard'))
+    durable['data_protection_level'] = level
+    transaction.set(conversation_ref, _prepare_conversation_for_write(durable, uid, level))
+    return True
+
+
+@transactional
+def _upsert_conversation_if_capture_finalizer(
+    transaction,
+    conversation_ref,
+    uid: str,
+    conversation_data: dict,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+) -> bool:
+    return _upsert_conversation_if_capture_finalizer_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        conversation_data,
+        generation,
+        owner_token,
+        claim_token,
+    )
+
+
+@set_data_protection_level(data_arg_name='conversation_data')
+def upsert_conversation_if_capture_finalizer(
+    uid: str,
+    conversation_data: dict,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_data['id'])
+    )
+    return _upsert_conversation_if_capture_finalizer(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        conversation_data,
+        generation,
+        owner_token,
+        claim_token,
+    )
+
+
+def _install_capture_conversation_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    uid: str,
+    conversation_data: dict,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+    expected_conversation_id: Optional[str] = None,
+    predecessor_ref=None,
+) -> str:
+    """Atomically publish a durable successor stub and make it the only v2 writer."""
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    authority = authority_snapshot.to_dict() if authority_snapshot.exists else {}
+    predecessor = None
+    if expected_conversation_id is not None:
+        if not _capture_tuple_matches(authority, expected_conversation_id, generation, owner_token):
+            return 'mismatch'
+        if authority.get('state') != 'active':
+            return 'mismatch'
+        if predecessor_ref is None:
+            return 'mismatch'
+        predecessor_snapshot = predecessor_ref.get(transaction=transaction)
+        if not predecessor_snapshot.exists:
+            return 'mismatch'
+        predecessor = predecessor_snapshot.to_dict() or {}
+        predecessor_status = getattr(predecessor.get('status'), 'value', predecessor.get('status'))
+        if (
+            predecessor_status != ConversationStatus.in_progress.value
+            or predecessor.get('capture_state') != 'active'
+            or predecessor.get('capture_generation') != generation
+            or predecessor.get('capture_owner_token') != owner_token
+        ):
+            return 'mismatch'
+    elif authority:
+        state = authority.get('state')
+        resumable_finalizer = state in {'drained', 'finalizing', 'terminal'}
+        abandoned_active = state == 'active' and _capture_lease_expired(authority, now)
+        if not resumable_finalizer and not abandoned_active:
+            return 'mismatch'
+
+    conversation_id = conversation_data['id']
+    metadata = _capture_metadata(conversation_id, generation, owner_token, 'active', now)
+    durable_conversation = copy.deepcopy(conversation_data)
+    durable_conversation.pop('photos', None)
+    durable_conversation.pop('audio_base64_url', None)
+    durable_conversation['data_protection_level'] = durable_conversation.get('data_protection_level') or 'standard'
+    durable_conversation.update(
+        {
+            'capture_protocol_version': capture_protocol_version,
+            'capture_generation': generation,
+            'capture_owner_token': owner_token,
+            'capture_state': 'active',
+            'capture_lease_expires_at': metadata['lease_expires_at'],
+        }
+    )
+    prepared = _prepare_conversation_for_write(
+        durable_conversation,
+        uid,
+        durable_conversation['data_protection_level'],
+    )
+    if predecessor_ref is not None and predecessor is not None:
+        transaction.update(
+            predecessor_ref,
+            {
+                'capture_state': 'drained',
+                'capture_drained_at': now,
+                'capture_lease_expires_at': now,
+            },
+        )
+    transaction.set(conversation_ref, prepared)
+    transaction.set(authority_ref, metadata)
+    return 'installed'
+
+
+@transactional
+def _install_capture_conversation(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    uid: str,
+    conversation_data: dict,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+    expected_conversation_id: Optional[str] = None,
+    predecessor_ref=None,
+) -> str:
+    return _install_capture_conversation_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        uid,
+        conversation_data,
+        generation,
+        owner_token,
+        now,
+        expected_conversation_id,
+        predecessor_ref,
+    )
+
+
+@set_data_protection_level(data_arg_name='conversation_data')
+def install_capture_conversation(
+    uid: str,
+    conversation_data: dict,
+    generation: str,
+    owner_token: str,
+    *,
+    expected_conversation_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> str:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_data['id'])
+    )
+    predecessor_ref = None
+    if expected_conversation_id is not None:
+        predecessor_ref = (
+            db.collection('users').document(uid).collection(conversations_collection).document(expected_conversation_id)
+        )
+    return _install_capture_conversation(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        uid,
+        conversation_data,
+        generation,
+        owner_token,
+        now or datetime.now(timezone.utc),
+        expected_conversation_id,
+        predecessor_ref,
+    )
+
+
+def _adopt_capture_conversation_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+) -> str:
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists:
+        return 'missing'
+    conversation = conversation_snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status != ConversationStatus.in_progress.value:
+        return 'settled'
+
+    authority = authority_snapshot.to_dict() if authority_snapshot.exists else {}
+    if authority:
+        if authority.get('conversation_id') != conversation_id or authority.get('state') != 'active':
+            return 'mismatch'
+        if not _capture_lease_expired(authority, now) and not _capture_tuple_matches(
+            authority, conversation_id, generation, owner_token
+        ):
+            return 'busy'
+
+    metadata = _capture_metadata(conversation_id, generation, owner_token, 'active', now)
+    transaction.set(authority_ref, metadata)
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_protocol_version': capture_protocol_version,
+            'capture_generation': generation,
+            'capture_owner_token': owner_token,
+            'capture_state': 'active',
+            'capture_lease_expires_at': metadata['lease_expires_at'],
+        },
+    )
+    return 'adopted'
+
+
+@transactional
+def _adopt_capture_conversation(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+) -> str:
+    return _adopt_capture_conversation_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        now,
+    )
+
+
+def adopt_capture_conversation(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _adopt_capture_conversation(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        now or datetime.now(timezone.utc),
+    )
+
+
 @prepare_for_read(decrypt_func=_prepare_conversation_for_read)
 @with_photos(get_conversation_photos)
 def get_conversation(uid, conversation_id):
@@ -562,6 +953,747 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+def _update_in_progress_conversation_capture_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    update_data: dict,
+    segments: List[TranscriptSegment],
+    photos: List[ConversationPhoto],
+) -> Optional[Dict[str, Any]]:
+    """Merge capture deltas only after checking the exact durable owner in this transaction."""
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not authority_snapshot.exists or not snapshot.exists:
+        return None
+
+    authority = authority_snapshot.to_dict() or {}
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if (
+        status != ConversationStatus.in_progress.value
+        or authority.get('state') != 'active'
+        or not _capture_tuple_matches(authority, conversation_id, generation, owner_token)
+        or conversation.get('capture_state') != 'active'
+        or conversation.get('capture_generation') != generation
+        or conversation.get('capture_owner_token') != owner_token
+    ):
+        return None
+
+    level = conversation.get('data_protection_level', 'standard')
+    plain_conversation = _prepare_conversation_for_read(conversation, uid) or {}
+    updated_segments: List[TranscriptSegment] = []
+    removed_ids: List[str] = []
+    if segments:
+        current_segments = [
+            TranscriptSegment(**segment) for segment in plain_conversation.get('transcript_segments', [])
+        ]
+        combined, updated_segments, removed_ids = TranscriptSegment.combine_segments(current_segments, segments)
+        update_data = {**update_data, 'transcript_segments': [segment.dict() for segment in combined]}
+        plain_conversation['transcript_segments'] = [segment.dict() for segment in combined]
+
+    now = datetime.now(timezone.utc)
+    lease_expires_at = now + timedelta(seconds=capture_authority_lease_seconds)
+    update_data = {
+        **update_data,
+        'capture_lease_expires_at': lease_expires_at,
+    }
+    transaction.update(conversation_ref, _prepare_conversation_for_write(update_data, uid, level))
+    transaction.update(
+        authority_ref,
+        {
+            'lease_expires_at': lease_expires_at,
+            'updated_at': now,
+        },
+    )
+    photos_ref = conversation_ref.collection('photos')
+    for photo in photos:
+        photo_id = photo.id or str(uuid.uuid4())
+        photo_data = photo.dict()
+        photo_data['id'] = photo_id
+        transaction.set(photos_ref.document(photo_id), _prepare_photo_for_write(photo_data, uid, level))
+    plain_conversation.update(update_data)
+    return {
+        'conversation': plain_conversation,
+        'updated_segments': [segment.dict() for segment in updated_segments],
+        'removed_ids': removed_ids,
+    }
+
+
+@transactional
+def _update_in_progress_conversation_capture(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    update_data: dict,
+    segments: List[TranscriptSegment],
+    photos: List[ConversationPhoto],
+) -> Optional[Dict[str, Any]]:
+    return _update_in_progress_conversation_capture_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        uid,
+        conversation_id,
+        generation,
+        owner_token,
+        update_data,
+        segments,
+        photos,
+    )
+
+
+def update_in_progress_conversation_capture(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    update_data: dict,
+    segments: Optional[List[TranscriptSegment]] = None,
+    photos: Optional[List[ConversationPhoto]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically owner-fence and merge capture deltas from the current Firestore snapshot."""
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_in_progress_conversation_capture(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        uid,
+        conversation_id,
+        generation,
+        owner_token,
+        update_data,
+        segments or [],
+        photos or [],
+    )
+
+
+def _renew_capture_authority_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+) -> bool:
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not authority_snapshot.exists or not conversation_snapshot.exists:
+        return False
+    authority = authority_snapshot.to_dict() or {}
+    conversation = conversation_snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if (
+        authority.get('state') != 'active'
+        or not _capture_tuple_matches(authority, conversation_id, generation, owner_token)
+        or status != ConversationStatus.in_progress.value
+        or conversation.get('capture_state') != 'active'
+        or conversation.get('capture_generation') != generation
+        or conversation.get('capture_owner_token') != owner_token
+    ):
+        return False
+    lease_expires_at = now + timedelta(seconds=capture_authority_lease_seconds)
+    transaction.update(authority_ref, {'lease_expires_at': lease_expires_at, 'updated_at': now})
+    transaction.update(conversation_ref, {'capture_lease_expires_at': lease_expires_at})
+    return True
+
+
+@transactional
+def _renew_capture_authority(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+) -> bool:
+    return _renew_capture_authority_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        now,
+    )
+
+
+def renew_capture_authority(uid: str, conversation_id: str, generation: str, owner_token: str) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _renew_capture_authority(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        datetime.now(timezone.utc),
+    )
+
+
+def _mark_capture_drained_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+) -> bool:
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not authority_snapshot.exists or not conversation_snapshot.exists:
+        return False
+    authority = authority_snapshot.to_dict() or {}
+    conversation = conversation_snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if not _capture_tuple_matches(authority, conversation_id, generation, owner_token):
+        return False
+    if authority.get('state') == 'drained' and conversation.get('capture_state') == 'drained':
+        return True
+    if (
+        authority.get('state') != 'active'
+        or status != ConversationStatus.in_progress.value
+        or conversation.get('capture_state') != 'active'
+        or conversation.get('capture_generation') != generation
+        or conversation.get('capture_owner_token') != owner_token
+    ):
+        return False
+    authority_update = _capture_metadata(conversation_id, generation, owner_token, 'drained', now)
+    transaction.set(authority_ref, authority_update)
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_state': 'drained',
+            'capture_drained_at': now,
+            'capture_lease_expires_at': authority_update['lease_expires_at'],
+        },
+    )
+    return True
+
+
+@transactional
+def _mark_capture_drained(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: datetime,
+) -> bool:
+    return _mark_capture_drained_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        now,
+    )
+
+
+def mark_capture_drained(uid: str, conversation_id: str, generation: str, owner_token: str) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _mark_capture_drained(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        datetime.now(timezone.utc),
+    )
+
+
+def _claim_capture_finalization_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    protocol_version: int,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: datetime,
+    lease_seconds: int = capture_finalization_lease_seconds,
+) -> Dict[str, Any]:
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists:
+        return {'outcome': 'not_found'}
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    conversation = conversation_snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    expected_tuple = bool(
+        protocol_version == capture_protocol_version
+        and conversation.get('capture_protocol_version') == protocol_version
+        and conversation.get('capture_generation') == generation
+        and conversation.get('capture_owner_token') == owner_token
+    )
+    if not expected_tuple:
+        return {'outcome': 'mismatch'}
+    state = conversation.get('capture_state')
+    settled_statuses = {ConversationStatus.completed.value, ConversationStatus.failed.value}
+    if state == 'terminal' and status in settled_statuses:
+        return {'outcome': 'settled', 'conversation': conversation}
+    if state == 'finalizing' and not _capture_lease_expired(
+        conversation, now, field='capture_finalization_lease_expires_at'
+    ):
+        return {'outcome': 'busy', 'conversation': conversation}
+    if state not in {'drained', 'finalizing'}:
+        return {'outcome': 'not_drained', 'conversation': conversation}
+
+    lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
+    update = {
+        'capture_state': 'finalizing',
+        'capture_finalization_claim_token': claim_token,
+        'capture_finalization_lease_expires_at': lease_expires_at,
+        'capture_finalization_attempt_count': int(conversation.get('capture_finalization_attempt_count') or 0) + 1,
+        'capture_finalization_started_at': conversation.get('capture_finalization_started_at') or now,
+    }
+    if status not in settled_statuses:
+        update['status'] = ConversationStatus.processing.value
+    transaction.update(conversation_ref, update)
+
+    if authority_snapshot.exists:
+        authority = authority_snapshot.to_dict() or {}
+        if _capture_tuple_matches(authority, conversation_id, generation, owner_token):
+            transaction.update(
+                authority_ref,
+                {
+                    'state': 'finalizing',
+                    'finalization_claim_token': claim_token,
+                    'finalization_lease_expires_at': lease_expires_at,
+                    'updated_at': now,
+                },
+            )
+    conversation.update(update)
+    return {
+        'outcome': 'claimed',
+        'claim_token': claim_token,
+        'lease_expires_at': lease_expires_at,
+        'conversation': conversation,
+    }
+
+
+@transactional
+def _claim_capture_finalization(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    protocol_version: int,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: datetime,
+    lease_seconds: int = capture_finalization_lease_seconds,
+) -> Dict[str, Any]:
+    return _claim_capture_finalization_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        conversation_id,
+        protocol_version,
+        generation,
+        owner_token,
+        claim_token,
+        now,
+        lease_seconds,
+    )
+
+
+def claim_capture_finalization(
+    uid: str,
+    conversation_id: str,
+    protocol_version: int,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    *,
+    now: Optional[datetime] = None,
+    lease_seconds: int = capture_finalization_lease_seconds,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_capture_finalization(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        conversation_id,
+        protocol_version,
+        generation,
+        owner_token,
+        claim_token,
+        now or datetime.now(timezone.utc),
+        lease_seconds,
+    )
+
+
+def _renew_capture_finalization_transaction(
+    transaction,
+    conversation_ref,
+    claim_token: str,
+    now: datetime,
+    lease_seconds: int,
+    generation: str,
+    owner_token: str,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if (
+        conversation.get('capture_protocol_version') != capture_protocol_version
+        or conversation.get('capture_state') != 'finalizing'
+        or conversation.get('capture_finalization_claim_token') != claim_token
+        or _capture_lease_expired(conversation, now, field='capture_finalization_lease_expires_at')
+        or conversation.get('capture_generation') != generation
+        or conversation.get('capture_owner_token') != owner_token
+    ):
+        return False
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_finalization_lease_expires_at': now + timedelta(seconds=max(1, lease_seconds)),
+        },
+    )
+    return True
+
+
+@transactional
+def _renew_capture_finalization(
+    transaction,
+    conversation_ref,
+    claim_token: str,
+    now: datetime,
+    lease_seconds: int,
+    generation: str,
+    owner_token: str,
+) -> bool:
+    return _renew_capture_finalization_transaction(
+        transaction,
+        conversation_ref,
+        claim_token,
+        now,
+        lease_seconds,
+        generation,
+        owner_token,
+    )
+
+
+def renew_capture_finalization(
+    uid: str,
+    conversation_id: str,
+    claim_token: str,
+    generation: str,
+    owner_token: str,
+    *,
+    lease_seconds: int = capture_finalization_lease_seconds,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _renew_capture_finalization(
+        db.transaction(),
+        conversation_ref,
+        claim_token,
+        datetime.now(timezone.utc),
+        lease_seconds,
+        generation,
+        owner_token,
+    )
+
+
+def _claim_capture_finalization_effect_transaction(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    """Claim one retry-safe effect under the exact live finalizer lease."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'outcome': 'not_found'}
+    conversation = snapshot.to_dict() or {}
+    if not _capture_finalization_claim_is_live(conversation, generation, owner_token, claim_token, now):
+        return {'outcome': 'lost'}
+
+    effects = copy.deepcopy(conversation.get('capture_finalization_effects') or {})
+    receipt = copy.deepcopy(effects.get(effect_id) or {})
+    if receipt.get('state') == 'completed':
+        return {
+            'outcome': 'completed',
+            'operation_token': receipt.get('operation_token'),
+            'result': receipt.get('result'),
+        }
+
+    operation_token = receipt.get('operation_token') or capture_finalization_effect_operation_token(
+        conversation.get('id'),
+        generation,
+        owner_token,
+        effect_id,
+    )
+    effects[effect_id] = {
+        **receipt,
+        'state': 'claimed',
+        'operation_token': operation_token,
+        'claim_token': claim_token,
+        'attempt_count': int(receipt.get('attempt_count') or 0) + 1,
+        'claimed_at': now,
+    }
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_finalization_effects': effects,
+            'capture_finalization_lease_expires_at': now + timedelta(seconds=capture_finalization_lease_seconds),
+        },
+    )
+    return {'outcome': 'claimed', 'operation_token': operation_token}
+
+
+@transactional
+def _claim_capture_finalization_effect(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    return _claim_capture_finalization_effect_transaction(
+        transaction,
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        now,
+    )
+
+
+def claim_capture_finalization_effect(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_capture_finalization_effect(
+        db.transaction(),
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        datetime.now(timezone.utc),
+    )
+
+
+def _complete_capture_finalization_effect_transaction(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    operation_token: str,
+    result: Any,
+    now: datetime,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if not _capture_finalization_claim_is_live(conversation, generation, owner_token, claim_token, now):
+        return False
+    effects = copy.deepcopy(conversation.get('capture_finalization_effects') or {})
+    receipt = copy.deepcopy(effects.get(effect_id) or {})
+    if (
+        receipt.get('state') != 'claimed'
+        or receipt.get('claim_token') != claim_token
+        or receipt.get('operation_token') != operation_token
+    ):
+        return False
+    effects[effect_id] = {
+        **receipt,
+        'state': 'completed',
+        'result': result,
+        'completed_at': now,
+    }
+    transaction.update(conversation_ref, {'capture_finalization_effects': effects})
+    return True
+
+
+@transactional
+def _complete_capture_finalization_effect(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    operation_token: str,
+    result: Any,
+    now: datetime,
+) -> bool:
+    return _complete_capture_finalization_effect_transaction(
+        transaction,
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+        now,
+    )
+
+
+def complete_capture_finalization_effect(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    operation_token: str,
+    result: Any = None,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _complete_capture_finalization_effect(
+        db.transaction(),
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+        datetime.now(timezone.utc),
+    )
+
+
+def _complete_capture_finalization_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: datetime,
+) -> bool:
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists:
+        return False
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    conversation = conversation_snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    integration_receipt = (conversation.get('capture_finalization_effects') or {}).get('integrations:external') or {}
+    if (
+        not _capture_finalization_claim_is_live(conversation, generation, owner_token, claim_token, now)
+        or status
+        not in {
+            ConversationStatus.completed.value,
+            ConversationStatus.failed.value,
+        }
+        or integration_receipt.get('state') != 'completed'
+    ):
+        return False
+    compact_effects = copy.deepcopy(conversation.get('capture_finalization_effects') or {})
+    for receipt in compact_effects.values():
+        if receipt.get('state') == 'completed':
+            receipt.pop('result', None)
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_state': 'terminal',
+            'capture_terminal_at': now,
+            'capture_finalization_completed_at': now,
+            'capture_finalization_lease_expires_at': now,
+            'capture_finalization_effects': compact_effects,
+        },
+    )
+    if authority_snapshot.exists:
+        authority = authority_snapshot.to_dict() or {}
+        if _capture_tuple_matches(authority, conversation_id, generation, owner_token):
+            transaction.update(authority_ref, {'state': 'terminal', 'updated_at': now, 'lease_expires_at': now})
+    return True
+
+
+@transactional
+def _complete_capture_finalization(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: datetime,
+) -> bool:
+    return _complete_capture_finalization_transaction(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        claim_token,
+        now,
+    )
+
+
+def complete_capture_finalization(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _complete_capture_finalization(
+        db.transaction(),
+        _capture_authority_ref(uid),
+        conversation_ref,
+        conversation_id,
+        generation,
+        owner_token,
+        claim_token,
+        datetime.now(timezone.utc),
+    )
+
+
 def _update_conversation_if_active_summary_version_transaction(
     transaction,
     conversation_ref,
@@ -619,6 +1751,7 @@ def update_conversation_if_active_summary_version(
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,
+    idempotency_key: Optional[str] = None,
 ) -> List[AudioFile]:
     """
     Create audio file records by merging chunks from a conversation.
@@ -649,7 +1782,13 @@ def create_audio_files_from_chunks(
             time_gap = chunk['timestamp'] - prev_chunk['timestamp']
             if time_gap > 30:
                 # Gap detected, finalize current group
-                audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+                audio_file = _finalize_audio_file_group(
+                    uid,
+                    conversation_id,
+                    current_group,
+                    audio_files,
+                    idempotency_key=idempotency_key,
+                )
                 if audio_file:
                     audio_files.append(audio_file)
                 current_group = [chunk]
@@ -658,15 +1797,29 @@ def create_audio_files_from_chunks(
 
     # Finalize last group
     if current_group:
-        audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+        audio_file = _finalize_audio_file_group(
+            uid,
+            conversation_id,
+            current_group,
+            audio_files,
+            idempotency_key=idempotency_key,
+        )
         if audio_file:
             audio_files.append(audio_file)
 
     return audio_files
 
 
+def capture_audio_file_id(idempotency_key: str, group_index: int) -> str:
+    return document_id_from_seed(f'{idempotency_key}:audio-file:{group_index}')
+
+
 def _finalize_audio_file_group(
-    uid: str, conversation_id: str, chunk_group: List[dict], existing_files: List[AudioFile]
+    uid: str,
+    conversation_id: str,
+    chunk_group: List[dict],
+    existing_files: List[AudioFile],
+    idempotency_key: Optional[str] = None,
 ) -> Optional[AudioFile]:
     """
     Create an AudioFile record that references chunks (no merging).
@@ -684,7 +1837,7 @@ def _finalize_audio_file_group(
         return None
 
     # Generate file ID
-    file_id = str(uuid.uuid4())
+    file_id = capture_audio_file_id(idempotency_key, len(existing_files)) if idempotency_key else str(uuid.uuid4())
 
     # Extract timestamps
     timestamps = [chunk['timestamp'] for chunk in chunk_group]
@@ -1027,6 +2180,33 @@ def update_conversation_status(uid: str, conversation_id: str, status: str):
     user_ref = db.collection('users').document(uid)
     conversation_ref = user_ref.collection(conversations_collection).document(conversation_id)
     conversation_ref.update({'status': status})
+
+
+def _claim_in_progress_conversation_transaction(transaction, conversation_ref) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status != ConversationStatus.in_progress.value:
+        return False
+
+    transaction.update(conversation_ref, {'status': ConversationStatus.processing.value})
+    return True
+
+
+@transactional
+def _claim_in_progress_conversation(transaction, conversation_ref) -> bool:
+    return _claim_in_progress_conversation_transaction(transaction, conversation_ref)
+
+
+def claim_in_progress_conversation(uid: str, conversation_id: str) -> bool:
+    """Atomically claim only the owner's exact in-progress conversation."""
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_in_progress_conversation(db.transaction(), conversation_ref)
 
 
 def _claim_conversation_processing_retry_transaction(

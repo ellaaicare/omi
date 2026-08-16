@@ -31,7 +31,11 @@ class HttpPoolManager {
     Duration timeout = const Duration(seconds: 30),
     int retries = 1,
     ExactAccountAuthorityVerifier? exactAuthority,
+    MonotonicRequestDeadline? absoluteDeadline,
   }) async {
+    final totalTimeout = MonotonicRequestDeadline.budgetFor(timeout: timeout, retries: retries);
+    final deadline = absoluteDeadline ?? MonotonicRequestDeadline(totalTimeout);
+    deadline.throwIfExpired('before request inspection');
     final sample = requestBuilder();
     final isGet = sample.method == 'GET';
     final url = sample.url.toString();
@@ -41,9 +45,11 @@ class HttpPoolManager {
       return _pendingGets[url]!;
     }
 
+    final admissionTimeout = deadline.remaining < totalTimeout ? deadline.remaining : totalTimeout;
     final future = _pool.withResource(() async {
-      return _executeWithRetry(requestBuilder, timeout, retries, exactAuthority);
-    });
+      deadline.throwIfExpired('before pooled request construction');
+      return _executeWithRetry(requestBuilder, timeout, retries, exactAuthority, deadline);
+    }).timeout(admissionTimeout);
 
     if (isGet && exactAuthority == null) {
       _pendingGets[url] = future;
@@ -58,18 +64,27 @@ class HttpPoolManager {
     Duration timeout,
     int retries,
     ExactAccountAuthorityVerifier? exactAuthority,
+    MonotonicRequestDeadline deadline,
   ) async {
     http.Response? lastResponse;
     Object? lastError;
 
     for (var i = 0; i <= retries; i++) {
       try {
-        final request = requestBuilder();
-        _verifyExactAuthority(exactAuthority, 'immediately before HTTP egress');
-        final streamed = await _client.send(request).timeout(timeout);
-        _verifyExactAuthority(exactAuthority, 'after HTTP response headers');
-        lastResponse = await http.Response.fromStream(streamed);
-        _verifyExactAuthority(exactAuthority, 'after HTTP response body');
+        deadline.throwIfExpired('before request construction');
+        final attemptTimeout = deadline.remaining < timeout ? deadline.remaining : timeout;
+        lastResponse = await (() async {
+          deadline.throwIfExpired('before request construction');
+          final request = requestBuilder();
+          _verifyExactAuthority(exactAuthority, 'immediately before HTTP egress');
+          deadline.throwIfExpired('immediately before HTTP egress');
+          final streamed = await _client.send(request);
+          _verifyExactAuthority(exactAuthority, 'after HTTP response headers');
+          final response = await http.Response.fromStream(streamed);
+          _verifyExactAuthority(exactAuthority, 'after HTTP response body');
+          return response;
+        })()
+            .timeout(attemptTimeout);
 
         if (lastResponse.statusCode < 500) {
           return lastResponse;
@@ -89,7 +104,11 @@ class HttpPoolManager {
       }
 
       if (i < retries) {
-        await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
+        final retryDelay = Duration(milliseconds: 200 * (i + 1));
+        final boundedDelay = deadline.remaining < retryDelay ? deadline.remaining : retryDelay;
+        if (boundedDelay > Duration.zero) {
+          await Future<void>.delayed(boundedDelay);
+        }
       }
     }
 
@@ -119,6 +138,32 @@ class HttpPoolManager {
   void replaceClientForTesting(http.Client client) {
     _client.close();
     _client = client;
+  }
+}
+
+class MonotonicRequestDeadline {
+  MonotonicRequestDeadline(this.budget) : _stopwatch = Stopwatch()..start();
+
+  factory MonotonicRequestDeadline.forRequest({required Duration timeout, required int retries}) =>
+      MonotonicRequestDeadline(budgetFor(timeout: timeout, retries: retries));
+
+  static Duration budgetFor({required Duration timeout, required int retries}) {
+    final retryBackoff = Duration(milliseconds: retries * (retries + 1) * 100);
+    return timeout * (retries + 1) + retryBackoff;
+  }
+
+  final Duration budget;
+  final Stopwatch _stopwatch;
+
+  Duration get remaining {
+    final value = budget - _stopwatch.elapsed;
+    return value > Duration.zero ? value : Duration.zero;
+  }
+
+  void throwIfExpired(String boundary) {
+    if (remaining <= Duration.zero) {
+      throw TimeoutException('Request deadline expired $boundary');
+    }
   }
 }
 

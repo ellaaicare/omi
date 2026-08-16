@@ -1,13 +1,44 @@
-from datetime import datetime
+import hashlib
+from datetime import datetime, timezone
 from typing import Optional
 from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+from google.cloud.firestore_v1 import FieldFilter, transactional
 
 from ._client import db
 from models.user_usage import UsageStats
 
 
-def update_hourly_usage(uid: str, date: datetime, updates: dict):
+def usage_idempotency_receipt_id(idempotency_key: str) -> str:
+    return hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()
+
+
+def _apply_hourly_usage_once_transaction(
+    transaction,
+    hourly_usage_ref,
+    receipt_ref,
+    update_doc: dict,
+    receipt_doc: dict,
+) -> bool:
+    receipt = receipt_ref.get(transaction=transaction)
+    if receipt.exists:
+        return False
+    transaction.set(hourly_usage_ref, update_doc, merge=True)
+    transaction.set(receipt_ref, receipt_doc)
+    return True
+
+
+@transactional
+def _apply_hourly_usage_once(transaction, hourly_usage_ref, receipt_ref, update_doc: dict, receipt_doc: dict) -> bool:
+    return _apply_hourly_usage_once_transaction(
+        transaction,
+        hourly_usage_ref,
+        receipt_ref,
+        update_doc,
+        receipt_doc,
+    )
+
+
+def update_hourly_usage(uid: str, date: datetime, updates: dict, idempotency_key: Optional[str] = None) -> bool:
     """Updates or creates usage stats for a specific hour using Firestore atomic increments."""
     user_ref = db.collection('users').document(uid)
     doc_id = f'{date.year}-{date.month:02d}-{date.day:02d}-{date.hour:02d}'
@@ -22,7 +53,7 @@ def update_hourly_usage(uid: str, date: datetime, updates: dict):
             has_increments = True
 
     if not has_increments:
-        return
+        return False
 
     # Add year, month, day, hour fields for querying
     update_doc['year'] = date.year
@@ -31,7 +62,24 @@ def update_hourly_usage(uid: str, date: datetime, updates: dict):
     update_doc['hour'] = date.hour
     update_doc['id'] = doc_id
 
+    if idempotency_key:
+        receipt_ref = user_ref.collection('capture_usage_receipts').document(
+            usage_idempotency_receipt_id(idempotency_key)
+        )
+        return _apply_hourly_usage_once(
+            db.transaction(),
+            hourly_usage_ref,
+            receipt_ref,
+            update_doc,
+            {
+                'idempotency_key': idempotency_key,
+                'hourly_usage_id': doc_id,
+                'applied_at': datetime.now(timezone.utc),
+            },
+        )
+
     hourly_usage_ref.set(update_doc, merge=True)
+    return True
 
 
 def batch_update_hourly_usage(uid: str, hourly_updates: dict):

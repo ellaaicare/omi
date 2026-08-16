@@ -11,6 +11,7 @@ import httpx
 
 import database.users as users_db
 import database.redis_db as redis_db
+import database.task_sync as task_sync_db
 from utils.other import endpoints as auth
 
 router = APIRouter()
@@ -473,6 +474,44 @@ async def perform_request_with_token_retry(
 # *****************************
 
 
+def _begin_task_sync_provider_egress(
+    uid: str,
+    app_key: str,
+    idempotency_key: Optional[str],
+    action_item_id: Optional[str],
+    sync_claim_token: Optional[str],
+) -> Optional[dict]:
+    if not idempotency_key:
+        return None
+    if not action_item_id or not sync_claim_token:
+        return {"success": False, "error": "Incomplete task-sync identity", "error_code": "stale_sync_claim"}
+
+    boundary = task_sync_db.begin_task_sync_egress(
+        uid,
+        idempotency_key,
+        action_item_id,
+        app_key,
+        sync_claim_token,
+    )
+    if boundary.get('outcome') == 'completed':
+        result = boundary.get('result') or {}
+        return {
+            "success": result.get('synced', False),
+            "external_task_id": result.get('external_task_id'),
+            "error": result.get('error'),
+            "deduplicated": True,
+        }
+    if boundary.get('outcome') == task_sync_db.TASK_SYNC_OUTBOUND_STARTED:
+        return None
+    if boundary.get('outcome') == 'ambiguous':
+        return {
+            "success": False,
+            "error": "Task-sync outbound result requires reconciliation",
+            "error_code": "ambiguous_outbound",
+        }
+    return {"success": False, "error": "Stale task-sync claim", "error_code": "stale_sync_claim"}
+
+
 async def _create_task_internal(
     uid: str,
     app_key: str,
@@ -480,6 +519,9 @@ async def _create_task_internal(
     title: str,
     description: Optional[str] = None,
     due_date: Optional[datetime] = None,
+    idempotency_key: Optional[str] = None,
+    action_item_id: Optional[str] = None,
+    sync_claim_token: Optional[str] = None,
 ) -> dict:
     """
     Internal function to create task in external service.
@@ -504,6 +546,27 @@ async def _create_task_internal(
         - api_error: External API returned an error
         - unsupported: Unsupported integration
     """
+    if idempotency_key:
+        if not action_item_id or not sync_claim_token:
+            return {"success": False, "error": "Incomplete task-sync identity", "error_code": "stale_sync_claim"}
+        claim = task_sync_db.observe_task_sync_claim(
+            uid,
+            idempotency_key,
+            action_item_id,
+            app_key,
+            sync_claim_token,
+        )
+        if claim.get('outcome') == 'completed':
+            result = claim.get('result') or {}
+            return {
+                "success": result.get('synced', False),
+                "external_task_id": result.get('external_task_id'),
+                "error": result.get('error'),
+                "deduplicated": True,
+            }
+        if claim.get('outcome') != 'claimed':
+            return {"success": False, "error": "Stale task-sync claim", "error_code": "stale_sync_claim"}
+
     if app_key in ['google_tasks', 'asana']:
         integration = await ensure_valid_oauth_token(
             uid, app_key, integration, refresh_if_missing_expires_at=(app_key == 'google_tasks')
@@ -516,6 +579,7 @@ async def _create_task_internal(
     if not access_token:
         return {"success": False, "error": f"No access token for {app_key}", "error_code": "no_access_token"}
 
+    outbound_started = False
     try:
         client = get_http_client()
 
@@ -526,9 +590,18 @@ async def _create_task_internal(
             if due_date:
                 body['due_string'] = due_date.strftime('%Y-%m-%d')
 
+            headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
+            if idempotency_key:
+                headers['X-Request-Id'] = task_sync_db.provider_request_id(idempotency_key)
+            boundary_result = _begin_task_sync_provider_egress(
+                uid, app_key, idempotency_key, action_item_id, sync_claim_token
+            )
+            if boundary_result is not None:
+                return boundary_result
+            outbound_started = bool(idempotency_key)
             response = await client.post(
                 'https://api.todoist.com/rest/v2/tasks',
-                headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'},
+                headers=headers,
                 json=body,
             )
 
@@ -563,6 +636,12 @@ async def _create_task_internal(
             if project_gid:
                 task_data['projects'] = [project_gid]
 
+            boundary_result = _begin_task_sync_provider_egress(
+                uid, app_key, idempotency_key, action_item_id, sync_claim_token
+            )
+            if boundary_result is not None:
+                return boundary_result
+            outbound_started = bool(idempotency_key)
             response = await client.post(
                 'https://app.asana.com/api/1.0/tasks',
                 headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'},
@@ -590,6 +669,12 @@ async def _create_task_internal(
             if due_date:
                 task_data['due'] = due_date.strftime('%Y-%m-%dT00:00:00.000Z')
 
+            boundary_result = _begin_task_sync_provider_egress(
+                uid, app_key, idempotency_key, action_item_id, sync_claim_token
+            )
+            if boundary_result is not None:
+                return boundary_result
+            outbound_started = bool(idempotency_key)
             response = await client.post(
                 f'https://tasks.googleapis.com/tasks/v1/lists/{list_id}/tasks',
                 headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'},
@@ -617,6 +702,12 @@ async def _create_task_internal(
             if due_date:
                 task_data['due_date'] = int(due_date.timestamp() * 1000)
 
+            boundary_result = _begin_task_sync_provider_egress(
+                uid, app_key, idempotency_key, action_item_id, sync_claim_token
+            )
+            if boundary_result is not None:
+                return boundary_result
+            outbound_started = bool(idempotency_key)
             response = await client.post(
                 f'https://api.clickup.com/api/v2/list/{list_id}/task',
                 headers={'Authorization': access_token, 'Content-Type': 'application/json'},
@@ -638,6 +729,12 @@ async def _create_task_internal(
 
     except Exception as e:
         print(f"Error creating task in {app_key}: {e}")
+        if outbound_started:
+            return {
+                "success": False,
+                "error": "Task-sync outbound result requires reconciliation",
+                "error_code": "ambiguous_outbound",
+            }
         return {"success": False, "error": str(e)}
 
 

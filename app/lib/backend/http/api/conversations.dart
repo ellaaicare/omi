@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,13 +10,25 @@ import 'package:omi/backend/schema/schema.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
-import 'package:omi/utils/platform/platform_manager.dart';
 
 typedef ConversationDeleteTransport = Future<http.Response?> Function({
   required String url,
   required String? expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier? exactAuthority,
 });
+
+typedef ConversationFinalizationTransport = Future<http.Response?> Function({
+  required String url,
+  required String method,
+  required String body,
+  required Duration timeout,
+  required int retries,
+  required bool retryOnUnauthorized,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+});
+
+typedef ConversationFinalizationDelay = Future<void> Function(Duration duration);
 
 Future<http.Response?> _defaultConversationDeleteTransport({
   required String url,
@@ -31,33 +44,260 @@ Future<http.Response?> _defaultConversationDeleteTransport({
       exactAuthority: exactAuthority,
     );
 
-Future<CreateConversationResponse?> processInProgressConversation({
-  required String conversationId,
-  String? expectedAuthenticatedUid,
-  ExactAccountAuthorityVerifier? exactAuthority,
-}) async {
-  http.Response? response;
-  const maxCaptureDrainAttempts = 40;
-  for (var attempt = 0; attempt < maxCaptureDrainAttempts; attempt++) {
-    response = await makeApiCall(
-      url: '${Env.apiBaseUrl}v1/conversations',
-      headers: {},
-      method: 'POST',
-      body: jsonEncode({'conversation_id': conversationId}),
+Future<http.Response?> _defaultConversationFinalizationTransport({
+  required String url,
+  required String method,
+  required String body,
+  required Duration timeout,
+  required int retries,
+  required bool retryOnUnauthorized,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: const {},
+      method: method,
+      body: body,
+      timeout: timeout,
+      retries: retries,
+      retryOnUnauthorized: retryOnUnauthorized,
+      enforceAbsoluteTimeout: true,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );
-    if (response?.statusCode != 409 || attempt == maxCaptureDrainAttempts - 1) break;
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+
+Future<void> _defaultConversationFinalizationDelay(Duration duration) => Future<void>.delayed(duration);
+
+void _verifyConversationFinalizationAuthority({
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) {
+  if (exactAuthority == null) return;
+  if (!exactAuthority.isExactCurrent() ||
+      (expectedAuthenticatedUid != null && exactAuthority.uid != expectedAuthenticatedUid)) {
+    throw ExactAccountAuthorityChangedException('Capture finalization authority changed while polling');
   }
-  if (response == null) return null;
-  Logger.debug('createConversationServer: ${response.body}');
-  if (response.statusCode == 200) {
-    return CreateConversationResponse.fromJson(jsonDecode(response.body));
-  } else {
-    // TODO: Server returns 304 doesn't recover
-    PlatformManager.instance.crashReporter.reportCrash(Exception('Failed to create conversation'), StackTrace.current,
-        userAttributes: {'response': response.body});
+}
+
+enum _ConversationFinalizationStatus { inProgress, processing, merging, completed, failed, invalid }
+
+class _InspectedConversationResponse {
+  const _InspectedConversationResponse({required this.status, this.responseJson, this.conversationJson});
+
+  final _ConversationFinalizationStatus status;
+  final Map<String, dynamic>? responseJson;
+  final Map<String, dynamic>? conversationJson;
+}
+
+_InspectedConversationResponse _inspectConversationResponse(
+  http.Response response, {
+  required String conversationId,
+  required bool wrapped,
+}) {
+  try {
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map) {
+      return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+    }
+    final responseJson = Map<String, dynamic>.from(decoded);
+    final candidate = wrapped ? responseJson['conversation'] : responseJson;
+    if (candidate is! Map) {
+      return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+    }
+    final conversationJson = Map<String, dynamic>.from(candidate);
+    if (conversationJson['id'] is! String || conversationJson['id'] != conversationId) {
+      return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+    }
+    var status = switch (conversationJson['status']) {
+      'in_progress' => _ConversationFinalizationStatus.inProgress,
+      'processing' => _ConversationFinalizationStatus.processing,
+      'merging' => _ConversationFinalizationStatus.merging,
+      'completed' => _ConversationFinalizationStatus.completed,
+      'failed' => _ConversationFinalizationStatus.failed,
+      _ => _ConversationFinalizationStatus.invalid,
+    };
+    if ((status == _ConversationFinalizationStatus.completed || status == _ConversationFinalizationStatus.failed) &&
+        conversationJson['capture_protocol_version'] == 2 &&
+        conversationJson['capture_state'] != 'terminal') {
+      status = _ConversationFinalizationStatus.processing;
+    }
+    return _InspectedConversationResponse(
+      status: status,
+      responseJson: responseJson,
+      conversationJson: conversationJson,
+    );
+  } catch (_) {
+    return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+  }
+}
+
+String _statusClass(int statusCode) => '${statusCode ~/ 100}xx';
+
+Future<CreateConversationResponse?> processInProgressConversation({
+  required String conversationId,
+  int protocolVersion = 2,
+  String generation = 'test-generation',
+  String ownerToken = 'test-owner-token',
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  int maxStatusPollAttempts = 60,
+  Duration statusPollInterval = const Duration(seconds: 1),
+  Duration statusPollTimeout = const Duration(seconds: 60),
+  ConversationFinalizationTransport transport = _defaultConversationFinalizationTransport,
+  ConversationFinalizationDelay delay = _defaultConversationFinalizationDelay,
+}) async {
+  final deadline = Stopwatch()..start();
+
+  Duration remainingTime() {
+    final remaining = statusPollTimeout - deadline.elapsed;
+    return remaining > Duration.zero ? remaining : Duration.zero;
+  }
+
+  Future<http.Response?> sendBounded({required String url, required String method, required String body}) async {
+    _verifyConversationFinalizationAuthority(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    final remaining = remainingTime();
+    if (remaining <= Duration.zero) return null;
+    try {
+      return await transport(
+        url: url,
+        method: method,
+        body: body,
+        timeout: remaining,
+        retries: 0,
+        retryOnUnauthorized: false,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      ).timeout(remaining);
+    } on TimeoutException {
+      return null;
+    } finally {
+      _verifyConversationFinalizationAuthority(
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      );
+    }
+  }
+
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  final finalizationBody = jsonEncode({
+    'conversation_id': conversationId,
+    'protocol_version': protocolVersion,
+    'generation': generation,
+    'owner_token': ownerToken,
+  });
+  final response = await sendBounded(
+    url: '${Env.apiBaseUrl}v1/conversations',
+    method: 'POST',
+    body: finalizationBody,
+  );
+  var shouldPoll = response == null;
+  if (response != null) {
+    Logger.debug('createConversationServer status_class=${_statusClass(response.statusCode)}');
+    if (response.statusCode == 200) {
+      final inspected = _inspectConversationResponse(response, conversationId: conversationId, wrapped: true);
+      if (inspected.status == _ConversationFinalizationStatus.completed) {
+        try {
+          final result = CreateConversationResponse.fromJson(inspected.responseJson!);
+          return result.conversation?.id == conversationId &&
+                  result.conversation?.status == ConversationStatus.completed
+              ? result
+              : null;
+        } catch (_) {
+          return null;
+        }
+      }
+      if (inspected.status == _ConversationFinalizationStatus.failed ||
+          inspected.status == _ConversationFinalizationStatus.invalid) {
+        return null;
+      }
+      shouldPoll = true;
+    } else if (response.statusCode == 409 || response.statusCode >= 500) {
+      shouldPoll = true;
+    } else {
+      shouldPoll = false;
+    }
+  }
+  if (!shouldPoll) {
+    return null;
+  }
+
+  final statusUrl = '${Env.apiBaseUrl}v1/conversations/${Uri.encodeComponent(conversationId)}';
+  for (var attempt = 0; attempt < maxStatusPollAttempts; attempt++) {
+    var remaining = remainingTime();
+    if (remaining <= Duration.zero) return null;
+    if (statusPollInterval > Duration.zero) {
+      final wait = statusPollInterval < remaining ? statusPollInterval : remaining;
+      try {
+        await delay(wait).timeout(remaining);
+      } on TimeoutException {
+        return null;
+      }
+    }
+    _verifyConversationFinalizationAuthority(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    remaining = remainingTime();
+    if (remaining <= Duration.zero) return null;
+    final statusResponse = await sendBounded(url: statusUrl, method: 'GET', body: '');
+    if (statusResponse == null ||
+        statusResponse.statusCode == 404 ||
+        statusResponse.statusCode == 409 ||
+        statusResponse.statusCode >= 500) {
+      continue;
+    }
+    if (statusResponse.statusCode != 200) return null;
+
+    final inspected = _inspectConversationResponse(statusResponse, conversationId: conversationId, wrapped: false);
+    if (inspected.status == _ConversationFinalizationStatus.completed) {
+      try {
+        final conversation = ServerConversation.fromJson(inspected.conversationJson!);
+        return conversation.id == conversationId && conversation.status == ConversationStatus.completed
+            ? CreateConversationResponse(messages: const [], conversation: conversation)
+            : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    if (inspected.status == _ConversationFinalizationStatus.failed ||
+        inspected.status == _ConversationFinalizationStatus.invalid) {
+      return null;
+    }
+    if (inspected.status == _ConversationFinalizationStatus.inProgress ||
+        inspected.status == _ConversationFinalizationStatus.processing) {
+      final recoveryResponse = await sendBounded(
+        url: '${Env.apiBaseUrl}v1/conversations',
+        method: 'POST',
+        body: finalizationBody,
+      );
+      if (recoveryResponse?.statusCode == 200) {
+        final recovered = _inspectConversationResponse(
+          recoveryResponse!,
+          conversationId: conversationId,
+          wrapped: true,
+        );
+        if (recovered.status == _ConversationFinalizationStatus.completed) {
+          try {
+            return CreateConversationResponse.fromJson(recovered.responseJson!);
+          } catch (_) {
+            return null;
+          }
+        }
+        if (recovered.status == _ConversationFinalizationStatus.failed ||
+            recovered.status == _ConversationFinalizationStatus.invalid) {
+          return null;
+        }
+      } else if (recoveryResponse != null && recoveryResponse.statusCode != 409 && recoveryResponse.statusCode < 500) {
+        return null;
+      }
+    }
   }
   return null;
 }
@@ -603,11 +843,7 @@ Future<bool> assignBulkConversationTranscriptSegments(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/segments/assign-bulk',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'segment_ids': segmentIds,
-      'assign_type': assignType,
-      'value': value,
-    }),
+    body: jsonEncode({'segment_ids': segmentIds, 'assign_type': assignType, 'value': value}),
   );
   if (response == null) return false;
   Logger.debug('assignBulkConversationTranscriptSegments: ${response.body}');
@@ -645,47 +881,26 @@ Future<bool> setConversationStarred(
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationEventsState(
-  String conversationId,
-  List<int> eventsIdx,
-  List<bool> values,
-) async {
-  print(jsonEncode({
-    'events_idx': eventsIdx,
-    'values': values,
-  }));
+Future<bool> setConversationEventsState(String conversationId, List<int> eventsIdx, List<bool> values) async {
+  print(jsonEncode({'events_idx': eventsIdx, 'values': values}));
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/events',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'events_idx': eventsIdx,
-      'values': values,
-    }),
+    body: jsonEncode({'events_idx': eventsIdx, 'values': values}),
   );
   if (response == null) return false;
   Logger.debug('setConversationEventsState: ${response.body}');
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationActionItemState(
-  String conversationId,
-  List<int> actionItemsIdx,
-  List<bool> values,
-) async {
-  print(jsonEncode({
-    'items_idx': actionItemsIdx,
-    'values': values,
-    'conversation_id': conversationId,
-  }));
+Future<bool> setConversationActionItemState(String conversationId, List<int> actionItemsIdx, List<bool> values) async {
+  print(jsonEncode({'items_idx': actionItemsIdx, 'values': values, 'conversation_id': conversationId}));
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'items_idx': actionItemsIdx,
-      'values': values,
-    }),
+    body: jsonEncode({'items_idx': actionItemsIdx, 'values': values}),
   );
   if (response == null) return false;
   Logger.debug('setConversationActionItemState: ${response.body}');
@@ -693,11 +908,12 @@ Future<bool> setConversationActionItemState(
 }
 
 Future<bool> updateActionItemDescription(
-    String conversationId, String oldDescription, String newDescription, int idx) async {
-  var body = {
-    'old_description': oldDescription,
-    'description': newDescription,
-  };
+  String conversationId,
+  String oldDescription,
+  String newDescription,
+  int idx,
+) async {
+  var body = {'old_description': oldDescription, 'description': newDescription};
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items/$idx',
     headers: {},
@@ -714,10 +930,7 @@ Future<bool> deleteConversationActionItem(String conversationId, ActionItem item
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items',
     headers: {},
     method: 'DELETE',
-    body: jsonEncode({
-      'completed': item.completed,
-      'description': item.description,
-    }),
+    body: jsonEncode({'completed': item.completed, 'description': item.description}),
   );
   if (response == null) return false;
   Logger.debug('deleteConversationActionItem: ${response.body}');
@@ -753,10 +966,7 @@ Future<List<ServerConversation>> sendStorageToBackend(File file, String sdCardDa
   }
 }
 
-Future<SyncLocalFilesResponse> syncLocalFiles(
-  List<File> files, {
-  String? expectedAuthenticatedUid,
-}) async {
+Future<SyncLocalFilesResponse> syncLocalFiles(List<File> files, {String? expectedAuthenticatedUid}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw StateError('AI consent is required before stored audio sync');
   }
@@ -796,8 +1006,12 @@ Future<(List<ServerConversation>, int, int)> searchConversationsServer(
     url: '${Env.apiBaseUrl}v1/conversations/search',
     headers: {},
     method: 'POST',
-    body:
-        jsonEncode({'query': query, 'page': page ?? 1, 'per_page': limit ?? 10, 'include_discarded': includeDiscarded}),
+    body: jsonEncode({
+      'query': query,
+      'page': page ?? 1,
+      'per_page': limit ?? 10,
+      'include_discarded': includeDiscarded,
+    }),
   );
   if (response == null) return (<ServerConversation>[], 0, 0);
   if (response.statusCode == 200) {
@@ -816,9 +1030,7 @@ Future<String> testConversationPrompt(String prompt, String conversationId) asyn
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/test-prompt',
     headers: {},
     method: 'POST',
-    body: jsonEncode({
-      'prompt': prompt,
-    }),
+    body: jsonEncode({'prompt': prompt}),
   );
   if (response == null) return '';
   if (response.statusCode == 200) {
@@ -848,12 +1060,7 @@ Future<ActionItemsResponse> getActionItems({
     url += '&end_date=${endDate.toIso8601String()}';
   }
 
-  var response = await makeApiCall(
-    url: url,
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: url, headers: {}, method: 'GET', body: '');
 
   if (response == null) return ActionItemsResponse(actionItems: [], hasMore: false);
 
@@ -883,11 +1090,7 @@ Future<List<App>> getConversationSuggestedApps(String conversationId) async {
   return [];
 }
 
-Future<bool> updateActionItemStateByMetadata(
-  String conversationId,
-  int itemIndex,
-  bool newState,
-) async {
+Future<bool> updateActionItemStateByMetadata(String conversationId, int itemIndex, bool newState) async {
   return await setConversationActionItemState(conversationId, [itemIndex], [newState]);
 }
 
@@ -920,10 +1123,7 @@ class MergeConversationsResponse {
 }
 
 /// Initiate merging of multiple conversations
-Future<MergeConversationsResponse?> mergeConversations(
-  List<String> conversationIds, {
-  bool reprocess = true,
-}) async {
+Future<MergeConversationsResponse?> mergeConversations(List<String> conversationIds, {bool reprocess = true}) async {
   if (conversationIds.length < 2) {
     Logger.debug('mergeConversations: At least 2 conversations required');
     return null;
@@ -933,10 +1133,7 @@ Future<MergeConversationsResponse?> mergeConversations(
     url: '${Env.apiBaseUrl}v1/conversations/merge',
     headers: {},
     method: 'POST',
-    body: jsonEncode({
-      'conversation_ids': conversationIds,
-      'reprocess': reprocess,
-    }),
+    body: jsonEncode({'conversation_ids': conversationIds, 'reprocess': reprocess}),
   );
 
   if (response == null) return null;

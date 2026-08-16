@@ -14,19 +14,22 @@ from .config import ELLA_CONFIG
 
 # Configurable via environment variable
 POSTPROCESS_WEBHOOK_URL = os.getenv(
-    'ELLA_POSTPROCESS_WEBHOOK_URL',
-    f'{ELLA_CONFIG.n8n_base_url}/webhook/conversation-completed'
+    'ELLA_POSTPROCESS_WEBHOOK_URL', f'{ELLA_CONFIG.n8n_base_url}/webhook/conversation-completed'
 )
 POSTPROCESS_ENABLED = os.getenv('ELLA_POSTPROCESS_ENABLED', 'true').lower() == 'true'
 POSTPROCESS_TIMEOUT = float(os.getenv('ELLA_POSTPROCESS_TIMEOUT', '10'))
 
 CONVERSATION_READY_WEBHOOK_URL = os.getenv(
-    'ELLA_CONVERSATION_READY_WEBHOOK',
-    f'{ELLA_CONFIG.n8n_base_url}/webhook/conversation-ready'
+    'ELLA_CONVERSATION_READY_WEBHOOK', f'{ELLA_CONFIG.n8n_base_url}/webhook/conversation-ready'
 )
 
 
-def fire_postprocess_webhook(uid: str, conversation) -> None:
+def fire_postprocess_webhook(
+    uid: str,
+    conversation,
+    idempotency_key: Optional[str] = None,
+    synchronous: bool = False,
+) -> None:
     """
     Fire post-process webhook after conversation is fully saved.
 
@@ -86,21 +89,33 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
 
         title = structured.get('title', 'untitled')
         emoji = structured.get('emoji', '')
-        print(f"[FLOW:POSTPROCESS] firing webhook uid={uid} conv={conv_short} title={title} emoji={emoji} url={POSTPROCESS_WEBHOOK_URL}", flush=True)
+        print(
+            f"[FLOW:POSTPROCESS] firing webhook uid={uid} conv={conv_short} title={title} emoji={emoji} url={POSTPROCESS_WEBHOOK_URL}",
+            flush=True,
+        )
 
+        completed_headers = {'Content-Type': 'application/json'}
+        if idempotency_key:
+            completed_headers['Idempotency-Key'] = f'{idempotency_key}:completed'
         response = requests.post(
             POSTPROCESS_WEBHOOK_URL,
             json=payload,
-            headers={'Content-Type': 'application/json'},
+            headers=completed_headers,
             timeout=POSTPROCESS_TIMEOUT,
         )
 
         _elapsed_completed = int((time.time() - _start) * 1000)
 
         if response.status_code == 200:
-            print(f"[FLOW:POSTPROCESS] OK conversation-completed uid={uid} conv={conv_short} status=200 latency={_elapsed_completed}ms", flush=True)
+            print(
+                f"[FLOW:POSTPROCESS] OK conversation-completed uid={uid} conv={conv_short} status=200 latency={_elapsed_completed}ms",
+                flush=True,
+            )
         else:
-            print(f"[FLOW:POSTPROCESS] ERROR conversation-completed uid={uid} conv={conv_short} status={response.status_code} latency={_elapsed_completed}ms", flush=True)
+            print(
+                f"[FLOW:POSTPROCESS] ERROR conversation-completed uid={uid} conv={conv_short} status={response.status_code} latency={_elapsed_completed}ms",
+                flush=True,
+            )
 
         # Notify the user's OpenClaw agent via conversation-ready webhook (fire-and-forget)
         ready_payload = {
@@ -114,25 +129,46 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             'finished_at': conversation.finished_at.isoformat() if conversation.finished_at else None,
         }
 
-        def _fire_ready(_url, _payload, _uid, _conv_short, _segments):
+        def _fire_ready(_url, _payload, _uid, _conv_short, _segments, _idempotency_key):
             try:
                 _t = time.time()
-                r = requests.post(_url, json=_payload, headers={'Content-Type': 'application/json'}, timeout=60)
+                ready_headers = {'Content-Type': 'application/json'}
+                if _idempotency_key:
+                    ready_headers['Idempotency-Key'] = f'{_idempotency_key}:ready'
+                r = requests.post(_url, json=_payload, headers=ready_headers, timeout=60)
                 _ms = int((time.time() - _t) * 1000)
-                print(f"[FLOW:POSTPROCESS] conversation-ready uid={_uid} conv={_conv_short} segments={_segments} status={r.status_code} latency={_ms}ms", flush=True)
+                print(
+                    f"[FLOW:POSTPROCESS] conversation-ready uid={_uid} conv={_conv_short} segments={_segments} status={r.status_code} latency={_ms}ms",
+                    flush=True,
+                )
             except Exception as _e:
-                print(f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={_uid} conv={_conv_short} error={_e}", flush=True)
+                print(
+                    f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={_uid} conv={_conv_short} error={_e}", flush=True
+                )
 
-        threading.Thread(
-            target=_fire_ready,
-            args=(CONVERSATION_READY_WEBHOOK_URL, ready_payload, uid, conv_short, segment_count),
-            daemon=True,
-        ).start()
-        print(f"[FLOW:POSTPROCESS] conversation-ready fired async uid={uid} conv={conv_short} segments={segment_count}", flush=True)
+        ready_args = (
+            CONVERSATION_READY_WEBHOOK_URL,
+            ready_payload,
+            uid,
+            conv_short,
+            segment_count,
+            idempotency_key,
+        )
+        if synchronous:
+            _fire_ready(*ready_args)
+        else:
+            threading.Thread(target=_fire_ready, args=ready_args, daemon=True).start()
+        print(
+            f"[FLOW:POSTPROCESS] conversation-ready fired async uid={uid} conv={conv_short} segments={segment_count}",
+            flush=True,
+        )
 
     except requests.Timeout:
         _elapsed = int((time.time() - _start) * 1000)
-        print(f"[FLOW:POSTPROCESS] TIMEOUT uid={uid} conv={conv_short} timeout={POSTPROCESS_TIMEOUT}s latency={_elapsed}ms", flush=True)
+        print(
+            f"[FLOW:POSTPROCESS] TIMEOUT uid={uid} conv={conv_short} timeout={POSTPROCESS_TIMEOUT}s latency={_elapsed}ms",
+            flush=True,
+        )
     except requests.RequestException as e:
         _elapsed = int((time.time() - _start) * 1000)
         print(f"[FLOW:POSTPROCESS] ERROR uid={uid} conv={conv_short} error={e} latency={_elapsed}ms", flush=True)

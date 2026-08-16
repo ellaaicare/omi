@@ -40,6 +40,8 @@
 		9958B35F20EB7136AF2389D8 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF506DE6C24FC5AB2AEFE6DA /* Pods_Runner.framework */; };
 		A6120CC9725B450B9E342698 /* GuardianModeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5D6E82A28E418DA2C0BBD4 /* GuardianModeManager.swift */; };
 		AB12345678901234567890AB /* AppleRemindersService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD12345678901234567890CD /* AppleRemindersService.swift */; };
+		A11D00000000000000000001 /* AppleRemindersSyncIdempotency.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11D00000000000000000002 /* AppleRemindersSyncIdempotency.swift */; };
+		A11D00000000000000000003 /* AppleRemindersSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11D00000000000000000004 /* AppleRemindersSyncService.swift */; };
 		AB12345678901234567890AC /* AppleHealthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD12345678901234567890CE /* AppleHealthService.swift */; };
 		CE7B938264FB7372447F8E21 /* prodLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ACE7BEFB9654B6DF5B9E1790 /* prodLaunchScreen.storyboard */; };
 		EF12345678901234567890EF /* WifiNetworkPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = FG12345678901234567890FG /* WifiNetworkPlugin.swift */; };
@@ -131,6 +133,8 @@
 		B52E83A1CC630E163A04DC50 /* prodProfile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = prodProfile.xcconfig; path = Flutter/prodProfile.xcconfig; sourceTree = "<group>"; };
 		C84EE89ABD9CB9B1CFD8B8CB /* Pods-Runner.profile-dev.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile-dev.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile-dev.xcconfig"; sourceTree = "<group>"; };
 		CD12345678901234567890CD /* AppleRemindersService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppleRemindersService.swift; sourceTree = "<group>"; };
+		A11D00000000000000000002 /* AppleRemindersSyncIdempotency.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppleRemindersSyncIdempotency.swift; sourceTree = "<group>"; };
+		A11D00000000000000000004 /* AppleRemindersSyncService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppleRemindersSyncService.swift; sourceTree = "<group>"; };
 		CD12345678901234567890CE /* AppleHealthService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppleHealthService.swift; sourceTree = "<group>"; };
 		CF0FE6142D61FDC10072C10D /* Custom.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Custom.xcconfig; path = Flutter/Custom.xcconfig; sourceTree = "<group>"; };
 		CF2F518C2EC08EA60025B331 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Base.xcconfig; path = Flutter/Base.xcconfig; sourceTree = "<group>"; };
@@ -277,6 +281,8 @@
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				CD12345678901234567890CD /* AppleRemindersService.swift */,
+				A11D00000000000000000002 /* AppleRemindersSyncIdempotency.swift */,
+				A11D00000000000000000004 /* AppleRemindersSyncService.swift */,
 				CD12345678901234567890CE /* AppleHealthService.swift */,
 				FG12345678901234567890FG /* WifiNetworkPlugin.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
@@ -567,6 +573,8 @@
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				AB12345678901234567890AB /* AppleRemindersService.swift in Sources */,
+				A11D00000000000000000001 /* AppleRemindersSyncIdempotency.swift in Sources */,
+				A11D00000000000000000003 /* AppleRemindersSyncService.swift in Sources */,
 				593482822F4ADC9300888317 /* TwilioVoiceManager.swift in Sources */,
 				593482832F4ADC9300888317 /* AccessTokenManager.swift in Sources */,
 				593482852F4ADCAA00888317 /* VoIPPushHandler.swift in Sources */,

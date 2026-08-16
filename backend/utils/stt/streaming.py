@@ -3,7 +3,7 @@ import os
 import random
 import time
 from enum import Enum
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional, Set
 
 import websockets
 from deepgram import DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents
@@ -13,6 +13,19 @@ from utils.stt.provider_selection import select_stt_service_for_language
 from utils.stt.soniox_util import *
 
 headers = {"Authorization": f"Token {os.getenv('DEEPGRAM_API_KEY')}", "Content-Type": "audio/*"}
+
+
+def _start_tracked_provider_task(
+    coroutine: Awaitable,
+    background_tasks: Optional[Set[asyncio.Task]],
+) -> asyncio.Task:
+    """Keep provider receivers/callback loops in the capture drain barrier."""
+    task = asyncio.create_task(coroutine)
+    if background_tasks is not None:
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+    return task
+
 
 # Speech profile constants
 SPEECH_PROFILE_FIXED_DURATION = 10
@@ -199,17 +212,77 @@ deepgram_nova3_languages = {
 
 # Grok STT supports 25 languages (superset of nova-3 multi)
 grok_languages = {
-    "en", "en-US", "en-AU", "en-GB", "en-IN",
-    "es", "es-419", "fr", "fr-CA", "de", "it", "pt", "pt-BR", "pt-PT",
-    "ja", "ko", "zh", "ru", "ar", "hi", "nl", "pl", "sv", "tr",
-    "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
+    "en",
+    "en-US",
+    "en-AU",
+    "en-GB",
+    "en-IN",
+    "es",
+    "es-419",
+    "fr",
+    "fr-CA",
+    "de",
+    "it",
+    "pt",
+    "pt-BR",
+    "pt-PT",
+    "ja",
+    "ko",
+    "zh",
+    "ru",
+    "ar",
+    "hi",
+    "nl",
+    "pl",
+    "sv",
+    "tr",
+    "da",
+    "fi",
+    "no",
+    "id",
+    "ms",
+    "th",
+    "vi",
+    "uk",
+    "cs",
+    "ro",
 }
 grok_multi_languages = {
     "multi",
-    "en", "en-US", "en-AU", "en-GB", "en-IN",
-    "es", "es-419", "fr", "fr-CA", "de", "it", "pt", "pt-BR", "pt-PT",
-    "ja", "ko", "zh", "ru", "ar", "hi", "nl", "pl", "sv", "tr",
-    "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
+    "en",
+    "en-US",
+    "en-AU",
+    "en-GB",
+    "en-IN",
+    "es",
+    "es-419",
+    "fr",
+    "fr-CA",
+    "de",
+    "it",
+    "pt",
+    "pt-BR",
+    "pt-PT",
+    "ja",
+    "ko",
+    "zh",
+    "ru",
+    "ar",
+    "hi",
+    "nl",
+    "pl",
+    "sv",
+    "tr",
+    "da",
+    "fi",
+    "no",
+    "id",
+    "ms",
+    "th",
+    "vi",
+    "uk",
+    "cs",
+    "ro",
 }
 
 # Supported values: soniox-stt-rt,dg-nova-3,dg-nova-2
@@ -510,6 +583,7 @@ async def process_audio_grok(
     language: str,
     preseconds: int = 0,
     stt_event_callback: Optional[Callable] = None,
+    background_tasks: Optional[Set[asyncio.Task]] = None,
 ):
     api_key = os.getenv('XAI_API_KEY')
     if not api_key:
@@ -567,28 +641,32 @@ async def process_audio_grok(
                     w_speaker = int(word.get("speaker", 0))
                     adjusted_start = max(0.0, w_start - preseconds)
                     adjusted_end = max(0.0, w_end - preseconds)
-                    is_user = (w_speaker == 0 and preseconds > 0)
+                    is_user = w_speaker == 0 and preseconds > 0
                     if not segs:
-                        segs.append({
-                            "speaker": f"SPEAKER_{w_speaker}",
-                            "start": adjusted_start,
-                            "end": adjusted_end,
-                            "text": w_text,
-                            "is_user": is_user,
-                            "person_id": None,
-                        })
+                        segs.append(
+                            {
+                                "speaker": f"SPEAKER_{w_speaker}",
+                                "start": adjusted_start,
+                                "end": adjusted_end,
+                                "text": w_text,
+                                "is_user": is_user,
+                                "person_id": None,
+                            }
+                        )
                     elif segs[-1]["speaker"] == f"SPEAKER_{w_speaker}":
                         segs[-1]["text"] += f" {w_text}"
                         segs[-1]["end"] = adjusted_end
                     else:
-                        segs.append({
-                            "speaker": f"SPEAKER_{w_speaker}",
-                            "start": adjusted_start,
-                            "end": adjusted_end,
-                            "text": w_text,
-                            "is_user": is_user,
-                            "person_id": None,
-                        })
+                        segs.append(
+                            {
+                                "speaker": f"SPEAKER_{w_speaker}",
+                                "start": adjusted_start,
+                                "end": adjusted_end,
+                                "text": w_text,
+                                "is_user": is_user,
+                                "person_id": None,
+                            }
+                        )
                 return segs
 
             try:
@@ -616,18 +694,18 @@ async def process_audio_grok(
                     if speech_final or is_final:
                         # Flush: emit every word we have not yet emitted
                         new_words = [
-                            w for w in words
-                            if float(w.get("start", 0.0)) >= preseconds
-                            and float(w.get("end", 0.0)) > last_streamed_end
+                            w
+                            for w in words
+                            if float(w.get("start", 0.0)) >= preseconds and float(w.get("end", 0.0)) > last_streamed_end
                         ]
                     else:
                         # Partial: only emit "stable" words — all except the last 3,
                         # which Grok may still revise as the model continues.
                         stable = words[:-3] if len(words) > 3 else []
                         new_words = [
-                            w for w in stable
-                            if float(w.get("start", 0.0)) >= preseconds
-                            and float(w.get("end", 0.0)) > last_streamed_end
+                            w
+                            for w in stable
+                            if float(w.get("start", 0.0)) >= preseconds and float(w.get("end", 0.0)) > last_streamed_end
                         ]
 
                     if new_words:
@@ -637,21 +715,25 @@ async def process_audio_grok(
                             print(f"[GROK] streaming {len(segments)} seg(s): {segments[0]['text'][:60]}")
                             stream_transcript(segments)
                             if stt_event_callback:
-                                stt_event_callback({
-                                    "provider": "grok",
-                                    "result_type": "final",
-                                    "text": " ".join(s["text"] for s in segments)[:120],
-                                })
+                                stt_event_callback(
+                                    {
+                                        "provider": "grok",
+                                        "result_type": "final",
+                                        "text": " ".join(s["text"] for s in segments)[:120],
+                                    }
+                                )
                     elif not words and top_text and (speech_final or is_final):
                         # Fallback when server returns only top-level text (no word list)
-                        segments = [{
-                            "speaker": "SPEAKER_0",
-                            "start": 0.0,
-                            "end": 0.0,
-                            "text": top_text.strip(),
-                            "is_user": preseconds > 0,
-                            "person_id": None,
-                        }]
+                        segments = [
+                            {
+                                "speaker": "SPEAKER_0",
+                                "start": 0.0,
+                                "end": 0.0,
+                                "text": top_text.strip(),
+                                "is_user": preseconds > 0,
+                                "person_id": None,
+                            }
+                        ]
                         print(f"[GROK] streaming text fallback: {top_text[:60]}")
                         stream_transcript(segments)
 
@@ -674,13 +756,15 @@ async def process_audio_grok(
 
         _grok_send_count = [0]
         _orig_send = grok_socket.send
+
         async def _counted_send(data):
             _grok_send_count[0] += 1
             if _grok_send_count[0] % 50 == 1:
                 print(f"[GROK] sent chunk #{_grok_send_count[0]} ({len(data)} bytes)")
             return await _orig_send(data)
+
         grok_socket.send = _counted_send
-        asyncio.create_task(on_message())
+        _start_tracked_provider_task(on_message(), background_tasks)
         return grok_socket
 
     except websockets.exceptions.WebSocketException as e:
@@ -699,6 +783,7 @@ async def process_audio_soniox(
     preseconds: int = 0,
     language_hints: List[str] = [],
     stt_event_callback: Optional[Callable] = None,
+    background_tasks: Optional[Set[asyncio.Task]] = None,
 ):
     # Soniox supports diarization primarily for English
     api_key = os.getenv('SONIOX_API_KEY')
@@ -898,13 +983,28 @@ async def process_audio_soniox(
             except Exception as e:
                 print(f"Error receiving from Soniox: {e}")
             finally:
+                # Soniox can close without an empty-token terminator. Publish
+                # the accumulated final segment before this tracked receiver
+                # becomes quiescent so capture drain cannot outrun the tail.
+                if current_segment:
+                    if stt_event_callback:
+                        stt_event_callback(
+                            {
+                                "provider": "soniox",
+                                "result_type": "final",
+                                "text": current_segment.get("text", "")[:120],
+                            }
+                        )
+                    stream_transcript([current_segment])
+                    current_segment = None
+                    current_segment_time = None
                 if not soniox_socket.closed:
                     await soniox_socket.close()
                     print("Soniox WebSocket closed in on_message.")
 
         # Start the coroutines
-        asyncio.create_task(on_message())
-        asyncio.create_task(soniox_socket.keepalive_ping())
+        _start_tracked_provider_task(on_message(), background_tasks)
+        _start_tracked_provider_task(soniox_socket.keepalive_ping(), background_tasks)
 
         # Return the Soniox WebSocket object
         return soniox_socket
@@ -914,7 +1014,13 @@ async def process_audio_soniox(
         raise  # Re-raise the exception to be handled by the caller
 
 
-async def process_audio_speechmatics(stream_transcript, sample_rate: int, language: str, preseconds: int = 0):
+async def process_audio_speechmatics(
+    stream_transcript,
+    sample_rate: int,
+    language: str,
+    preseconds: int = 0,
+    background_tasks: Optional[Set[asyncio.Task]] = None,
+):
     api_key = os.getenv('SPEECHMATICS_API_KEY')
     uri = 'wss://eu2.rt.speechmatics.com/v2'
 
@@ -1023,7 +1129,7 @@ async def process_audio_speechmatics(stream_transcript, sample_rate: int, langua
                     await socket.close()
                     print("Speechmatics WebSocket closed in on_message.")
 
-        asyncio.create_task(on_message())
+        _start_tracked_provider_task(on_message(), background_tasks)
         return socket
     except Exception as e:
         print(f"Exception in process_audio_speechmatics: {e}")
