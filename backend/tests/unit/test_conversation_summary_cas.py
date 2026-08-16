@@ -74,3 +74,56 @@ def test_active_summary_version_compare_and_set_is_atomic_and_fail_closed(monkey
         is False
     )
     assert stale_transaction.updates == []
+
+
+def test_conversation_builder_reads_and_writes_with_the_same_transaction(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    monkeypatch.setattr(conversations, "_prepare_conversation_for_write", lambda data, _uid, _level: data)
+
+    class ConversationRef:
+        def __init__(self, exists=True):
+            self.exists = exists
+            self.read_transactions = []
+
+        def get(self, transaction=None):
+            self.read_transactions.append(transaction)
+            return SimpleNamespace(
+                exists=self.exists,
+                to_dict=lambda: {"structured": {"title": "current"}, "data_protection_level": "standard"},
+            )
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+    ref = ConversationRef()
+    transaction = Transaction()
+
+    result = conversations._update_conversation_with_builder_transaction(
+        transaction,
+        ref,
+        "uid-1",
+        lambda current: (
+            {"structured.title": "winner"},
+            {"previous_title": current["structured"]["title"]},
+        ),
+    )
+
+    assert ref.read_transactions == [transaction]
+    assert transaction.updates == [(ref, {"structured.title": "winner"})]
+    assert result["result"] == {"previous_title": "current"}
+
+    missing_ref = ConversationRef(exists=False)
+    missing_transaction = Transaction()
+    missing = conversations._update_conversation_with_builder_transaction(
+        missing_transaction,
+        missing_ref,
+        "uid-1",
+        lambda _current: (_ for _ in ()).throw(AssertionError("builder must not run")),
+    )
+    assert missing is None
+    assert missing_ref.read_transactions == [missing_transaction]
+    assert missing_transaction.updates == []
