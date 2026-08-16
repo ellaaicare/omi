@@ -1,5 +1,6 @@
 """Production-route authentication tests for Ella user and service boundaries."""
 
+import asyncio
 import sys
 import types
 
@@ -17,6 +18,7 @@ app_settings_module.save_voice_settings = lambda _uid, voice_settings: voice_set
 sys.modules.setdefault("database.app_settings", app_settings_module)
 
 from ella.routers import chat, guardian, resolve, voice
+from ella.services.hermes_session import canonical_omi_session_key
 from utils.ella import exact_firebase_auth
 
 
@@ -353,6 +355,33 @@ def test_resolve_missing_workspace_fails_closed_without_retained_fallback_or_sec
         assert forbidden not in serialized
 
 
+def test_resolved_hermes_routing_uses_exact_v2_owner_key_without_legacy_fallback(monkeypatch):
+    class CaseResolvePool:
+        async def fetchrow(self, _query, *args):
+            assert args == ("CaseUID",)
+            return {
+                "id": "case-owner-row",
+                "name": "Case Owner",
+                "omi_uid": "CaseUID",
+                "status": "active",
+                "guardian_mode": "OFF",
+                "timezone": "America/Los_Angeles",
+                "conditions": [],
+                "medications": [],
+                "agents": {"userAgentId": "case-agent", "workspace": "/profiles/CaseUID/workspace"},
+                "cluster_status": "ready",
+            }
+
+    monkeypatch.setattr(resolve, "_pool", CaseResolvePool())
+    monkeypatch.setattr(resolve, "CHAT_PLATFORM", "hermes")
+
+    resolved = asyncio.run(resolve.resolve_user_routing("CaseUID"))
+
+    assert resolved["routing"]["sessionKey"] == canonical_omi_session_key("CaseUID")
+    assert resolved["routing"]["sessionKey"] != "ella:omi:caseuid:canonical"
+    assert "CaseUID" not in resolved["routing"]["sessionKey"]
+
+
 def test_voice_alternate_routes_reject_missing_and_wrong_subject_before_downstream_work(monkeypatch):
     pool = _VoicePool()
     monkeypatch.setattr(voice, "_pool", pool)
@@ -422,6 +451,51 @@ def test_voice_context_owner_response_never_contains_runtime_credentials(monkeyp
     assert payload["medications"] == ["owner-medication"]
     assert "gateway_token" not in payload
     assert "private-routing-value" not in str(payload)
+
+
+def test_unified_voice_search_success_logs_never_include_query_content(monkeypatch, caplog):
+    sentinel = "SENTINEL private transcript phrase success"
+
+    async def search_timeline(_uid, _query, _limit):
+        return [{"source": "timeline", "content": "safe result", "score": 1, "metadata": {}}]
+
+    monkeypatch.setattr(voice, "_pool", _VoicePool())
+    monkeypatch.setattr(voice, "_search_canonical_timeline", search_timeline)
+    caplog.set_level("INFO", logger=voice.__name__)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/search",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"query": sentinel, "sources": ["timeline"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_results"] == 1
+    assert sentinel not in caplog.text
+
+
+def test_unified_voice_search_failure_logs_never_include_query_or_exception_content(monkeypatch, caplog):
+    sentinel = "SENTINEL private transcript phrase failure"
+
+    async def failing_timeline(_uid, _query, _limit):
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(voice, "_pool", _VoicePool())
+    monkeypatch.setattr(voice, "_search_canonical_timeline", failing_timeline)
+    caplog.set_level("INFO", logger=voice.__name__)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/search",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"query": sentinel, "sources": ["timeline"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_results"] == 0
+    assert "error_class=RuntimeError" in caplog.text
+    assert sentinel not in caplog.text
 
 
 def test_guardian_alternate_routes_reject_missing_and_wrong_subject_without_side_effect(monkeypatch):

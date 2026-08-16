@@ -1135,7 +1135,7 @@ async def search_omi_conversations(
     if not query:
         raise HTTPException(status_code=400, detail="query required")
 
-    logger.info(f"[FLOW:VOICE-SEARCH] uid={uid} query=\"{query}\" limit={limit}")
+    logger.info("[FLOW:VOICE-SEARCH] status=started limit=%s", limit)
 
     try:
         from google.cloud import firestore
@@ -1237,7 +1237,11 @@ async def search_omi_conversations(
         keyword_terms = _expand_query_terms(_significant_query_terms(" ".join(keyword_terms)))
         keyword_terms = _normalized_query_terms(" ".join(keyword_terms))
 
-        logger.info(f"[FLOW:VOICE-SEARCH] date_filter={date_filter_start}->{date_filter_end}, keywords={keyword_terms}")
+        logger.info(
+            "[FLOW:VOICE-SEARCH] status=classified date_filter=%s keyword_count=%s",
+            bool(date_filter_start and date_filter_end),
+            len(keyword_terms),
+        )
 
         # Fetch conversations — use date filter if we have one, otherwise get last 100
         if date_filter_start and date_filter_end:
@@ -1317,11 +1321,11 @@ async def search_omi_conversations(
                 }
             )
 
-        logger.info(f"[FLOW:VOICE-SEARCH] Found {len(results)} matches for \"{query}\"")
+        logger.info("[FLOW:VOICE-SEARCH] status=complete result_count=%s", len(results))
         return {"results": results, "total_searched": len(convos), "query": query}
 
     except Exception as e:
-        logger.error(f"[FLOW:VOICE-SEARCH] Error: {e}")
+        logger.error("[FLOW:VOICE-SEARCH] status=failed error_class=%s", type(e).__name__)
         return {"results": [], "error": str(e), "query": query}
 
 
@@ -1446,7 +1450,7 @@ def _conversation_transcript_text(conversation: dict, uid: str, max_chars: int =
     try:
         data = _decrypt_conversation_data(conversation, uid)
     except Exception as e:
-        logger.debug(f"[FLOW:UNIFIED-SEARCH] Transcript decrypt/decompress failed: {e}")
+        logger.debug("[FLOW:UNIFIED-SEARCH] transcript_decode=failed error_class=%s", type(e).__name__)
         data = conversation
 
     segments = data.get("transcript_segments") or []
@@ -1735,7 +1739,7 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
             """
             SELECT channel, provider, role, text, started_at, session_id, metadata
             FROM canonical_events
-            WHERE lower(uid) = lower($1)
+            WHERE uid = $1
               AND text IS NOT NULL
               AND trim(text) != ''
             ORDER BY started_at DESC, id DESC
@@ -1796,7 +1800,7 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
         matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [m[2] for m in matches[:limit]]
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] Canonical timeline search error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=timeline status=failed error_class=%s", type(e).__name__)
         return results
 
 
@@ -1823,7 +1827,7 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
                 },
             )
         if resp.status_code != 200:
-            logger.warning(f"[FLOW:VOICE-MEMORY] lookup returned {resp.status_code}: {resp.text[:200]}")
+            logger.warning("[FLOW:VOICE-MEMORY] status=failed response_status=%s", resp.status_code)
             return []
         data = resp.json()
         answer = (data.get("answer") or "").strip()
@@ -1851,7 +1855,7 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
             }
         ]
     except Exception as e:
-        logger.warning(f"[FLOW:VOICE-MEMORY] lookup error: {e}")
+        logger.warning("[FLOW:VOICE-MEMORY] status=failed error_class=%s", type(e).__name__)
         return []
 
 
@@ -1868,7 +1872,7 @@ async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars:
             """
             SELECT channel, provider, role, text, started_at
             FROM canonical_events
-            WHERE lower(uid) = lower($1)
+            WHERE uid = $1
               AND text IS NOT NULL
               AND trim(text) != ''
             ORDER BY started_at DESC, id DESC
@@ -1878,7 +1882,7 @@ async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars:
             limit,
         )
     except Exception as e:
-        logger.warning(f"[FLOW:VOICE-CONTEXT] Canonical timeline fetch failed: {e}")
+        logger.warning("[FLOW:VOICE-CONTEXT] timeline=failed error_class=%s", type(e).__name__)
         return ""
 
     entries = []
@@ -1989,7 +1993,7 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
             return results[:limit]
 
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] Workspace search error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=workspace status=failed error_class=%s", type(e).__name__)
         return results
 
 
@@ -2054,7 +2058,7 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
     try:
         events = await fetch_canonical_timeline(uid, limit=timeline_limit, channels=["omi"])
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] Canonical OMI timeline fetch error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=omi_timeline status=failed error_class=%s", type(e).__name__)
         return results
 
     query_terms = _expand_query_terms(_significant_query_terms(query_without_time if window_start else query))
@@ -2130,12 +2134,10 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
 async def _search_omi_canonical_first(uid: str, query: str, limit: int, full_access: bool) -> list:
     canonical_results = await _search_canonical_omi_events(uid, query, limit, full_access)
     if canonical_results:
-        logger.info(f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results={len(canonical_results)}")
+        logger.info("[FLOW:UNIFIED-SEARCH] source=omi_timeline status=complete result_count=%s", len(canonical_results))
         return canonical_results
 
-    logger.warning(
-        f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results=0 fallback=firestore_legacy_omi"
-    )
+    logger.warning("[FLOW:UNIFIED-SEARCH] source=omi_timeline result_count=0 fallback=firestore_legacy_omi")
     fallback_results = await _search_omi_conversations(uid, query, limit, full_access)
     for item in fallback_results:
         metadata = item.setdefault("metadata", {})
@@ -2374,7 +2376,7 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
         return results
 
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] OMI search error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=omi status=failed error_class=%s", type(e).__name__)
         return results
 
 
@@ -2446,7 +2448,7 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
         return results
 
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] Memory search error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=memories status=failed error_class=%s", type(e).__name__)
         return results
 
 
@@ -2526,7 +2528,7 @@ async def _search_voice_logs(uid: str, agent_id: str, query: str, limit: int) ->
             return results[:limit]
 
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] Voice log search error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=voice status=failed error_class=%s", type(e).__name__)
         return results
 
 
@@ -2613,7 +2615,7 @@ async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: s
         return [m[1] for m in matches[:limit]]
 
     except Exception as e:
-        logger.warning(f"[FLOW:UNIFIED-SEARCH] Scanner search error: {e}")
+        logger.warning("[FLOW:UNIFIED-SEARCH] source=scanner status=failed error_class=%s", type(e).__name__)
         return results
 
 
@@ -2660,9 +2662,11 @@ async def unified_search(
         if fast_results and fast_results[0].get("score", 0) >= 120:
             _elapsed = int((time.time() - _start) * 1000)
             logger.info(
-                f"[FLOW:UNIFIED-SEARCH] uid={uid} role={agent_role} query=\"{query}\" "
-                f"sources=['voice_memory'] results={len(fast_results)} denied=[] "
-                f"latency={_elapsed}ms fast_path=true"
+                "[FLOW:UNIFIED-SEARCH] role=%s sources=['voice_memory'] result_count=%s "
+                "denied_count=0 latency_ms=%s fast_path=true",
+                agent_role,
+                len(fast_results),
+                _elapsed,
             )
             return {
                 "results": fast_results,
@@ -2696,7 +2700,7 @@ async def unified_search(
                     agents_data = {}
                 agent_id = agents_data.get("userAgentId", "")
         except Exception as e:
-            logger.warning(f"[FLOW:UNIFIED-SEARCH] Agent ID lookup failed: {e}")
+            logger.warning("[FLOW:UNIFIED-SEARCH] lookup=agent_id status=failed error_class=%s", type(e).__name__)
 
     # Determine allowed sources based on role
     allowed = _get_allowed_sources(agent_role, requested_sources)
@@ -2755,7 +2759,11 @@ async def unified_search(
         for i, result in enumerate(gathered):
             src_name = task_source_names[i]
             if isinstance(result, Exception):
-                logger.warning(f"[FLOW:UNIFIED-SEARCH] Source {src_name} failed: {result}")
+                logger.warning(
+                    "[FLOW:UNIFIED-SEARCH] source=%s status=failed error_class=%s",
+                    src_name,
+                    type(result).__name__,
+                )
                 continue
             if isinstance(result, list):
                 all_results.extend(result)
@@ -2770,9 +2778,13 @@ async def unified_search(
 
     _elapsed = int((time.time() - _start) * 1000)
     logger.info(
-        f"[FLOW:UNIFIED-SEARCH] uid={uid} role={agent_role} query=\"{query}\" "
-        f"sources={sorted(sources_searched)} results={len(all_results)} "
-        f"denied={sources_denied} provenance={provenance} latency={_elapsed}ms"
+        "[FLOW:UNIFIED-SEARCH] role=%s sources=%s result_count=%s denied_count=%s " "provenance=%s latency_ms=%s",
+        agent_role,
+        sorted(sources_searched),
+        len(all_results),
+        len(sources_denied),
+        provenance,
+        _elapsed,
     )
 
     return {

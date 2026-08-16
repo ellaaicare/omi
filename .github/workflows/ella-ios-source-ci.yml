@@ -45,6 +45,8 @@ on:
       - backend/ella/routers/canonical_events.py
       - backend/ella/routers/corrections.py
       - backend/ella/routers/voice.py
+      - backend/ella/services/correction_honcho_contract.py
+      - backend/ella/services/hermes_session.py
       - backend/ella/routers/callbacks.py
       - backend/ella/services/runtime_resolver.py
       - backend/ella/services/ai_consent.py
@@ -72,6 +74,8 @@ on:
       - backend/tests/unit/test_conversation_summary_cas.py
       - backend/tests/unit/test_ella_callbacks_summary_update.py
       - backend/tests/fixtures/ella_canonical_source_v1.json
+      - backend/tests/unit/test_ella_chat_temporal_context.py
+      - backend/tests/unit/test_ella_correction_honcho_contract.py
       - backend/utils/ella/exact_firebase_auth.py
       - backend/utils/ella/canonical_omi.py
       - backend/utils/ella/scanner.py
@@ -211,7 +215,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/main.py|backend/database/action_items.py|backend/database/authority_advisory_lock.py|backend/database/chat.py|backend/database/conversations.py|backend/database/ella_provisioning.py|backend/database/folders.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/redis_db.py|backend/database/runtime_targets.py|backend/database/task_sync.py|backend/database/user_usage.py|backend/database/voice_canary.py|backend/ella/docs/SUMMARY_CAS_ROLLOUT.md|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/canonical_summary_source.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/task_integrations.py|backend/routers/transcribe.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/canonical_context.py|backend/utils/ella/canonical_omi.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/task_sync.py|backend/utils/webhooks.py|backend/tests/fixtures/ella_canonical_source_v1.json|backend/tests/unit/test_capture_task_sync_idempotency.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_conversation_summary_cas.py|backend/tests/unit/test_ella_callbacks_summary_update.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_canonical_event_version_fence.py|backend/tests/unit/test_ella_canonical_omi.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_ella_v2v_turn_persistence.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/main.py|backend/database/action_items.py|backend/database/authority_advisory_lock.py|backend/database/chat.py|backend/database/conversations.py|backend/database/ella_provisioning.py|backend/database/folders.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/redis_db.py|backend/database/runtime_targets.py|backend/database/task_sync.py|backend/database/user_usage.py|backend/database/voice_canary.py|backend/ella/docs/SUMMARY_CAS_ROLLOUT.md|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/canonical_summary_source.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_honcho_contract.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/hermes_session.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/task_integrations.py|backend/routers/transcribe.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/canonical_context.py|backend/utils/ella/canonical_omi.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/task_sync.py|backend/utils/webhooks.py|backend/tests/fixtures/ella_canonical_source_v1.json|backend/tests/unit/test_capture_task_sync_idempotency.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_conversation_summary_cas.py|backend/tests/unit/test_ella_callbacks_summary_update.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_canonical_event_version_fence.py|backend/tests/unit/test_ella_canonical_omi.py|backend/tests/unit/test_ella_chat_temporal_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_honcho_contract.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_ella_v2v_turn_persistence.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -289,18 +293,19 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/guardian-python"
           source "$RUNNER_TEMP/guardian-python/bin/activate"
-          python -m pip install --disable-pip-version-check \
+          python3 -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
             Jinja2==3.1.4 \
             asyncpg==0.31.0 \
-            python-multipart==0.0.9
-          python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
-          python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
+            python-multipart==0.0.9 \
+            websockets==15.0.1
+          python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
+          python3 -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
-          python -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python3 -m pytest backend/tests/unit/test_ella_user_route_auth.py
           task_sync_tests=(
             'backend/tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_receipt_reclaim_and_completion_are_exact_claim_cas'
             'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]'
@@ -388,7 +393,10 @@ jobs:
             exit 1
           fi
 
-          python -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
+          python3 -m pytest backend/tests/unit/test_ella_chat_temporal_context.py \
+            backend/tests/unit/test_ella_conversation_corrections.py \
+            backend/tests/unit/test_ella_correction_honcho_contract.py
+          python3 -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
             -k 'not test_real_postgres'
 
       - name: Run exact correction terminal-receipt contracts
@@ -760,21 +768,23 @@ jobs:
 
           python3 -m venv "$RUNNER_TEMP/postgres-contract-python"
           source "$RUNNER_TEMP/postgres-contract-python/bin/activate"
-          python -m pip install --disable-pip-version-check \
+          python3 -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
             asyncpg==0.31.0 \
-            python-multipart==0.0.9
+            python-multipart==0.0.9 \
+            websockets==15.0.1
 
-          expected_test_count=3
+          expected_test_count=4
           expected_test_ids=(
             'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
             'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_case_distinct_owner_isolation_and_numeric_string_limit_order'
             'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_mounted_voice_route_and_context_helper_keep_case_distinct_owners_private'
           )
-          collection_output="$(python -m pytest --collect-only -q "${expected_test_ids[@]}")"
+          collection_output="$(python3 -m pytest --collect-only -q "${expected_test_ids[@]}")"
           printf '%s\n' "$collection_output"
           actual_test_ids="$(printf '%s\n' "$collection_output" | grep '::' || true)"
           actual_test_count="$(printf '%s\n' "$actual_test_ids" | grep -c '::' || true)"
@@ -791,7 +801,7 @@ jobs:
           printf 'PostgreSQL regression collection receipt: expectedCount=%s actualCount=%s testIds=%s\n' \
             "$expected_test_count" "$actual_test_count" "${expected_test_ids[*]}"
 
-          execution_output="$(python -m pytest -q -rA "${expected_test_ids[@]}")"
+          execution_output="$(python3 -m pytest -q -rA "${expected_test_ids[@]}")"
           printf '%s\n' "$execution_output"
           actual_pass_count="$(printf '%s\n' "$execution_output" | grep -c '^PASSED .*::' || true)"
           [[ "$actual_pass_count" -eq "$expected_test_count" ]] || {

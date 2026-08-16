@@ -4,16 +4,24 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import types
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 
-from ella.routers import canonical_events, chat
+conversations_module = types.ModuleType("database.conversations")
+conversations_module._decrypt_conversation_data = lambda conversation, _uid: conversation
+sys.modules.setdefault("database.conversations", conversations_module)
+
+from ella.routers import canonical_events, chat, voice
 from ella.routers.canonical_events import CanonicalEventIn, InMemoryCanonicalEventStore, SessionCompleteIn
+from utils.ella.exact_firebase_auth import EllaRequestAuthority
 from utils.ella.canonical_context import (
     MAX_CANONICAL_EVENT_SEQUENCE,
     MAX_CANONICAL_TURN_ORDINAL,
@@ -902,6 +910,73 @@ def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_c
             assert await pool.fetchval("SELECT count(*) FROM canonical_events WHERE uid = $1", uid) == 2
         finally:
             await pool.execute("DELETE FROM canonical_events WHERE uid = $1", uid)
+            await pool.close()
+
+    asyncio.run(exercise_postgres())
+
+
+def test_real_postgres_mounted_voice_route_and_context_helper_keep_case_distinct_owners_private(
+    monkeypatch, canonical_postgres
+):
+    async def exercise_postgres():
+        pool = await canonical_events.asyncpg.create_pool(min_size=1, max_size=2, **canonical_postgres)
+        case_uids = ("CaseUID", "caseuid")
+        private_text = {
+            "CaseUID": "private upper owner record",
+            "caseuid": "private lower owner record",
+        }
+        try:
+            await _ensure_canonical_events_table(pool)
+            await pool.execute("DELETE FROM canonical_events WHERE uid = ANY($1::text[])", [*case_uids])
+
+            async def get_pool():
+                return pool
+
+            monkeypatch.setattr(canonical_events, "_get_pool", get_pool)
+            monkeypatch.setattr(voice, "_get_pool", get_pool)
+            store = canonical_events.PostgresCanonicalEventStore()
+            timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+            events = [
+                CanonicalEventIn(
+                    uid=uid,
+                    canonical_identity=uid,
+                    event_id=f"private-{uid}",
+                    session_id="private-session",
+                    channel="ios_voice",
+                    provider="voice-owner-isolation-test",
+                    role="user",
+                    text=private_text[uid],
+                    started_at=timestamp,
+                    privacy_scope="user_private",
+                    source_ref={"source_identity": f"voice-private:{uid}"},
+                    metadata={"turn_id": f"private-{uid}", "event_sequence": 0},
+                )
+                for uid in case_uids
+            ]
+            assert (await store.write_batch(events))["inserted"] == 2
+
+            app = FastAPI()
+            app.include_router(voice.router)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                for uid, other_uid in (("CaseUID", "caseuid"), ("caseuid", "CaseUID")):
+                    app.dependency_overrides[voice.get_voice_search_authority] = (
+                        lambda owner_uid=uid: EllaRequestAuthority(firebase_uid=owner_uid)
+                    )
+                    response = await client.post(
+                        "/v1/voice/search",
+                        json={"uid": uid, "query": "private owner record", "sources": ["timeline"]},
+                    )
+                    assert response.status_code == 200
+                    payload = response.json()
+                    assert [item["content"] for item in payload["results"]] == [private_text[uid]]
+                    assert private_text[other_uid] not in response.text
+
+                    context = await voice._fetch_recent_canonical_timeline(uid, limit=10)
+                    assert private_text[uid] in context
+                    assert private_text[other_uid] not in context
+        finally:
+            await pool.execute("DELETE FROM canonical_events WHERE uid = ANY($1::text[])", [*case_uids])
             await pool.close()
 
     asyncio.run(exercise_postgres())
