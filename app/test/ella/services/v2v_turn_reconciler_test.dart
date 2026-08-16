@@ -327,6 +327,52 @@ void main() {
       expect(writes, hasLength(1));
     });
 
+    test('concurrent duplicate ACK frames await the same durable outbox write', () async {
+      final releaseDurableWrite = Completer<void>();
+      final store = _BlockingPutStore(releaseDurableWrite.future);
+      final reconciler = V2VTurnReconciler(durableStore: store, writer: (_) async => false);
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
+      final terminal = terminalTurn(sessionId: 'session-1', ordinal: 1);
+
+      final first = reconciler.persistTerminalTurnForAck('session-1', terminal);
+      await Future<void>.delayed(Duration.zero);
+      final duplicate = reconciler.persistTerminalTurnForAck('session-1', terminal);
+      var duplicateCompleted = false;
+      duplicate.then((_) => duplicateCompleted = true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(duplicateCompleted, isFalse);
+      releaseDurableWrite.complete();
+      expect(await Future.wait([first, duplicate]), everyElement(isTrue));
+      expect(reconciler.pendingTurnCountForTesting('session-1'), 1);
+    });
+
+    test('new authenticated session ACKs owner-durable replay with the same provider turn id', () async {
+      final store = MemoryV2VTurnDurableStore();
+      final reconciler = V2VTurnReconciler(durableStore: store, writer: (_) async => false);
+      expect(await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: authorityIsCurrent), isTrue);
+      expect(
+        await reconciler.persistTerminalTurnForAck(
+          'session-1',
+          terminalTurn(sessionId: 'session-1', ordinal: 1),
+        ),
+        isTrue,
+      );
+      await reconciler.settle();
+      reconciler.endSession('session-1');
+
+      expect(await beginSession(reconciler, sessionId: 'session-2', isAuthorityCurrent: authorityIsCurrent), isTrue);
+      expect(
+        await reconciler.persistTerminalTurnForAck(
+          'session-2',
+          terminalTurn(sessionId: 'session-2', ordinal: 1),
+        ),
+        isTrue,
+      );
+      expect(reconciler.pendingTurnCountForTesting('session-1'), 1);
+      expect(reconciler.pendingTurnCountForTesting('session-2'), 0);
+    });
+
     test('reconnect isolates late events and retries an ended authorized session safely', () async {
       var attempts = 0;
       final writes = <V2VTranscriptTurn>[];

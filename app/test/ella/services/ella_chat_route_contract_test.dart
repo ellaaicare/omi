@@ -440,6 +440,25 @@ void main() {
     }
   });
 
+  test('iOS canonical ordering preserves one microsecond at a high datetime range', () {
+    ServerMessage message(String id, String createdAt) => ServerMessage.fromJson({
+          'id': id,
+          'created_at': createdAt,
+          'text': id,
+          'sender': 'human',
+          'type': 'text',
+          'metadata': {'conversation_id': 'session-high-range', 'turn_id': id, 'event_sequence': 0},
+        });
+
+    final messages = [
+      message('a-newer:user', '2500-01-01T00:00:00.000001Z'),
+      message('z-older:user', '2500-01-01T00:00:00.000000Z'),
+    ]..sort(compareServerMessagesChronologically);
+
+    expect(messages.map((message) => message.id), ['z-older:user', 'a-newer:user']);
+    expect(messages.last.createdAt.difference(messages.first.createdAt), const Duration(microseconds: 1));
+  });
+
   test('V2V backend error body is neither accepted nor surfaced as content', () async {
     const authority = _CurrentAuthority('uid-a');
     const privateErrorBody = '{"detail":"private transcript must never be logged"}';

@@ -181,6 +181,18 @@ class V2VTranscriptTurn {
     }
     return jsonEncode(first) == jsonEncode(second);
   }
+
+  bool sameTerminalPayload(V2VTerminalTranscriptTurn other) =>
+      sessionId == other.sessionId && sameProviderPayload(other);
+
+  bool sameProviderPayload(V2VTerminalTranscriptTurn other) =>
+      turnId == other.turnId &&
+      userEventId == other.userEventId &&
+      assistantEventId == other.assistantEventId &&
+      userTranscript == other.userTranscript &&
+      assistantTranscript == other.assistantTranscript &&
+      startedAt == other.startedAt &&
+      completedAt == other.completedAt;
 }
 
 typedef V2VTranscriptTurnWriter = Future<bool> Function(V2VTranscriptTurn turn);
@@ -1088,10 +1100,37 @@ class V2VTurnReconciler {
   }
 
   Future<bool> addTerminalTurn(String sessionId, V2VTerminalTranscriptTurn terminal) {
+    return _addTerminalTurn(sessionId, terminal, acceptExactDuplicate: false);
+  }
+
+  Future<bool> persistTerminalTurnForAck(String sessionId, V2VTerminalTranscriptTurn terminal) {
+    return _addTerminalTurn(sessionId, terminal, acceptExactDuplicate: true);
+  }
+
+  Future<bool> _addTerminalTurn(
+    String sessionId,
+    V2VTerminalTranscriptTurn terminal, {
+    required bool acceptExactDuplicate,
+  }) {
     final state = _authorizedActiveState(sessionId);
     if (state == null || terminal.sessionId != state.sessionId) return Future<bool>.value(false);
-    if (state.turnIds.contains(terminal.turnId) ||
-        state.userEventIds.contains(terminal.userEventId) ||
+    final existing = state.turnsById[terminal.turnId];
+    if (existing != null) {
+      if (!acceptExactDuplicate || !existing.sameTerminalPayload(terminal)) return Future<bool>.value(false);
+      return state.enqueueFutureByTurnId[terminal.turnId] ?? Future<bool>.value(true);
+    }
+    for (final candidate in _sessions.values) {
+      if (identical(candidate, state) ||
+          candidate.unauthorized ||
+          !identical(candidate.authorityLease, state.authorityLease)) {
+        continue;
+      }
+      final ownerExisting = candidate.turnsById[terminal.turnId];
+      if (ownerExisting == null) continue;
+      if (!acceptExactDuplicate || !ownerExisting.sameProviderPayload(terminal)) return Future<bool>.value(false);
+      return candidate.enqueueFutureByTurnId[terminal.turnId] ?? Future<bool>.value(true);
+    }
+    if (state.userEventIds.contains(terminal.userEventId) ||
         state.assistantEventIds.contains(terminal.assistantEventId)) {
       return Future<bool>.value(false);
     }
@@ -1114,9 +1153,13 @@ class V2VTurnReconciler {
     late final Future<bool> enqueueFuture;
     enqueueFuture = _enqueueAcceptedTurn(state, turn);
     state.enqueueFutures.add(enqueueFuture);
+    state.enqueueFutureByTurnId[turn.turnId] = enqueueFuture;
     unawaited(
       enqueueFuture.then<void>((_) {
         state.enqueueFutures.remove(enqueueFuture);
+        if (identical(state.enqueueFutureByTurnId[turn.turnId], enqueueFuture)) {
+          state.enqueueFutureByTurnId.remove(turn.turnId);
+        }
         if (state.unauthorized && state.unauthorizedClearPending && state.enqueueFutures.isEmpty) {
           _markUnauthorized(state);
           return;
@@ -1378,6 +1421,7 @@ class V2VTurnReconciler {
     state.turnIds.add(turn.turnId);
     state.userEventIds.add(turn.userEventId);
     state.assistantEventIds.add(turn.assistantEventId);
+    state.turnsById[turn.turnId] = turn;
     return true;
   }
 
@@ -1385,6 +1429,7 @@ class V2VTurnReconciler {
     state.turnIds.remove(turn.turnId);
     state.userEventIds.remove(turn.userEventId);
     state.assistantEventIds.remove(turn.assistantEventId);
+    state.turnsById.remove(turn.turnId);
   }
 
   bool _rememberTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) {
@@ -1431,6 +1476,7 @@ class _V2VSessionTurns {
   final Set<String> turnIds = {};
   final Set<String> userEventIds = {};
   final Set<String> assistantEventIds = {};
+  final Map<String, V2VTranscriptTurn> turnsById = {};
   int revision = 0;
   int nextTurnOrdinal = 0;
   int failedAtRevision = -1;
@@ -1443,5 +1489,6 @@ class _V2VSessionTurns {
   Completer<void>? cleanupRetryCompleter;
   Future<void>? cleanupRetryFuture;
   final Set<Future<bool>> enqueueFutures = {};
+  final Map<String, Future<bool>> enqueueFutureByTurnId = {};
   Future<void>? drainFuture;
 }

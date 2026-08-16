@@ -849,6 +849,7 @@ class MessageProvider extends ChangeNotifier {
     required DateTime startedAt,
     required DateTime completedAt,
     required int? turnOrdinal,
+    bool injectIntoChat = true,
   }) async {
     final lease = _beginAccountCommit();
     if (lease == null || lease.uid != expectedUid) {
@@ -890,6 +891,11 @@ class MessageProvider extends ChangeNotifier {
           canonicalMessages.any((message) => !message.fromVoice)) {
         _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
         return false;
+      }
+
+      if (!injectIntoChat) {
+        _lastStreamFailure = null;
+        return true;
       }
 
       final updated = List<ServerMessage>.from(messages);

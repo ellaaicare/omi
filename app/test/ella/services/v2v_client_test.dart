@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -563,15 +564,20 @@ void main() {
         onListen: () => websocketController.add(terminalFrame),
       );
       final order = <String>[];
+      final sentFrames = <String>[];
       var armedSessionId = '';
       Future<bool>? terminalAcceptance;
       late final V2VClient client;
       client = V2VClient(
+        onTerminalTurnDurable: (terminalTurn) {
+          order.add('terminal-persist-started');
+          expect(armedSessionId, 'session-jti-1');
+          terminalAcceptance = reconciler.persistTerminalTurnForAck(armedSessionId, terminalTurn);
+          return terminalAcceptance!;
+        },
         onEvent: (event) {
           if (event.type != 'transcript_turn') return;
           order.add('terminal-delivered');
-          expect(armedSessionId, 'session-jti-1');
-          terminalAcceptance = reconciler.addTerminalTurn(armedSessionId, event.terminalTurn!);
         },
         providerRegistryValidator: (_) async => null,
         sessionCreator: (_, provider, __) async => {
@@ -585,7 +591,7 @@ void main() {
         webSocketConnector: (_) => V2VWebSocketTransport(
           ready: Future<void>.value(),
           stream: websocketController.stream,
-          send: (_) {},
+          send: (value) => sentFrames.add(value as String),
           close: websocketController.close,
         ),
         microphoneStarter: () async {
@@ -618,9 +624,22 @@ void main() {
       releaseHydration.complete();
       final receipt = await connect;
       expect(receipt.connected, isTrue);
+      await client.settleTerminalTurnsForTesting();
       expect(terminalAcceptance, isNotNull);
       expect(await terminalAcceptance!, isTrue);
-      expect(order, ['hydration-started', 'session-armed', 'terminal-delivered', 'microphone-started']);
+      expect(order, [
+        'hydration-started',
+        'session-armed',
+        'microphone-started',
+        'terminal-persist-started',
+        'terminal-delivered',
+      ]);
+      expect(jsonDecode(sentFrames.single), {
+        'type': 'transcript_turn_ack',
+        'contract_version': 1,
+        'session_id': 'session-jti-1',
+        'turn_id': 'v2v-turn-ffffffffffffffffffffffffffffffff',
+      });
       expect(
         (await backingStore.load(
           uid: owner.uid,
@@ -719,6 +738,97 @@ void main() {
       );
       await reconciler.settle();
       expect(writes, isEmpty);
+    });
+
+    test('disconnect before durable handoff emits no ACK and a new client safely ACKs replay', () async {
+      grantCurrentConsent();
+      const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+          '"session_id":"session-jti-1","turn_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",'
+          '"user_event_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:user",'
+          '"assistant_event_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:assistant",'
+          '"user_text":"Question","assistant_text":"Answer",'
+          '"started_at":"2026-08-15T20:10:00Z","completed_at":"2026-08-15T20:10:02Z"}';
+      final persistenceStarted = Completer<void>();
+      final releasePersistence = Completer<void>();
+      var appOwnsTurnDurably = false;
+      final firstSentFrames = <String>[];
+      final firstSocket = StreamController<dynamic>(sync: true);
+      final firstClient = V2VClient(
+        onTerminalTurnDurable: (_) async {
+          persistenceStarted.complete();
+          await releasePersistence.future;
+          appOwnsTurnDurably = true;
+          return true;
+        },
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice',
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'session-jti-1',
+        },
+        audioSessionConfigurator: () async {},
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: firstSocket.stream,
+          send: (value) => firstSentFrames.add(value as String),
+          close: firstSocket.close,
+        ),
+        microphoneStarter: () async => true,
+      );
+      expect(
+        (await firstClient.connect(provider: 'grok-voice', beforeTransportActivation: (_) async => true)).connected,
+        isTrue,
+      );
+
+      firstSocket.add(terminalFrame);
+      await persistenceStarted.future;
+      await firstClient.disconnect();
+      releasePersistence.complete();
+      await firstClient.settleTerminalTurnsForTesting();
+
+      expect(appOwnsTurnDurably, isTrue);
+      expect(firstSentFrames, isEmpty);
+
+      final replaySentFrames = <String>[];
+      final replaySocket = StreamController<dynamic>(sync: true);
+      final replayClient = V2VClient(
+        onTerminalTurnDurable: (_) async => appOwnsTurnDurably,
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice',
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'session-jti-2',
+        },
+        audioSessionConfigurator: () async {},
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: replaySocket.stream,
+          send: (value) => replaySentFrames.add(value as String),
+          close: replaySocket.close,
+        ),
+        microphoneStarter: () async => true,
+      );
+      expect(
+        (await replayClient.connect(provider: 'grok-voice', beforeTransportActivation: (_) async => true)).connected,
+        isTrue,
+      );
+
+      final reboundReplay = Map<String, dynamic>.from(jsonDecode(terminalFrame) as Map)
+        ..['session_id'] = 'session-jti-2';
+      replaySocket.add(jsonEncode(reboundReplay));
+      await replayClient.settleTerminalTurnsForTesting();
+
+      expect(jsonDecode(replaySentFrames.single), {
+        'type': 'transcript_turn_ack',
+        'contract_version': 1,
+        'session_id': 'session-jti-2',
+        'turn_id': 'v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      });
+      await replayClient.disconnect();
     });
 
     test('revocation during delayed startup produces zero protected egress and zero microphone frames', () async {

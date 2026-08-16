@@ -187,6 +187,7 @@ enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSes
 enum V2VProtectedEgressBoundary { providerRegistry, session, websocket, microphoneCapture, microphoneFrame }
 
 typedef V2VBeforeTransportActivation = Future<bool> Function(String sessionId);
+typedef V2VTerminalTurnDurableHandler = Future<bool> Function(V2VTerminalTranscriptTurn turn);
 
 class V2VWebSocketTransport {
   const V2VWebSocketTransport({
@@ -304,6 +305,8 @@ class V2VClient {
   int _micChunksSent = 0;
   int _micBytesSent = 0;
   Future<void> _micGateFuture = Future.value();
+  Future<void> _terminalTurnTail = Future.value();
+  String _connectedSessionId = '';
 
   /// PCM buffer for accumulating audio chunks before WAV playback
   final BytesBuilder _pcmBuffer = BytesBuilder(copy: false);
@@ -317,6 +320,9 @@ class V2VClient {
 
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
+
+  /// Returns true only after the exact terminal turn is durably owned by the app.
+  final V2VTerminalTurnDurableHandler? onTerminalTurnDurable;
 
   /// Callback for connection state changes.
   final void Function(bool connected)? onConnectionChanged;
@@ -337,6 +343,7 @@ class V2VClient {
 
   V2VClient({
     this.onEvent,
+    this.onTerminalTurnDurable,
     this.onConnectionChanged,
     @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
@@ -395,6 +402,9 @@ class V2VClient {
 
   @visibleForTesting
   void handleMessageForTesting(dynamic message) => _handleMessage(message);
+
+  @visibleForTesting
+  Future<void> settleTerminalTurnsForTesting() => _terminalTurnTail;
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
@@ -809,6 +819,7 @@ class V2VClient {
           // caller's session/outbox must therefore be armed before this point.
           listenerAttached = true;
           _isConnected = true;
+          _connectedSessionId = sessionId;
           _wsSub = _channel!.stream.listen(
             _handleMessage,
             onError: (error) {
@@ -888,6 +899,7 @@ class V2VClient {
     _sessionShouldContinue = null;
     final shouldAnnounceDisconnect = _connectionAnnounced;
     _isConnected = false;
+    _connectedSessionId = '';
     _connectionAnnounced = false;
     if (shouldAnnounceDisconnect) onConnectionChanged?.call(false);
     if (_activeClient == this) {
@@ -1585,7 +1597,38 @@ class V2VClient {
             Logger.debug('[V2V] Ignoring invalid terminal transcript contract');
             return;
           }
-          onEvent?.call(V2VEvent(type: 'transcript_turn', terminalTurn: terminalTurn));
+          final durableHandler = onTerminalTurnDurable;
+          if (durableHandler == null) {
+            onEvent?.call(V2VEvent(type: 'transcript_turn', terminalTurn: terminalTurn));
+            return;
+          }
+          _terminalTurnTail = _terminalTurnTail.then((_) async {
+            var durablyOwned = false;
+            try {
+              durablyOwned = await durableHandler(terminalTurn);
+            } catch (_) {
+              Logger.error('[V2V] Terminal transcript durable handoff failed');
+            }
+            if (!durablyOwned) return;
+            onEvent?.call(V2VEvent(type: 'transcript_turn', terminalTurn: terminalTurn));
+            final channel = _channel;
+            if (!_isConnected ||
+                channel == null ||
+                terminalTurn.sessionId != _connectedSessionId ||
+                !_hasCurrentSessionAuthority()) {
+              return;
+            }
+            channel.send(
+              jsonEncode({
+                'type': 'transcript_turn_ack',
+                'contract_version': 1,
+                'session_id': terminalTurn.sessionId,
+                'turn_id': terminalTurn.turnId,
+              }),
+            );
+          }).catchError((_) {
+            Logger.error('[V2V] Terminal transcript acknowledgment failed');
+          });
           return;
         }
 

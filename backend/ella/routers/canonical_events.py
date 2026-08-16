@@ -38,6 +38,12 @@ _EVENT_SEQUENCE_SQL_IS_VALID = """(
         OR metadata->>'event_sequence' <= '2147483647'
     )
 )"""
+_TURN_IDENTITY_SQL = """COALESCE(
+    NULLIF(metadata->>'turn_id', ''),
+    NULLIF(source_ref->>'client_message_id', ''),
+    NULLIF(source_ref->>'turn_id', ''),
+    regexp_replace(event_id, ':(user|assistant)$', '')
+)"""
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -475,8 +481,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
                         ELSE 0
                     END DESC,
-                    COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
-                             regexp_replace(event_id, ':(user|assistant)$', '')) DESC,
+                    {_TURN_IDENTITY_SQL} DESC,
                     CASE
                         WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
                         WHEN role = 'assistant' THEN 1 WHEN role = 'user' THEN 0 ELSE 2
@@ -492,8 +497,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                     WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
                     ELSE 0
                 END ASC,
-                COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
-                         regexp_replace(event_id, ':(user|assistant)$', '')) ASC,
+                {_TURN_IDENTITY_SQL} ASC,
                 CASE
                     WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
                     WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
@@ -526,8 +530,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                     WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
                     ELSE 0
                 END ASC,
-                COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
-                         regexp_replace(event_id, ':(user|assistant)$', '')) ASC,
+                {_TURN_IDENTITY_SQL} ASC,
                 CASE
                     WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
                     WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2

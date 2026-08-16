@@ -416,6 +416,81 @@ void main() {
     expect(prefs.cachedMessages.map((message) => message.id), ['canonical-user', 'canonical-assistant']);
   });
 
+  test('scoped V2V turn is persisted canonically without entering general Chat', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    var canonicalWriteCompleted = false;
+    final canonical = [
+      ServerMessage(
+        'canonical-user',
+        DateTime.utc(2026, 8, 15, 20),
+        'Scoped question',
+        MessageSender.human,
+        MessageType.text,
+        null,
+        false,
+        [],
+        [],
+        [],
+        askForNps: false,
+        fromVoice: true,
+      ),
+      ServerMessage(
+        'canonical-assistant',
+        DateTime.utc(2026, 8, 15, 20, 0, 2),
+        'Scoped answer',
+        MessageSender.ai,
+        MessageType.text,
+        null,
+        false,
+        [],
+        [],
+        [],
+        askForNps: false,
+        fromVoice: true,
+      ),
+    ];
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      aiConsentEnsurer: () async => true,
+      v2vTurnPersister: ({
+        required uid,
+        required sessionId,
+        required turnId,
+        required userEventId,
+        required assistantEventId,
+        required userTranscript,
+        required assistantTranscript,
+        required startedAt,
+        required completedAt,
+        required turnOrdinal,
+        required exactAuthority,
+      }) async {
+        canonicalWriteCompleted = true;
+        return EllaServiceResult.success(canonical);
+      },
+    );
+
+    final committed = await provider.persistV2VTurn(
+      expectedUid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
+      userTranscript: 'Scoped question',
+      assistantTranscript: 'Scoped answer',
+      startedAt: DateTime.utc(2026, 8, 15, 20),
+      completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
+      injectIntoChat: false,
+    );
+
+    expect(committed, isTrue);
+    expect(canonicalWriteCompleted, isTrue);
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+  });
+
   test('MessageProvider uses backend empty-conversation ordering for mixed legacy equal-time messages', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     await _grantAuthority(prefs, 'uid-a');

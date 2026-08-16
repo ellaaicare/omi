@@ -98,12 +98,21 @@ def _turn_ordinal(event: dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[float, str, int, int, str, int, str]:
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MIN_DATETIME_MICROSECONDS = (datetime.min.replace(tzinfo=timezone.utc) - _UTC_EPOCH).days * 86_400_000_000
+
+
+def _exact_datetime_microseconds(value: datetime) -> int:
+    delta = value - _UTC_EPOCH
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
+def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[int, str, int, int, str, int, str]:
     try:
         parsed = _parse_iso(_event_time(event))
     except (TypeError, ValueError):
         parsed = None
-    timestamp = parsed.timestamp() if parsed is not None else float("-inf")
+    timestamp = _exact_datetime_microseconds(parsed) if parsed is not None else _MIN_DATETIME_MICROSECONDS - 1
     conversation_id = str(event.get("session_id") or "")
     event_id = str(event.get("event_id") or event.get("id") or "")
     turn_ordinal = _turn_ordinal(event)

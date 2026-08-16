@@ -552,10 +552,90 @@ def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe(monke
                 event_ids=list(reversed(expected_order)),
             )
             assert [event["event_id"] for event in readback] == expected_order
+
+            insert_limit_boundary_sql = """
+                INSERT INTO canonical_events (
+                    uid, canonical_identity, event_id, source_identity,
+                    session_id, channel, provider, role, text,
+                    started_at, ended_at, privacy_scope, scan_policy,
+                    source_ref, metadata, raw_event
+                )
+                VALUES (
+                    $1, $1, $2, 'legacy-limit-source',
+                    NULL, 'ios_voice', 'legacy-test', 'user', $2,
+                    $3, NULL, 'user_private', 'none',
+                    $4::jsonb, $5::jsonb, '{}'::jsonb
+                )
+            """
+            limit_uid = "uid-postgres-limit-boundary"
+            await pool.executemany(
+                insert_limit_boundary_sql,
+                [
+                    (
+                        limit_uid,
+                        "legacy-limit-a",
+                        timestamp,
+                        json.dumps({"turn_id": "legacy-a"}),
+                        json.dumps({"turn_id": ""}),
+                    ),
+                    (
+                        limit_uid,
+                        "legacy-limit-b",
+                        timestamp,
+                        json.dumps({"client_message_id": "", "turn_id": "legacy-b"}),
+                        json.dumps({"turn_id": ""}),
+                    ),
+                    (
+                        limit_uid,
+                        "legacy-limit-c",
+                        timestamp,
+                        json.dumps({}),
+                        json.dumps({"turn_id": "legacy-c"}),
+                    ),
+                ],
+            )
+
+            limit_boundary = await store.timeline(uid=limit_uid, since=None, limit=2, channels=None)
+            assert [event["event_id"] for event in limit_boundary] == ["legacy-limit-b", "legacy-limit-c"]
+            exact_legacy_order = await store.events_by_event_ids(
+                uid=limit_uid,
+                source_identity="legacy-limit-source",
+                event_ids=["legacy-limit-c", "legacy-limit-b", "legacy-limit-a"],
+            )
+            assert [event["event_id"] for event in exact_legacy_order] == [
+                "legacy-limit-a",
+                "legacy-limit-b",
+                "legacy-limit-c",
+            ]
         finally:
             await pool.close()
 
     asyncio.run(exercise_postgres())
+
+
+def test_backend_server_message_order_preserves_one_microsecond_at_high_datetime_range():
+    older = {
+        "event_id": "z-older:user",
+        "session_id": "session-high-range",
+        "role": "user",
+        "text": "older",
+        "started_at": "2500-01-01T00:00:00.000000Z",
+        "metadata": {"turn_id": "z-older", "event_sequence": 0},
+    }
+    newer = {
+        "event_id": "a-newer:user",
+        "session_id": "session-high-range",
+        "role": "user",
+        "text": "newer",
+        "started_at": "2500-01-01T00:00:00.000001Z",
+        "metadata": {"turn_id": "a-newer", "event_sequence": 0},
+    }
+
+    chronological = canonical_events_to_server_messages([newer, older], newest_first=False)
+    newest_first = canonical_events_to_server_messages([older, newer], newest_first=True)
+
+    assert [message["id"] for message in chronological] == ["z-older:user", "a-newer:user"]
+    assert [message["id"] for message in newest_first] == ["a-newer:user", "z-older:user"]
 
 
 def test_backend_mixed_legacy_total_key_matches_shared_ios_fixture_for_all_permutations():

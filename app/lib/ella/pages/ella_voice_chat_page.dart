@@ -791,6 +791,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     late final V2VClient client;
     client = V2VClient(
+      onTerminalTurnDurable: (terminalTurn) async {
+        if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return false;
+        return _v2vTurnReconciler.persistTerminalTurnForAck(_activeSessionId, terminalTurn);
+      },
       onEvent: (event) {
         if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return;
         _onV2VEvent(event);
@@ -830,7 +834,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           reconciler: _v2vTurnReconciler,
           authenticatedUid: authority!.uid,
           sessionId: sessionId,
-          persistTranscriptTurns: EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope),
+          persistTranscriptTurns: true,
           isStartupCurrent: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
         );
         if (!transcriptSessionReady || !hasCurrentStartupAuthority() || !identical(_v2vClient, client)) {
@@ -1092,9 +1096,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       case 'transcript_turn':
         final terminalTurn = event.terminalTurn;
         if (terminalTurn == null) break;
-        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-          unawaited(_v2vTurnReconciler.addTerminalTurn(_activeSessionId, terminalTurn));
-        }
         setState(() {
           _lastUserText = terminalTurn.userTranscript;
           _lastEllaText = terminalTurn.assistantTranscript;
@@ -1510,6 +1511,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       startedAt: turn.startedAt,
       completedAt: turn.completedAt,
       turnOrdinal: turn.turnOrdinal,
+      injectIntoChat: EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope),
     );
   }
 
