@@ -21,6 +21,7 @@ from typing import Optional
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ella.services.hermes_session import canonical_omi_session_key
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             routing.update(
                 {
                     "agentId": HERMES_AGENT_ID,
-                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:canonical",
+                    "sessionKey": canonical_omi_session_key(row["omi_uid"]),
                     "gatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
                     "scannerGatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
                     "token": HERMES_GATEWAY_TOKEN,

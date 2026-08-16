@@ -1298,16 +1298,16 @@ def test_generate_corrected_summary_uses_hermes_api_with_scoped_session(monkeypa
     assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
     assert calls[0]["headers"]["Authorization"] == "Bearer hermes-secret"
     assert calls[0]["headers"]["X-Hermes-Session-Id"] == "correction:user-123:conv-123:corr-123"
-    assert calls[0]["headers"]["X-Hermes-Session-Key"] == "ella:omi:user-123:canonical"
+    assert calls[0]["headers"]["X-Hermes-Session-Key"] == corrections._correction_session_key("user/123")
     assert calls[0]["headers"]["X-Trace-Id"] == "trace-123"
     assert calls[0]["json"]["model"] == "profile-model"
     assert "Speaker 5" in calls[0]["json"]["messages"][0]["content"]
 
 
 def test_correction_session_key_is_stable_per_user():
-    assert corrections._correction_session_key("User/123") == "ella:omi:user-123:canonical"
-    assert corrections._correction_session_key("User/123") == corrections._correction_session_key("user/123")
-    assert corrections._correction_session_key("Other User") == "ella:omi:other-user:canonical"
+    assert corrections._correction_session_key("User/123") == summary_recovery.canonical_omi_session_key("User/123")
+    assert corrections._correction_session_key("User/123") != corrections._correction_session_key("user/123")
+    assert corrections._correction_session_key("Other User") == summary_recovery.canonical_omi_session_key("Other User")
     assert corrections._correction_session_key("User/123") != corrections._correction_session_key("Other User")
 
 
@@ -1319,8 +1319,16 @@ def test_correction_session_key_matches_chat_memory_scope(monkeypatch):
     assert corrections._correction_session_key("abc123") == chat._hermes_chat_memory_key("abc123")
 
     monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "daily")
-    assert chat._hermes_chat_session_key("abc123").startswith("ella:omi:abc123:ios-chat:")
+    assert chat._hermes_chat_session_key("abc123").startswith(
+        f"ella:omi:{chat.canonical_owner_component('abc123')}:ios-chat:"
+    )
     assert corrections._correction_session_key("abc123") == chat._hermes_chat_memory_key("abc123")
+
+    exact_case_key = summary_recovery.canonical_omi_session_key("CaseUID")
+    assert corrections._correction_session_key("CaseUID") == exact_case_key
+    assert chat._hermes_chat_memory_key("CaseUID") == exact_case_key
+    assert exact_case_key != "ella:omi:caseuid:canonical"
+    assert "CaseUID" not in exact_case_key
 
 
 def test_generate_corrected_summary_can_use_legacy_provider(monkeypatch):
@@ -1971,6 +1979,7 @@ def test_enriched_vector_fails_closed_when_active_summary_changes_after_upsert(m
 
 
 def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypatch):
+    uid = "CaseUID"
     transcript = "start " + ("important " * 3000) + "tail-marker"
     conversation = _retry_conversation(status="completed", request_id="request-1")
     conversation["transcript_segments"] = [{"is_user": True, "text": transcript}]
@@ -2025,7 +2034,7 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
     )
     result = asyncio.run(
         summary_recovery.invoke_hermes_recovery(
-            uid="user-1",
+            uid=uid,
             conversation=conversation,
             request_id="request-1",
             client_context="Cafe context",
@@ -2036,7 +2045,8 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
 
     assert captured["url"] == "http://hermes.test/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert captured["headers"]["X-Hermes-Session-Key"] == summary_recovery.canonical_omi_session_key("user-1")
+    assert captured["headers"]["X-Hermes-Session-Key"] == summary_recovery.canonical_omi_session_key(uid)
+    assert captured["headers"]["X-Hermes-Session-Key"] != "ella:omi:caseuid:canonical"
     prompt = captured["body"]["messages"][0]["content"]
     assert "tail-marker" in prompt
     assert "Cafe context" in prompt
@@ -2049,7 +2059,7 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
         "canonical_confirmed": True,
         "source_sha256": summary_recovery.build_hermes_recovery_source(conversation)[1],
         "session_scope_sha256": summary_recovery.hashlib.sha256(
-            summary_recovery.canonical_omi_session_key("user-1").encode("utf-8")
+            summary_recovery.canonical_omi_session_key(uid).encode("utf-8")
         ).hexdigest(),
     }
 

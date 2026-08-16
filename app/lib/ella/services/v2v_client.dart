@@ -8,7 +8,6 @@ import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -16,6 +15,7 @@ import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
+import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
@@ -168,6 +168,7 @@ class V2VEvent {
     this.quotaState,
     this.quota,
     this.turnBoundary = false,
+    this.terminalTurn,
   });
 
   final String type;
@@ -178,11 +179,29 @@ class V2VEvent {
   final String? quotaState;
   final EllaQuota? quota;
   final bool turnBoundary;
+  final V2VTerminalTranscriptTurn? terminalTurn;
 }
 
 enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
 
 enum V2VProtectedEgressBoundary { providerRegistry, session, websocket, microphoneCapture, microphoneFrame }
+
+typedef V2VBeforeTransportActivation = Future<bool> Function(String sessionId);
+typedef V2VTerminalTurnDurableHandler = Future<bool> Function(V2VTerminalTranscriptTurn turn);
+
+class V2VWebSocketTransport {
+  const V2VWebSocketTransport({
+    required this.ready,
+    required this.stream,
+    required this.send,
+    required this.close,
+  });
+
+  final Future<void> ready;
+  final Stream<dynamic> stream;
+  final void Function(dynamic data) send;
+  final Future<void> Function() close;
+}
 
 /// Redacted connection result safe to show in UI and persist in debug logs.
 /// It intentionally excludes session tokens, endpoint URLs, and response bodies.
@@ -270,7 +289,7 @@ class V2VClient {
     _activeClient = null;
   }
 
-  WebSocketChannel? _channel;
+  V2VWebSocketTransport? _channel;
   AudioRecorder? _recorder;
   StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
@@ -286,6 +305,8 @@ class V2VClient {
   int _micChunksSent = 0;
   int _micBytesSent = 0;
   Future<void> _micGateFuture = Future.value();
+  Future<void> _terminalTurnTail = Future.value();
+  String _connectedSessionId = '';
 
   /// PCM buffer for accumulating audio chunks before WAV playback
   final BytesBuilder _pcmBuffer = BytesBuilder(copy: false);
@@ -300,6 +321,9 @@ class V2VClient {
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
 
+  /// Returns true only after the exact terminal turn is durably owned by the app.
+  final V2VTerminalTurnDurableHandler? onTerminalTurnDurable;
+
   /// Callback for connection state changes.
   final void Function(bool connected)? onConnectionChanged;
 
@@ -310,10 +334,16 @@ class V2VClient {
   final Future<bool> Function() _playbackOutputEnforcer;
   final Future<void> Function(Uint8List wavBytes)? _wavPlayback;
   final bool Function()? _liveChannelForTesting;
+  final Future<V2VConnectionReceipt?> Function(String provider)? _providerRegistryValidator;
+  final Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)?
+      _sessionCreator;
+  final Future<void> Function()? _audioSessionConfigurator;
+  final V2VWebSocketTransport Function(Uri uri)? _webSocketConnector;
   final Duration _playbackMicCooldown;
 
   V2VClient({
     this.onEvent,
+    this.onTerminalTurnDurable,
     this.onConnectionChanged,
     @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
     @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
@@ -322,6 +352,11 @@ class V2VClient {
     @visibleForTesting Future<bool> Function()? playbackOutputEnforcer,
     @visibleForTesting Future<void> Function(Uint8List wavBytes)? wavPlayback,
     @visibleForTesting bool Function()? liveChannelForTesting,
+    @visibleForTesting Future<V2VConnectionReceipt?> Function(String provider)? providerRegistryValidator,
+    @visibleForTesting
+    Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)? sessionCreator,
+    @visibleForTesting Future<void> Function()? audioSessionConfigurator,
+    @visibleForTesting V2VWebSocketTransport Function(Uri uri)? webSocketConnector,
     @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
@@ -333,6 +368,10 @@ class V2VClient {
             (() => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback)),
         _wavPlayback = wavPlayback,
         _liveChannelForTesting = liveChannelForTesting,
+        _providerRegistryValidator = providerRegistryValidator,
+        _sessionCreator = sessionCreator,
+        _audioSessionConfigurator = audioSessionConfigurator,
+        _webSocketConnector = webSocketConnector,
         _playbackMicCooldown = playbackMicCooldown;
 
   bool get isConnected => _isConnected;
@@ -363,6 +402,9 @@ class V2VClient {
 
   @visibleForTesting
   void handleMessageForTesting(dynamic message) => _handleMessage(message);
+
+  @visibleForTesting
+  Future<void> settleTerminalTurnsForTesting() => _terminalTurnTail;
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
@@ -520,6 +562,7 @@ class V2VClient {
     required String provider,
     V2VSessionScope? sessionScope,
     bool Function()? shouldContinue,
+    V2VBeforeTransportActivation? beforeTransportActivation,
   }) async {
     provider = normalizeProvider(provider);
 
@@ -643,7 +686,7 @@ class V2VClient {
       if (invalid != null) return invalid;
       return stopForAuthorityLoss();
     }
-    final registryFailure = await _validateProviderRegistry(provider);
+    final registryFailure = await (_providerRegistryValidator?.call(provider) ?? _validateProviderRegistry(provider));
     final registryInvalid = await stopIfStartupInvalid(V2VConnectionStage.providerRegistry);
     if (registryInvalid != null) return registryInvalid;
     if (registryFailure != null) {
@@ -660,7 +703,16 @@ class V2VClient {
       if (invalid != null) return invalid;
       return stopForAuthorityLoss();
     }
-    final sessionResult = await _createSession(uid, provider, sessionScope);
+    final sessionResult = _sessionCreator == null
+        ? await _createSession(uid, provider, sessionScope)
+        : _V2VSessionResult(
+            data: await _sessionCreator!(uid, provider, sessionScope),
+            receipt: V2VConnectionReceipt(
+              connected: false,
+              provider: provider,
+              stage: V2VConnectionStage.session,
+            ),
+          );
     final sessionInvalid = await stopIfStartupInvalid(
       V2VConnectionStage.session,
       voiceMode: sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '',
@@ -679,7 +731,7 @@ class V2VClient {
         sessionData['voice_mode'] as String? ?? sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '';
     final sessionId = sessionData['session_id']?.toString().trim() ?? '';
     final confirmedScope = V2VResolvedSessionScope.tryParse(sessionData['session_scope']);
-    if (token.isEmpty || endpoint.isEmpty) {
+    if (token.isEmpty || endpoint.isEmpty || sessionId.isEmpty) {
       Logger.debug('[V2V] Invalid session data');
       if (_activeClient == this) _activeClient = null;
       return _completeReceipt(
@@ -723,7 +775,7 @@ class V2VClient {
 
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
-      await _configureAudioSession();
+      await (_audioSessionConfigurator?.call() ?? _configureAudioSession());
       final invalid = await stopIfStartupInvalid(V2VConnectionStage.audioSession, voiceMode: confirmedVoiceMode);
       if (invalid != null) return invalid;
     } catch (error) {
@@ -750,49 +802,63 @@ class V2VClient {
         if (invalid != null) return invalid;
         return stopForAuthorityLoss(voiceMode: confirmedVoiceMode);
       }
-      _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl), pingInterval: const Duration(seconds: 30));
+      _channel = _webSocketConnector?.call(Uri.parse(wsUrl)) ?? _connectWebSocket(Uri.parse(wsUrl));
 
       await _channel!.ready.timeout(const Duration(seconds: 12));
       final websocketInvalid = await stopIfStartupInvalid(V2VConnectionStage.websocket, voiceMode: confirmedVoiceMode);
       if (websocketInvalid != null) return websocketInvalid;
 
-      // 3. Listen for messages from proxy
-      _isConnected = true;
-      _wsSub = _channel!.stream.listen(
-        _handleMessage,
-        onError: (error) {
-          Logger.error('[V2V] WebSocket error: ${error.runtimeType}');
-          disconnect();
+      var listenerAttached = false;
+      final micStarted = await activateV2VTransportInOrder(
+        armSession: () async {
+          if (beforeTransportActivation != null && !await beforeTransportActivation(sessionId)) return false;
+          return _hasCurrentSessionAuthority();
         },
-        onDone: () {
-          Logger.debug('[V2V] WebSocket closed');
-          _isConnected = false;
-          if (_connectionAnnounced) {
-            _connectionAnnounced = false;
-            onConnectionChanged?.call(false);
-          }
+        attachListener: () {
+          // Registering the listener can synchronously release buffered proxy frames. The
+          // caller's session/outbox must therefore be armed before this point.
+          listenerAttached = true;
+          _isConnected = true;
+          _connectedSessionId = sessionId;
+          _wsSub = _channel!.stream.listen(
+            _handleMessage,
+            onError: (error) {
+              Logger.error('[V2V] WebSocket error: ${error.runtimeType}');
+              disconnect();
+            },
+            onDone: () {
+              Logger.debug('[V2V] WebSocket closed');
+              _isConnected = false;
+              if (_connectionAnnounced) {
+                _connectionAnnounced = false;
+                onConnectionChanged?.call(false);
+              }
+            },
+          );
         },
-      );
-
-      // 4. Start recording mic audio and streaming to WebSocket
-      final micStarted = await _startAuthorizedMicrophone(
-        authority: authority,
-        shouldContinue: _sessionShouldContinue!,
+        startMicrophone: () => _startAuthorizedMicrophone(
+          authority: authority,
+          shouldContinue: _sessionShouldContinue!,
+        ),
       );
       final microphoneInvalid = await stopIfStartupInvalid(
         V2VConnectionStage.microphone,
         voiceMode: confirmedVoiceMode,
       );
       if (microphoneInvalid != null) return microphoneInvalid;
-      if (!micStarted || !_isConnected) {
+      if (!listenerAttached || !micStarted || !_isConnected) {
         await disconnect();
         return _completeReceipt(
           V2VConnectionReceipt(
             connected: false,
             provider: provider,
             voiceMode: confirmedVoiceMode,
-            stage: micStarted ? V2VConnectionStage.websocket : V2VConnectionStage.microphone,
-            errorCode: micStarted ? 'websocket_closed' : 'microphone_unavailable',
+            stage: !listenerAttached || micStarted ? V2VConnectionStage.websocket : V2VConnectionStage.microphone,
+            errorCode: !listenerAttached
+                ? 'session_activation_failed'
+                : micStarted
+                    ? 'websocket_closed'
+                    : 'microphone_unavailable',
           ),
         );
       }
@@ -833,6 +899,7 @@ class V2VClient {
     _sessionShouldContinue = null;
     final shouldAnnounceDisconnect = _connectionAnnounced;
     _isConnected = false;
+    _connectedSessionId = '';
     _connectionAnnounced = false;
     if (shouldAnnounceDisconnect) onConnectionChanged?.call(false);
     if (_activeClient == this) {
@@ -843,7 +910,7 @@ class V2VClient {
     _wsSub = null;
 
     try {
-      await _channel?.sink.close();
+      await _channel?.close();
     } catch (_) {}
     _channel = null;
 
@@ -905,6 +972,18 @@ class V2VClient {
   }
 
   // --- Audio session ---
+
+  V2VWebSocketTransport _connectWebSocket(Uri uri) {
+    final channel = IOWebSocketChannel.connect(uri, pingInterval: const Duration(seconds: 30));
+    return V2VWebSocketTransport(
+      ready: channel.ready,
+      stream: channel.stream,
+      send: channel.sink.add,
+      close: () async {
+        await channel.sink.close();
+      },
+    );
+  }
 
   Future<void> _configureAudioSession() async {
     final session = await AudioSession.instance;
@@ -1126,27 +1205,12 @@ class V2VClient {
   }
 
   static bool _isUserTranscriptEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'user_transcript' ||
-        normalized == 'input_transcript' ||
-        normalized == 'input_audio_transcription.completed' ||
-        normalized.contains('input_audio_transcription') ||
-        (normalized.contains('user') && normalized.contains('transcript'));
+    return type.toLowerCase() == 'user_transcript';
   }
 
   static bool _isAssistantTranscriptEvent(String type) {
     final normalized = type.toLowerCase();
-    return normalized == 'transcript' ||
-        normalized == 'transcript_delta' ||
-        normalized == 'assistant_transcript' ||
-        normalized == 'output_transcript' ||
-        normalized == 'response_text' ||
-        normalized == 'response.audio_transcript.delta' ||
-        normalized == 'response.audio_transcript.done' ||
-        normalized == 'response.text.delta' ||
-        normalized == 'response.text.done' ||
-        normalized.contains('output_audio_transcription') ||
-        (normalized.contains('assistant') && normalized.contains('transcript'));
+    return normalized == 'transcript';
   }
 
   @visibleForTesting
@@ -1155,26 +1219,12 @@ class V2VClient {
   }
 
   static bool _isAudioDoneEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'audio_done' ||
-        normalized == 'response.audio.done' ||
-        normalized == 'output_audio.done' ||
-        normalized == 'audio.done';
-  }
-
-  static bool _isResponseCompleteEvent(String type) {
-    final normalized = type.toLowerCase();
-    return normalized == 'turn_complete' || normalized == 'response.done';
+    return type.toLowerCase() == 'audio_done';
   }
 
   @visibleForTesting
   static bool treatsAsAudioDoneEvent(String type) {
     return _isAudioDoneEvent(type);
-  }
-
-  @visibleForTesting
-  static bool treatsAsResponseCompleteEvent(String type) {
-    return _isResponseCompleteEvent(type);
   }
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
@@ -1269,7 +1319,7 @@ class V2VClient {
         }
         if (_isConnected && _channel != null && !_micMuted && !_isPlaying && !_micSuspendedForPlayback) {
           _onProtectedEgress?.call(V2VProtectedEgressBoundary.microphoneFrame);
-          _channel!.sink.add(data);
+          _channel!.send(data);
           _micChunksSent++;
           _micBytesSent += data.length;
           if (_micChunksSent % 50 == 0) {
@@ -1536,11 +1586,51 @@ class V2VClient {
 
     if (message is String) {
       // JSON event
-      Logger.debug('[V2V] JSON event: $message');
       try {
         final json = jsonDecode(message) as Map<String, dynamic>;
         final type = json['type'] as String? ?? 'unknown';
         final text = _eventText(json);
+
+        if (type == 'transcript_turn') {
+          final terminalTurn = V2VTerminalTranscriptTurn.tryParse(json);
+          if (terminalTurn == null) {
+            Logger.debug('[V2V] Ignoring invalid terminal transcript contract');
+            return;
+          }
+          final durableHandler = onTerminalTurnDurable;
+          if (durableHandler == null) {
+            onEvent?.call(V2VEvent(type: 'transcript_turn', terminalTurn: terminalTurn));
+            return;
+          }
+          _terminalTurnTail = _terminalTurnTail.then((_) async {
+            var durablyOwned = false;
+            try {
+              durablyOwned = await durableHandler(terminalTurn);
+            } catch (_) {
+              Logger.error('[V2V] Terminal transcript durable handoff failed');
+            }
+            if (!durablyOwned) return;
+            onEvent?.call(V2VEvent(type: 'transcript_turn', terminalTurn: terminalTurn));
+            final channel = _channel;
+            if (!_isConnected ||
+                channel == null ||
+                terminalTurn.sessionId != _connectedSessionId ||
+                !_hasCurrentSessionAuthority()) {
+              return;
+            }
+            channel.send(
+              jsonEncode({
+                'type': 'transcript_turn_ack',
+                'contract_version': 1,
+                'session_id': terminalTurn.sessionId,
+                'turn_id': terminalTurn.turnId,
+              }),
+            );
+          }).catchError((_) {
+            Logger.error('[V2V] Terminal transcript acknowledgment failed');
+          });
+          return;
+        }
 
         if (_isUserTranscriptEvent(type)) {
           onEvent?.call(V2VEvent(type: 'user_transcript', text: text));
@@ -1555,11 +1645,6 @@ class V2VClient {
         if (_isAudioDoneEvent(type)) {
           _scheduleFinishPlayback(type);
           onEvent?.call(const V2VEvent(type: 'audio_done'));
-          return;
-        }
-
-        if (_isResponseCompleteEvent(type)) {
-          _scheduleFinishPlayback(type);
           return;
         }
 
@@ -1599,7 +1684,7 @@ class V2VClient {
             disconnect();
             break;
           case 'error':
-            Logger.error('[V2V] Server error: ${json['message'] ?? text}');
+            Logger.error('[V2V] Server error event');
             onEvent?.call(
               V2VEvent(
                 type: 'error',
@@ -1610,11 +1695,11 @@ class V2VClient {
             );
             break;
           default:
-            Logger.debug('[V2V] Unknown event: $type');
+            Logger.debug('[V2V] Unknown event received');
             onEvent?.call(V2VEvent(type: type, text: text));
         }
       } catch (e) {
-        Logger.debug('[V2V] Failed to parse JSON event: $e');
+        Logger.debug('[V2V] Failed to parse JSON event: ${e.runtimeType}');
       }
     }
   }

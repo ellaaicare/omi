@@ -3,6 +3,7 @@ name: Ella iOS Source CI
 on:
   pull_request:
     branches:
+      - codex/815-device-rejection-successor
       - feature/phase-a-testflight
       - main
     paths:
@@ -12,10 +13,17 @@ on:
       - backend/ella/routers/escalations.py
       - backend/ella/routers/chat.py
       - backend/ella/routers/voice.py
+      - backend/ella/services/correction_honcho_contract.py
+      - backend/ella/services/hermes_session.py
       - backend/ella/routers/callbacks.py
+      - backend/ella/routers/canonical_events.py
       - backend/tests/unit/test_ella_guardian_delivery.py
       - backend/tests/unit/test_ella_canonical_context.py
       - backend/tests/unit/test_ella_user_route_auth.py
+      - backend/tests/unit/test_ella_v2v_turn_persistence.py
+      - backend/tests/unit/test_ella_chat_temporal_context.py
+      - backend/tests/unit/test_ella_conversation_corrections.py
+      - backend/tests/unit/test_ella_correction_honcho_contract.py
       - backend/utils/ella/exact_firebase_auth.py
       - backend/utils/ella/scanner.py
       - backend/utils/notifications.py
@@ -55,8 +63,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify immutable checked-out head
+        working-directory: .
+        env:
+          ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          head_sha="$ELLA_EXPECTED_HEAD_SHA"
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character immutable head SHA." >&2
+            exit 1
+          }
+          [[ "$checked_out_head" == "$head_sha" ]] || {
+            echo "Source CI checkout mismatch: headSha=$head_sha checkedOutHead=$checked_out_head" >&2
+            exit 1
+          }
+          printf 'headSha=%s checkedOutHead=%s\n' "$head_sha" "$checked_out_head"
+          printf '%s\n' "$head_sha" > /tmp/ella-ios-source-ci-head-sha.txt
 
       - name: Verify credential-free source CI scope
         working-directory: .
@@ -100,7 +129,35 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              .github/workflows/ella-ios-source-ci.yml|\
+              app/lib/backend/preferences.dart|\
+              app/lib/backend/schema/message.dart|\
+              app/lib/ella/pages/ella_voice_chat_page.dart|\
+              app/lib/ella/services/ella_chat_service.dart|\
+              app/lib/ella/services/v2v_client.dart|\
+              app/lib/ella/services/v2v_turn_reconciler.dart|\
+              app/lib/providers/message_provider.dart|\
+              app/lib/services/wals/wal.dart|\
+              app/lib/services/wals/wal_owner_authority.dart|\
+              app/test/ella/account_isolation_test.dart|\
+              app/test/ella/services/ella_chat_route_contract_test.dart|\
+              app/test/ella/services/v2v_client_test.dart|\
+              app/test/ella/services/v2v_turn_reconciler_test.dart|\
+              app/test/harness/v2v_composed_replay_app.dart|\
+              app/test/fixtures/canonical_ordering_mixed_legacy.json|\
+              app/test/services/wals/wal_account_isolation_test.dart|\
+              backend/ella/routers/canonical_events.py|\
+              backend/ella/routers/chat.py|\
+              backend/ella/routers/resolve.py|\
+              backend/ella/routers/voice.py|\
+              backend/ella/services/correction_honcho_contract.py|\
+              backend/ella/services/hermes_session.py|\
+              backend/tests/unit/test_ella_chat_temporal_context.py|\
+              backend/tests/unit/test_ella_conversation_corrections.py|\
+              backend/tests/unit/test_ella_correction_honcho_contract.py|\
+              backend/tests/unit/test_ella_user_route_auth.py|\
+              backend/tests/unit/test_ella_v2v_turn_persistence.py|\
+              backend/utils/ella/canonical_context.py) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -144,16 +201,23 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/guardian-python"
           source "$RUNNER_TEMP/guardian-python/bin/activate"
-          python -m pip install --disable-pip-version-check \
+          python3 -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
-            python-multipart==0.0.9
-          python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
-          python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
+            asyncpg==0.31.0 \
+            python-multipart==0.0.9 \
+            websockets==15.0.1
+          python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
+          python3 -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
-          python -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python3 -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python3 -m pytest backend/tests/unit/test_ella_chat_temporal_context.py \
+            backend/tests/unit/test_ella_conversation_corrections.py \
+            backend/tests/unit/test_ella_correction_honcho_contract.py
+          python3 -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
+            -k 'not test_real_postgres'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -214,7 +278,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=45
+          expected_issue_test_count=46
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -222,7 +286,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=72
+          expected_app_test_count=73
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -278,11 +342,12 @@ jobs:
             test/ella/services/guardian_mode_api_test.dart
             test/ella/pages/ella_voice_quota_states_test.dart
             test/ella/services/v2v_client_test.dart
+            test/ella/services/v2v_turn_reconciler_test.dart
             test/ella/services/voice_session_startup_guard_test.dart
             test/ella/widgets/v2v_fallback_dialog_test.dart
           )
 
-          expected_focused_test_count=25
+          expected_focused_test_count=26
           if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
             echo "Focused source test manifest count drifted." >&2
             exit 1
@@ -326,3 +391,136 @@ jobs:
 
       - name: Run full Flutter tests
         run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub
+
+      - name: Print exact-head gate receipt
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          head_sha="$(cat /tmp/ella-ios-source-ci-head-sha.txt)"
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$checked_out_head" == "$head_sha" ]] || {
+            echo "Source CI checkout changed during gate: headSha=$head_sha checkedOutHead=$checked_out_head" >&2
+            exit 1
+          }
+          printf 'Ella source gate receipt: headSha=%s checkedOutHead=%s baseSha=%s\n' \
+            "$head_sha" "$checked_out_head" "$(cat /tmp/ella-ios-source-ci-base-ref.txt)"
+
+  postgres-ordering-contract:
+    name: PostgreSQL 16 ordering and range contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      ELLA_TEST_POSTGRES_DATABASE: postgres
+      ELLA_TEST_POSTGRES_HOST: 127.0.0.1
+      ELLA_TEST_POSTGRES_PASSWORD: postgres
+      ELLA_TEST_POSTGRES_PORT: "5432"
+      ELLA_TEST_POSTGRES_USER: postgres
+
+    steps:
+      - name: Checkout immutable source head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable checked-out head
+        run: |
+          set -euo pipefail
+
+          expected_sha="$ELLA_EXPECTED_HEAD_SHA"
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "PostgreSQL contract requires an exact 40-character immutable head SHA." >&2
+            exit 1
+          }
+          [[ "$actual_sha" == "$expected_sha" ]] || {
+            echo "PostgreSQL contract checkout mismatch: expectedSha=$expected_sha actualSha=$actual_sha" >&2
+            exit 1
+          }
+          printf 'PostgreSQL contract head receipt: expectedSha=%s actualSha=%s\n' "$expected_sha" "$actual_sha"
+
+      - name: Run exact real PostgreSQL regression
+        working-directory: backend
+        run: |
+          set -euo pipefail
+
+          python3 -m venv "$RUNNER_TEMP/postgres-contract-python"
+          source "$RUNNER_TEMP/postgres-contract-python/bin/activate"
+          python3 -m pip install --disable-pip-version-check \
+            pytest==8.4.2 \
+            fastapi==0.112.0 \
+            firebase-admin==6.5.0 \
+            httpx==0.28.0 \
+            asyncpg==0.31.0 \
+            python-multipart==0.0.9 \
+            websockets==15.0.1
+
+          expected_test_count=4
+          expected_test_ids=(
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_case_distinct_owner_isolation_and_numeric_string_limit_order'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_mounted_voice_route_and_context_helper_keep_case_distinct_owners_private'
+          )
+          collection_output="$(python3 -m pytest --collect-only -q "${expected_test_ids[@]}")"
+          printf '%s\n' "$collection_output"
+          actual_test_ids="$(printf '%s\n' "$collection_output" | grep '::' || true)"
+          actual_test_count="$(printf '%s\n' "$actual_test_ids" | grep -c '::' || true)"
+          [[ "$actual_test_count" -eq "$expected_test_count" ]] || {
+            echo "PostgreSQL regression collection mismatch: expectedCount=$expected_test_count actualCount=$actual_test_count" >&2
+            exit 1
+          }
+          for expected_test_id in "${expected_test_ids[@]}"; do
+            [[ "$(printf '%s\n' "$actual_test_ids" | grep -Fxc "$expected_test_id" || true)" -eq 1 ]] || {
+              echo "PostgreSQL regression missing or duplicated exact test ID: $expected_test_id" >&2
+              exit 1
+            }
+          done
+          printf 'PostgreSQL regression collection receipt: expectedCount=%s actualCount=%s testIds=%s\n' \
+            "$expected_test_count" "$actual_test_count" "${expected_test_ids[*]}"
+
+          execution_output="$(python3 -m pytest -q -rA "${expected_test_ids[@]}")"
+          printf '%s\n' "$execution_output"
+          actual_pass_count="$(printf '%s\n' "$execution_output" | grep -c '^PASSED .*::' || true)"
+          [[ "$actual_pass_count" -eq "$expected_test_count" ]] || {
+            echo "PostgreSQL regression execution mismatch: expectedCount=$expected_test_count actualCount=$actual_pass_count" >&2
+            exit 1
+          }
+          if printf '%s\n' "$execution_output" | grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)'; then
+            echo "PostgreSQL regression gate requires zero skips and zero deselections." >&2
+            exit 1
+          fi
+          for expected_test_id in "${expected_test_ids[@]}"; do
+            [[ "$(printf '%s\n' "$execution_output" | grep -Fxc "PASSED $expected_test_id" || true)" -eq 1 ]] || {
+              echo "PostgreSQL regression did not pass exact test ID once: $expected_test_id" >&2
+              exit 1
+            }
+          done
+          printf 'PostgreSQL regression execution receipt: expectedCount=%s actualCount=%s skipped=0 deselected=0 testIds=%s\n' \
+            "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
+
+          expected_sha="$ELLA_EXPECTED_HEAD_SHA"
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$expected_sha" ]] || {
+            echo "PostgreSQL contract checkout changed during test: expectedSha=$expected_sha actualSha=$actual_sha" >&2
+            exit 1
+          }
+          printf 'PostgreSQL contract final receipt: expectedSha=%s actualSha=%s expectedCount=%s actualCount=%s skipped=0 deselected=0 testIds=%s\n' \
+            "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"

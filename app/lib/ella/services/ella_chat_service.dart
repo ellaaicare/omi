@@ -32,12 +32,16 @@ typedef EllaChatHistoryTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
+  required String url,
+  required String body,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+
 const ellaChatInactivityTimeout = Duration(seconds: 75);
 
-Stream<T> withEllaChatInactivityTimeout<T>(
-  Stream<T> stream, {
-  Duration timeout = ellaChatInactivityTimeout,
-}) =>
+Stream<T> withEllaChatInactivityTimeout<T>(Stream<T> stream, {Duration timeout = ellaChatInactivityTimeout}) =>
     stream.timeout(
       timeout,
       onTimeout: (sink) {
@@ -61,6 +65,143 @@ Future<http.Response?> _defaultHistoryTransport({
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );
+
+Future<http.Response?> _defaultVoiceTurnTransport({
+  required String url,
+  required String body,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: _ellaDebugHeaders(routeSource: 'v2v-canonical-writeback'),
+      method: 'POST',
+      body: body,
+      timeout: const Duration(seconds: 10),
+      retries: 0,
+      requireAuthCheck: true,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
+  required String uid,
+  required String sessionId,
+  required String turnId,
+  required String userEventId,
+  required String assistantEventId,
+  required String userTranscript,
+  required String assistantTranscript,
+  required DateTime startedAt,
+  required DateTime completedAt,
+  required int? turnOrdinal,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaVoiceTurnTransport? transport,
+}) async {
+  if (uid.isEmpty ||
+      sessionId.isEmpty ||
+      turnId.isEmpty ||
+      userEventId != '$turnId:user' ||
+      assistantEventId != '$turnId:assistant' ||
+      userTranscript.trim().isEmpty ||
+      assistantTranscript.trim().isEmpty) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+  if (!exactAuthority.isExactCurrent() || exactAuthority.uid != uid) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  }
+
+  try {
+    final response = await (transport ?? _defaultVoiceTurnTransport)(
+      url: '${Env.apiBaseUrl}v1/ella/chat/voice-turns',
+      body: jsonEncode({
+        'uid': uid,
+        'session_id': sessionId,
+        'turn_id': turnId,
+        'user_event_id': userEventId,
+        'assistant_event_id': assistantEventId,
+        'user_transcript': userTranscript.trim(),
+        'assistant_transcript': assistantTranscript.trim(),
+        'user_terminal': true,
+        'assistant_terminal': true,
+        'started_at': startedAt.toUtc().toIso8601String(),
+        'completed_at': completedAt.toUtc().toIso8601String(),
+        if (turnOrdinal != null) 'turn_ordinal': turnOrdinal,
+      }),
+      expectedAuthenticatedUid: uid,
+      exactAuthority: exactAuthority,
+    );
+    if (response == null || response.statusCode != 200) {
+      Logger.debug('[EllaChat] V2V canonical write failed: ${response?.statusCode}');
+      return EllaServiceResult.failure(
+        response == null
+            ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+            : ClientApiFailure.fromHttp(statusCode: response.statusCode),
+      );
+    }
+    if (!exactAuthority.isExactCurrent()) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+    }
+
+    final payload = jsonDecode(response.body);
+    if (payload is! Map<String, dynamic> ||
+        payload['ok'] != true ||
+        payload['session_id'] != sessionId ||
+        payload['turn_id'] != turnId ||
+        payload['messages'] is! List) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
+
+    final messages = <ServerMessage>[];
+    for (final raw in payload['messages'] as List<dynamic>) {
+      if (raw is! Map<String, dynamic>) continue;
+      final id = raw['id']?.toString() ?? '';
+      final text = raw['text']?.toString() ?? '';
+      final createdAt = DateTime.tryParse(raw['created_at']?.toString() ?? '');
+      final sender = switch (raw['sender']?.toString()) {
+        'human' => MessageSender.human,
+        'ai' => MessageSender.ai,
+        _ => null,
+      };
+      if (id.isEmpty || text.trim().isEmpty || createdAt == null || sender == null) continue;
+      messages.add(
+        ServerMessage(
+          id,
+          createdAt.toLocal(),
+          text,
+          sender,
+          MessageType.text,
+          null,
+          false,
+          [],
+          [],
+          [],
+          askForNps: false,
+          fromVoice: true,
+          canonicalConversationId: (raw['metadata'] as Map?)?['conversation_id']?.toString() ?? sessionId,
+          canonicalTurnId: (raw['metadata'] as Map?)?['turn_id']?.toString() ?? turnId,
+          canonicalTurnOrdinal: parseCanonicalTurnOrdinal((raw['metadata'] as Map?)?['turn_ordinal']),
+          canonicalEventSequence: parseCanonicalEventSequence((raw['metadata'] as Map?)?['event_sequence']),
+        ),
+      );
+    }
+    final messagesById = {for (final message in messages) message.id: message};
+    if (messages.length != 2 ||
+        messagesById.keys.toSet().difference({userEventId, assistantEventId}).isNotEmpty ||
+        messagesById.length != 2 ||
+        messagesById[userEventId]?.sender != MessageSender.human ||
+        messagesById[assistantEventId]?.sender != MessageSender.ai) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
+    messages.sort(compareServerMessagesChronologically);
+    return EllaServiceResult.success(messages);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  } catch (error) {
+    Logger.debug('[EllaChat] V2V canonical response rejected: ${error.runtimeType}');
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+}
 
 /// Fetch chat history from the VPS proxy endpoint.
 /// Returns messages in chronological order (oldest first). A failed read is
@@ -130,6 +271,10 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           [],
           [],
           askForNps: false,
+          canonicalConversationId: (m['metadata'] as Map?)?['conversation_id']?.toString(),
+          canonicalTurnId: (m['metadata'] as Map?)?['turn_id']?.toString(),
+          canonicalTurnOrdinal: parseCanonicalTurnOrdinal((m['metadata'] as Map?)?['turn_ordinal']),
+          canonicalEventSequence: parseCanonicalEventSequence((m['metadata'] as Map?)?['event_sequence']),
         ),
       );
     }
@@ -140,7 +285,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     }
 
     // API returns newest first; reverse for chronological UI order
-    result.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    result.sort(compareServerMessagesChronologically);
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
     return EllaServiceResult.success(result);
   } on ClientApiFailure catch (failure) {

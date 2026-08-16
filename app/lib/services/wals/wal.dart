@@ -35,12 +35,38 @@ class WalOwner {
   final String consentReceiptId;
   final int authorityGenerationAtCapture;
 
+  static final RegExp _authorityIdentifierPattern = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:@+/=\-]{0,511}$');
+
+  bool get hasValidAuthorityIdentity =>
+      _authorityIdentifierPattern.hasMatch(uid) &&
+      _authorityIdentifierPattern.hasMatch(profileBindingId) &&
+      bindingRevision > 0 &&
+      _authorityIdentifierPattern.hasMatch(consentReceiptId) &&
+      authorityGenerationAtCapture >= 0;
+
+  void _requireValidAuthorityIdentity() {
+    if (!hasValidAuthorityIdentity) throw StateError('Invalid WAL owner authority identity');
+  }
+
   String get storageNamespace {
+    _requireValidAuthorityIdentity();
     final digest = sha256.convert(utf8.encode('$uid\n$profileBindingId\n$bindingRevision'));
     return digest.toString().substring(0, 24);
   }
 
+  String get authorityFingerprint {
+    _requireValidAuthorityIdentity();
+    // The server-issued receipt is the durable authority epoch. The local
+    // generation remains an in-process lease fence, but intentionally cannot
+    // make a valid outbox unreadable after a cold process start.
+    final preimage = jsonEncode(['wal-owner-authority-v1', uid, profileBindingId, bindingRevision, consentReceiptId]);
+    final digest = sha256.convert(utf8.encode(preimage));
+    return digest.toString();
+  }
+
   bool matches(WalOwner other) =>
+      hasValidAuthorityIdentity &&
+      other.hasValidAuthorityIdentity &&
       uid == other.uid &&
       profileBindingId == other.profileBindingId &&
       bindingRevision == other.bindingRevision &&
