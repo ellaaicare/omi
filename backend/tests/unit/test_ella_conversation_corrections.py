@@ -3049,6 +3049,11 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, version_id, update: updates.append(update) or True,
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
         "update_conversation",
         lambda uid, cid, update: updates.append(update),
     )

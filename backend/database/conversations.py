@@ -1692,6 +1692,12 @@ def complete_capture_finalization(
         claim_token,
         datetime.now(timezone.utc),
     )
+class PendingConversationSummaryReconciliationError(RuntimeError):
+    """A summary writer cannot supersede an unfinished canonical publication."""
+
+
+SUMMARY_WRITEBACK_RECEIPT_FIELD = 'summary_writeback_receipt'
+SUMMARY_WRITEBACK_PENDING = 'pending_reconciliation'
 
 
 def _update_conversation_if_active_summary_version_transaction(
@@ -1705,6 +1711,13 @@ def _update_conversation_if_active_summary_version_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
+    receipt = conversation.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+    if (
+        SUMMARY_WRITEBACK_RECEIPT_FIELD in update_data
+        and update_data.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) is None
+        and receipt.get('status') == SUMMARY_WRITEBACK_PENDING
+    ):
+        raise PendingConversationSummaryReconciliationError('canonical_summary_reconciliation_pending')
     if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
         return False
     doc_level = conversation.get('data_protection_level', 'standard')

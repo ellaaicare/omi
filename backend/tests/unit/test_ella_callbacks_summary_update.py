@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import importlib.util
 import json
 import sys
@@ -44,6 +45,23 @@ from ella.services.canonical_summary_source import (  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def disable_canonical_omi_network(monkeypatch):
+    class PendingConversationSummaryReconciliationError(RuntimeError):
+        pass
+
+    def guarded_summary_update(uid, conversation_id, _expected_active_version_id, update_data):
+        callbacks.conversations_db.update_conversation(uid, conversation_id, update_data)
+        return True
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "PendingConversationSummaryReconciliationError",
+        PendingConversationSummaryReconciliationError,
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_active_summary_version",
+        guarded_summary_update,
+    )
     monkeypatch.setattr(
         callbacks,
         "write_omi_canonical_event",
@@ -87,6 +105,7 @@ def test_update_conversation_summary_clears_stale_app_results(monkeypatch):
     assert captured["update_data"]["structured.category"] == "personal"
     assert captured["update_data"]["apps_results"] == []
     assert captured["update_data"]["plugins_results"] == []
+    assert captured["update_data"]["summary_writeback_receipt"] is None
     assert result["sanitizer_warnings"] == []
 
 
@@ -625,19 +644,31 @@ def test_cas_success_is_atomic_and_returns_content_free_receipt_header(monkeypat
     conversation = _cas_conversation()
     writes = _install_atomic_cas_fake(monkeypatch, conversation)
     token = _cas_token(conversation)
+    payload = json.dumps(
+        _cas_update().model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
     response = _cas_client().patch(
         "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
-        json=_cas_update().model_dump(),
-        headers={
-            "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
-            "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
-        },
+        content=payload,
+        headers=_cas_headers(token),
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "completed",
+        "operation_receipt": {
+            "token": "c" * 64,
+            "status": "completed",
+            "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "source_sha256": token,
+            "source_version": "2026-08-15T12:01:00Z",
+        },
+    }
     assert response.headers["X-Ella-CAS-Applied"] == callbacks.ELLA_CANONICAL_SOURCE_CONTRACT
-    assert len(writes) == 1
+    assert len(writes) == 2
     assert conversation["structured"]["title"] == "Winning summary"
     assert conversation["active_summary_version_id"] == "winner-v2"
     assert "private transcript" not in response.text
@@ -649,10 +680,13 @@ def _required_cas_update():
     return update
 
 
-def _cas_headers(token):
+def _cas_headers(token, *, operation_token="c" * 64, source_version="2026-08-15T12:01:00Z"):
     return {
+        "Content-Type": "application/json",
         "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
         "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+        "X-Ella-Operation-Token": operation_token,
+        "X-Ella-Source-Version": source_version,
     }
 
 
@@ -678,12 +712,21 @@ def test_required_canonical_failure_returns_durable_pending_and_exact_retry_reco
     )
 
     assert first.status_code == 202
-    assert first.json() == {"status": "pending_reconciliation"}
-    assert first.headers["X-Ella-CAS-Applied"] == callbacks.ELLA_CANONICAL_SOURCE_CONTRACT
+    assert first.json()["status"] == "pending_reconciliation"
+    assert set(first.json()) == {"status", "operation_receipt"}
+    assert set(first.json()["operation_receipt"]) == {
+        "token",
+        "status",
+        "payload_sha256",
+        "source_sha256",
+        "source_version",
+    }
+    assert first.json()["operation_receipt"]["status"] == "pending_reconciliation"
+    assert "X-Ella-CAS-Applied" not in first.headers
     assert first.headers["X-Ella-CAS-Reconciliation"] == "pending"
     assert len(writes) == 1
     assert conversation["structured"]["title"] == "Winning summary"
-    assert conversation["summary_writeback_receipt"]["status"] == "pending_canonical"
+    assert conversation["summary_writeback_receipt"]["status"] == "pending_reconciliation"
     assert conversation["enrichment_state"]["canonical_status"] == "pending"
 
     monkeypatch.setattr(callbacks, "write_omi_canonical_event", lambda *args, **kwargs: {"ok": True})
@@ -694,13 +737,156 @@ def test_required_canonical_failure_returns_durable_pending_and_exact_retry_reco
     )
 
     assert retry.status_code == 200
-    assert retry.json() == {"status": "ok"}
+    assert retry.json()["status"] == "completed"
+    assert retry.json()["operation_receipt"]["token"] == "c" * 64
     assert len(writes) == 2
     assert len(conversation["summary_versions"]) == 2
     assert conversation["active_summary_version_id"] == "winner-v2"
     assert conversation["summary_writeback_receipt"]["status"] == "completed"
     assert conversation["enrichment_state"]["canonical_status"] == "completed"
     assert len(canonical_calls) == 1
+
+
+def test_cas_contract_requires_canonical_publication_without_body_flag(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic canonical outage")),
+    )
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=_cas_headers(_cas_token(conversation)),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "pending_reconciliation"
+    assert "X-Ella-CAS-Applied" not in response.headers
+    assert len(writes) == 1
+
+
+def test_completed_response_loss_retry_returns_same_receipt_without_republish(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    canonical_calls = []
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda *args, **kwargs: canonical_calls.append((args, kwargs)) or {"ok": True},
+    )
+    headers = _cas_headers(_cas_token(conversation))
+
+    first = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+    retry = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json()
+    assert len(writes) == 2
+    assert len(canonical_calls) == 1
+
+
+@pytest.mark.parametrize("change", ["source", "active_version", "post_image"])
+def test_finalize_conflict_never_acknowledges_or_publishes_later_content(monkeypatch, change):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    transact = callbacks.conversations_db.update_conversation_with_builder
+    published_titles = []
+
+    def interleave_later_writer(*args, **kwargs):
+        if getattr(args[2], "__name__", "") == "finalize":
+            if change == "source":
+                conversation["structured"]["title"] = "Later writer B"
+            elif change == "active_version":
+                conversation["active_summary_version_id"] = "later-v3"
+                conversation["summary_versions"] = [
+                    {"id": "winner-v2", "is_active": False, "title": "Winning summary"},
+                    {"id": "later-v3", "is_active": True, "title": "Winning summary"},
+                ]
+            else:
+                conversation["internal_assessment"] = {"risk_level": "later-writer-B"}
+        return transact(*args, **kwargs)
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", interleave_later_writer)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda _uid, current, **_kwargs: published_titles.append(current["structured"]["title"]) or {"ok": True},
+    )
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=_cas_headers(_cas_token(conversation)),
+    )
+
+    assert response.status_code == 409
+    assert "X-Ella-CAS-Applied" not in response.headers
+    assert published_titles == ["Winning summary"]
+    assert conversation["structured"]["title"] == ("Later writer B" if change == "source" else "Winning summary")
+    assert len(writes) == 1
+
+
+def test_later_cas_writer_after_completion_gets_412_and_cannot_replay_old_receipt(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    original_source = _cas_token(conversation)
+    first = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=_cas_headers(original_source),
+    )
+    later = _cas_update()
+    later.title = "Later writer B"
+    second = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=later.model_dump(),
+        headers=_cas_headers(original_source, operation_token="d" * 64),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 412
+    assert conversation["structured"]["title"] == "Winning summary"
+    assert len(writes) == 2
+
+
+def test_later_legacy_writer_is_blocked_while_cas_receipt_is_pending(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_OPTIONAL)
+    conversation = _cas_conversation()
+    conversation["summary_writeback_receipt"] = {"status": "pending_reconciliation", "token": "c" * 64}
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversation", lambda *_args: copy.deepcopy(conversation))
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda *_args: (_ for _ in ()).throw(
+            callbacks.conversations_db.PendingConversationSummaryReconciliationError("pending")
+        ),
+    )
+    canonical_writer = MagicMock()
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", canonical_writer)
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Canonical summary reconciliation pending"}
+    canonical_writer.assert_not_called()
 
 
 def test_required_canonical_preflight_failure_is_zero_write(monkeypatch):
@@ -718,7 +904,7 @@ def test_required_canonical_preflight_failure_is_zero_write(monkeypatch):
     response = _cas_client().patch(
         "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
         json=_required_cas_update().model_dump(),
-        headers=_cas_headers("a" * 64),
+        headers=_cas_headers(_cas_token(_cas_conversation())),
     )
 
     assert response.status_code == 503
@@ -750,7 +936,7 @@ def test_firestore_response_loss_reconciles_committed_receipt_without_second_sum
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "completed"
     assert len(writes) == 2
     assert len(conversation["summary_versions"]) == 2
     assert conversation["summary_writeback_receipt"]["status"] == "completed"
@@ -770,7 +956,7 @@ def test_firestore_outcome_without_readable_receipt_is_explicitly_unknown(monkey
     response = _cas_client().patch(
         "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
         json=_required_cas_update().model_dump(),
-        headers=_cas_headers("a" * 64),
+        headers=_cas_headers(_cas_token(_cas_conversation())),
     )
 
     assert response.status_code == 503
@@ -838,7 +1024,7 @@ def test_different_cas_is_blocked_while_required_reconciliation_is_pending(monke
     second = _cas_client().patch(
         "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
         json=different.model_dump(),
-        headers=_cas_headers(token),
+        headers=_cas_headers(token, operation_token="d" * 64),
     )
 
     assert first.status_code == 202
@@ -874,10 +1060,7 @@ def test_interleaved_canonical_change_returns_412_and_preserves_winner(monkeypat
     response = _cas_client().patch(
         "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
         json=_cas_update().model_dump(),
-        headers={
-            "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
-            "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{stale_token}"',
-        },
+        headers=_cas_headers(stale_token),
     )
 
     assert response.status_code == 412
@@ -886,6 +1069,22 @@ def test_interleaved_canonical_change_returns_412_and_preserves_winner(monkeypat
     assert writes == []
     assert conversation["active_summary_version_id"] == "original-v1"
     assert conversation["structured"]["title"] != "Winning summary"
+
+
+def test_cas_source_version_mismatch_returns_412_without_writes(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=_cas_headers(_cas_token(conversation), source_version="2026-08-15T12:00:59Z"),
+    )
+
+    assert response.status_code == 412
+    assert writes == []
+    assert conversation["structured"]["title"] == "Original"
 
 
 @pytest.mark.parametrize(
@@ -924,6 +1123,42 @@ def test_required_cas_rejects_missing_or_malformed_headers_before_write(monkeypa
 
 
 @pytest.mark.parametrize(
+    ("operation_token", "source_version"),
+    [
+        (None, "2026-08-15T12:01:00Z"),
+        ("short", "2026-08-15T12:01:00Z"),
+        ("c" * 257, "2026-08-15T12:01:00Z"),
+        ("invalid token value", "2026-08-15T12:01:00Z"),
+        ("c" * 64, None),
+        ("c" * 64, ""),
+        ("c" * 64, "line\nbreak"),
+        ("c" * 64, "v" * 257),
+    ],
+)
+def test_cas_rejects_missing_or_malformed_operation_headers_before_write(monkeypatch, operation_token, source_version):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    writer = MagicMock()
+    monkeypatch.setattr(callbacks, "write_conversation_summary_cas", writer)
+    headers = {
+        "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+        "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"',
+    }
+    if operation_token is not None:
+        headers["X-Ella-Operation-Token"] = operation_token
+    if source_version is not None:
+        headers["X-Ella-Source-Version"] = source_version
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+
+    assert response.status_code == 428
+    writer.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "headers",
     [
         [
@@ -946,6 +1181,20 @@ def test_required_cas_rejects_missing_or_malformed_headers_before_write(monkeypa
             ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
             ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
         ],
+        [
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+            ("X-Ella-Operation-Token", "c" * 64),
+            ("X-Ella-Operation-Token", "d" * 64),
+            ("X-Ella-Source-Version", "2026-08-15T12:01:00Z"),
+        ],
+        [
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+            ("X-Ella-Operation-Token", "c" * 64),
+            ("X-Ella-Source-Version", "2026-08-15T12:01:00Z"),
+            ("X-Ella-Source-Version", "2026-08-15T12:01:00Z"),
+        ],
     ],
 )
 def test_cas_rejects_duplicate_raw_precondition_headers_before_write(monkeypatch, headers):
@@ -960,7 +1209,7 @@ def test_cas_rejects_duplicate_raw_precondition_headers_before_write(monkeypatch
     )
 
     assert response.status_code == 400
-    assert response.json() == {"detail": "Duplicate canonical source precondition headers"}
+    assert response.json() == {"detail": "Duplicate summary operation headers"}
     writer.assert_not_called()
 
 
@@ -1027,6 +1276,8 @@ def test_cas_wrong_owner_and_missing_conversation_never_write(monkeypatch):
                 service=_service_authority("uid-a"),
                 cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
                 if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+                operation_token="c" * 64,
+                source_version="2026-08-15T12:01:00Z",
             )
         )
     assert owner_error.value.status_code == 403
@@ -1053,6 +1304,8 @@ def test_cas_wrong_owner_and_missing_conversation_never_write(monkeypatch):
                 service=_service_authority("uid-a"),
                 cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
                 if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+                operation_token="c" * 64,
+                source_version="2026-08-15T12:01:00Z",
             )
         )
     assert missing_error.value.status_code == 404
@@ -1073,6 +1326,8 @@ def test_cas_sanitizer_failure_performs_zero_writes(monkeypatch):
                 service=_service_authority("uid-a"),
                 cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
                 if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{_cas_token(conversation)}"',
+                operation_token="c" * 64,
+                source_version="2026-08-15T12:01:00Z",
             )
         )
     assert excinfo.value.status_code == 422
@@ -1097,6 +1352,8 @@ def test_cas_failure_does_not_log_or_return_headers_secrets_or_payload(monkeypat
                 service=_service_authority("uid-a"),
                 cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
                 if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+                operation_token="c" * 64,
+                source_version="2026-08-15T12:01:00Z",
             )
         )
 
