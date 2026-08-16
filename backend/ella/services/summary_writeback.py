@@ -95,6 +95,9 @@ class ConversationSummaryOutcomeUnknownError(RuntimeError):
 SUMMARY_WRITEBACK_RECEIPT_FIELD = 'summary_writeback_receipt'
 SUMMARY_WRITEBACK_PENDING = 'pending_reconciliation'
 SUMMARY_WRITEBACK_COMPLETED = 'completed'
+SUMMARY_WRITEBACK_SUPERSEDED = 'superseded'
+CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD = 'canonical_summary_publication_sequence'
+CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD = 'canonical_summary_publication_sha256'
 OPERATION_RECEIPT_PUBLIC_FIELDS = (
     'token',
     'status',
@@ -105,6 +108,10 @@ OPERATION_RECEIPT_PUBLIC_FIELDS = (
 
 
 class CanonicalSummaryOperationConflictError(RuntimeError):
+    pass
+
+
+class _CanonicalSummaryRepairRetry(RuntimeError):
     pass
 
 
@@ -147,6 +154,7 @@ def _publication_post_image_sha256(conversation: dict[str, Any]) -> str:
             'transcript_segments': conversation.get('transcript_segments') or [],
             'summary_versions': conversation.get('summary_versions') or [],
             'active_summary_version_id': conversation.get('active_summary_version_id'),
+            'enrichment_state': conversation.get('enrichment_state') or {},
             'internal_assessment': conversation.get('internal_assessment') or {},
             'ella_tags': conversation.get('ella_tags') or [],
             'ella_signal': conversation.get('ella_signal') or {},
@@ -154,6 +162,24 @@ def _publication_post_image_sha256(conversation: dict[str, Any]) -> str:
             'status': conversation.get('status'),
         }
     )
+
+
+def _next_publication_sequence(conversation: dict[str, Any], receipt: Optional[dict[str, Any]] = None) -> int:
+    candidates = [conversation.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)]
+    if receipt:
+        candidates.extend(
+            (
+                receipt.get('publication_sequence'),
+                receipt.get('reconciliation_publication_sequence'),
+            )
+        )
+    normalized = []
+    for candidate in candidates:
+        try:
+            normalized.append(max(0, int(candidate or 0)))
+        except (TypeError, ValueError):
+            continue
+    return max(normalized or [0]) + 1
 
 
 def _receipt_matches_request(
@@ -187,11 +213,67 @@ def _receipt_matches_current_post_image(
         conversation_id=conversation_id,
         conversation=conversation,
     )
+    expected_post_image_sha256 = (
+        receipt.get('completed_post_image_sha256')
+        if receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED
+        else receipt.get('post_image_sha256')
+    )
     return (
         str(conversation.get('active_summary_version_id') or '') == str(receipt.get('active_summary_version_id') or '')
         and canonical_source_sha256(current_source) == receipt.get('canonical_source_post_image_sha256')
-        and _publication_post_image_sha256(conversation) == receipt.get('post_image_sha256')
+        and _publication_post_image_sha256(conversation) == expected_post_image_sha256
         and _active_summary_version_sha256(conversation) == receipt.get('active_summary_version_sha256')
+    )
+
+
+def _superseded_enrichment_state(
+    conversation: dict[str, Any],
+    receipt: dict[str, Any],
+    *,
+    updated_at: datetime,
+) -> dict[str, Any]:
+    current_state = dict(conversation.get('enrichment_state') or {})
+    receipt_owns_state = (
+        str(conversation.get('active_summary_version_id') or '') == str(receipt.get('active_summary_version_id') or '')
+        and current_state.get('status') == 'writeback_pending_canonical'
+        and current_state.get('trace_id') == receipt.get('trace_id')
+        and current_state.get('source') == receipt.get('summary_source')
+        and current_state.get('kind') == receipt.get('summary_kind')
+    )
+    if not receipt_owns_state:
+        return current_state
+    return {
+        **current_state,
+        'status': 'writeback_applied',
+        'pending': False,
+        'canonical_status': SUMMARY_WRITEBACK_SUPERSEDED,
+        'error': 'canonical_summary_operation_superseded',
+        'updated_at': updated_at,
+    }
+
+
+def _receipt_reconciliation_matches_current(
+    receipt: dict[str, Any],
+    *,
+    uid: str,
+    conversation_id: str,
+    conversation: dict[str, Any],
+) -> bool:
+    current_source = canonical_source_from_conversation(
+        uid=uid,
+        conversation_id=conversation_id,
+        conversation=conversation,
+    )
+    return (
+        _publication_post_image_sha256(conversation) == receipt.get('reconciliation_post_image_sha256')
+        and str(conversation.get('active_summary_version_id') or '')
+        == str(receipt.get('reconciliation_active_summary_version_id') or '')
+        and _active_summary_version_sha256(conversation) == receipt.get('reconciliation_active_summary_version_sha256')
+        and canonical_source_sha256(current_source) == receipt.get('reconciliation_canonical_source_sha256')
+        and int(conversation.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD) or 0)
+        == int(receipt.get('reconciliation_publication_sequence') or -1)
+        and str(conversation.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD) or '')
+        == str(receipt.get('reconciliation_publication_sha256') or '')
     )
 
 
@@ -210,6 +292,201 @@ def _cas_result(
         'status': receipt.get('status'),
         'operation_receipt': _public_operation_receipt(receipt),
     }
+
+
+async def _reconcile_superseded_canonical_publication(
+    *,
+    uid: str,
+    conversation_id: str,
+    operation_token: str,
+    payload_sha256: str,
+    source_sha256: str,
+    source_version: str,
+    canonical_writer: Callable[..., dict],
+    fallback_summary_source: str,
+    fallback_summary_kind: str,
+    fallback_trace_id: Optional[str],
+) -> dict[str, Any]:
+    """Restore the current canonical image before terminally superseding a stale receipt."""
+    last_receipt: dict[str, Any] = {}
+    for _attempt in range(3):
+        reconciliation_at = datetime.now(timezone.utc)
+
+        def prepare(current: dict[str, Any]):
+            current_receipt = current.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+            if current_receipt.get('token') != operation_token or not _receipt_matches_request(
+                current_receipt,
+                operation_token=operation_token,
+                payload_sha256=payload_sha256,
+                source_sha256=source_sha256,
+                source_version=source_version,
+            ):
+                raise CanonicalSummaryOperationConflictError('canonical_summary_reconciliation_conflict')
+            if current_receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED:
+                return {}, {
+                    'receipt': current_receipt,
+                    'conversation': current,
+                    'repair_required': False,
+                    'correction_audit': None,
+                }
+            if current_receipt.get('status') == SUMMARY_WRITEBACK_SUPERSEDED:
+                raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded')
+            if current_receipt.get('status') != SUMMARY_WRITEBACK_PENDING:
+                raise CanonicalSummaryOperationConflictError('canonical_summary_reconciliation_conflict')
+
+            if _receipt_reconciliation_matches_current(
+                current_receipt,
+                uid=uid,
+                conversation_id=conversation_id,
+                conversation=current,
+            ):
+                terminal_state = dict(current_receipt.get('reconciliation_terminal_enrichment_state') or {})
+                canonical_conversation = {
+                    **current,
+                    'id': conversation_id,
+                    'enrichment_state': terminal_state,
+                }
+                return {}, {
+                    'receipt': current_receipt,
+                    'conversation': canonical_conversation,
+                    'repair_required': True,
+                    'correction_audit': None,
+                }
+
+            publication_sequence = _next_publication_sequence(current, current_receipt)
+            source_post_image_sha256 = _publication_post_image_sha256(current)
+            terminal_state = _superseded_enrichment_state(
+                current,
+                current_receipt,
+                updated_at=reconciliation_at,
+            )
+            canonical_conversation = {
+                **current,
+                'id': conversation_id,
+                'enrichment_state': terminal_state,
+                CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD: publication_sequence,
+            }
+            publication_sha256 = _publication_post_image_sha256(canonical_conversation)
+            canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
+            current_source = canonical_source_from_conversation(
+                uid=uid,
+                conversation_id=conversation_id,
+                conversation=current,
+            )
+            reconciliation_receipt = {
+                **current_receipt,
+                'canonical_status': 'supersession_pending',
+                'reconciliation_post_image_sha256': source_post_image_sha256,
+                'reconciliation_terminal_post_image_sha256': publication_sha256,
+                'reconciliation_terminal_enrichment_state': terminal_state,
+                'reconciliation_active_summary_version_id': current.get('active_summary_version_id'),
+                'reconciliation_active_summary_version_sha256': _active_summary_version_sha256(current),
+                'reconciliation_canonical_source_sha256': canonical_source_sha256(current_source),
+                'reconciliation_publication_sequence': publication_sequence,
+                'reconciliation_publication_sha256': publication_sha256,
+                'updated_at': reconciliation_at,
+            }
+            canonical_conversation[SUMMARY_WRITEBACK_RECEIPT_FIELD] = reconciliation_receipt
+            return {
+                CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD: publication_sequence,
+                CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD: publication_sha256,
+                SUMMARY_WRITEBACK_RECEIPT_FIELD: reconciliation_receipt,
+            }, {
+                'receipt': reconciliation_receipt,
+                'conversation': canonical_conversation,
+                'repair_required': True,
+                'correction_audit': None,
+            }
+
+        prepared = conversations_db.update_conversation_with_builder(uid, conversation_id, prepare)
+        if prepared is None:
+            raise ConversationSummaryNotFoundError(conversation_id)
+        repair = prepared['result']
+        last_receipt = repair['receipt']
+        if not repair['repair_required']:
+            return last_receipt
+
+        canonical_conversation = repair['conversation']
+        repair_state = canonical_conversation.get('enrichment_state') or {}
+        try:
+            canonical_result = await asyncio.to_thread(
+                canonical_writer,
+                uid,
+                canonical_conversation,
+                summary_source=repair_state.get('source') or fallback_summary_source,
+                summary_kind=repair_state.get('kind') or fallback_summary_kind,
+                trace_id=repair_state.get('trace_id') or fallback_trace_id,
+            )
+            if not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True:
+                raise RuntimeError('canonical_write_unconfirmed')
+        except Exception:
+            logger.error('Canonical summary supersession remains pending after repair publication failure')
+            return last_receipt
+
+        superseded_at = datetime.now(timezone.utc)
+
+        def terminalize(current: dict[str, Any]):
+            current_receipt = current.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+            if current_receipt.get('token') != operation_token or not _receipt_matches_request(
+                current_receipt,
+                operation_token=operation_token,
+                payload_sha256=payload_sha256,
+                source_sha256=source_sha256,
+                source_version=source_version,
+            ):
+                raise CanonicalSummaryOperationConflictError('canonical_summary_reconciliation_conflict')
+            if current_receipt.get('status') == SUMMARY_WRITEBACK_SUPERSEDED:
+                raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded')
+            if current_receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED:
+                return {}, {
+                    'receipt': current_receipt,
+                    'conversation': current,
+                    'correction_audit': None,
+                }
+            if current_receipt.get(
+                'status'
+            ) != SUMMARY_WRITEBACK_PENDING or not _receipt_reconciliation_matches_current(
+                current_receipt,
+                uid=uid,
+                conversation_id=conversation_id,
+                conversation=current,
+            ):
+                raise _CanonicalSummaryRepairRetry('canonical_summary_repair_target_changed')
+            terminal_state = dict(current_receipt.get('reconciliation_terminal_enrichment_state') or {})
+            if _publication_post_image_sha256({**current, 'enrichment_state': terminal_state}) != current_receipt.get(
+                'reconciliation_terminal_post_image_sha256'
+            ):
+                raise _CanonicalSummaryRepairRetry('canonical_summary_repair_terminal_image_changed')
+            superseded_receipt = {
+                **current_receipt,
+                'status': SUMMARY_WRITEBACK_SUPERSEDED,
+                'canonical_status': SUMMARY_WRITEBACK_SUPERSEDED,
+                'updated_at': superseded_at,
+            }
+            return {
+                'enrichment_state': terminal_state,
+                SUMMARY_WRITEBACK_RECEIPT_FIELD: superseded_receipt,
+            }, {
+                'receipt': superseded_receipt,
+                'conversation': current,
+                'correction_audit': None,
+            }
+
+        try:
+            terminalized = conversations_db.update_conversation_with_builder(uid, conversation_id, terminalize)
+            if terminalized is None:
+                raise ConversationSummaryOutcomeUnknownError('canonical_summary_supersession_missing')
+        except _CanonicalSummaryRepairRetry:
+            continue
+        except CanonicalSummaryOperationConflictError:
+            raise
+        except Exception:
+            logger.error('Canonical summary repair was published but terminal supersession remains unconfirmed')
+            return last_receipt
+        raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded')
+
+    logger.error('Canonical summary kept pending because its repair target changed repeatedly')
+    return last_receipt
 
 
 async def write_conversation_summary_cas(
@@ -268,6 +545,8 @@ async def write_conversation_summary_cas(
     def build_update(conversation: dict[str, Any]):
         existing_receipt = conversation.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
         if existing_receipt.get('token') == operation_token:
+            if existing_receipt.get('status') == SUMMARY_WRITEBACK_SUPERSEDED:
+                raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded')
             if existing_receipt.get('status') not in {SUMMARY_WRITEBACK_PENDING, SUMMARY_WRITEBACK_COMPLETED}:
                 raise CanonicalSummaryOperationConflictError('operation_receipt_invalid')
             if not _receipt_matches_request(
@@ -278,18 +557,20 @@ async def write_conversation_summary_cas(
                 source_version=source_version,
             ):
                 raise CanonicalSummaryOperationConflictError('operation_token_reused')
-            if not _receipt_matches_current_post_image(
+            post_image_matches = _receipt_matches_current_post_image(
                 existing_receipt,
                 uid=uid,
                 conversation_id=conversation_id,
                 conversation=conversation,
-            ):
+            )
+            if existing_receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED and not post_image_matches:
                 raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded')
             return {}, {
                 'receipt': existing_receipt,
                 'conversation': conversation,
                 'correction_audit': None,
                 'idempotent_replay': True,
+                'repair_required': not post_image_matches,
             }
         if existing_receipt.get('status') == SUMMARY_WRITEBACK_PENDING:
             raise CanonicalSummaryReconciliationPendingError('canonical_summary_reconciliation_pending')
@@ -381,11 +662,25 @@ async def write_conversation_summary_cas(
             'ella_tags': update_data.get('ella_tags', conversation.get('ella_tags') or []),
             'ella_signal': update_data.get('ella_signal', conversation.get('ella_signal')),
         }
+        publication_sequence = _next_publication_sequence(conversation, existing_receipt)
         post_image_source = canonical_source_from_conversation(
             uid=uid,
             conversation_id=conversation_id,
             conversation=canonical_conversation,
         )
+        post_image_sha256 = _publication_post_image_sha256(canonical_conversation)
+        confirmed_state = {
+            **update_data['enrichment_state'],
+            'status': 'writeback_applied',
+            'pending': False,
+            'canonical_status': 'completed',
+            'error': None,
+            'updated_at': state_updated_at,
+        }
+        completed_conversation = {
+            **canonical_conversation,
+            'enrichment_state': confirmed_state,
+        }
         receipt = {
             'contract': ELLA_CANONICAL_SOURCE_CONTRACT,
             'token': operation_token,
@@ -395,21 +690,31 @@ async def write_conversation_summary_cas(
             'source_version': source_version,
             'canonical_status': 'pending',
             'correction_audit_status': 'applied' if correction_id else 'not_requested',
+            'summary_source': summary_source,
+            'summary_kind': summary_kind,
+            'trace_id': trace_id,
             'active_summary_version_id': version_update['active_summary_version_id'],
             'active_summary_version_sha256': _active_summary_version_sha256(canonical_conversation),
             'canonical_source_post_image_sha256': canonical_source_sha256(post_image_source),
-            'post_image_sha256': _publication_post_image_sha256(canonical_conversation),
+            'post_image_sha256': post_image_sha256,
+            'completed_post_image_sha256': _publication_post_image_sha256(completed_conversation),
+            'publication_sequence': publication_sequence,
             'updated_fields': list(update_data.keys()),
             'created_at': state_updated_at,
             'updated_at': state_updated_at,
         }
+        update_data[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+        update_data[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = post_image_sha256
         update_data[SUMMARY_WRITEBACK_RECEIPT_FIELD] = receipt
+        canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+        canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = post_image_sha256
         canonical_conversation[SUMMARY_WRITEBACK_RECEIPT_FIELD] = receipt
         return update_data, {
             'receipt': receipt,
             'conversation': canonical_conversation,
             'correction_audit': correction_audit,
             'idempotent_replay': False,
+            'repair_required': False,
         }
 
     try:
@@ -450,12 +755,15 @@ async def write_conversation_summary_cas(
             payload_sha256=payload_sha256,
             source_sha256=expected_canonical_source_sha256,
             source_version=source_version,
-        ) or not _receipt_matches_current_post_image(
+        ):
+            raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded') from error
+        post_image_matches = _receipt_matches_current_post_image(
             receipt,
             uid=uid,
             conversation_id=conversation_id,
             conversation=conversation,
-        ):
+        )
+        if receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED and not post_image_matches:
             raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded') from error
         transaction_result = {
             'conversation': conversation,
@@ -465,6 +773,7 @@ async def write_conversation_summary_cas(
                 'conversation': conversation,
                 'correction_audit': None,
                 'idempotent_replay': True,
+                'repair_required': not post_image_matches,
             },
         }
     if transaction_result is None:
@@ -473,6 +782,25 @@ async def write_conversation_summary_cas(
     result = transaction_result['result']
     receipt = result['receipt']
     idempotent_replay = bool(result['idempotent_replay'])
+    if result.get('repair_required'):
+        repaired_receipt = await _reconcile_superseded_canonical_publication(
+            uid=uid,
+            conversation_id=conversation_id,
+            operation_token=operation_token,
+            payload_sha256=payload_sha256,
+            source_sha256=expected_canonical_source_sha256,
+            source_version=source_version,
+            canonical_writer=canonical_writer,
+            fallback_summary_source=summary_source,
+            fallback_summary_kind=summary_kind,
+            fallback_trace_id=trace_id,
+        )
+        return _cas_result(
+            conversation_id=conversation_id,
+            receipt=repaired_receipt,
+            sanitizer_warnings=sanitized.warnings,
+            idempotent_replay=idempotent_replay,
+        )
     if receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED:
         return _cas_result(
             conversation_id=conversation_id,
@@ -522,24 +850,39 @@ async def write_conversation_summary_cas(
 
     def finalize(current: dict[str, Any]):
         current_receipt = current.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
-        if (
-            current_receipt.get('token') != operation_token
-            or current_receipt.get('status') != SUMMARY_WRITEBACK_PENDING
-            or not _receipt_matches_request(
-                current_receipt,
-                operation_token=operation_token,
-                payload_sha256=payload_sha256,
-                source_sha256=expected_canonical_source_sha256,
-                source_version=source_version,
-            )
-            or not _receipt_matches_current_post_image(
-                current_receipt,
-                uid=uid,
-                conversation_id=conversation_id,
-                conversation=current,
-            )
+        if current_receipt.get('token') != operation_token or not _receipt_matches_request(
+            current_receipt,
+            operation_token=operation_token,
+            payload_sha256=payload_sha256,
+            source_sha256=expected_canonical_source_sha256,
+            source_version=source_version,
         ):
             raise CanonicalSummaryOperationConflictError('canonical_summary_finalize_conflict')
+        if current_receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED:
+            return {}, {
+                'receipt': current_receipt,
+                'conversation': current,
+                'correction_audit': None,
+                'idempotent_replay': True,
+                'repair_required': False,
+            }
+        if current_receipt.get('status') == SUMMARY_WRITEBACK_SUPERSEDED:
+            raise CanonicalSummaryOperationConflictError('canonical_summary_operation_superseded')
+        if current_receipt.get('status') != SUMMARY_WRITEBACK_PENDING:
+            raise CanonicalSummaryOperationConflictError('canonical_summary_finalize_conflict')
+        if not _receipt_matches_current_post_image(
+            current_receipt,
+            uid=uid,
+            conversation_id=conversation_id,
+            conversation=current,
+        ):
+            return {}, {
+                'receipt': current_receipt,
+                'conversation': current,
+                'correction_audit': None,
+                'idempotent_replay': idempotent_replay,
+                'repair_required': True,
+            }
         completed_receipt = {
             **current_receipt,
             'status': SUMMARY_WRITEBACK_COMPLETED,
@@ -554,6 +897,7 @@ async def write_conversation_summary_cas(
             'conversation': current,
             'correction_audit': None,
             'idempotent_replay': idempotent_replay,
+            'repair_required': False,
         }
 
     try:
@@ -567,6 +911,26 @@ async def write_conversation_summary_cas(
         return _cas_result(
             conversation_id=conversation_id,
             receipt=receipt,
+            sanitizer_warnings=sanitized.warnings,
+            idempotent_replay=idempotent_replay,
+        )
+
+    if finalized['result'].get('repair_required'):
+        repaired_receipt = await _reconcile_superseded_canonical_publication(
+            uid=uid,
+            conversation_id=conversation_id,
+            operation_token=operation_token,
+            payload_sha256=payload_sha256,
+            source_sha256=expected_canonical_source_sha256,
+            source_version=source_version,
+            canonical_writer=canonical_writer,
+            fallback_summary_source=summary_source,
+            fallback_summary_kind=summary_kind,
+            fallback_trace_id=trace_id,
+        )
+        return _cas_result(
+            conversation_id=conversation_id,
+            receipt=repaired_receipt,
             sanitizer_warnings=sanitized.warnings,
             idempotent_replay=idempotent_replay,
         )
@@ -789,6 +1153,39 @@ async def write_conversation_summary(
     # A completed CAS receipt is superseded by this later legacy write. A
     # pending receipt is rejected transactionally by the database helper.
     update_data[SUMMARY_WRITEBACK_RECEIPT_FIELD] = None
+    confirmed_state = {
+        **update_data['enrichment_state'],
+        'status': 'writeback_applied',
+        'pending': False,
+        'canonical_status': 'completed',
+        'error': None,
+    }
+    canonical_base = dict(conversation)
+    canonical_conversation = {
+        **canonical_base,
+        'id': conversation_id,
+        'structured': structured,
+        'summary_versions': version_update['summary_versions'],
+        'active_summary_version_id': version_update['active_summary_version_id'],
+        'enrichment_state': confirmed_state,
+        'internal_assessment': update_data.get('internal_assessment', canonical_base.get('internal_assessment')),
+        'ella_tags': update_data.get('ella_tags', canonical_base.get('ella_tags') or []),
+        'ella_signal': update_data.get('ella_signal', canonical_base.get('ella_signal')),
+    }
+    confirmed_correction_state: Optional[dict[str, Any]] = None
+    if correction_id:
+        confirmed_correction_state = {
+            **update_data['correction_state'],
+            'status': 'applied',
+            'pending': False,
+        }
+        canonical_conversation['correction_state'] = confirmed_correction_state
+    publication_sequence = _next_publication_sequence(conversation, receipt)
+    publication_sha256 = _publication_post_image_sha256(canonical_conversation)
+    update_data[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+    update_data[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
+    canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+    canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
 
     if source_mutation_guard is not None:
         await asyncio.to_thread(source_mutation_guard)
@@ -808,34 +1205,6 @@ async def write_conversation_summary(
         raise CanonicalSummaryReconciliationPendingError('canonical_summary_reconciliation_pending') from error
     if not updated:
         raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
-    canonical_base = dict(conversation)
-    canonical_conversation = {
-        **canonical_base,
-        'id': conversation_id,
-        'structured': structured,
-        'summary_versions': version_update['summary_versions'],
-        'active_summary_version_id': version_update['active_summary_version_id'],
-        'enrichment_state': update_data['enrichment_state'],
-        'internal_assessment': update_data.get('internal_assessment', canonical_base.get('internal_assessment')),
-        'ella_tags': update_data.get('ella_tags', canonical_base.get('ella_tags') or []),
-        'ella_signal': update_data.get('ella_signal', canonical_base.get('ella_signal')),
-    }
-    confirmed_state = {
-        **update_data['enrichment_state'],
-        'status': 'writeback_applied',
-        'pending': False,
-        'canonical_status': 'completed',
-        'error': None,
-    }
-    canonical_conversation['enrichment_state'] = confirmed_state
-    confirmed_correction_state: Optional[dict[str, Any]] = None
-    if correction_id:
-        confirmed_correction_state = {
-            **update_data['correction_state'],
-            'status': 'applied',
-            'pending': False,
-        }
-        canonical_conversation['correction_state'] = confirmed_correction_state
     canonical_result: Optional[dict[str, Any]] = None
     canonical_error: Optional[Exception] = None
     try:
