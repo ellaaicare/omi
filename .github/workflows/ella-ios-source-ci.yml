@@ -197,6 +197,7 @@ jobs:
           set -euo pipefail
           swiftc -warnings-as-errors \
             app/ios/Runner/AppleRemindersSyncIdempotency.swift \
+            app/ios/Runner/AppleRemindersSyncService.swift \
             app/ios/Tests/AppleRemindersSyncIdempotencyTests.swift \
             -o "$RUNNER_TEMP/apple-reminders-sync-idempotency-tests"
           "$RUNNER_TEMP/apple-reminders-sync-idempotency-tests"

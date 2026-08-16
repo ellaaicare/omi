@@ -415,6 +415,9 @@ extension FlutterError: Error {}
   // MARK: - Silent Push for Apple Reminders Auto-Sync
 
   private let syncEventStore = EKEventStore()
+  private lazy var appleRemindersAutoSyncService = AppleRemindersSyncService(
+      sink: EventKitAppleRemindersSyncSink(eventStore: syncEventStore)
+  )
 
   override func application(
       _ application: UIApplication,
@@ -507,10 +510,13 @@ extension FlutterError: Error {}
 
       // iOS 17+ uses .fullAccess and .writeOnly, older iOS uses .authorized
       var hasAccess = false
+      var canReconcile = false
       if #available(iOS 17.0, *) {
           hasAccess = status == .fullAccess || status == .writeOnly
+          canReconcile = status == .fullAccess
       } else {
           hasAccess = status == .authorized
+          canReconcile = status == .authorized
       }
 
       guard hasAccess else {
@@ -527,31 +533,27 @@ extension FlutterError: Error {}
       }()
 
       let idempotencyKey = (userInfo["idempotency_key"] as? String) ?? actionItemId
-      let outcome = AppleRemindersSyncIdempotency.shared.performOnce(idempotencyKey: idempotencyKey) {
-          let reminder = EKReminder(eventStore: syncEventStore)
-          reminder.title = description
-          reminder.notes = "From Omi"
-          reminder.calendar = syncEventStore.defaultCalendarForNewReminders()
-
-          if let due = dueDate {
-              reminder.dueDateComponents = Calendar.current.dateComponents(
-                  [.year, .month, .day, .hour, .minute], from: due
-              )
+      appleRemindersAutoSyncService.sync(
+          idempotencyKey: idempotencyKey,
+          title: description,
+          dueDate: dueDate,
+          canReconcile: canReconcile
+      ) { [weak self] outcome in
+          switch outcome {
+          case .performed:
+              // Notify Flutter to mark as exported via API
+              DispatchQueue.main.async {
+                  self?.appleRemindersChannel?.invokeMethod(
+                      "markExported",
+                      arguments: ["action_item_id": actionItemId]
+                  )
+              }
+              completionHandler(.newData)
+          case .alreadyCompleted:
+              completionHandler(.noData)
+          case .ambiguous, .failed:
+              completionHandler(.failed)
           }
-          try syncEventStore.save(reminder, commit: true)
-      }
-
-      switch outcome {
-      case .performed:
-          // Notify Flutter to mark as exported via API
-          DispatchQueue.main.async {
-              self.appleRemindersChannel?.invokeMethod("markExported", arguments: ["action_item_id": actionItemId])
-          }
-          completionHandler(.newData)
-      case .alreadyCompleted:
-          completionHandler(.noData)
-      case .failed:
-          completionHandler(.failed)
       }
   }
 

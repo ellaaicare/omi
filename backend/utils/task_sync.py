@@ -7,6 +7,19 @@ import database.action_items as action_items_db
 import database.task_sync as task_sync_db
 from utils.notifications import send_apple_reminders_sync_push
 
+TASK_SYNC_AMBIGUOUS_REASON = "task_sync_outbound_ambiguous"
+
+
+def _ambiguous_task_sync_result(platform: str) -> dict:
+    return {
+        "synced": False,
+        "platform": platform,
+        "reason": TASK_SYNC_AMBIGUOUS_REASON,
+        "receipt_state": task_sync_db.TASK_SYNC_OUTBOUND_STARTED,
+        "automatic_retry_safe": False,
+        "operator_reconciliation_required": True,
+    }
+
 
 async def auto_sync_action_item(uid: str, action_item: dict, idempotency_key: Optional[str] = None) -> dict:
     """
@@ -43,6 +56,8 @@ async def auto_sync_action_item(uid: str, action_item: dict, idempotency_key: Op
             )
             if claim.get('outcome') == 'completed':
                 return claim.get('result') or {"synced": False, "reason": "completed_without_result"}
+            if claim.get('outcome') == 'ambiguous':
+                return _ambiguous_task_sync_result(default_app)
             if claim.get('outcome') != 'claimed':
                 return {"synced": False, "platform": default_app, "reason": "sync_in_progress"}
 
@@ -60,6 +75,8 @@ async def auto_sync_action_item(uid: str, action_item: dict, idempotency_key: Op
             )
 
         if not idempotency_key:
+            return result
+        if result.get('reason') == TASK_SYNC_AMBIGUOUS_REASON:
             return result
 
         completion = task_sync_db.complete_task_sync(
@@ -114,6 +131,8 @@ async def _sync_to_cloud_service(
         )
         return {"synced": True, "platform": app_key, "external_task_id": result.get("external_task_id")}
 
+    if result.get("error_code") == "ambiguous_outbound":
+        return _ambiguous_task_sync_result(app_key)
     return {"synced": False, "platform": app_key, "error": result.get("error")}
 
 
@@ -125,25 +144,32 @@ def _sync_to_apple_reminders(
 ) -> dict:
     """Send silent push to device for Apple Reminders."""
     if idempotency_key:
-        claim = task_sync_db.observe_task_sync_claim(
+        boundary = task_sync_db.begin_task_sync_egress(
             uid,
             idempotency_key,
             action_item['id'],
             'apple_reminders',
             claim_token,
         )
-        if claim.get('outcome') == 'completed':
-            return claim.get('result') or {"synced": False, "reason": "completed_without_result"}
-        if claim.get('outcome') != 'claimed':
+        if boundary.get('outcome') == 'completed':
+            return boundary.get('result') or {"synced": False, "reason": "completed_without_result"}
+        if boundary.get('outcome') == 'ambiguous':
+            return _ambiguous_task_sync_result("apple_reminders")
+        if boundary.get('outcome') != task_sync_db.TASK_SYNC_OUTBOUND_STARTED:
             return {"synced": False, "platform": "apple_reminders", "reason": "stale_sync_claim"}
 
-    success = send_apple_reminders_sync_push(
-        user_id=uid,
-        action_item_id=action_item["id"],
-        description=action_item["description"],
-        due_at=action_item.get("due_at"),
-        idempotency_key=idempotency_key,
-    )
+    try:
+        success = send_apple_reminders_sync_push(
+            user_id=uid,
+            action_item_id=action_item["id"],
+            description=action_item["description"],
+            due_at=action_item.get("due_at"),
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        if idempotency_key:
+            return _ambiguous_task_sync_result("apple_reminders")
+        raise
 
     return {"synced": success, "platform": "apple_reminders", "pending_device": True}
 
