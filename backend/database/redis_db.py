@@ -400,28 +400,106 @@ def set_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 3
     r.expire(f'users:{uid}:in_progress_memory_id', ttl)
 
 
-def refresh_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300) -> str:
-    """Refresh or recover an exact active capture pointer without overwriting a successor."""
-    key = f'users:{uid}:in_progress_memory_id'
+def acquire_capture_stream_authority(
+    uid: str,
+    generation_id: str,
+    conversation_id: str,
+    ttl: int = 300,
+) -> str:
+    """Install a new stream generation only while the bounded active pointer is absent."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
     result = r.eval(
         """
+        -- capture_authority:acquire
+        if redis.call('GET', KEYS[1]) then
+            return 0
+        end
+        redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+        redis.call('SET', KEYS[2], ARGV[3])
+        return 1
+        """,
+        2,
+        pointer_key,
+        authority_key,
+        conversation_id,
+        ttl,
+        f'active:{generation_id}:{conversation_id}',
+    )
+    return 'acquired' if result == 1 else 'mismatch'
+
+
+def adopt_capture_stream_authority(
+    uid: str,
+    generation_id: str,
+    conversation_id: str,
+    ttl: int = 300,
+) -> str:
+    """Transfer an exact resumable conversation to a newly connected stream generation."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
+    adopted = r.eval(
+        """
+        -- capture_authority:adopt
+        local pointer = redis.call('GET', KEYS[1])
+        if pointer and pointer ~= ARGV[1] then
+            return 0
+        end
+        local authority = redis.call('GET', KEYS[2])
+        local suffix = ':' .. ARGV[1]
+        if authority then
+            local active = string.sub(authority, 1, 7) == 'active:'
+            local same_conversation = string.sub(authority, -string.len(suffix)) == suffix
+            if not active or not same_conversation then
+                return 0
+            end
+        end
+        redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+        redis.call('SET', KEYS[2], ARGV[3])
+        return 1
+        """,
+        2,
+        pointer_key,
+        authority_key,
+        conversation_id,
+        ttl,
+        f'active:{generation_id}:{conversation_id}',
+    )
+    return 'adopted' if adopted == 1 else 'mismatch'
+
+
+def refresh_in_progress_conversation_id(
+    uid: str,
+    generation_id: str,
+    conversation_id: str,
+    ttl: int = 300,
+) -> str:
+    """Refresh or recover only the exact durable active stream generation."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
+    result = r.eval(
+        """
+        -- capture_authority:refresh
+        if redis.call('GET', KEYS[2]) ~= ARGV[3] then
+            return 0
+        end
         local current = redis.call('GET', KEYS[1])
         if current == ARGV[1] then
             redis.call('EXPIRE', KEYS[1], ARGV[2])
             return 1
         end
         if not current then
-            local restored = redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2], 'NX')
-            if restored then
-                return 2
-            end
+            redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+            return 2
         end
         return 0
         """,
-        1,
-        key,
+        2,
+        pointer_key,
+        authority_key,
         conversation_id,
         ttl,
+        f'active:{generation_id}:{conversation_id}',
     )
     if result == 1:
         return 'refreshed'
@@ -432,47 +510,76 @@ def refresh_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int
 
 def rotate_in_progress_conversation_id(
     uid: str,
+    generation_id: str,
     current_conversation_id: str,
     new_conversation_id: str,
     ttl: int = 300,
 ) -> str:
-    """CAS an owned active capture pointer to its same-stream successor."""
-    key = f'users:{uid}:in_progress_memory_id'
+    """CAS an exact active generation to its same-stream conversation successor."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
     rotated = r.eval(
         """
-        if redis.call('GET', KEYS[1]) == ARGV[1] then
+        -- capture_authority:rotate
+        if redis.call('GET', KEYS[1]) == ARGV[1] and redis.call('GET', KEYS[2]) == ARGV[4] then
             redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            redis.call('SET', KEYS[2], ARGV[5])
             return 1
         end
         return 0
         """,
-        1,
-        key,
+        2,
+        pointer_key,
+        authority_key,
         current_conversation_id,
         new_conversation_id,
         ttl,
+        f'active:{generation_id}:{current_conversation_id}',
+        f'active:{generation_id}:{new_conversation_id}',
     )
     return 'rotated' if rotated else 'mismatch'
 
 
 def claim_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int = 300) -> str:
-    """CAS the exact capture pointer to a processing fence without touching a successor."""
-    key = f'users:{uid}:in_progress_memory_id'
+    """CAS the exact active generation to a processing fence without touching a successor."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
     processing_fence = f'processing:{conversation_id}'
     result = r.eval(
         """
+        -- capture_authority:claim
         local current = redis.call('GET', KEYS[1])
-        if current == ARGV[1] then
+        local authority = redis.call('GET', KEYS[2])
+        local suffix = ':' .. ARGV[1]
+        local active_authority = authority and string.sub(authority, 1, 7) == 'active:'
+            and string.sub(authority, -string.len(suffix)) == suffix
+        if current == ARGV[1] or (not current and active_authority) then
+            if authority and not active_authority then
+                return 0
+            end
+            if not authority then
+                authority = 'active:legacy:' .. ARGV[1]
+            end
             redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            redis.call('SET', KEYS[2], 'finalizing:' .. string.sub(authority, 8))
             return 1
         end
         if current == ARGV[2] then
-            return 2
+            if not authority then
+                redis.call('SET', KEYS[2], 'finalizing:legacy:' .. ARGV[1])
+                return 2
+            end
+            local finalizing_authority = string.sub(authority, 1, 11) == 'finalizing:'
+                and string.sub(authority, -string.len(suffix)) == suffix
+            if finalizing_authority then
+                return 2
+            end
         end
         return 0
         """,
-        1,
-        key,
+        2,
+        pointer_key,
+        authority_key,
         conversation_id,
         processing_fence,
         ttl,
@@ -485,24 +592,111 @@ def claim_in_progress_conversation_id(uid: str, conversation_id: str, ttl: int =
 
 
 def restore_in_progress_conversation_id_if_matches(uid: str, conversation_id: str, ttl: int = 300) -> bool:
-    """Restore an exact processing fence to a bounded active pointer after a pre-claim failure."""
-    key = f'users:{uid}:in_progress_memory_id'
+    """Restore the exact finalizing generation after a pre-durable-claim failure."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
     processing_fence = f'processing:{conversation_id}'
     restored = r.eval(
         """
-        if redis.call('GET', KEYS[1]) == ARGV[1] then
+        -- capture_authority:restore
+        local authority = redis.call('GET', KEYS[2])
+        local suffix = ':' .. ARGV[2]
+        local finalizing_authority = authority and string.sub(authority, 1, 11) == 'finalizing:'
+            and string.sub(authority, -string.len(suffix)) == suffix
+        local current = redis.call('GET', KEYS[1])
+        if (current == ARGV[1] or not current) and finalizing_authority then
             redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            redis.call('SET', KEYS[2], 'active:' .. string.sub(authority, 12))
             return 1
         end
         return 0
         """,
-        1,
-        key,
+        2,
+        pointer_key,
+        authority_key,
         processing_fence,
         conversation_id,
         ttl,
     )
     return bool(restored)
+
+
+def terminalize_in_progress_conversation_id(uid: str, conversation_id: str) -> str:
+    """Persist terminal authority and remove only the matching active/processing pointer."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
+    processing_fence = f'processing:{conversation_id}'
+    terminalized = r.eval(
+        """
+        -- capture_authority:terminalize
+        local current = redis.call('GET', KEYS[1])
+        local authority = redis.call('GET', KEYS[2])
+        local suffix = ':' .. ARGV[1]
+        if authority and string.sub(authority, 1, 9) == 'terminal:'
+            and string.sub(authority, -string.len(suffix)) == suffix then
+            if not current then
+                return 2
+            end
+            return 0
+        end
+        if current and current ~= ARGV[1] and current ~= ARGV[2] then
+            return 0
+        end
+        if authority then
+            local same_conversation = string.sub(authority, -string.len(suffix)) == suffix
+            local active = string.sub(authority, 1, 7) == 'active:'
+            local finalizing = string.sub(authority, 1, 11) == 'finalizing:'
+            if not same_conversation or (not active and not finalizing) then
+                return 0
+            end
+            if active then
+                authority = string.sub(authority, 8)
+            else
+                authority = string.sub(authority, 12)
+            end
+        else
+            authority = 'legacy:' .. ARGV[1]
+        end
+        redis.call('SET', KEYS[2], 'terminal:' .. authority)
+        if current then
+            redis.call('DEL', KEYS[1])
+        end
+        return 1
+        """,
+        2,
+        pointer_key,
+        authority_key,
+        conversation_id,
+        processing_fence,
+    )
+    if terminalized == 1:
+        return 'terminalized'
+    if terminalized == 2:
+        return 'already_terminal'
+    return 'mismatch'
+
+
+def release_capture_stream_authority_if_matches(uid: str, generation_id: str, conversation_id: str) -> bool:
+    """Remove only a just-acquired generation whose durable stub installation failed."""
+    pointer_key = f'users:{uid}:in_progress_memory_id'
+    authority_key = f'users:{uid}:capture_stream_authority'
+    released = r.eval(
+        """
+        -- capture_authority:release_failed_acquire
+        if redis.call('GET', KEYS[1]) == ARGV[1] and redis.call('GET', KEYS[2]) == ARGV[2] then
+            redis.call('DEL', KEYS[1])
+            redis.call('DEL', KEYS[2])
+            return 1
+        end
+        return 0
+        """,
+        2,
+        pointer_key,
+        authority_key,
+        conversation_id,
+        f'active:{generation_id}:{conversation_id}',
+    )
+    return bool(released)
 
 
 def remove_in_progress_conversation_id_if_matches(uid: str, expected_value: str) -> bool:

@@ -426,7 +426,7 @@ async def _stream_handler(
                 websocket.close(code=websocket_close_code, reason="Capture authority lost")
             )
 
-    capture_authority = CaptureStreamAuthority(uid, _on_capture_authority_lost)
+    capture_authority = CaptureStreamAuthority(uid, session_id, _on_capture_authority_lost)
 
     # === Speaker Identification State ===
     RING_BUFFER_DURATION = 60.0  # seconds
@@ -831,6 +831,10 @@ async def _stream_handler(
         nonlocal current_conversation_id
 
         if existing_conversation := retrieve_in_progress_conversation(uid):
+            current_conversation_id = existing_conversation['id']
+            if not capture_authority.adopt(current_conversation_id, 'resume'):
+                return None
+
             finished_at = datetime.fromisoformat(existing_conversation['finished_at'].isoformat())
             seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
             if seconds_since_last_segment >= conversation_creation_timeout:
@@ -844,9 +848,6 @@ async def _stream_handler(
                 return existing_conversation["id"]
 
             # Continue with the existing conversation
-            current_conversation_id = existing_conversation['id']
-            if not capture_authority.refresh(current_conversation_id, 'resume'):
-                return None
             print(
                 f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
                 uid,

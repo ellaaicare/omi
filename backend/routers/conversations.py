@@ -76,6 +76,7 @@ def process_in_progress_conversation(
         ConversationStatus.failed.value,
     }
     if status in settled_statuses:
+        redis_db.terminalize_in_progress_conversation_id(uid, conversation_id)
         return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
     if status != ConversationStatus.in_progress.value:
         raise HTTPException(status_code=409, detail="Conversation cannot be processed from its current state")
@@ -122,7 +123,7 @@ def process_in_progress_conversation(
         return CreateConversationResponse(conversation=conversation, messages=messages)
     finally:
         if durable_claim_succeeded:
-            redis_db.remove_in_progress_conversation_id_if_matches(uid, f'processing:{conversation_id}')
+            redis_db.terminalize_in_progress_conversation_id(uid, conversation_id)
         elif pointer_claim == 'claimed':
             redis_db.restore_in_progress_conversation_id_if_matches(uid, conversation_id)
 
