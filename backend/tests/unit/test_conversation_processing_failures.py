@@ -3,6 +3,7 @@ import asyncio
 import binascii
 import os
 import sys
+import threading
 import types
 
 import pytest
@@ -1016,6 +1017,50 @@ def test_capture_successor_installation_is_one_atomic_transaction_without_rollba
     assert transaction.updates[0][1]['capture_state'] == 'drained'
 
 
+def test_capture_successor_install_publishes_each_exact_ready_tuple(monkeypatch):
+    authority = capture_authority.CaptureStreamAuthority('authenticated-user', 'generation-a', 'owner-a')
+    installs = []
+    published = []
+
+    monkeypatch.setattr(
+        authority,
+        'acquire',
+        lambda conversation, checkpoint: installs.append(('acquire', conversation['id'], checkpoint)) or True,
+    )
+    monkeypatch.setattr(
+        authority,
+        'rotate',
+        lambda current_id, conversation, checkpoint: installs.append(
+            ('rotate', current_id, conversation['id'], checkpoint)
+        )
+        or True,
+    )
+
+    async def publish(protocol_version, conversation_id, generation, owner_token):
+        published.append((protocol_version, conversation_id, generation, owner_token))
+        return True
+
+    async def scenario():
+        initial = await authority.install_and_publish_ready({'id': 'capture-a'}, 'initial', publish)
+        successor = await authority.install_and_publish_ready(
+            {'id': 'capture-b'},
+            'rotation',
+            publish,
+            expected_conversation_id='capture-a',
+        )
+        return initial, successor
+
+    assert asyncio.run(scenario()) == (True, True)
+    assert installs == [
+        ('acquire', 'capture-a', 'initial'),
+        ('rotate', 'capture-a', 'capture-b', 'rotation'),
+    ]
+    assert published == [
+        (2, 'capture-a', 'generation-a', 'owner-a'),
+        (2, 'capture-b', 'generation-a', 'owner-a'),
+    ]
+
+
 def test_capture_drain_waits_for_final_segment_persistence_scheduling_race():
     async def scenario():
         drained = asyncio.Event()
@@ -1071,3 +1116,171 @@ def test_capture_drain_body_rejects_missing_wrong_and_stale_authority_fields():
         'generation-a',
         'owner-a',
     )
+
+
+def test_capture_pre_v2_clients_are_rejected_before_creation_and_leave_zero_active_state():
+    class _Socket:
+        def __init__(self):
+            self.closes = []
+
+        async def close(self, *, code, reason):
+            self.closes.append((code, reason))
+
+    async def scenario(protocol_version):
+        socket = _Socket()
+        active = {'created': 0, 'drained': 0, 'finalized': 0}
+        accepted = await capture_authority.require_capture_protocol_before_creation(socket, protocol_version)
+        if accepted:
+            active['created'] += 1
+        return accepted, socket.closes, active
+
+    for installed_protocol in (0, 1):
+        accepted, closes, active = asyncio.run(scenario(installed_protocol))
+        assert accepted is False
+        assert closes == [
+            (
+                capture_authority.CAPTURE_PROTOCOL_UPGRADE_CLOSE_CODE,
+                capture_authority.CAPTURE_PROTOCOL_UPGRADE_REASON,
+            )
+        ]
+        assert active == {'created': 0, 'drained': 0, 'finalized': 0}
+
+    accepted, closes, active = asyncio.run(scenario(2))
+    assert accepted is True
+    assert closes == []
+    assert active['created'] == 1
+
+
+def test_capture_drain_rechecks_idle_after_provider_returns_with_late_tail():
+    async def scenario():
+        drained = asyncio.Event()
+        drained.set()  # The old bug observed this idle indication too early.
+        tasks = set()
+        durable = []
+
+        async def persist_tail():
+            await asyncio.sleep(0)
+            durable.append('late-soniox-tail')
+            drained.set()
+
+        async def provider_receiver():
+            await asyncio.sleep(0)
+            drained.clear()
+            persistence = asyncio.create_task(persist_tail())
+            tasks.add(persistence)
+            persistence.add_done_callback(tasks.discard)
+
+        async def finish_provider():
+            receiver = asyncio.create_task(provider_receiver())
+            tasks.add(receiver)
+            receiver.add_done_callback(tasks.discard)
+
+        flushed = await capture_authority.flush_capture_before_drained(finish_provider, tasks, drained, timeout=1)
+        return flushed, durable, tasks
+
+    flushed, durable, tasks = asyncio.run(scenario())
+    assert flushed is True
+    assert durable == ['late-soniox-tail']
+    assert tasks == set()
+
+
+def test_capture_finalization_expired_lease_cannot_be_renewed_or_persisted():
+    now = datetime(2026, 8, 15, 2, 0, tzinfo=timezone.utc)
+    expired = {
+        **_v2_conversation(state='finalizing', status='processing'),
+        'capture_finalization_claim_token': 'claim-a',
+        'capture_finalization_lease_expires_at': now - timedelta(seconds=1),
+    }
+    conversation_ref = _FakeDocumentRef(expired)
+    transaction = _FakeTransaction()
+
+    renewed = conversations_router.conversations_db._renew_capture_finalization_transaction(
+        transaction,
+        conversation_ref,
+        'claim-a',
+        now,
+        15,
+        'generation-a',
+        'owner-a',
+    )
+    persisted = conversations_router.conversations_db._upsert_conversation_if_capture_finalizer_transaction(
+        transaction,
+        conversation_ref,
+        'authenticated-user',
+        {**expired, 'status': 'completed'},
+        'generation-a',
+        'owner-a',
+        'claim-a',
+        now,
+    )
+
+    assert renewed is False
+    assert persisted is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
+def test_capture_reclaimed_finalizer_fences_all_late_side_effect_classes(monkeypatch):
+    conversation = _long_conversation()
+    conversation.id = 'capture-a'
+    conversation.folder_id = 'existing-folder'
+    entered_guard = threading.Event()
+    successor_completed = threading.Event()
+    failures = []
+    side_effects = {
+        name: 0 for name in ('usage', 'apps', 'vectors', 'memories', 'trends', 'actions', 'goals', 'audio', 'jobs')
+    }
+
+    monkeypatch.setattr(
+        conversation_processor,
+        '_get_structured',
+        lambda *args, **kwargs: (
+            Structured(title='Captured title', overview='one two three four five six seven.'),
+            False,
+        ),
+    )
+
+    def stale_a_renew(*args, **kwargs):
+        entered_guard.set()
+        assert successor_completed.wait(timeout=2)
+        return False
+
+    monkeypatch.setattr(conversation_processor.conversations_db, 'renew_capture_finalization', stale_a_renew)
+    monkeypatch.setattr(
+        conversation_processor,
+        'record_usage',
+        lambda *args, **kwargs: side_effects.__setitem__('usage', side_effects['usage'] + 1),
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        'upsert_conversation_if_capture_finalizer',
+        lambda *args, **kwargs: side_effects.__setitem__('jobs', side_effects['jobs'] + 1),
+    )
+
+    def run_stale_a():
+        try:
+            conversation_processor.process_conversation(
+                'authenticated-user',
+                'en',
+                conversation,
+                force_process=True,
+                capture_finalization=('generation-a', 'owner-a', 'claim-a'),
+            )
+        except Exception as error:
+            failures.append(error)
+
+    stale_a = threading.Thread(target=run_stale_a)
+    stale_a.start()
+    assert entered_guard.wait(timeout=2)
+
+    # B reclaims and completes every effect class while A is paused at its
+    # first immediate lease boundary.
+    for name in side_effects:
+        side_effects[name] += 1
+    successor_completed.set()
+    stale_a.join(timeout=2)
+
+    assert not stale_a.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], conversation_processor.CaptureFinalizationLeaseLost)
+    assert side_effects == {name: 1 for name in side_effects}

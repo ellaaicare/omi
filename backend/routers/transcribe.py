@@ -75,6 +75,7 @@ from utils.conversations.capture_authority import (
     CaptureStreamAuthority,
     capture_protocol_v2_rollout_enabled,
     flush_capture_before_drained,
+    require_capture_protocol_before_creation,
     valid_capture_drain_body,
 )
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
@@ -181,10 +182,12 @@ async def _stream_handler(
     Core WebSocket streaming handler. Assumes websocket is already accepted and uid is validated.
     This function is called by both _listen (for app clients) and web_listen_handler (for web clients).
     """
+    if not await require_capture_protocol_before_creation(websocket, capture_protocol):
+        return
     session_id = str(uuid.uuid4())
     generation_id = str(uuid.uuid4())
     owner_token = session_id
-    if capture_protocol == CAPTURE_PROTOCOL_VERSION and not capture_protocol_v2_rollout_enabled():
+    if not capture_protocol_v2_rollout_enabled():
         await websocket.close(code=1013, reason='Capture protocol v2 rollout drain is not complete')
         return
     session_started_at = time.time()
@@ -427,6 +430,12 @@ async def _stream_handler(
     capture_buffers_drained = asyncio.Event()
     capture_buffers_drained.set()
     capture_background_tasks: Set[asyncio.Task] = set()
+
+    def _track_capture_task(coroutine) -> asyncio.Task:
+        task = asyncio.create_task(coroutine)
+        capture_background_tasks.add(task)
+        task.add_done_callback(capture_background_tasks.discard)
+        return task
 
     def _on_capture_authority_lost(checkpoint: str, conversation_id: str) -> None:
         nonlocal websocket_active, websocket_close_code, authority_loss_close_task
@@ -833,17 +842,24 @@ async def _stream_handler(
             private_cloud_sync_enabled=private_cloud_sync_enabled,
         )
         stub_data = stub_conversation.dict()
-        if expected_conversation_id is None:
-            installed = capture_authority.acquire(
-                stub_data,
-                'initial_acquisition',
+
+        async def publish_ready(protocol_version: int, conversation_id: str, generation: str, owner_token: str) -> bool:
+            return await _asend_message_event(
+                MessageServiceStatusEvent(
+                    status="capture_protocol_ready",
+                    protocol_version=protocol_version,
+                    conversation_id=conversation_id,
+                    generation=generation,
+                    owner_token=owner_token,
+                )
             )
-        else:
-            installed = capture_authority.rotate(
-                expected_conversation_id,
-                stub_data,
-                'conversation_rotation',
-            )
+
+        installed = await capture_authority.install_and_publish_ready(
+            stub_data,
+            'initial_acquisition' if expected_conversation_id is None else 'conversation_rotation',
+            publish_ready,
+            expected_conversation_id=expected_conversation_id,
+        )
         if not installed:
             return False
 
@@ -953,9 +969,6 @@ async def _stream_handler(
         await asyncio.gather(heartbeat_task, return_exceptions=True)
         if authority_loss_close_task:
             await asyncio.gather(authority_loss_close_task, return_exceptions=True)
-        return
-    if capture_protocol not in {0, CAPTURE_PROTOCOL_VERSION}:
-        capture_authority.lose('unsupported_capture_protocol', current_conversation_id or '')
         return
 
     def _update_in_progress_conversation(
@@ -1136,6 +1149,7 @@ async def _stream_handler(
                         preseconds=speech_profile_preseconds,
                         language_hints=hints,
                         stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                        background_tasks=capture_background_tasks,
                     )
 
                     # Create a second socket for initial speech profile if needed
@@ -1147,6 +1161,7 @@ async def _stream_handler(
                             uid if include_speech_profile else None,
                             language_hints=hints,
                             stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                            background_tasks=capture_background_tasks,
                         )
                 except ValueError as e:
                     print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
@@ -1178,7 +1193,11 @@ async def _stream_handler(
             # SPEECHMATICS
             elif stt_service == STTService.speechmatics:
                 speechmatics_socket = await process_audio_speechmatics(
-                    stream_transcript, sample_rate, stt_language, preseconds=speech_profile_preseconds
+                    stream_transcript,
+                    sample_rate,
+                    stt_language,
+                    preseconds=speech_profile_preseconds,
+                    background_tasks=capture_background_tasks,
                 )
 
             stt_connect_ready_at = time.time()
@@ -2296,7 +2315,7 @@ async def _stream_handler(
                             socket_to_close.finish()
                             print('Closed deepgram_profile_socket after 5s delay', uid, session_id)
 
-                        asyncio.create_task(close_dg_profile())
+                        _track_capture_task(close_dg_profile())
                 else:
                     deepgram_profile_socket.send(chunk)
 
@@ -2313,7 +2332,7 @@ async def _stream_handler(
                             await socket_to_close.close()
                             print('Closed soniox_profile_socket after 5s delay', uid, session_id)
 
-                        asyncio.create_task(close_soniox_profile())
+                        _track_capture_task(close_soniox_profile())
                 else:
                     await soniox_profile_socket.send(chunk)
 
@@ -2338,6 +2357,7 @@ async def _stream_handler(
                             stt_language or 'en',
                             preseconds=speech_profile_preseconds,
                             stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                            background_tasks=capture_background_tasks,
                         )
                         print("[GROK] reconnected successfully")
                     except Exception as _grok_reconnect_err:
@@ -2359,6 +2379,7 @@ async def _stream_handler(
                                 stt_language or 'en',
                                 preseconds=speech_profile_preseconds,
                                 stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                                background_tasks=capture_background_tasks,
                             )
                             await grok_sock.send(bytes(chunk))
                             print("[GROK] reconnected and sent chunk")
@@ -2651,18 +2672,6 @@ async def _stream_handler(
         pending_conversations_task = asyncio.create_task(process_pending_conversations(timed_out_conversation_id))
         speaker_id_task = asyncio.create_task(speaker_identification_task())
 
-        if capture_protocol == CAPTURE_PROTOCOL_VERSION:
-            ready_sent = await _asend_message_event(
-                MessageServiceStatusEvent(
-                    status="capture_protocol_ready",
-                    protocol_version=CAPTURE_PROTOCOL_VERSION,
-                    conversation_id=current_conversation_id,
-                    generation=capture_authority.generation_id,
-                    owner_token=capture_authority.owner_token,
-                )
-            )
-            if not ready_sent:
-                return
         _send_message_event(MessageServiceStatusEvent(status="ready"))
 
         tasks = [
@@ -2867,6 +2876,7 @@ async def web_listen_handler(
     source: Optional[str] = None,
     custom_stt: str = 'disabled',
     onboarding: str = 'disabled',
+    capture_protocol: int = 0,
 ):
     """
     WebSocket endpoint for web browser clients using first-message authentication.
@@ -2928,6 +2938,7 @@ async def web_listen_handler(
         source=source,
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
+        capture_protocol=capture_protocol,
         socket_accepted_at=socket_accepted_at,
     )
     print("web_listen_handler ended", uid)

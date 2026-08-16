@@ -302,6 +302,135 @@ void main() {
     expect(pure.stops, 1);
   });
 
+  test('capture socket atomically adopts successor B and stale A messages cannot kill or replace it', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    const tupleA = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+    const tupleB = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-b',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+
+    final start = service.start();
+    await pumpEventQueue();
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleA}));
+    await start;
+    await service.send([1]);
+
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleB}));
+    expect(service.captureAuthority?.conversationId, 'capture-b');
+    await service.send([2]);
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleA}));
+    expect(service.captureAuthority?.conversationId, 'capture-b', reason: 'retired A cannot replace successor B');
+
+    final stop = service.stop();
+    await pumpEventQueue();
+    expect(jsonDecode(pure.sent.last as String), {'type': 'capture_drain', ...tupleB});
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...tupleA}));
+    await pumpEventQueue();
+    expect(pure.stops, 0, reason: 'stale A acknowledgement must not close B before its exact fence is durable');
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...tupleB}));
+    await stop;
+
+    expect(pure.stops, 1);
+    expect(pure.sent.take(2), [
+      [1],
+      [2],
+    ]);
+  });
+
+  test('lost drain acknowledgement closes transport then continues exact-tuple finalization reconciliation', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final pure = _FakePureSocket();
+    final transcriptService = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    const tupleB = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-b',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleB}));
+
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var processCalls = 0;
+    final processEntered = Completer<void>();
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('capture-b', 'Durable words before the lost acknowledgement')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        expect(conversationId, 'capture-b');
+        final operation = exactAuthority as CaptureFinalizationOperation;
+        expect(operation.captureProtocolAuthority?.conversationId, 'capture-b');
+        expect(operation.captureProtocolAuthority?.generation, 'generation-a');
+        expect(operation.captureProtocolAuthority?.ownerToken, 'owner-a');
+        expect(pure.status, PureSocketStatus.disconnected);
+        processEntered.complete();
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'capture-b',
+            'Durable words before the lost acknowledgement',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..reconnectDeviceCaptureSocketForTesting(transcriptService);
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+
+    final stopping = provider.stopStreamRecordingAndFinalize();
+    await pumpEventQueue();
+    expect(jsonDecode(pure.sent.last as String), {'type': 'capture_drain', ...tupleB});
+    pure.onClosed(); // Server committed drained, but the acknowledgement was lost with the socket.
+    await processEntered.future;
+
+    expect(await stopping, isTrue);
+    expect(processCalls, 1);
+    expect(pure.stops, 1);
+  });
+
   test('capture socket fails closed when a legacy worker never acknowledges protocol authority', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
@@ -321,7 +450,7 @@ void main() {
     expect(pure.stops, 1);
   });
 
-  test('capture socket rejects missing ready fields and a stale drained authority tuple', () async {
+  test('capture socket rejects missing ready fields and treats a stale drained tuple as ambiguous', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final missingPure = _FakePureSocket(status: PureSocketStatus.notConnected);
     final missingService = TranscriptSegmentSocketService.withSocket(
@@ -368,7 +497,9 @@ void main() {
       'generation': 'generation-b',
       'owner_token': 'owner-a',
     }));
-    await expectLater(staleStop, throwsA(isA<StateError>()));
+    await staleStop;
+    expect(stalePure.stops, 1);
+    expect(staleService.captureAuthority?.conversationId, 'capture-a');
   });
 
   test('production phone path waits for native capture and a physical frame, not websocket delivery', () async {

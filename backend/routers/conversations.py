@@ -196,7 +196,13 @@ def process_in_progress_conversation(
     def renew_finalization_lease():
         interval = max(1.0, conversations_db.capture_finalization_lease_seconds / 3)
         while not heartbeat_stop.wait(interval):
-            if not conversations_db.renew_capture_finalization(uid, conversation_id, claim_token):
+            if not conversations_db.renew_capture_finalization(
+                uid,
+                conversation_id,
+                claim_token,
+                generation=request.generation or '',
+                owner_token=request.owner_token or '',
+            ):
                 return
 
     heartbeat = threading.Thread(target=renew_finalization_lease, daemon=True)
@@ -230,6 +236,23 @@ def process_in_progress_conversation(
             force_process=True,
             capture_finalization=(request.generation or '', request.owner_token or '', claim_token),
         )
+        if not conversations_db.renew_capture_finalization(
+            uid,
+            conversation_id,
+            claim_token,
+            generation=request.generation or '',
+            owner_token=request.owner_token or '',
+        ):
+            raise HTTPException(status_code=409, detail="Conversation finalization lost its lease before integrations")
+        messages = trigger_external_integrations(uid, conversation)
+        if not conversations_db.renew_capture_finalization(
+            uid,
+            conversation_id,
+            claim_token,
+            generation=request.generation or '',
+            owner_token=request.owner_token or '',
+        ):
+            raise HTTPException(status_code=409, detail="Conversation finalization lost its lease after integrations")
         if not conversations_db.complete_capture_finalization(
             uid,
             conversation_id,
@@ -248,7 +271,6 @@ def process_in_progress_conversation(
             )
         except Exception as error:
             print('Capture finalization Redis projection failed', uid, conversation_id, error)
-        messages = trigger_external_integrations(uid, conversation)
         return CreateConversationResponse(conversation=conversation, messages=messages)
     except Exception:
         failed = conversations_db.get_conversation(uid, conversation_id)

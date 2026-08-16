@@ -6,7 +6,7 @@ import uuid
 import logging
 import asyncio
 from datetime import timezone, timedelta, datetime
-from typing import Union, Tuple, List, Optional
+from typing import Callable, Union, Tuple, List, Optional
 
 from fastapi import HTTPException
 
@@ -77,6 +77,17 @@ from utils.conversations.failure_state import (
     clear_conversation_processing_error,
 )
 from utils.conversations.vector import save_structured_vector
+
+SideEffectGuard = Optional[Callable[[str], None]]
+
+
+class CaptureFinalizationLeaseLost(RuntimeError):
+    pass
+
+
+def _guard_side_effect(guard: SideEffectGuard, boundary: str) -> None:
+    if guard:
+        guard(boundary)
 
 
 def _get_structured(
@@ -306,6 +317,7 @@ def _trigger_apps(
     app_id: Optional[str] = None,
     language_code: str = 'en',
     people: List[Person] = None,
+    side_effect_guard: SideEffectGuard = None,
 ):
     # Get default apps for auto-selection
     default_apps = get_default_conversation_summarized_apps()
@@ -356,24 +368,27 @@ def _trigger_apps(
     # Clear existing app results
     conversation.apps_results = []
 
-    threads = []
-
     def execute_app(app):
+        _guard_side_effect(side_effect_guard, f'app:{app.id}:invoke')
         result = get_app_result(
             conversation.get_transcript(False, people=people), conversation.photos, app, language_code=language_code
         ).strip()
+        _guard_side_effect(side_effect_guard, f'app:{app.id}:result')
         conversation.apps_results.append(AppResult(app_id=app.id, content=result))
         if not is_reprocess:
+            _guard_side_effect(side_effect_guard, f'app:{app.id}:usage')
             record_app_usage(uid, app.id, UsageHistoryType.memory_created_prompt, conversation_id=conversation.id)
 
-    for app in filtered_apps:
-        threads.append(threading.Thread(target=execute_app, args=(app,)))
+    if side_effect_guard:
+        for app in filtered_apps:
+            execute_app(app)
+    else:
+        threads = [threading.Thread(target=execute_app, args=(app,)) for app in filtered_apps]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
 
-    [t.start() for t in threads]
-    [t.join() for t in threads]
 
-
-def _update_goal_progress(uid: str, conversation: Conversation):
+def _update_goal_progress(uid: str, conversation: Conversation, side_effect_guard: SideEffectGuard = None):
     """Extract and update goal progress from conversation text."""
     try:
         # Get conversation text
@@ -387,17 +402,22 @@ def _update_goal_progress(uid: str, conversation: Conversation):
             return
 
         # Use utility function to extract and update goal progress
+        _guard_side_effect(side_effect_guard, 'goals:update')
         extract_and_update_goal_progress(uid, text)
     except Exception as e:
+        if isinstance(e, CaptureFinalizationLeaseLost):
+            raise
         print(f"[GOAL] Error updating progress: {e}")
 
 
-def _extract_memories(uid: str, conversation: Conversation):
+def _extract_memories(uid: str, conversation: Conversation, side_effect_guard: SideEffectGuard = None):
     # Delete old memories for this conversation (if reprocessing)
     # Also get the IDs to delete from Pinecone
     existing_memory_ids = memories_db.get_memory_ids_for_conversation(uid, conversation.id)
     for memory_id in existing_memory_ids:
+        _guard_side_effect(side_effect_guard, f'memories:delete_vector:{memory_id}')
         delete_memory_vector(uid, memory_id)
+    _guard_side_effect(side_effect_guard, 'memories:delete_existing')
     memories_db.delete_memories_for_conversation(uid, conversation.id)
 
     new_memories: List[Memory] = []
@@ -407,9 +427,11 @@ def _extract_memories(uid: str, conversation: Conversation):
         text_content = conversation.external_data.get('text')
         if text_content and len(text_content) > 0:
             text_source = conversation.external_data.get('text_source', 'other')
+            _guard_side_effect(side_effect_guard, 'memories:extract_external')
             new_memories = extract_memories_from_text(uid, text_content, text_source)
     else:
         # For regular conversations with transcript segments
+        _guard_side_effect(side_effect_guard, 'memories:extract')
         new_memories = new_memories_extractor(uid, conversation.transcript_segments)
 
     is_locked = conversation.is_locked
@@ -418,6 +440,7 @@ def _extract_memories(uid: str, conversation: Conversation):
 
     for memory in new_memories:
         # Find similar existing memories
+        _guard_side_effect(side_effect_guard, 'memories:similarity_search')
         similar_matches = find_similar_memories(uid, memory.content, threshold=0.7, limit=3)
 
         # Fetch content for each similar memory
@@ -435,7 +458,7 @@ def _extract_memories(uid: str, conversation: Conversation):
                 )
 
         if similar_memories:
-
+            _guard_side_effect(side_effect_guard, 'memories:resolve_conflict')
             resolution = resolve_memory_conflict(memory.content, similar_memories)
 
             if resolution.action == 'keep_existing':
@@ -455,7 +478,9 @@ def _extract_memories(uid: str, conversation: Conversation):
         parsed_memories.append(memory_db_obj)
 
     for memory_id in memories_to_delete:
+        _guard_side_effect(side_effect_guard, f'memories:merge_delete_vector:{memory_id}')
         delete_memory_vector(uid, memory_id)
+        _guard_side_effect(side_effect_guard, f'memories:merge_delete:{memory_id}')
         memories_db.delete_memory(uid, memory_id)
 
     if len(parsed_memories) == 0:
@@ -463,12 +488,15 @@ def _extract_memories(uid: str, conversation: Conversation):
         return
 
     print(f"Saving {len(parsed_memories)} memories for conversation {conversation.id}")
+    _guard_side_effect(side_effect_guard, 'memories:save')
     memories_db.save_memories(uid, [fact.dict() for fact in parsed_memories])
 
     for memory_db_obj in parsed_memories:
+        _guard_side_effect(side_effect_guard, f'memories:upsert_vector:{memory_db_obj.id}')
         upsert_memory_vector(uid, memory_db_obj.id, memory_db_obj.content, memory_db_obj.category.value)
 
     if len(parsed_memories) > 0:
+        _guard_side_effect(side_effect_guard, 'memories:usage')
         record_usage(uid, memories_created=len(parsed_memories))
 
         try:
@@ -483,9 +511,13 @@ def _extract_memories(uid: str, conversation: Conversation):
             for memory_db_obj in parsed_memories:
                 if memory_db_obj.kg_extracted:
                     continue
+                _guard_side_effect(side_effect_guard, f'memories:knowledge_graph:{memory_db_obj.id}')
                 extract_knowledge_from_memory(uid, memory_db_obj.content, memory_db_obj.id, user_name)
+                _guard_side_effect(side_effect_guard, f'memories:knowledge_graph_receipt:{memory_db_obj.id}')
                 set_memory_kg_extracted(uid, memory_db_obj.id)
         except Exception:
+            if side_effect_guard:
+                _guard_side_effect(side_effect_guard, 'memories:knowledge_graph_error_fence')
             logging.exception("Error extracting knowledge graph from memory.")
 
 
@@ -503,13 +535,15 @@ def send_new_memories_notification(user_id: str, memories: [MemoryDB]):
     send_notification(user_id, "omi" + ' says', message, NotificationMessage.get_message_as_dict(ai_message))
 
 
-def _extract_trends(uid: str, conversation: Conversation):
+def _extract_trends(uid: str, conversation: Conversation, side_effect_guard: SideEffectGuard = None):
+    _guard_side_effect(side_effect_guard, 'trends:extract')
     extracted_items = trends_extractor(uid, conversation)
     parsed = [Trend(category=item.category, topics=[item.topic], type=item.type) for item in extracted_items]
+    _guard_side_effect(side_effect_guard, 'trends:save')
     trends_db.save_trends(conversation, parsed)
 
 
-def _save_action_items(uid: str, conversation: Conversation):
+def _save_action_items(uid: str, conversation: Conversation, side_effect_guard: SideEffectGuard = None):
     """
     Save action items from a conversation to the dedicated action_items collection.
     This runs in addition to storing them in the conversation for backward compatibility.
@@ -536,8 +570,10 @@ def _save_action_items(uid: str, conversation: Conversation):
 
     if action_items_data:
         # Delete existing action items for this conversation first (in case of reprocessing)
+        _guard_side_effect(side_effect_guard, 'action_items:delete_existing')
         action_items_db.delete_action_items_for_conversation(uid, conversation.id)
         # Save new action items
+        _guard_side_effect(side_effect_guard, 'action_items:create')
         action_item_ids = action_items_db.create_action_items_batch(uid, action_items_data)
         print(f"Saved {len(action_item_ids)} action items for conversation {conversation.id}")
 
@@ -545,6 +581,7 @@ def _save_action_items(uid: str, conversation: Conversation):
         for idx, action_item in enumerate(conversation.structured.action_items):
             if action_item.due_at and idx < len(action_item_ids):
                 action_item_id = action_item_ids[idx]
+                _guard_side_effect(side_effect_guard, f'action_items:notify:{action_item_id}')
                 send_action_item_data_message(
                     user_id=uid,
                     action_item_id=action_item_id,
@@ -558,7 +595,11 @@ def _save_action_items(uid: str, conversation: Conversation):
         def _run_auto_sync():
             asyncio.run(auto_sync_action_items_batch(uid, created_items))
 
-        threading.Thread(target=_run_auto_sync, daemon=True).start()
+        if side_effect_guard:
+            _guard_side_effect(side_effect_guard, 'action_items:auto_sync')
+            _run_auto_sync()
+        else:
+            threading.Thread(target=_run_auto_sync, daemon=True).start()
 
 
 def _update_personas_async(uid: str):
@@ -583,6 +624,22 @@ def process_conversation(
     app_id: Optional[str] = None,
     capture_finalization: Optional[Tuple[str, str, str]] = None,
 ) -> Conversation:
+    side_effect_guard: SideEffectGuard = None
+    if capture_finalization:
+        generation, owner_token, claim_token = capture_finalization
+
+        def require_live_capture_finalizer(boundary: str) -> None:
+            if not conversations_db.renew_capture_finalization(
+                uid,
+                conversation.id,
+                claim_token,
+                generation=generation,
+                owner_token=owner_token,
+            ):
+                raise CaptureFinalizationLeaseLost(f'Capture finalization lease was lost before {boundary}')
+
+        side_effect_guard = require_live_capture_finalizer
+
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
     if hasattr(conversation, 'id') and conversation.id:
         meeting_id = redis_db.get_conversation_meeting_id(conversation.id)
@@ -625,9 +682,11 @@ def process_conversation(
             # Get user's folders
             user_folders = folders_db.get_folders(uid)
             if not user_folders:
+                _guard_side_effect(side_effect_guard, 'folders:initialize')
                 user_folders = folders_db.initialize_system_folders(uid)
 
             if user_folders and conversation.structured:
+                _guard_side_effect(side_effect_guard, 'folders:assign')
                 folder_id, confidence, reasoning = assign_conversation_to_folder(
                     title=conversation.structured.title or '',
                     overview=conversation.structured.overview or '',
@@ -641,6 +700,8 @@ def process_conversation(
                         f"AI assigned conversation {conversation.id} to folder {folder_id} (confidence: {confidence:.2f}): {reasoning}"
                     )
         except Exception as e:
+            if isinstance(e, CaptureFinalizationLeaseLost):
+                raise
             print(f"Error during folder assignment for conversation {conversation.id}: {e}")
 
     if not discarded:
@@ -668,30 +729,47 @@ def process_conversation(
                         insights_gained += 1
 
         if insights_gained > 0:
+            _guard_side_effect(side_effect_guard, 'usage:insights')
             record_usage(uid, insights_gained=insights_gained)
 
         _trigger_apps(
-            uid, conversation, is_reprocess=is_reprocess, app_id=app_id, language_code=language_code, people=people
+            uid,
+            conversation,
+            is_reprocess=is_reprocess,
+            app_id=app_id,
+            language_code=language_code,
+            people=people,
+            side_effect_guard=side_effect_guard,
         )
-        (
-            threading.Thread(
-                target=save_structured_vector,
-                args=(
-                    uid,
-                    conversation,
-                ),
-            ).start()
-            if not is_reprocess
-            else None
-        )
-        threading.Thread(target=_extract_memories, args=(uid, conversation)).start()
-        threading.Thread(target=_extract_trends, args=(uid, conversation)).start()
-        threading.Thread(target=_save_action_items, args=(uid, conversation)).start()
-        threading.Thread(target=_update_goal_progress, args=(uid, conversation)).start()
+        if side_effect_guard:
+            if not is_reprocess:
+                _guard_side_effect(side_effect_guard, 'vectors:structured')
+                save_structured_vector(uid, conversation)
+            _extract_memories(uid, conversation, side_effect_guard)
+            _extract_trends(uid, conversation, side_effect_guard)
+            _save_action_items(uid, conversation, side_effect_guard)
+            _update_goal_progress(uid, conversation, side_effect_guard)
+        else:
+            (
+                threading.Thread(
+                    target=save_structured_vector,
+                    args=(
+                        uid,
+                        conversation,
+                    ),
+                ).start()
+                if not is_reprocess
+                else None
+            )
+            threading.Thread(target=_extract_memories, args=(uid, conversation)).start()
+            threading.Thread(target=_extract_trends, args=(uid, conversation)).start()
+            threading.Thread(target=_save_action_items, args=(uid, conversation)).start()
+            threading.Thread(target=_update_goal_progress, args=(uid, conversation)).start()
 
     # Create audio files from chunks if private cloud sync was enabled
     if not is_reprocess and conversation.private_cloud_sync_enabled:
         try:
+            _guard_side_effect(side_effect_guard, 'audio:create_files')
             audio_files = conversations_db.create_audio_files_from_chunks(uid, conversation.id)
             if audio_files:
                 conversation.audio_files = audio_files
@@ -700,8 +778,11 @@ def process_conversation(
                         uid, conversation.id, {'audio_files': [af.dict() for af in audio_files]}
                     )
                 # Pre-cache audio files in background
+                _guard_side_effect(side_effect_guard, 'audio:precache')
                 precache_conversation_audio(uid, conversation.id, [af.dict() for af in audio_files])
         except Exception as e:
+            if isinstance(e, CaptureFinalizationLeaseLost):
+                raise
             print(f"Error creating audio files: {e}")
 
     conversation.status = ConversationStatus.completed
@@ -720,18 +801,25 @@ def process_conversation(
 
     # Update folder conversation count after conversation is saved
     if assigned_folder_id:
+        _guard_side_effect(side_effect_guard, 'folders:update_count')
         folders_db.update_folder_conversation_count(uid, assigned_folder_id)
 
     if not is_reprocess:
-        threading.Thread(
-            target=conversation_created_webhook,
-            args=(
-                uid,
-                conversation,
-            ),
-        ).start()
-        # Update persona prompts with new conversation
-        threading.Thread(target=update_personas_async, args=(uid,)).start()
+        if side_effect_guard:
+            _guard_side_effect(side_effect_guard, 'webhook:conversation_created')
+            conversation_created_webhook(uid, conversation)
+            _guard_side_effect(side_effect_guard, 'personas:update')
+            update_personas_async(uid)
+        else:
+            threading.Thread(
+                target=conversation_created_webhook,
+                args=(
+                    uid,
+                    conversation,
+                ),
+            ).start()
+            # Update persona prompts with new conversation
+            threading.Thread(target=update_personas_async, args=(uid,)).start()
 
         # Disable important conversation for now
         # Send important conversation notification for long conversations (>30 minutes)
@@ -742,10 +830,14 @@ def process_conversation(
 
     # Ella post-process hook: notify n8n after conversation is fully saved
     if fire_postprocess_webhook:  # Fires for both initial processing and reprocessing
-        threading.Thread(
-            target=fire_postprocess_webhook,
-            args=(uid, conversation),
-        ).start()
+        if side_effect_guard:
+            _guard_side_effect(side_effect_guard, 'webhook:postprocess')
+            fire_postprocess_webhook(uid, conversation)
+        else:
+            threading.Thread(
+                target=fire_postprocess_webhook,
+                args=(uid, conversation),
+            ).start()
 
     print('process_conversation completed conversation.id=', conversation.id)
     return conversation

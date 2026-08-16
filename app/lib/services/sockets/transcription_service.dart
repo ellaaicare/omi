@@ -101,6 +101,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
   Completer<bool>? _captureDrainCompleter;
   CaptureProtocolAuthority? _captureAuthority;
   CaptureProtocolAuthority? _pendingDrainAuthority;
+  final Set<String> _retiredCaptureConversationIds = <String>{};
 
   CaptureProtocolAuthority? get captureAuthority => _captureAuthority;
 
@@ -193,6 +194,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
       _captureProtocolReady = false;
       _captureAuthority = null;
       _pendingDrainAuthority = null;
+      _retiredCaptureConversationIds.clear();
       _captureProtocolReadyCompleter = Completer<bool>();
     }
     bool ok = await _socket.connect();
@@ -234,7 +236,6 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     final consentLease = _aiConsentLease;
     _aiConsentLease = null;
     consentLease?.stop();
-    Object? drainError;
     if (_requiresCaptureProtocol && _captureProtocolReady && _socket.status == PureSocketStatus.connected) {
       try {
         final authority = _captureAuthority;
@@ -247,10 +248,16 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
           onTimeout: () => false,
         );
         if (!drained) {
-          drainError = StateError('Capture websocket did not acknowledge its server-side authority fence');
+          // The server may have committed the durable drained fence and lost
+          // the acknowledgement with the socket. Closing the transport is
+          // safe; the caller must reconcile through the idempotent exact-tuple
+          // finalization POST instead of treating this ambiguity as failure.
+          Logger.debug('Capture drain acknowledgement was ambiguous; reconciling by exact finalization tuple');
         }
       } catch (error) {
-        drainError = error;
+        // Send/transport failure is likewise ambiguous. The exact tuple held
+        // by the finalization operation is the authority for reconciliation.
+        Logger.debug('Capture drain transport became ambiguous: $error');
       }
     }
     _captureProtocolReady = false;
@@ -262,7 +269,6 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
       Logger.debug(reason);
       await DebugLogManager.logInfo('transcription_socket_stopped', {'reason': reason});
     }
-    if (drainError != null) throw drainError;
   }
 
   Future send(dynamic message) async {
@@ -348,12 +354,30 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
               ownerToken.isNotEmpty;
           if (valid) {
             final wasReady = _captureProtocolReady;
-            _captureAuthority = CaptureProtocolAuthority(
+            final nextAuthority = CaptureProtocolAuthority(
               protocolVersion: event.protocolVersion!,
               conversationId: conversationId,
               generation: generation,
               ownerToken: ownerToken,
             );
+            final currentAuthority = _captureAuthority;
+            final isInitial = currentAuthority == null;
+            final isIdempotent = currentAuthority?.matches(event) ?? false;
+            final isSuccessor = currentAuthority != null &&
+                currentAuthority.protocolVersion == nextAuthority.protocolVersion &&
+                currentAuthority.generation == nextAuthority.generation &&
+                currentAuthority.ownerToken == nextAuthority.ownerToken &&
+                currentAuthority.conversationId != nextAuthority.conversationId &&
+                !_retiredCaptureConversationIds.contains(nextAuthority.conversationId);
+            if (!isInitial && !isIdempotent && !isSuccessor) {
+              // Fail this stale/mixed-owner message closed without revoking a
+              // newer valid authority already held by the live socket.
+              return;
+            }
+            if (isSuccessor) {
+              _retiredCaptureConversationIds.add(currentAuthority.conversationId);
+            }
+            _captureAuthority = nextAuthority;
             _captureProtocolReady = true;
             if (!(_captureProtocolReadyCompleter?.isCompleted ?? true)) _captureProtocolReadyCompleter!.complete(true);
             if (!wasReady) _notifyConnected();
@@ -363,7 +387,9 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
         } else if (event.status == 'capture_protocol_drained') {
           final expected = _pendingDrainAuthority;
           final matches = expected != null && expected.matches(event);
-          if (!(_captureDrainCompleter?.isCompleted ?? true)) _captureDrainCompleter!.complete(matches);
+          if (matches && !(_captureDrainCompleter?.isCompleted ?? true)) {
+            _captureDrainCompleter!.complete(true);
+          }
         }
       }
       _listeners.forEach((k, v) {

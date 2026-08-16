@@ -66,6 +66,23 @@ def _capture_lease_expired(data: Dict[str, Any], now: datetime, field: str = 'le
     return not isinstance(expires_at, datetime) or _ensure_timezone_aware(expires_at) <= _ensure_timezone_aware(now)
 
 
+def _capture_finalization_claim_is_live(
+    conversation: Dict[str, Any],
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    now: datetime,
+) -> bool:
+    return bool(
+        conversation.get('capture_protocol_version') == capture_protocol_version
+        and conversation.get('capture_generation') == generation
+        and conversation.get('capture_owner_token') == owner_token
+        and conversation.get('capture_state') == 'finalizing'
+        and conversation.get('capture_finalization_claim_token') == claim_token
+        and not _capture_lease_expired(conversation, now, field='capture_finalization_lease_expires_at')
+    )
+
+
 def _capture_metadata(
     conversation_id: str,
     generation: str,
@@ -513,18 +530,19 @@ def _upsert_conversation_if_capture_finalizer_transaction(
     generation: str,
     owner_token: str,
     claim_token: str,
+    now: Optional[datetime] = None,
 ) -> bool:
     """Write finalization output only while this exact durable lease still owns it."""
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
         return False
     current = snapshot.to_dict() or {}
-    if (
-        current.get('capture_protocol_version') != capture_protocol_version
-        or current.get('capture_generation') != generation
-        or current.get('capture_owner_token') != owner_token
-        or current.get('capture_state') != 'finalizing'
-        or current.get('capture_finalization_claim_token') != claim_token
+    if not _capture_finalization_claim_is_live(
+        current,
+        generation,
+        owner_token,
+        claim_token,
+        now or datetime.now(timezone.utc),
     ):
         return False
 
@@ -1318,14 +1336,20 @@ def _renew_capture_finalization_transaction(
     claim_token: str,
     now: datetime,
     lease_seconds: int = capture_finalization_lease_seconds,
+    generation: Optional[str] = None,
+    owner_token: Optional[str] = None,
 ) -> bool:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
     if (
-        conversation.get('capture_state') != 'finalizing'
+        conversation.get('capture_protocol_version') != capture_protocol_version
+        or conversation.get('capture_state') != 'finalizing'
         or conversation.get('capture_finalization_claim_token') != claim_token
+        or _capture_lease_expired(conversation, now, field='capture_finalization_lease_expires_at')
+        or (generation is not None and conversation.get('capture_generation') != generation)
+        or (owner_token is not None and conversation.get('capture_owner_token') != owner_token)
     ):
         return False
     transaction.update(
@@ -1344,8 +1368,18 @@ def _renew_capture_finalization(
     claim_token: str,
     now: datetime,
     lease_seconds: int = capture_finalization_lease_seconds,
+    generation: Optional[str] = None,
+    owner_token: Optional[str] = None,
 ) -> bool:
-    return _renew_capture_finalization_transaction(transaction, conversation_ref, claim_token, now, lease_seconds)
+    return _renew_capture_finalization_transaction(
+        transaction,
+        conversation_ref,
+        claim_token,
+        now,
+        lease_seconds,
+        generation,
+        owner_token,
+    )
 
 
 def renew_capture_finalization(
@@ -1354,6 +1388,8 @@ def renew_capture_finalization(
     claim_token: str,
     *,
     lease_seconds: int = capture_finalization_lease_seconds,
+    generation: Optional[str] = None,
+    owner_token: Optional[str] = None,
 ) -> bool:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -1364,6 +1400,8 @@ def renew_capture_finalization(
         claim_token,
         datetime.now(timezone.utc),
         lease_seconds,
+        generation,
+        owner_token,
     )
 
 
@@ -1383,12 +1421,9 @@ def _complete_capture_finalization_transaction(
     authority_snapshot = authority_ref.get(transaction=transaction)
     conversation = conversation_snapshot.to_dict() or {}
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
-    if (
-        conversation.get('capture_generation') != generation
-        or conversation.get('capture_owner_token') != owner_token
-        or conversation.get('capture_finalization_claim_token') != claim_token
-        or status not in {ConversationStatus.completed.value, ConversationStatus.failed.value}
-    ):
+    if not _capture_finalization_claim_is_live(
+        conversation, generation, owner_token, claim_token, now
+    ) or status not in {ConversationStatus.completed.value, ConversationStatus.failed.value}:
         return False
     transaction.update(
         conversation_ref,

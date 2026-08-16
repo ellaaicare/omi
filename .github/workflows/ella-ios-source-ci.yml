@@ -192,7 +192,52 @@ jobs:
           python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
           python -m pytest backend/tests/unit/test_ella_user_route_auth.py
-          python -m pytest backend/tests/unit/test_conversation_processing_failures.py -k capture_finalization
+          capture_tests=(
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_requires_exact_id_and_rejects_non_owner_before_mutation'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_successor_mismatch_fails_before_any_conversation_mutation'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_cross_id_document_fails_before_pointer_claim'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_v2_rejects_missing_and_stale_protocol_authority_tuple'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_lost_ack_and_repeats_converge_without_duplicate_side_effects'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_compare_delete_cannot_clear_successor_race'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_processing_replay_does_not_touch_successor_or_side_effects'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_pointer_acquisition_failure_preserves_exact_pointer'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_failure_restores_exact_pointer_for_safe_replay[enrichment]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_failure_restores_exact_pointer_for_safe_replay[firestore_claim]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_failure_retains_an_existing_processing_fence'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_restore_cannot_overwrite_successor_or_finalize_wrong_capture'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_firestore_claim_is_atomic_and_exact'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_writer_rechecks_firestore_status_inside_transaction_after_finalization_wins'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_v2_fails_closed_until_actual_legacy_writer_drain'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_stale_pause_then_successor_adopt_rejects_write_and_stale_arrays'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_process_kill_boundary_reclaims_expired_durable_lease'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_stale_finalizer_cannot_persist_after_expired_lease_is_reclaimed'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_successor_installation_is_one_atomic_transaction_without_rollback_delete'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_successor_install_publishes_each_exact_ready_tuple'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_waits_for_final_segment_persistence_scheduling_race'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_redis_keys_share_real_cluster_slot'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_body_rejects_missing_wrong_and_stale_authority_fields'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_pre_v2_clients_are_rejected_before_creation_and_leave_zero_active_state'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_rechecks_idle_after_provider_returns_with_late_tail'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_expired_lease_cannot_be_renewed_or_persisted'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_reclaimed_finalizer_fences_all_late_side_effect_classes'
+          )
+          expected_capture_tests="${#capture_tests[@]}"
+          echo "Running exact capture-finalization inventory: ${expected_capture_tests} required tests"
+          set +e
+          python -m pytest -q -rs "${capture_tests[@]}" | tee "$RUNNER_TEMP/capture-finalization-pytest.txt"
+          capture_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$capture_status" -ne 0 ]]; then
+            exit "$capture_status"
+          fi
+          if grep -Eq '[0-9]+ skipped|[0-9]+ deselected' "$RUNNER_TEMP/capture-finalization-pytest.txt"; then
+            echo 'Capture-finalization inventory may not skip or deselect required tests.' >&2
+            exit 1
+          fi
+          if ! grep -Eq "${expected_capture_tests} passed" "$RUNNER_TEMP/capture-finalization-pytest.txt"; then
+            echo "Expected ${expected_capture_tests} passing capture tests." >&2
+            exit 1
+          fi
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2

@@ -5,10 +5,34 @@ from typing import Awaitable, Callable, Optional, Set
 from database import conversations as conversations_db
 from database import redis_db
 
+CAPTURE_PROTOCOL_VERSION = 2
+CAPTURE_PROTOCOL_UPGRADE_CLOSE_CODE = 1008
+CAPTURE_PROTOCOL_UPGRADE_REASON = 'This app version can no longer start captures. Please update the app.'
+
 
 def capture_protocol_v2_rollout_enabled() -> bool:
     """V2 stays fail-closed until the documented legacy drain is attested."""
     return os.getenv('CAPTURE_PROTOCOL_V2_ROLLOUT_STATE', '').strip() == 'legacy_workers_drained'
+
+
+def capture_protocol_accepted(protocol_version: int) -> bool:
+    """Only an explicit v2 client may create v2 durable authority.
+
+    Protocol 0 is FastAPI's default for installed clients that predate the
+    handshake. Treating it as v2 strands a conversation that the client cannot
+    drain or finalize, so compatibility must fail before capture creation.
+    """
+    return protocol_version == CAPTURE_PROTOCOL_VERSION
+
+
+async def require_capture_protocol_before_creation(websocket, protocol_version: int) -> bool:
+    if capture_protocol_accepted(protocol_version):
+        return True
+    await websocket.close(
+        code=CAPTURE_PROTOCOL_UPGRADE_CLOSE_CODE,
+        reason=CAPTURE_PROTOCOL_UPGRADE_REASON,
+    )
+    return False
 
 
 def valid_capture_drain_body(
@@ -41,8 +65,16 @@ async def flush_capture_before_drained(
     result = finish_stt_inputs()
     if result is not None:
         await result
-    if persistence_tasks:
-        await asyncio.gather(*tuple(persistence_tasks), return_exceptions=True)
+    # Tasks remove themselves from the shared set when done and provider
+    # shutdown can schedule a final callback task. Iterate to a stable empty
+    # set instead of taking one snapshot before that tail exists.
+    while persistence_tasks:
+        snapshot = tuple(persistence_tasks)
+        await asyncio.gather(*snapshot, return_exceptions=True)
+        for task in snapshot:
+            if task.done():
+                persistence_tasks.discard(task)
+        await asyncio.sleep(0)
     try:
         await asyncio.wait_for(buffers_drained.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -150,6 +182,31 @@ class CaptureStreamAuthority:
         if result != 'installed':
             return self._lose(f'{checkpoint}_{result}', current_conversation_id)
         self._project(new_conversation_id)
+        return True
+
+    async def install_and_publish_ready(
+        self,
+        conversation_data: dict,
+        checkpoint: str,
+        publish_ready: Callable[[int, str, str, str], Awaitable[bool]],
+        *,
+        expected_conversation_id: Optional[str] = None,
+    ) -> bool:
+        """Install one authority tuple and publish that exact tuple before use."""
+        conversation_id = conversation_data['id']
+        if expected_conversation_id is None:
+            installed = self.acquire(conversation_data, checkpoint)
+        else:
+            installed = self.rotate(expected_conversation_id, conversation_data, checkpoint)
+        if not installed:
+            return False
+        if not await publish_ready(
+            CAPTURE_PROTOCOL_VERSION,
+            conversation_id,
+            self.generation_id,
+            self.owner_token,
+        ):
+            return self._lose('capture_protocol_ready_delivery', conversation_id)
         return True
 
     def drain(self, conversation_id: str, checkpoint: str) -> bool:
