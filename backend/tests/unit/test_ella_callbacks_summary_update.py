@@ -47,6 +47,10 @@ from ella.routers.canonical_events import _should_accept_canonical_summary_repla
 from utils.ella.canonical_omi import build_omi_canonical_event  # noqa: E402
 
 
+def _service_authority(uid: str):
+    return callbacks.EllaRequestAuthority(service="test_callback", service_subject_uid=uid)
+
+
 @pytest.fixture(autouse=True)
 def disable_canonical_omi_network(monkeypatch):
     class PendingConversationSummaryReconciliationError(RuntimeError):
@@ -94,6 +98,7 @@ def test_update_conversation_summary_clears_stale_app_results(monkeypatch):
                 category="personal",
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -128,6 +133,7 @@ def test_update_conversation_summary_adds_missing_ella_prefix(monkeypatch):
                 overview="Updated overview with enough useful context to safely replace the prior summary.",
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -154,6 +160,7 @@ def test_update_conversation_summary_removes_raw_scanner_audit_sentence(monkeypa
                 ),
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -175,6 +182,7 @@ def test_update_conversation_summary_rejects_internal_debug_jargon(monkeypatch):
                     ),
                 ),
                 uid="user-123",
+                service=_service_authority("user-123"),
             )
         )
 
@@ -202,6 +210,7 @@ def test_update_conversation_summary_allows_user_facing_mcp_api_topic(monkeypatc
                 category="technology",
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -217,6 +226,7 @@ def test_update_conversation_summary_rejects_invalid_category():
                 "conv-123",
                 callbacks.ConversationSummaryUpdate(category="definitely-not-a-real-category"),
                 uid="user-123",
+                service=_service_authority("user-123"),
             )
         )
 
@@ -244,7 +254,13 @@ def test_get_conversation_data_returns_transcript_payload(monkeypatch):
         },
     )
 
-    result = asyncio.run(callbacks.get_conversation_data("conv-123", uid="user-123"))
+    result = asyncio.run(
+        callbacks.get_conversation_data(
+            "conv-123",
+            uid="user-123",
+            service=_service_authority("user-123"),
+        )
+    )
 
     assert result["conversation_id"] == "conv-123"
     assert result["uid"] == "user-123"
@@ -270,7 +286,13 @@ def test_get_conversation_data_404s_when_missing(monkeypatch):
     monkeypatch.setattr(callbacks.conversations_db, "get_conversation", lambda uid, conversation_id: None)
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(callbacks.get_conversation_data("missing-conv", uid="user-123"))
+        asyncio.run(
+            callbacks.get_conversation_data(
+                "missing-conv",
+                uid="user-123",
+                service=_service_authority("user-123"),
+            )
+        )
 
     assert excinfo.value.status_code == 404
     assert "Conversation not found" in excinfo.value.detail
@@ -331,6 +353,7 @@ def test_update_conversation_summary_records_version_and_marks_correction_applie
                 summary_source="observer",
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -399,6 +422,7 @@ def test_update_conversation_summary_persists_internal_assessment_when_available
                 summary_kind="observer_enriched",
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -457,6 +481,7 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
                 require_canonical=True,
             ),
             uid="user-123",
+            service=_service_authority("user-123"),
         )
     )
 
@@ -511,6 +536,7 @@ def test_update_conversation_summary_same_trace_is_idempotent(monkeypatch):
                 trace_id="summary-retry:conversation-1:request-1",
             ),
             uid="user-1",
+            service=_service_authority("user-1"),
         )
     )
 
