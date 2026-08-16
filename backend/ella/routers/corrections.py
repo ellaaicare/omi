@@ -6,6 +6,8 @@ of the upstream OMI conversation router so future upstream syncs do not have to
 carry this custom app contract as a core patch.
 """
 
+import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -75,6 +77,7 @@ CORRECTION_TERMINAL_OVERHEAD_SECONDS = 30.0
 CORRECTION_TERMINAL_BOUND_SECONDS = CORRECTION_PROVIDER_TIMEOUT_MAX_SECONDS + CORRECTION_TERMINAL_OVERHEAD_SECONDS
 CORRECTION_CLIENT_POLL_MARGIN_SECONDS = 30.0
 CORRECTION_CLIENT_POLL_BUDGET_SECONDS = (2 * CORRECTION_TERMINAL_BOUND_SECONDS) + CORRECTION_CLIENT_POLL_MARGIN_SECONDS
+CORRECTION_END_TO_END_DEADLINE_SECONDS = CORRECTION_TERMINAL_BOUND_SECONDS - 5.0
 
 
 def _bounded_correction_provider_timeout(value: Any) -> float:
@@ -126,6 +129,7 @@ class SummaryContext(BaseModel):
 
 
 class ConversationCorrectionRequest(BaseModel):
+    correction_id: Optional[uuid.UUID] = None
     correction_text: str = Field(
         ...,
         min_length=1,
@@ -143,6 +147,16 @@ class ConversationCorrectionRequest(BaseModel):
         if not stripped:
             raise ValueError("correction_text cannot be blank")
         return stripped
+
+
+def _correction_request_fingerprint(request: ConversationCorrectionRequest) -> str:
+    payload = {
+        "correction_text": request.correction_text,
+        "source": request.source,
+        "summary_context": request.summary_context.model_dump(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class ConversationCorrectionResponse(BaseModel):
@@ -413,6 +427,8 @@ async def _generate_corrected_summary(
         transcript=transcript,
         segment_count=segment_count,
     )
+    # Runtime resolution can itself cross a managed-provider boundary.
+    require_current_ai_consent(uid)
     config = await summary_provider_config_for_uid(
         uid,
         SummaryProviderConfig(
@@ -426,6 +442,9 @@ async def _generate_corrected_summary(
             timeout_seconds=DIRECT_CORRECTION_TIMEOUT_SECONDS,
         ),
     )
+    # Consent can be revoked while runtime authority is resolving. Revalidate
+    # again at the last possible point before retained transcript egress.
+    require_current_ai_consent(uid)
     return await generate_summary_from_prompt(
         prompt=prompt,
         fallback=structured,
@@ -435,6 +454,7 @@ async def _generate_corrected_summary(
         required_tags=("omi", "correction"),
         config=config,
         async_client_factory=httpx.AsyncClient,
+        egress_guard=lambda: require_current_ai_consent(uid),
     )
 
 
@@ -457,6 +477,7 @@ async def _apply_corrected_summary(
         correction_id=correction_id,
         require_based_on_match=True,
         require_canonical=True,
+        canonical_egress_guard=lambda: require_current_ai_consent(uid),
     )
 
 
@@ -477,6 +498,102 @@ def _read_correction_audit(uid: str, conversation_id: str, correction_id: str) -
         return {}
     value = snapshot.to_dict() or {}
     return value if isinstance(value, dict) else {}
+
+
+def _audit_request_fingerprint(audit: dict[str, Any]) -> str:
+    recorded = str(audit.get("request_fingerprint") or "")
+    if recorded:
+        return recorded
+    try:
+        request = ConversationCorrectionRequest(
+            correction_id=audit.get("correction_id"),
+            correction_text=str(audit.get("correction_text") or ""),
+            source=str(audit.get("source") or "ios"),
+            summary_context=audit.get("summary_context") if isinstance(audit.get("summary_context"), dict) else {},
+        )
+    except Exception:
+        return ""
+    return _correction_request_fingerprint(request)
+
+
+def _claim_initial_correction_submission_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_active_summary_version_id: str,
+    bootstrap_update: dict[str, Any],
+    correction_state: dict[str, Any],
+    audit_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically create the leased initial receipt or replay its exact request."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False):
+        return {"outcome": "conversation_missing"}
+    if getattr(audit_snapshot, "exists", False):
+        audit = audit_snapshot.to_dict() or {}
+        if (
+            str(audit.get("uid") or "") != uid
+            or str(audit.get("conversation_id") or "") != conversation_id
+            or str(audit.get("correction_id") or "") != correction_id
+            or _audit_request_fingerprint(audit) != str(audit_payload.get("request_fingerprint") or "")
+        ):
+            return {"outcome": "idempotency_conflict"}
+        return {"outcome": "replay", "audit": audit}
+
+    conversation = conversation_snapshot.to_dict() or {}
+    current_active_summary_version_id = str(
+        conversation.get("active_summary_version_id") or bootstrap_update.get("active_summary_version_id") or ""
+    )
+    if current_active_summary_version_id != expected_active_summary_version_id:
+        return {"outcome": "version_drift"}
+    transaction.set(
+        conversation_ref,
+        {**bootstrap_update, "correction_state": correction_state},
+        merge=True,
+    )
+    transaction.set(audit_ref, audit_payload)
+    return {"outcome": "created", "audit": audit_payload}
+
+
+@transactional
+def _claim_initial_correction_submission_transaction(transaction, conversation_ref, audit_ref, **kwargs):
+    return _claim_initial_correction_submission_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **kwargs,
+    )
+
+
+def _claim_initial_correction_submission(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_active_summary_version_id: str,
+    bootstrap_update: dict[str, Any],
+    correction_state: dict[str, Any],
+    audit_payload: dict[str, Any],
+) -> dict[str, Any]:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _claim_initial_correction_submission_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+        bootstrap_update=bootstrap_update,
+        correction_state=correction_state,
+        audit_payload=audit_payload,
+    )
 
 
 def _correction_failure_code(error: Exception) -> str:
@@ -540,6 +657,151 @@ def _correction_summary_versions(
     )
     before = _summary_version(conversation, corrected.get("based_on_version_id") if corrected else None)
     return before, corrected
+
+
+def _correction_response_from_audit(
+    *,
+    conversation_id: str,
+    correction_id: str,
+    audit: dict[str, Any],
+) -> ConversationCorrectionResponse:
+    status_value = str(audit.get("status") or "queued")
+    return ConversationCorrectionResponse(
+        correction_id=correction_id,
+        conversation_id=conversation_id,
+        trace_id=str(audit.get("trace_id") or f"correction:{conversation_id}:{correction_id}"),
+        status=status_value,
+        queued=status_value in {"submitted", "queued", "processing", "retry_queued", "canonical_pending"},
+        proposal_id=str(audit.get("proposal_id") or "") or None,
+    )
+
+
+def _finalize_revoked_correction_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_retry_attempt_token: Optional[str],
+    finalized_at: str,
+) -> dict[str, Any]:
+    """Fence a revoked attempt and preserve any already-committed source correction."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return {"outcome": "missing"}
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+    ):
+        return {"outcome": "identity_mismatch"}
+    if expected_retry_attempt_token and str(audit.get("retry_attempt_token") or "") != expected_retry_attempt_token:
+        return {"outcome": "stale_attempt", "audit": audit}
+    if str(audit.get("status") or "") in {"applied", "undone", "consent_revoked"}:
+        return {"outcome": "already_terminal", "audit": audit}
+
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    corrected_id = str(corrected.get("id") or "") if corrected else ""
+    source_committed = bool(corrected_id and str(conversation.get("active_summary_version_id") or "") == corrected_id)
+    status_value = "applied" if source_committed else "consent_revoked"
+    failure_code = "consent_revoked_after_source_apply" if source_committed else "ai_consent_required"
+    audit_update = {
+        "status": status_value,
+        "pending": False,
+        "updated_at": finalized_at,
+        "failure_code": failure_code,
+        "retry_lease_expires_at": None,
+    }
+    if source_committed:
+        audit_update["applied_at"] = audit.get("applied_at") or finalized_at
+    transaction.set(audit_ref, audit_update, merge=True)
+
+    state = conversation.get("correction_state") or {}
+    if str(state.get("correction_id") or "") == correction_id:
+        transaction.set(
+            conversation_ref,
+            {
+                "correction_state": {
+                    **state,
+                    "status": status_value,
+                    "pending": False,
+                    "updated_at": finalized_at,
+                    "failure_code": failure_code,
+                    "active_summary_version_id": corrected_id or state.get("active_summary_version_id"),
+                }
+            },
+            merge=True,
+        )
+    return {"outcome": "finalized", "audit": {**audit, **audit_update}}
+
+
+@transactional
+def _finalize_revoked_correction_transaction(transaction, conversation_ref, audit_ref, **kwargs):
+    return _finalize_revoked_correction_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _finalize_revoked_correction(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_retry_attempt_token: Optional[str] = None,
+) -> dict[str, Any]:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _finalize_revoked_correction_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_retry_attempt_token=expected_retry_attempt_token,
+        finalized_at=_now_iso(),
+    )
+
+
+def _require_correction_consent_or_terminal_response(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_retry_attempt_token: Optional[str] = None,
+) -> Optional[ConversationCorrectionResponse]:
+    try:
+        require_current_ai_consent(uid)
+        return None
+    except HTTPException as error:
+        detail = error.detail if isinstance(error.detail, dict) else {}
+        if error.status_code != 403 or detail.get("code") != "ai_consent_required":
+            raise
+    result = _finalize_revoked_correction(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_retry_attempt_token=expected_retry_attempt_token,
+    )
+    audit = result.get("audit") if isinstance(result.get("audit"), dict) else {}
+    if result.get("outcome") == "missing":
+        raise HTTPException(status_code=404, detail="Correction not found")
+    if result.get("outcome") == "identity_mismatch":
+        raise HTTPException(status_code=404, detail="Correction not found")
+    if result.get("outcome") == "stale_attempt":
+        return _correction_response_from_audit(
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            audit=audit,
+        )
+    return _correction_response_from_audit(
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        audit=audit,
+    )
 
 
 def _snapshot(version: Optional[dict[str, Any]]) -> CorrectionSummarySnapshot:
@@ -615,7 +877,7 @@ def _correction_receipt(
     )
     if canonical_confirmed:
         status_value = "applied"
-    elif canonical_pending:
+    elif canonical_pending and status_value != "applied":
         status_value = "canonical_pending"
     recorded_base_version_id = str(
         audit.get("active_summary_version_id") or state.get("active_summary_version_id") or ""
@@ -1172,6 +1434,7 @@ async def _run_post_source_correction_side_effects(
 ) -> Optional[str]:
     """Run only incomplete downstream work after the source summary CAS succeeds."""
 
+    require_current_ai_consent(uid)
     audit = _read_correction_audit(uid, conversation_id, correction_id)
     proposal_id = str(audit.get("proposal_id") or "") or None
     proposal_completed = bool(proposal_id) or _audit_has_completed_stage(audit, "proposal_created")
@@ -1220,6 +1483,7 @@ async def _run_post_source_correction_side_effects(
                 {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id},
             )
 
+    require_current_ai_consent(uid)
     await _run_correction_observer_work(
         uid=uid,
         conversation_id=conversation_id,
@@ -1270,6 +1534,7 @@ async def _submit_correction_to_n8n(
         "transcript": transcript,
         "segments_count": segment_count,
     }
+    require_current_ai_consent(uid)
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(webhook_url, json=payload)
     try:
@@ -1301,6 +1566,7 @@ async def _run_direct_correction_apply(
     proposal_id: Optional[str] = None,
     source_conversation: Optional[dict[str, Any]] = None,
     retry_attempt_token: Optional[str] = None,
+    retry_deadline_at: Optional[str] = None,
 ) -> ConversationCorrectionResponse:
     if retry_attempt_token:
         attempt_status = _start_correction_retry_attempt(
@@ -1311,52 +1577,70 @@ async def _run_direct_correction_apply(
             retry_attempt_token=retry_attempt_token,
         )
         if attempt_status != "started":
-            return ConversationCorrectionResponse(
-                correction_id=correction_id,
+            return _correction_response_from_audit(
                 conversation_id=conversation_id,
-                trace_id=trace_id,
-                status="queued",
-                queued=True,
-                proposal_id=proposal_id,
+                correction_id=correction_id,
+                audit=_read_correction_audit(uid, conversation_id, correction_id),
             )
-    try:
-        corrected_summary = await _generate_corrected_summary(
-            uid=uid,
-            conversation_id=conversation_id,
-            correction_id=correction_id,
-            trace_id=trace_id,
-            request=request,
-            structured=structured,
-            transcript=transcript,
-            segment_count=segment_count,
+    consent_terminal = _require_correction_consent_or_terminal_response(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_retry_attempt_token=retry_attempt_token,
+    )
+    if consent_terminal is not None:
+        return consent_terminal
+    deadline_seconds = CORRECTION_END_TO_END_DEADLINE_SECONDS
+    parsed_retry_deadline = _parse_correction_timestamp(retry_deadline_at)
+    if parsed_retry_deadline is not None:
+        deadline_seconds = min(
+            deadline_seconds,
+            max(0.0, (parsed_retry_deadline - datetime.now(timezone.utc)).total_seconds()),
         )
-        if retry_attempt_token:
-            attempt_status = _start_correction_retry_attempt(
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            corrected_summary = await _generate_corrected_summary(
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
-                recorded_base_version_id=str(active_summary_version_id or ""),
-                retry_attempt_token=retry_attempt_token,
+                trace_id=trace_id,
+                request=request,
+                structured=structured,
+                transcript=transcript,
+                segment_count=segment_count,
             )
-            if attempt_status != "started":
-                return ConversationCorrectionResponse(
-                    correction_id=correction_id,
+            consent_terminal = _require_correction_consent_or_terminal_response(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                expected_retry_attempt_token=retry_attempt_token,
+            )
+            if consent_terminal is not None:
+                return consent_terminal
+            if retry_attempt_token:
+                attempt_status = _start_correction_retry_attempt(
+                    uid=uid,
                     conversation_id=conversation_id,
-                    trace_id=trace_id,
-                    status="queued",
-                    queued=True,
-                    proposal_id=proposal_id,
+                    correction_id=correction_id,
+                    recorded_base_version_id=str(active_summary_version_id or ""),
+                    retry_attempt_token=retry_attempt_token,
                 )
-        apply_result = await _apply_corrected_summary(
-            uid=uid,
-            conversation_id=conversation_id,
-            correction_id=correction_id,
-            trace_id=trace_id,
-            active_summary_version_id=active_summary_version_id,
-            corrected=corrected_summary,
-        )
-        if apply_result.get("canonical_confirmed") is not True:
-            raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
+                if attempt_status != "started":
+                    return _correction_response_from_audit(
+                        conversation_id=conversation_id,
+                        correction_id=correction_id,
+                        audit=_read_correction_audit(uid, conversation_id, correction_id),
+                    )
+            apply_result = await _apply_corrected_summary(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                active_summary_version_id=active_summary_version_id,
+                corrected=corrected_summary,
+            )
+            if apply_result.get("canonical_confirmed") is not True:
+                raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
         applied_at = _now_iso()
         try:
             _persist_correction_audit(
@@ -1400,6 +1684,7 @@ async def _run_direct_correction_apply(
                 extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
             )
         try:
+            require_current_ai_consent(uid)
             latest_source = conversations_db.get_conversation(uid, conversation_id) or source_conversation or {}
             proposal_id = await _run_post_source_correction_side_effects(
                 uid=uid,
@@ -1428,6 +1713,27 @@ async def _run_direct_correction_apply(
             proposal_id=proposal_id,
         )
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            if exc.status_code == 403 and detail.get("code") == "ai_consent_required":
+                terminal = _require_correction_consent_or_terminal_response(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    expected_retry_attempt_token=retry_attempt_token,
+                )
+                if terminal is not None:
+                    return terminal
+        reconciled = _reconcile_committed_correction(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            active_summary_version_id=active_summary_version_id,
+            proposal_id=proposal_id,
+        )
+        if reconciled is not None:
+            return reconciled
         if retry_attempt_token:
             attempt_status = _start_correction_retry_attempt(
                 uid=uid,
@@ -1436,14 +1742,11 @@ async def _run_direct_correction_apply(
                 recorded_base_version_id=str(active_summary_version_id or ""),
                 retry_attempt_token=retry_attempt_token,
             )
-            if attempt_status in {"missing", "stale_attempt"}:
-                return ConversationCorrectionResponse(
-                    correction_id=correction_id,
+            if attempt_status in {"missing", "stale_attempt", "version_drift"}:
+                return _correction_response_from_audit(
                     conversation_id=conversation_id,
-                    trace_id=trace_id,
-                    status="queued",
-                    queued=True,
-                    proposal_id=proposal_id,
+                    correction_id=correction_id,
+                    audit=_read_correction_audit(uid, conversation_id, correction_id),
                 )
         if isinstance(exc, CanonicalSummaryWriteUnconfirmedError):
             pending_at = _now_iso()
@@ -1506,49 +1809,63 @@ async def _run_direct_correction_apply(
         )
         failed_at = _now_iso()
         failure_code = _correction_failure_code(exc)
-        _append_correction_event(
-            uid,
-            conversation_id,
-            correction_id,
-            {
-                "stage": "direct_apply_failed",
-                "status": "error",
-                "at": failed_at,
-                "trace_id": trace_id,
-                "failure_code": failure_code,
-                "n8n_fallback_enabled": N8N_CORRECTION_FALLBACK_ENABLED,
-            },
-        )
         if not N8N_CORRECTION_FALLBACK_ENABLED:
-            _persist_correction_audit(
+            failed_audit = {
+                "status": "direct_apply_failed",
+                "updated_at": failed_at,
+                "failure_code": failure_code,
+                "source": request.source,
+                "active_summary_version_id": active_summary_version_id,
+                "retry_attempt_token": retry_attempt_token,
+                "retry_lease_expires_at": None,
+            }
+            failed_state = {
+                "status": "direct_apply_failed",
+                "pending": False,
+                "correction_id": correction_id,
+                "trace_id": trace_id,
+                "submitted_at": submitted_at,
+                "updated_at": failed_at,
+                "source": request.source,
+                "active_summary_version_id": active_summary_version_id,
+                "failure_code": failure_code,
+            }
+            failure_outcome = _record_failed_correction_attempt(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                retry_attempt_token=retry_attempt_token,
+                audit_update=failed_audit,
+                correction_state=failed_state,
+            )
+            if failure_outcome == "irreversible_success":
+                reconciled = _reconcile_committed_correction(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    trace_id=trace_id,
+                    active_summary_version_id=active_summary_version_id,
+                    proposal_id=proposal_id,
+                )
+                if reconciled is not None:
+                    return reconciled
+            if failure_outcome != "recorded":
+                return _correction_response_from_audit(
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    audit=_read_correction_audit(uid, conversation_id, correction_id),
+                )
+            _append_correction_event(
                 uid,
                 conversation_id,
                 correction_id,
                 {
-                    "status": "direct_apply_failed",
-                    "updated_at": failed_at,
+                    "stage": "direct_apply_failed",
+                    "status": "error",
+                    "at": failed_at,
+                    "trace_id": trace_id,
                     "failure_code": failure_code,
-                    "source": request.source,
-                    "active_summary_version_id": active_summary_version_id,
-                    "retry_attempt_token": retry_attempt_token,
-                    "retry_lease_expires_at": None,
-                },
-            )
-            _update_conversation_correction_state(
-                uid,
-                conversation_id,
-                {
-                    "correction_state": {
-                        "status": "direct_apply_failed",
-                        "pending": False,
-                        "correction_id": correction_id,
-                        "trace_id": trace_id,
-                        "submitted_at": submitted_at,
-                        "updated_at": failed_at,
-                        "source": request.source,
-                        "active_summary_version_id": active_summary_version_id,
-                        "failure_code": failure_code,
-                    }
+                    "n8n_fallback_enabled": False,
                 },
             )
             return ConversationCorrectionResponse(
@@ -1574,7 +1891,7 @@ async def _submit_conversation_correction(
     if conversation.get("is_locked", False):
         raise HTTPException(status_code=402, detail="Conversation locked")
 
-    correction_id = str(uuid.uuid4())
+    correction_id = str(request.correction_id or uuid.uuid4())
     trace_id = f"correction:{conversation_id}:{correction_id}"
     submitted_at = _now_iso()
     structured = _structured_summary(conversation)
@@ -1585,43 +1902,73 @@ async def _submit_conversation_correction(
     if callable(bootstrap_builder):
         bootstrap_update = bootstrap_builder(conversation)
 
+    expected_active_summary_version_id = str(
+        bootstrap_update.get("active_summary_version_id") or conversation.get("active_summary_version_id") or ""
+    )
+    initial_attempt_token = _new_correction_attempt_token() if DIRECT_CORRECTION_APPLY_ENABLED else None
+    initial_lease_expires_at = (
+        _correction_retry_lease_expiry(datetime.now(timezone.utc)) if initial_attempt_token else None
+    )
+    initial_queue_mode = (
+        "background_direct_apply"
+        if initial_attempt_token and DIRECT_CORRECTION_BACKGROUND_ENABLED and background_tasks is not None
+        else "direct_apply" if initial_attempt_token else "fallback"
+    )
     submitted_state = {
         "correction_id": correction_id,
-        "status": "submitted",
+        "trace_id": trace_id,
+        "status": "queued",
         "pending": True,
         "source": request.source,
         "submitted_at": submitted_at,
         "updated_at": submitted_at,
-        "active_summary_version_id": bootstrap_update.get("active_summary_version_id")
-        or conversation.get("active_summary_version_id"),
+        "active_summary_version_id": expected_active_summary_version_id,
     }
-    _update_conversation_correction_state(
-        uid,
-        conversation_id,
-        {
-            **bootstrap_update,
-            "correction_state": submitted_state,
-        },
-    )
 
     audit_payload = {
         "correction_id": correction_id,
         "trace_id": trace_id,
         "uid": uid,
         "conversation_id": conversation_id,
-        "status": "submitted",
+        "status": "queued",
+        "pending": True,
         "source": request.source,
         "correction_text": request.correction_text,
         "category": _correction_category(request.correction_text, request.summary_context),
         "summary_context": request.summary_context.model_dump(),
         "current_summary": structured,
         "segment_count": segment_count,
-        "active_summary_version_id": submitted_state.get("active_summary_version_id"),
+        "active_summary_version_id": expected_active_summary_version_id,
+        "request_fingerprint": _correction_request_fingerprint(request),
+        "queue_result": {"mode": initial_queue_mode},
+        "retry_attempt_token": initial_attempt_token,
+        "retry_lease_expires_at": initial_lease_expires_at,
         "created_at": submitted_at,
         "updated_at": submitted_at,
-        "events": [{"stage": "submitted", "status": "ok", "at": submitted_at, "trace_id": trace_id}],
+        "events": [{"stage": "queued", "status": "ok", "at": submitted_at, "trace_id": trace_id}],
     }
-    _persist_correction_audit(uid, conversation_id, correction_id, audit_payload)
+    initial_claim = _claim_initial_correction_submission(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+        bootstrap_update=bootstrap_update,
+        correction_state=submitted_state,
+        audit_payload=audit_payload,
+    )
+    claim_outcome = str(initial_claim.get("outcome") or "")
+    if claim_outcome == "replay":
+        return _correction_response_from_audit(
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            audit=initial_claim.get("audit") or {},
+        )
+    if claim_outcome == "conversation_missing":
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if claim_outcome in {"version_drift", "idempotency_conflict"}:
+        raise HTTPException(status_code=409, detail="Correction idempotency conflict")
+    if claim_outcome != "created":
+        raise HTTPException(status_code=500, detail="Correction submission claim failed")
 
     proposal_id = None
 
@@ -1639,47 +1986,10 @@ async def _submit_conversation_correction(
             "active_summary_version_id": submitted_state.get("active_summary_version_id"),
             "proposal_id": proposal_id,
             "source_conversation": conversation,
+            "retry_attempt_token": initial_attempt_token,
+            "retry_deadline_at": initial_lease_expires_at,
         }
         if DIRECT_CORRECTION_BACKGROUND_ENABLED and background_tasks is not None:
-            queued_now = datetime.now(timezone.utc)
-            queued_at = queued_now.isoformat()
-            initial_attempt_token = _new_correction_attempt_token()
-            initial_lease_expires_at = _correction_retry_lease_expiry(queued_now)
-            direct_apply_kwargs["retry_attempt_token"] = initial_attempt_token
-            queued_state = {
-                "correction_id": correction_id,
-                "status": "queued",
-                "pending": True,
-                "source": request.source,
-                "submitted_at": submitted_at,
-                "updated_at": queued_at,
-                "active_summary_version_id": submitted_state.get("active_summary_version_id"),
-            }
-            _persist_correction_audit(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    "status": "queued",
-                    "updated_at": queued_at,
-                    "queue_result": {"mode": "background_direct_apply"},
-                    "retry_attempt_token": initial_attempt_token,
-                    "retry_lease_expires_at": initial_lease_expires_at,
-                },
-            )
-            _append_correction_event(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    "stage": "direct_apply_queued",
-                    "status": "ok",
-                    "at": queued_at,
-                    "trace_id": trace_id,
-                    "queue_result": {"mode": "background_direct_apply"},
-                },
-            )
-            _update_conversation_correction_state(uid, conversation_id, {"correction_state": queued_state})
             background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)
             return ConversationCorrectionResponse(
                 correction_id=correction_id,
@@ -1940,7 +2250,16 @@ def _correction_retry_lease_expiry(now: datetime) -> str:
 
 
 def _correction_work_lease_is_reclaimable(audit: dict[str, Any], *, now: datetime) -> bool:
-    if str(audit.get("status") or "") not in {"queued", "processing", "retry_queued"}:
+    audit_status = str(audit.get("status") or "")
+    if audit_status not in {
+        "submitted",
+        "queued",
+        "processing",
+        "retry_queued",
+        "canonical_pending",
+    }:
+        return False
+    if audit_status in {"queued", "processing", "retry_queued"} and not audit.get("retry_attempt_token"):
         return False
     lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
     return lease_expires_at is None or lease_expires_at <= now.astimezone(timezone.utc)
@@ -1979,7 +2298,7 @@ def _claim_failed_correction_retry_in_transaction(
     ):
         return "identity_mismatch"
     audit_status = str(audit.get("status") or "")
-    if audit_status in {"queued", "processing", "retry_queued"}:
+    if audit_status in {"submitted", "queued", "processing", "retry_queued", "canonical_pending"}:
         lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
         retry_now = _parse_correction_timestamp(retry_queued_at)
         if lease_expires_at is not None and retry_now is not None and lease_expires_at > retry_now:
@@ -2055,9 +2374,8 @@ def _start_correction_retry_attempt_in_transaction(
     recorded_base_version_id: str,
     retry_attempt_token: str,
     started_at: str,
-    retry_lease_expires_at: str,
 ) -> str:
-    """Renew only the current attempt before any provider or source work."""
+    """Validate the current attempt without extending its absolute lease."""
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     audit_snapshot = audit_ref.get(transaction=transaction)
     if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
@@ -2074,12 +2392,15 @@ def _start_correction_retry_attempt_in_transaction(
         return "stale_attempt"
     if str(conversation.get("active_summary_version_id") or "") != recorded_base_version_id:
         return "version_drift"
+    lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
+    attempt_started_at = _parse_correction_timestamp(started_at)
+    if lease_expires_at is not None and attempt_started_at is not None and lease_expires_at <= attempt_started_at:
+        return "lease_expired"
     transaction.set(
         audit_ref,
         {
             "status": "processing",
             "retry_attempt_token": retry_attempt_token,
-            "retry_lease_expires_at": retry_lease_expires_at,
             "updated_at": started_at,
         },
         merge=True,
@@ -2112,7 +2433,292 @@ def _start_correction_retry_attempt(
         recorded_base_version_id=recorded_base_version_id,
         retry_attempt_token=retry_attempt_token,
         started_at=started.isoformat(),
-        retry_lease_expires_at=_correction_retry_lease_expiry(started),
+    )
+
+
+def _claim_canonical_reconciliation_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_queued_at: str,
+    retry_lease_expires_at: str,
+    retry_attempt_token: str,
+) -> str:
+    """Serialize repair after the exact correction source version is active."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+    ):
+        return "identity_mismatch"
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    corrected_id = str(corrected.get("id") or "") if corrected else ""
+    if (
+        not corrected_id
+        or str(corrected.get("based_on_version_id") or "") != recorded_base_version_id
+        or str(conversation.get("active_summary_version_id") or "") != corrected_id
+    ):
+        return "version_drift"
+    if str(audit.get("status") or "") == "applied":
+        return "already_applied"
+    lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
+    retry_now = _parse_correction_timestamp(retry_queued_at)
+    if lease_expires_at is not None and retry_now is not None and lease_expires_at > retry_now:
+        return "already_queued"
+    transaction.set(
+        audit_ref,
+        {
+            "status": "canonical_pending",
+            "pending": True,
+            "retry_attempt_token": retry_attempt_token,
+            "retry_lease_expires_at": retry_lease_expires_at,
+            "updated_at": retry_queued_at,
+        },
+        merge=True,
+    )
+    return "claimed"
+
+
+@transactional
+def _claim_canonical_reconciliation_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
+    return _claim_canonical_reconciliation_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _claim_canonical_reconciliation(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_queued_at: str,
+    retry_lease_expires_at: str,
+    retry_attempt_token: str,
+) -> str:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _claim_canonical_reconciliation_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        recorded_base_version_id=recorded_base_version_id,
+        retry_queued_at=retry_queued_at,
+        retry_lease_expires_at=retry_lease_expires_at,
+        retry_attempt_token=retry_attempt_token,
+    )
+
+
+def _finish_canonical_reconciliation_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_attempt_token: str,
+    audit_update: dict[str, Any],
+) -> str:
+    """Commit a repair result only while the exact token still owns it."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+    ):
+        return "stale_attempt"
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    corrected_id = str(corrected.get("id") or "") if corrected else ""
+    if (
+        not corrected_id
+        or str(corrected.get("based_on_version_id") or "") != recorded_base_version_id
+        or str(conversation.get("active_summary_version_id") or "") != corrected_id
+    ):
+        return "version_drift"
+    transaction.set(audit_ref, audit_update, merge=True)
+    return "finished"
+
+
+@transactional
+def _finish_canonical_reconciliation_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
+    return _finish_canonical_reconciliation_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _finish_canonical_reconciliation(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    recorded_base_version_id: str,
+    retry_attempt_token: str,
+    audit_update: dict[str, Any],
+) -> str:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _finish_canonical_reconciliation_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        recorded_base_version_id=recorded_base_version_id,
+        retry_attempt_token=retry_attempt_token,
+        audit_update=audit_update,
+    )
+
+
+def _record_failed_correction_attempt_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: Optional[str],
+    audit_update: dict[str, Any],
+    correction_state: dict[str, Any],
+) -> str:
+    """Write failure only while this token owns an uncommitted correction."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+    ):
+        return "identity_mismatch"
+    if retry_attempt_token and str(audit.get("retry_attempt_token") or "") != retry_attempt_token:
+        return "stale_attempt"
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    corrected_id = str(corrected.get("id") or "") if corrected else ""
+    if corrected_id and str(conversation.get("active_summary_version_id") or "") == corrected_id:
+        return "irreversible_success"
+    if str(audit.get("status") or "") in {"applied", "undone", "consent_revoked"}:
+        return "already_terminal"
+    transaction.set(audit_ref, audit_update, merge=True)
+    state = conversation.get("correction_state") or {}
+    if str(state.get("correction_id") or "") == correction_id:
+        transaction.set(conversation_ref, {"correction_state": correction_state}, merge=True)
+    return "recorded"
+
+
+@transactional
+def _record_failed_correction_attempt_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
+    return _record_failed_correction_attempt_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _record_failed_correction_attempt(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: Optional[str],
+    audit_update: dict[str, Any],
+    correction_state: dict[str, Any],
+) -> str:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _record_failed_correction_attempt_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+        audit_update=audit_update,
+        correction_state=correction_state,
+    )
+
+
+def _reconcile_committed_correction(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    active_summary_version_id: Optional[str],
+    proposal_id: Optional[str],
+) -> Optional[ConversationCorrectionResponse]:
+    """Derive a non-failure receipt from source/canonical durable evidence."""
+
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        return None
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    if corrected is None:
+        return None
+    corrected_id = str(corrected.get("id") or "")
+    if (
+        not corrected_id
+        or str(corrected.get("based_on_version_id") or "") != str(active_summary_version_id or "")
+        or str(conversation.get("active_summary_version_id") or "") != corrected_id
+    ):
+        return None
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    enrichment = conversation.get("enrichment_state") or {}
+    audit_apply_result = audit.get("direct_apply_result") or {}
+    canonical_confirmed = bool(
+        str(enrichment.get("trace_id") or "") == trace_id
+        and enrichment.get("status") == "writeback_applied"
+        and enrichment.get("canonical_status") == "completed"
+    ) or bool(isinstance(audit_apply_result, dict) and audit_apply_result.get("canonical_confirmed") is True)
+    status_value = (
+        "applied" if canonical_confirmed or str(audit.get("status") or "") == "applied" else "canonical_pending"
+    )
+    reconciled_at = _now_iso()
+    try:
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "status": status_value,
+                "pending": status_value != "applied",
+                "updated_at": reconciled_at,
+                "applied_at": audit.get("applied_at") or (reconciled_at if status_value == "applied" else None),
+                "failure_code": None if status_value == "applied" else "canonical_write_unconfirmed",
+                "retry_lease_expires_at": None,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to persist reconciled correction receipt",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+    return ConversationCorrectionResponse(
+        correction_id=correction_id,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        status=status_value,
+        queued=status_value != "applied",
+        proposal_id=proposal_id,
     )
 
 
@@ -2139,6 +2745,15 @@ async def _retry_failed_conversation_correction(
     elif str(conversation.get("active_summary_version_id") or "") != recorded_base_version_id:
         raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
 
+    consent_terminal = _require_correction_consent_or_terminal_response(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_retry_attempt_token=str(audit.get("retry_attempt_token") or "") or None,
+    )
+    if consent_terminal is not None:
+        return consent_terminal
+
     trace_id = str(audit.get("trace_id") or f"correction:{conversation_id}:{correction_id}")
     submitted_at = str(audit.get("created_at") or audit.get("submitted_at") or _now_iso())
     try:
@@ -2154,6 +2769,36 @@ async def _retry_failed_conversation_correction(
     segment_count = len(conversation.get("transcript_segments") or [])
 
     if corrected is not None:
+        if str(audit.get("status") or "") == "applied":
+            return _correction_response_from_audit(
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                audit=audit,
+            )
+        reconciliation_now = datetime.now(timezone.utc)
+        reconciliation_attempt_token = _new_correction_attempt_token()
+        claim_status = _claim_canonical_reconciliation(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            recorded_base_version_id=recorded_base_version_id,
+            retry_queued_at=reconciliation_now.isoformat(),
+            retry_lease_expires_at=_correction_retry_lease_expiry(reconciliation_now),
+            retry_attempt_token=reconciliation_attempt_token,
+        )
+        if claim_status in {"already_applied", "already_queued"}:
+            return _correction_response_from_audit(
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                audit=_read_correction_audit(uid, conversation_id, correction_id),
+            )
+        if claim_status == "missing":
+            raise HTTPException(status_code=404, detail="Correction not found")
+        if claim_status in {"identity_mismatch", "version_drift"}:
+            raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
+        if claim_status != "claimed":
+            raise HTTPException(status_code=500, detail="Canonical correction reconciliation claim failed")
+
         enrichment = conversation.get("enrichment_state") or {}
         audit_apply_result = audit.get("direct_apply_result") or {}
         canonical_already_confirmed = bool(
@@ -2169,29 +2814,73 @@ async def _retry_failed_conversation_correction(
             apply_result["canonical_confirmed"] = True
         else:
             try:
-                apply_result = await _apply_corrected_summary(
+                require_current_ai_consent(uid)
+                async with asyncio.timeout(CORRECTION_END_TO_END_DEADLINE_SECONDS):
+                    apply_result = await _apply_corrected_summary(
+                        uid=uid,
+                        conversation_id=conversation_id,
+                        correction_id=correction_id,
+                        trace_id=trace_id,
+                        active_summary_version_id=recorded_base_version_id,
+                        corrected=corrected,
+                    )
+                if apply_result.get("canonical_confirmed") is not True:
+                    raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
+            except HTTPException as error:
+                detail = error.detail if isinstance(error.detail, dict) else {}
+                if error.status_code != 403 or detail.get("code") != "ai_consent_required":
+                    raise
+                terminal = _require_correction_consent_or_terminal_response(
                     uid=uid,
                     conversation_id=conversation_id,
                     correction_id=correction_id,
-                    trace_id=trace_id,
-                    active_summary_version_id=recorded_base_version_id,
-                    corrected=corrected,
+                    expected_retry_attempt_token=reconciliation_attempt_token,
                 )
-                if apply_result.get("canonical_confirmed") is not True:
-                    raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
-            except CanonicalSummaryWriteUnconfirmedError:
+                if terminal is not None:
+                    return terminal
+                raise
+            except (CanonicalSummaryWriteUnconfirmedError, TimeoutError):
                 pending_at = _now_iso()
-                _persist_correction_audit(
-                    uid,
-                    conversation_id,
-                    correction_id,
-                    {
-                        "status": "canonical_pending",
-                        "updated_at": pending_at,
-                        "failure_code": "canonical_write_unconfirmed",
-                        "retry_lease_expires_at": None,
-                    },
-                )
+                try:
+                    finish_status = _finish_canonical_reconciliation(
+                        uid=uid,
+                        conversation_id=conversation_id,
+                        correction_id=correction_id,
+                        recorded_base_version_id=recorded_base_version_id,
+                        retry_attempt_token=reconciliation_attempt_token,
+                        audit_update={
+                            "status": "canonical_pending",
+                            "pending": True,
+                            "updated_at": pending_at,
+                            "failure_code": "canonical_write_unconfirmed",
+                            "retry_lease_expires_at": None,
+                        },
+                    )
+                except Exception:
+                    finish_status = "confirmation_failed"
+                    logger.exception(
+                        "Failed to persist canonical reconciliation pending marker",
+                        extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+                    )
+                if finish_status != "finished":
+                    reconciled = _reconcile_committed_correction(
+                        uid=uid,
+                        conversation_id=conversation_id,
+                        correction_id=correction_id,
+                        trace_id=trace_id,
+                        active_summary_version_id=recorded_base_version_id,
+                        proposal_id=str(audit.get("proposal_id") or "") or None,
+                    )
+                    if reconciled is not None:
+                        return reconciled
+                    return ConversationCorrectionResponse(
+                        conversation_id=conversation_id,
+                        correction_id=correction_id,
+                        trace_id=trace_id,
+                        status="canonical_pending",
+                        queued=True,
+                        proposal_id=str(audit.get("proposal_id") or "") or None,
+                    )
                 return ConversationCorrectionResponse(
                     correction_id=correction_id,
                     conversation_id=conversation_id,
@@ -2201,19 +2890,48 @@ async def _retry_failed_conversation_correction(
                     proposal_id=str(audit.get("proposal_id") or "") or None,
                 )
         applied_at = _now_iso()
-        _persist_correction_audit(
-            uid,
-            conversation_id,
-            correction_id,
-            {
-                "status": "applied",
-                "applied_at": applied_at,
-                "updated_at": applied_at,
-                "direct_apply_result": apply_result,
-                "failure_code": None,
-                "retry_lease_expires_at": None,
-            },
-        )
+        try:
+            finish_status = _finish_canonical_reconciliation(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                recorded_base_version_id=recorded_base_version_id,
+                retry_attempt_token=reconciliation_attempt_token,
+                audit_update={
+                    "status": "applied",
+                    "pending": False,
+                    "applied_at": applied_at,
+                    "updated_at": applied_at,
+                    "direct_apply_result": apply_result,
+                    "failure_code": None,
+                    "retry_lease_expires_at": None,
+                },
+            )
+        except Exception:
+            finish_status = "confirmation_failed"
+            logger.exception(
+                "Canonical correction durable before reconciliation receipt confirmation",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+            )
+        if finish_status != "finished":
+            reconciled = _reconcile_committed_correction(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                active_summary_version_id=recorded_base_version_id,
+                proposal_id=str(audit.get("proposal_id") or "") or None,
+            )
+            if reconciled is not None and reconciled.status == "applied":
+                return reconciled
+            return ConversationCorrectionResponse(
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                status="applied",
+                queued=False,
+                proposal_id=str(audit.get("proposal_id") or "") or None,
+            )
         if not _audit_has_completed_stage(audit, "direct_apply_succeeded"):
             _append_correction_event(
                 uid,
@@ -2228,19 +2946,26 @@ async def _retry_failed_conversation_correction(
                     "reconciled": True,
                 },
             )
-        proposal_id = await _run_post_source_correction_side_effects(
-            uid=uid,
-            conversation_id=conversation_id,
-            correction_id=correction_id,
-            trace_id=trace_id,
-            request=request,
-            source_conversation=conversation,
-            structured=structured,
-            transcript=transcript,
-            segment_count=segment_count,
-            submitted_at=submitted_at,
-            active_summary_version_id=recorded_base_version_id,
-        )
+        proposal_id = str(audit.get("proposal_id") or "") or None
+        try:
+            require_current_ai_consent(uid)
+            proposal_id = await _run_post_source_correction_side_effects(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                request=request,
+                source_conversation=conversation,
+                structured=structured,
+                transcript=transcript,
+                segment_count=segment_count,
+                submitted_at=submitted_at,
+                active_summary_version_id=recorded_base_version_id,
+            )
+        except HTTPException as error:
+            detail = error.detail if isinstance(error.detail, dict) else {}
+            if error.status_code != 403 or detail.get("code") != "ai_consent_required":
+                raise
         return ConversationCorrectionResponse(
             correction_id=correction_id,
             conversation_id=conversation_id,
@@ -2252,6 +2977,7 @@ async def _retry_failed_conversation_correction(
 
     audit_status = str(audit.get("status") or "")
     if audit_status not in {
+        "submitted",
         "queued",
         "processing",
         "retry_queued",
@@ -2264,6 +2990,7 @@ async def _retry_failed_conversation_correction(
 
     retry_now = datetime.now(timezone.utc)
     retry_queued_at = retry_now.isoformat()
+    retry_lease_expires_at = _correction_retry_lease_expiry(retry_now)
     retry_attempt_token = _new_correction_attempt_token()
     claim_status = _claim_failed_correction_retry(
         uid=uid,
@@ -2271,7 +2998,7 @@ async def _retry_failed_conversation_correction(
         correction_id=correction_id,
         recorded_base_version_id=recorded_base_version_id,
         retry_queued_at=retry_queued_at,
-        retry_lease_expires_at=_correction_retry_lease_expiry(retry_now),
+        retry_lease_expires_at=retry_lease_expires_at,
         retry_attempt_token=retry_attempt_token,
         source=request.source,
     )
@@ -2306,6 +3033,7 @@ async def _retry_failed_conversation_correction(
         "proposal_id": str(audit.get("proposal_id") or "") or None,
         "source_conversation": conversation,
         "retry_attempt_token": retry_attempt_token,
+        "retry_deadline_at": retry_lease_expires_at,
     }
     if background_tasks is not None:
         background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)
@@ -2450,6 +3178,11 @@ async def get_conversation_correction_receipt(
             conversation_id=conversation_id,
             correction_id=correction_id,
             background_tasks=background_tasks,
+        )
+        return _correction_receipt(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
         )
     return receipt
 

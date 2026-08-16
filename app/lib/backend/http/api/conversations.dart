@@ -321,6 +321,7 @@ class ConversationCorrectionSubmission {
 
 Future<ConversationCorrectionSubmission?> submitConversationCorrection({
   required String conversationId,
+  required String correctionId,
   required String correctionText,
   String? summaryTitle,
   String? summaryOverview,
@@ -339,6 +340,7 @@ Future<ConversationCorrectionSubmission?> submitConversationCorrection({
     url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/corrections',
     method: 'POST',
     body: jsonEncode({
+      'correction_id': correctionId,
       'correction_text': correctionText,
       'source': 'ios',
       'summary_context': {

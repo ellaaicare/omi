@@ -8,12 +8,18 @@ import os
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
 import database.conversations as conversations_db
+from database import vector_db
 from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime as _resolve_isolated_runtime,
+    revalidate_runtime_authority as _revalidate_runtime_authority,
+    runtime_authority_identity as _runtime_authority_identity,
+)
 from ella.services.summary_writeback import CanonicalSummaryWriteUnconfirmedError, write_conversation_summary
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from utils.conversations.generic_summary import generate_stock_conversation_summary
@@ -42,14 +48,10 @@ def _active_summary_version(conversation: dict[str, Any]) -> dict[str, Any]:
 
 
 def _conversation_vector_present(uid: str, conversation_id: str) -> bool:
-    from database import vector_db
-
     return conversation_id in vector_db.fetch_existing_conversation_vector_ids(uid, [conversation_id])
 
 
 def _conversation_vector_metadata(uid: str, conversation_id: str) -> Optional[dict[str, Any]]:
-    from database import vector_db
-
     return vector_db.fetch_conversation_vector_metadata(uid, conversation_id)
 
 
@@ -169,22 +171,15 @@ def default_summary_provider_config() -> SummaryProviderConfig:
 
 
 async def resolve_isolated_runtime(uid: str, *, target_mode: str):
-    """Lazy deployed-runtime bridge for the shipped release source overlay."""
-    from ella.services.runtime_resolver import resolve_isolated_runtime as resolve_runtime
-
-    return await resolve_runtime(uid, target_mode=target_mode)
+    return await _resolve_isolated_runtime(uid, target_mode=target_mode)
 
 
 def runtime_authority_identity(runtime):
-    from ella.services.runtime_resolver import runtime_authority_identity as build_identity
-
-    return build_identity(runtime)
+    return _runtime_authority_identity(runtime)
 
 
 async def revalidate_runtime_authority(identity):
-    from ella.services.runtime_resolver import revalidate_runtime_authority as revalidate
-
-    return await revalidate(identity)
+    return await _revalidate_runtime_authority(identity)
 
 
 async def summary_provider_config_for_uid(
@@ -306,6 +301,7 @@ async def generate_summary_from_prompt(
     required_tags: tuple[str, ...],
     config: SummaryProviderConfig,
     async_client_factory: Any = httpx.AsyncClient,
+    egress_guard: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     if config.provider == 'hermes-api':
         if config.cloud_authority is None and not config.hermes_api_key:
@@ -325,6 +321,8 @@ async def generate_summary_from_prompt(
     async with async_client_factory(timeout=config.timeout_seconds) as client:
         if config.provider == 'hermes-api' and config.cloud_authority is not None:
             url, model, api_key = await resolve_summary_provider_send(config)
+        if egress_guard is not None:
+            egress_guard()
         headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
         if config.provider == 'hermes-api':
             headers.update(
@@ -363,6 +361,7 @@ async def apply_summary_update(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
+    canonical_egress_guard: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -382,6 +381,7 @@ async def apply_summary_update(
         require_canonical=require_canonical,
         require_based_on_match=require_based_on_match,
         preserve_generated_results=preserve_generated_results,
+        canonical_egress_guard=canonical_egress_guard,
     )
 
 

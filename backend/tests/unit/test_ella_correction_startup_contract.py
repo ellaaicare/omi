@@ -27,29 +27,37 @@ def test_runtime_resolver_imports_real_in_tree_dependency_closure():
         "print('runtime-import-ok')"
     )
 
-    assert probe.returncode == 0, probe.stderr
+    assert probe.returncode == 0, f"{probe.stderr}\n{probe.stdout}"
     assert probe.stdout.strip() == "runtime-import-ok"
 
 
-def test_main_wires_consent_firestore_and_router_while_disabled_extensions_stay_fail_closed():
+def test_ella_enabled_main_startup_registers_correction_routes_and_keeps_consent_fail_closed():
     probe = _run_clean_backend_probe(r'''
 import os
 import sys
 from types import ModuleType, SimpleNamespace
 
-os.environ["ELLA_ENABLED"] = "false"
+os.environ["ELLA_ENABLED"] = "true"
 os.environ["ELLA_AI_CONSENT_ENFORCEMENT_ENABLED"] = "false"
+os.environ["ELLA_MEMORY_ENABLED"] = "false"
+os.environ["ELLA_SCANNER_ENABLED"] = "false"
+os.environ["ELLA_VOICE_V2_ENABLED"] = "false"
+os.environ["ELLA_GUARDIAN_ENABLED"] = "false"
+os.environ["ENCRYPTION_SECRET"] = "startup-probe-only-32-byte-key-value"
 
 fake_db = object()
 database_client = ModuleType("database._client")
 database_client.db = fake_db
+database_client.document_id_from_seed = lambda seed: str(seed)
 sys.modules["database._client"] = database_client
+sys.modules["database.conversations"] = ModuleType("database.conversations")
 
 firebase_admin = ModuleType("firebase_admin")
 firebase_admin.credentials = SimpleNamespace(Certificate=lambda value: value)
 firebase_admin.auth = SimpleNamespace(verify_id_token=lambda value: {})
 firebase_admin.initialize_app = lambda *args, **kwargs: None
 sys.modules["firebase_admin"] = firebase_admin
+sys.modules["stripe"] = ModuleType("stripe")
 
 class _Decorator:
     def __call__(self, *args, **kwargs):
@@ -89,6 +97,23 @@ for name in (
     setattr(routers, name, SimpleNamespace(router=APIRouter()))
 sys.modules["routers"] = routers
 
+sys.modules["database.vector_db"] = ModuleType("database.vector_db")
+sys.modules["database.vector_db"].fetch_existing_conversation_vector_ids = lambda *args: []
+sys.modules["database.vector_db"].fetch_conversation_vector_metadata = lambda *args: None
+
+canonical_events = ModuleType("ella.routers.canonical_events")
+canonical_events.CanonicalEventIn = lambda **kwargs: SimpleNamespace(**kwargs)
+canonical_events.PostgresCanonicalEventStore = lambda: SimpleNamespace()
+canonical_events.create_canonical_events_router = lambda: APIRouter()
+sys.modules["ella.routers.canonical_events"] = canonical_events
+
+generic_summary = ModuleType("utils.conversations.generic_summary")
+generic_summary.generate_stock_conversation_summary = lambda *args, **kwargs: None
+sys.modules["utils.conversations.generic_summary"] = generic_summary
+vector = ModuleType("utils.conversations.vector")
+vector.refresh_structured_summary_vector = lambda *args, **kwargs: None
+sys.modules["utils.conversations.vector"] = vector
+
 observability = ModuleType("utils.observability")
 observability.log_langsmith_status = lambda: None
 sys.modules["utils.observability"] = observability
@@ -98,7 +123,13 @@ from ella.services import ai_consent
 from fastapi import HTTPException
 
 assert ai_consent._firestore_db is fake_db
-assert "/v1/users/ai-consent" in {route.path for route in main.app.routes}
+route_paths = {route.path for route in main.app.routes}
+assert "/v1/users/ai-consent" in route_paths
+assert "/v1/ella/conversations/{conversation_id}/corrections" in route_paths
+assert "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}" in route_paths
+assert "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/retry" in route_paths
+assert "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo" in route_paths
+assert "/v1/conversations/{conversation_id}/corrections" in route_paths
 
 class _NoGrantRepository:
     def get_current(self, uid):
@@ -116,8 +147,8 @@ except HTTPException as exc:
     assert exc.detail["code"] == "ai_consent_required"
 else:
     raise AssertionError("disabled rollout bypassed correction consent")
-print("consent-startup-ok")
+print("ella-correction-startup-ok")
 ''')
 
-    assert probe.returncode == 0, probe.stderr
-    assert "consent-startup-ok" in probe.stdout
+    assert probe.returncode == 0, f"{probe.stderr}\n{probe.stdout}"
+    assert "ella-correction-startup-ok" in probe.stdout

@@ -80,16 +80,17 @@ void main() {
     tester,
   ) async {
     const conversationId = 'conversation-1';
-    const correctionId = 'correction-1';
     const correctionText = 'private correction sentinel';
     const responseOnlySentinel = 'response-body-must-not-be-logged';
     final authority = _ExactAuthority('owner-1');
     final logs = <String>[];
     var receiptCalls = 0;
     var refreshCalls = 0;
+    final submittedCorrectionIds = <String>[];
 
     Future<ConversationCorrectionSubmission?> submitter({
       required String conversationId,
+      required String correctionId,
       required String correctionText,
       String? summaryTitle,
       String? summaryOverview,
@@ -97,8 +98,10 @@ void main() {
       String? expectedAuthenticatedUid,
       ExactAccountAuthorityVerifier? exactAuthority,
     }) {
+      submittedCorrectionIds.add(correctionId);
       return submitConversationCorrection(
         conversationId: conversationId,
+        correctionId: correctionId,
         correctionText: correctionText,
         summaryTitle: summaryTitle,
         summaryOverview: summaryOverview,
@@ -117,6 +120,7 @@ void main() {
           expect(expectedAuthenticatedUid, 'owner-1');
           expect(identical(exactAuthority, authority), isTrue);
           expect(jsonDecode(body)['correction_text'], correctionText);
+          expect(jsonDecode(body)['correction_id'], correctionId);
           return http.Response(
             jsonEncode({
               'correction_id': correctionId,
@@ -214,10 +218,16 @@ void main() {
 
     expect(receiptCalls, 2);
     expect(refreshCalls, 0);
+    expect(submittedCorrectionIds, hasLength(1));
     expect(
       find.text("Ella can't reach your correction service right now"),
       findsOneWidget,
     );
+    await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
+    await tester.pumpAndSettle();
+    expect(submittedCorrectionIds, hasLength(2));
+    expect(submittedCorrectionIds.toSet(), hasLength(1));
+    expect(receiptCalls, 3);
     expect(find.textContaining('self_hosted_runtime_target_mode_required'), findsNothing);
     expect(find.byType(CorrectSummarySheet), findsOneWidget);
     expect(find.text('Memory updated'), findsNothing);
@@ -227,6 +237,8 @@ void main() {
     expect(logs, [
       'submitConversationCorrection: status=202',
       'getConversationCorrectionReceipt: status=200',
+      'getConversationCorrectionReceipt: status=200',
+      'submitConversationCorrection: status=202',
       'getConversationCorrectionReceipt: status=200',
     ]);
   });
@@ -257,6 +269,7 @@ void main() {
             authorityProvider: () => authority,
             submitter: ({
               required conversationId,
+              required correctionId,
               required correctionText,
               summaryTitle,
               summaryOverview,
@@ -313,6 +326,7 @@ void main() {
 
     final submission = await submitConversationCorrection(
       conversationId: conversationId,
+      correctionId: correctionId,
       correctionText: 'Correct the retained summary.',
       expectedAuthenticatedUid: authority.uid,
       exactAuthority: authority,

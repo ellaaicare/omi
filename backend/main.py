@@ -161,9 +161,23 @@ for path in paths:
 # ============================================================================
 # ELLA EXTENSIONS (downstream fork customizations)
 # ============================================================================
+_ella_extensions_required = os.getenv("ELLA_ENABLED", "true").lower() == "true"
 try:
     from ella import register_ella_extensions
 
     register_ella_extensions(app)
 except ImportError:
-    pass  # Running vanilla OMI
+    if _ella_extensions_required:
+        raise
+if _ella_extensions_required:
+    _registered_route_paths = {route.path for route in app.routes}
+    _required_correction_routes = {
+        "/v1/conversations/{conversation_id}/corrections",
+        "/v1/ella/conversations/{conversation_id}/corrections",
+        "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}",
+        "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/retry",
+        "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo",
+    }
+    _missing_correction_routes = _required_correction_routes - _registered_route_paths
+    if _missing_correction_routes:
+        raise RuntimeError(f"Ella correction routes missing at startup: {sorted(_missing_correction_routes)}")

@@ -51,6 +51,7 @@ async def write_conversation_summary(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
+    canonical_egress_guard: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -87,6 +88,8 @@ async def write_conversation_summary(
             'id': conversation_id,
             'enrichment_state': confirmed_state,
         }
+        if canonical_egress_guard is not None:
+            canonical_egress_guard()
         try:
             canonical_result = await asyncio.to_thread(
                 canonical_writer,
@@ -114,7 +117,16 @@ async def write_conversation_summary(
                 'updated_at': confirmed_state['updated_at'],
                 'active_summary_version_id': conversation.get('active_summary_version_id'),
             }
-        conversations_db.update_conversation(uid, conversation_id, confirmed_update)
+        try:
+            conversations_db.update_conversation(uid, conversation_id, confirmed_update)
+        except Exception:
+            # The canonical writer already returned durable success. A source
+            # confirmation marker is repairable and must not turn that commit
+            # into a false failure or trigger another source version.
+            logger.exception(
+                'Canonical summary durable before pending marker confirmation',
+                extra={'uid': uid, 'conversation_id': conversation_id, 'trace_id': trace_id},
+            )
         return {
             'status': 'ok',
             'conversation_id': conversation_id,
@@ -248,6 +260,8 @@ async def write_conversation_summary(
         canonical_conversation['correction_state'] = confirmed_correction_state
     canonical_result: Optional[dict[str, Any]] = None
     canonical_error: Optional[Exception] = None
+    if canonical_egress_guard is not None:
+        canonical_egress_guard()
     try:
         canonical_result = await asyncio.to_thread(
             canonical_writer,
@@ -279,7 +293,13 @@ async def write_conversation_summary(
         confirmed_update = {'enrichment_state': confirmed_state}
         if confirmed_correction_state is not None:
             confirmed_update['correction_state'] = confirmed_correction_state
-        conversations_db.update_conversation(uid, conversation_id, confirmed_update)
+        try:
+            conversations_db.update_conversation(uid, conversation_id, confirmed_update)
+        except Exception:
+            logger.exception(
+                'Canonical summary durable before source marker confirmation',
+                extra={'uid': uid, 'conversation_id': conversation_id, 'trace_id': trace_id},
+            )
 
     if correction_id and correction_audit_updater:
         try:

@@ -9,6 +9,7 @@ import 'package:gradient_borders/box_borders/gradient_box_border.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:tuple/tuple.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/webhooks.dart';
@@ -49,6 +50,8 @@ String correctionTerminalFailureMessage(
   ConversationCorrectionReceipt? receipt,
 ) {
   switch (receipt?.failureCode) {
+    case 'ai_consent_required':
+      return l10n.aiConsentNotAllowedStatus;
     case 'self_hosted_runtime_target_mode_required':
     case 'self_hosted_runtime_target_mode_missing':
     case 'self_hosted_runtime_target_identity_missing':
@@ -979,6 +982,7 @@ class _TypeCorrectionLink extends StatelessWidget {
 
 typedef CorrectionSubmitter = Future<ConversationCorrectionSubmission?> Function({
   required String conversationId,
+  required String correctionId,
   required String correctionText,
   String? summaryTitle,
   String? summaryOverview,
@@ -1019,6 +1023,8 @@ class CorrectSummarySheet extends StatefulWidget {
 class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
+  String? _pendingCorrectionId;
+  String? _pendingCorrectionText;
 
   @override
   void dispose() {
@@ -1029,6 +1035,10 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   Future<void> _submit() async {
     final correctionText = _controller.text.trim();
     if (correctionText.isEmpty || _isSubmitting) return;
+    if (_pendingCorrectionText != correctionText || _pendingCorrectionId == null) {
+      _pendingCorrectionText = correctionText;
+      _pendingCorrectionId = const Uuid().v4();
+    }
 
     setState(() => _isSubmitting = true);
     final authority = widget.authorityProvider();
@@ -1037,6 +1047,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
       if (authority != null && authority.uid.isNotEmpty && authority.isExactCurrent()) {
         final submission = await widget.submitter(
           conversationId: widget.conversation.id,
+          correctionId: _pendingCorrectionId!,
           correctionText: correctionText,
           summaryTitle: widget.conversation.structured.title,
           summaryOverview: widget.conversation.structured.overview,

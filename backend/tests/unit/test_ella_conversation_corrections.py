@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 sys.modules.setdefault("database.conversations", MagicMock())
+sys.modules.setdefault("database.vector_db", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.other.endpoints", MagicMock())
 sys.modules.setdefault(
@@ -40,6 +41,7 @@ corrections = importlib.util.module_from_spec(_corrections_spec)
 assert _corrections_spec is not None and _corrections_spec.loader is not None
 _corrections_spec.loader.exec_module(corrections)
 corrections.ELLA_CONFIG = SimpleNamespace(n8n_base_url="https://n8n.test")
+_original_require_current_ai_consent = corrections.require_current_ai_consent
 from ella.services import summary_recovery, summary_writeback
 
 
@@ -55,9 +57,38 @@ def _disable_external_observer_side_effects(monkeypatch):
         del uid
         return config
 
+    def claim_initial(**kwargs):
+        corrections._update_conversation_correction_state(
+            kwargs["uid"],
+            kwargs["conversation_id"],
+            {**kwargs["bootstrap_update"], "correction_state": kwargs["correction_state"]},
+        )
+        corrections._persist_correction_audit(
+            kwargs["uid"],
+            kwargs["conversation_id"],
+            kwargs["correction_id"],
+            kwargs["audit_payload"],
+        )
+        return {"outcome": "created", "audit": kwargs["audit_payload"]}
+
+    def record_failed(**kwargs):
+        corrections._persist_correction_audit(
+            kwargs["uid"], kwargs["conversation_id"], kwargs["correction_id"], kwargs["audit_update"]
+        )
+        corrections._update_conversation_correction_state(
+            kwargs["uid"],
+            kwargs["conversation_id"],
+            {"correction_state": kwargs["correction_state"]},
+        )
+        return "recorded"
+
     monkeypatch.setattr(corrections, "_emit_canonical_correction_event", noop_emit)
     monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", noop_propagate)
     monkeypatch.setattr(corrections, "summary_provider_config_for_uid", passthrough_provider_config)
+    monkeypatch.setattr(corrections, "require_current_ai_consent", lambda uid: uid)
+    monkeypatch.setattr(corrections, "_claim_initial_correction_submission", claim_initial)
+    monkeypatch.setattr(corrections, "_record_failed_correction_attempt", record_failed)
+    monkeypatch.setattr(corrections, "_start_correction_retry_attempt", lambda **kwargs: "started")
     monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: False)
 
 
@@ -196,7 +227,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     assert result.correction_id
     assert result.trace_id.startswith("correction:conv-123:")
     assert audits[0]["uid"] == "user-123"
-    assert audits[0]["payload"]["status"] == "submitted"
+    assert audits[0]["payload"]["status"] == "queued"
     assert audits[0]["payload"]["category"] == "media"
     assert audits[0]["payload"]["correction_text"] == "This was background TV audio, not a real memory concern."
     assert submitted["uid"] == "user-123"
@@ -206,7 +237,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     assert proposals == []
     assert not any(event["stage"] == "proposal_created" for event in events)
     assert events[-1]["stage"] == "queued"
-    assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+    assert conversation_updates[0]["correction_state"]["status"] == "queued"
     assert conversation_updates[0]["active_summary_version_id"] == "legacy-v1"
     assert conversation_updates[-1]["correction_state"]["status"] == "queued"
     assert conversation_updates[-1]["correction_state"]["active_summary_version_id"] == "legacy-v1"
@@ -874,7 +905,7 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
     assert audits[-1]["failure_code"] == "runtimeerror"
     assert events[-1]["stage"] == "queue_failed"
     assert events[-1]["status"] == "error"
-    assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+    assert conversation_updates[0]["correction_state"]["status"] == "queued"
     assert conversation_updates[-1]["correction_state"]["status"] == "queue_failed"
     assert conversation_updates[-1]["correction_state"]["pending"] is False
 
@@ -1006,7 +1037,7 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
     assert [event["stage"] for event in events].index("direct_apply_succeeded") < [
         event["stage"] for event in events
     ].index("proposal_created")
-    assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+    assert conversation_updates[0]["correction_state"]["status"] == "queued"
 
 
 def test_apply_corrected_summary_uses_shared_direct_writeback_service(monkeypatch):
@@ -1038,6 +1069,8 @@ def test_apply_corrected_summary_uses_shared_direct_writeback_service(monkeypatc
     )
 
     assert result["active_summary_version_id"] == "corrected-v1"
+    canonical_egress_guard = captured.pop("canonical_egress_guard")
+    assert callable(canonical_egress_guard)
     assert captured == {
         "uid": "user-123",
         "conversation_id": "conv-123",
@@ -1135,7 +1168,8 @@ def test_submit_correction_queues_background_direct_apply_without_waiting(monkey
     assert audits[-1]["queue_result"] == {"mode": "background_direct_apply"}
     assert audits[-1]["retry_attempt_token"]
     assert audits[-1]["retry_lease_expires_at"]
-    assert events[-1]["stage"] == "direct_apply_queued"
+    assert audits[-1]["events"][-1]["stage"] == "queued"
+    assert events == []
     assert conversation_updates[-1]["correction_state"]["status"] == "queued"
 
     func, args, kwargs = background_tasks.tasks[0]
@@ -1221,7 +1255,7 @@ def test_correction_routes_use_deployed_exact_auth_and_current_consent_dependenc
         "/v1/conversations/{conversation_id}/corrections",
     }
     for path in submit_paths:
-        assert route_dependencies[(path, "POST")] == [corrections.require_current_ai_consent]
+        assert route_dependencies[(path, "POST")] == [_original_require_current_ai_consent]
 
     exact_paths = {
         ("/v1/conversations/{conversation_id}/processing-retry-plan", "GET"),
@@ -1445,6 +1479,76 @@ def test_generate_corrected_summary_binds_two_owners_to_two_current_runtimes_wit
     assert "legacy.invalid" not in str(calls)
     assert "legacy-model" not in str(calls)
     assert "legacy-secret" not in str(calls)
+
+
+def test_provider_egress_revalidates_consent_after_slow_runtime_authority_resolution(monkeypatch):
+    consent_checks = []
+    provider_calls = []
+    revalidated = []
+
+    async def resolve_runtime(uid, *, target_mode):
+        return SimpleNamespace(uid=uid, target_mode=target_mode)
+
+    async def revalidate(authority):
+        revalidated.append(authority.uid)
+        await asyncio.sleep(0)
+        return SimpleNamespace(
+            gateway_url="https://owner.runtime.test",
+            gateway_token="owner-token",
+            agent_id="owner-model",
+        )
+
+    def consent(uid):
+        consent_checks.append(uid)
+        if len(consent_checks) == 3:
+            raise HTTPException(status_code=403, detail={"code": "ai_consent_required", "decision": "revoked"})
+        return uid
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            provider_calls.append((args, kwargs))
+            raise AssertionError("revocation after runtime resolution must prevent provider egress")
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", resolve_runtime)
+    monkeypatch.setattr(
+        summary_recovery,
+        "runtime_authority_identity",
+        lambda runtime: SimpleNamespace(uid=runtime.uid, target_mode=runtime.target_mode),
+    )
+    monkeypatch.setattr(summary_recovery, "revalidate_runtime_authority", revalidate)
+    monkeypatch.setattr(
+        corrections, "summary_provider_config_for_uid", summary_recovery.summary_provider_config_for_uid
+    )
+    monkeypatch.setattr(corrections, "require_current_ai_consent", consent)
+    monkeypatch.setattr(corrections.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            corrections._generate_corrected_summary(
+                uid="owner-1",
+                conversation_id="conv-1",
+                correction_id="corr-1",
+                trace_id="trace-1",
+                request=corrections.ConversationCorrectionRequest(correction_text="Correct attribution."),
+                structured={"title": "Old", "overview": "[Ella] Old."},
+                transcript="retained transcript",
+                segment_count=1,
+            )
+        )
+
+    assert error.value.status_code == 403
+    assert revalidated == ["owner-1"]
+    assert consent_checks == ["owner-1", "owner-1", "owner-1"]
+    assert provider_calls == []
 
 
 def test_correction_session_key_is_stable_per_user():
@@ -3175,6 +3279,89 @@ def test_strict_summary_writeback_retries_only_canonical_after_transport_uncerta
     ]
 
 
+def test_canonical_success_survives_confirmation_marker_failure_and_replays_without_second_source_cas(monkeypatch):
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "base-v1",
+        "summary_versions": [{"id": "base-v1", "kind": "generic", "is_active": True}],
+    }
+    source_cas_calls = []
+    canonical_calls = []
+    canonical_guard_calls = []
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "build_summary_version_update",
+        lambda *args, **kwargs: {
+            "summary_versions": [
+                {"id": "base-v1", "kind": "generic", "is_active": False},
+                {
+                    "id": "corrected-v2",
+                    "kind": "corrected_enriched",
+                    "correction_id": "corr-1",
+                    "based_on_version_id": "base-v1",
+                    "is_active": True,
+                },
+            ],
+            "active_summary_version_id": "corrected-v2",
+        },
+    )
+
+    def source_cas(uid, cid, expected, update):
+        source_cas_calls.append(expected)
+        conversation.update(
+            {
+                "summary_versions": update["summary_versions"],
+                "active_summary_version_id": update["active_summary_version_id"],
+                "enrichment_state": update["enrichment_state"],
+                "correction_state": update["correction_state"],
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        source_cas,
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("confirmation transport failed")),
+    )
+
+    def canonical_writer(*args, **kwargs):
+        assert len(canonical_guard_calls) == len(canonical_calls) + 1
+        canonical_calls.append(kwargs["trace_id"])
+        return {"ok": True, "inserted": 1}
+
+    async def apply_once():
+        return await summary_writeback.write_conversation_summary(
+            uid="owner-1",
+            conversation_id="conv-1",
+            title="Corrected",
+            overview="[Ella] Corrected the retained attribution while preserving the rest of the conversation.",
+            category="other",
+            summary_kind="corrected_enriched",
+            correction_id="corr-1",
+            based_on_version_id="base-v1",
+            trace_id="correction:conv-1:corr-1",
+            canonical_writer=canonical_writer,
+            require_canonical=True,
+            require_based_on_match=True,
+            canonical_egress_guard=lambda: canonical_guard_calls.append("checked"),
+        )
+
+    first = asyncio.run(apply_once())
+    replay = asyncio.run(apply_once())
+
+    assert first["canonical_confirmed"] is True
+    assert replay["canonical_confirmed"] is True
+    assert source_cas_calls == ["base-v1"]
+    assert canonical_calls == ["correction:conv-1:corr-1", "correction:conv-1:corr-1"]
+    assert canonical_guard_calls == ["checked", "checked"]
+
+
 class _MutableCorrectionAuditRef:
     def __init__(self, value):
         self.value = value
@@ -3481,7 +3668,6 @@ def test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_liv
         recorded_base_version_id="base-v1",
         retry_attempt_token="attempt-1",
         started_at="2026-08-15T23:22:01+00:00",
-        retry_lease_expires_at="2026-08-15T23:24:01+00:00",
     )
     current_start = corrections._start_correction_retry_attempt_in_transaction(
         transaction,
@@ -3493,11 +3679,38 @@ def test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_liv
         recorded_base_version_id="base-v1",
         retry_attempt_token="attempt-2",
         started_at="2026-08-15T23:22:01+00:00",
-        retry_lease_expires_at="2026-08-15T23:24:01+00:00",
     )
     assert stale_start == "stale_attempt"
     assert current_start == "started"
     assert len(transaction.writes) == 3
+    assert audit_ref.value["retry_lease_expires_at"] == "2026-08-15T23:24:00+00:00"
+
+    second_ownership_check = corrections._start_correction_retry_attempt_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        recorded_base_version_id="base-v1",
+        retry_attempt_token="attempt-2",
+        started_at="2026-08-15T23:23:59+00:00",
+    )
+    expired_ownership_check = corrections._start_correction_retry_attempt_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        recorded_base_version_id="base-v1",
+        retry_attempt_token="attempt-2",
+        started_at="2026-08-15T23:24:01+00:00",
+    )
+    assert second_ownership_check == "started"
+    assert expired_ownership_check == "lease_expired"
+    assert len(transaction.writes) == 4
+    assert audit_ref.value["retry_lease_expires_at"] == "2026-08-15T23:24:00+00:00"
 
     audit_ref.value["status"] = "direct_apply_failed"
     conversation_ref.value["active_summary_version_id"] = "newer-v2"
@@ -3508,7 +3721,98 @@ def test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_liv
         **kwargs,
     )
     assert drift == "version_drift"
-    assert len(transaction.writes) == 3
+    assert len(transaction.writes) == 4
+
+
+def test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_fenced():
+    correction_id = "canonical-pending-correction"
+    conversation_ref = _MutableCorrectionAuditRef(
+        {
+            "active_summary_version_id": "corrected-v2",
+            "summary_versions": [
+                {"id": "base-v1", "is_active": False},
+                {
+                    "id": "corrected-v2",
+                    "based_on_version_id": "base-v1",
+                    "correction_id": correction_id,
+                    "is_active": True,
+                },
+            ],
+        }
+    )
+    audit_ref = _MutableCorrectionAuditRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": correction_id,
+            "status": "canonical_pending",
+            "active_summary_version_id": "base-v1",
+            "retry_lease_expires_at": None,
+        }
+    )
+
+    class _Transaction:
+        def __init__(self):
+            self.writes = []
+
+        def set(self, ref, payload, merge=False):
+            self.writes.append((ref, dict(payload), merge))
+            ref.set(payload, merge=merge)
+
+    transaction = _Transaction()
+    claim = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "recorded_base_version_id": "base-v1",
+        "retry_queued_at": "2026-08-16T00:02:00+00:00",
+        "retry_lease_expires_at": "2026-08-16T00:04:30+00:00",
+        "retry_attempt_token": "repair-1",
+    }
+    first = corrections._claim_canonical_reconciliation_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **claim,
+    )
+    duplicate = corrections._claim_canonical_reconciliation_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        **{**claim, "retry_attempt_token": "repair-2"},
+    )
+
+    assert first == "claimed"
+    assert duplicate == "already_queued"
+    assert audit_ref.value["retry_attempt_token"] == "repair-1"
+    assert len(transaction.writes) == 1
+
+    stale_finish = corrections._finish_canonical_reconciliation_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        recorded_base_version_id="base-v1",
+        retry_attempt_token="repair-2",
+        audit_update={"status": "applied"},
+    )
+    current_finish = corrections._finish_canonical_reconciliation_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        recorded_base_version_id="base-v1",
+        retry_attempt_token="repair-1",
+        audit_update={"status": "applied", "retry_lease_expires_at": None},
+    )
+    assert stale_finish == "stale_attempt"
+    assert current_finish == "finished"
+    assert audit_ref.value["status"] == "applied"
+    assert len(transaction.writes) == 2
 
 
 def test_initial_queued_correction_reclaims_expired_lost_background_task_but_not_live_lease():
@@ -3568,6 +3872,69 @@ def test_initial_queued_correction_reclaims_expired_lost_background_task_but_not
     assert audit_ref.value["retry_attempt_token"] == "reclaimed-attempt"
 
 
+def test_revoked_consent_after_source_commit_is_terminal_applied_and_never_reverts_to_pending(monkeypatch):
+    correction_id = "revoked-after-source"
+    conversation_ref = _MutableCorrectionAuditRef(
+        {
+            "active_summary_version_id": "corrected-v2",
+            "summary_versions": [
+                {"id": "base-v1", "is_active": False},
+                {
+                    "id": "corrected-v2",
+                    "correction_id": correction_id,
+                    "based_on_version_id": "base-v1",
+                    "is_active": True,
+                },
+            ],
+            "correction_state": {"correction_id": correction_id, "status": "canonical_pending"},
+            "enrichment_state": {
+                "trace_id": f"correction:conv-1:{correction_id}",
+                "status": "writeback_pending_canonical",
+                "canonical_status": "pending",
+            },
+        }
+    )
+    audit_ref = _MutableCorrectionAuditRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": correction_id,
+            "trace_id": f"correction:conv-1:{correction_id}",
+            "status": "canonical_pending",
+            "active_summary_version_id": "base-v1",
+            "retry_attempt_token": "attempt-1",
+        }
+    )
+
+    class Transaction:
+        def set(self, ref, payload, merge=False):
+            ref.set(payload, merge=merge)
+
+    result = corrections._finalize_revoked_correction_in_transaction(
+        Transaction(),
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        expected_retry_attempt_token="attempt-1",
+        finalized_at="2026-08-16T00:10:00+00:00",
+    )
+
+    assert result["audit"]["status"] == "applied"
+    assert result["audit"]["failure_code"] == "consent_revoked_after_source_apply"
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, cid, corr_id: audit_ref)
+    monkeypatch.setattr(corrections, "_correction_propagation_counts", lambda *args: (0, 0, "known"))
+    receipt = corrections._correction_receipt(
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        conversation=conversation_ref.value,
+    )
+    assert receipt.status == "applied"
+    assert receipt.failure_code == "consent_revoked_after_source_apply"
+
+
 def test_exact_receipt_poll_reclaims_stale_initial_queue_but_not_live_lease(monkeypatch):
     correction_id = "initial-receipt-recovery"
     conversation = _conversation()
@@ -3576,6 +3943,7 @@ def test_exact_receipt_poll_reclaims_stale_initial_queue_but_not_live_lease(monk
         "conversation_id": "conv-1",
         "correction_id": correction_id,
         "status": "queued",
+        "retry_attempt_token": "initial-attempt",
         "retry_lease_expires_at": "2020-01-01T00:00:00+00:00",
     }
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
@@ -3619,6 +3987,7 @@ def test_correction_terminal_sla_caps_provider_and_matches_client_budget_with_ma
     assert corrections._bounded_correction_provider_timeout("999") == 120.0
     assert corrections._bounded_correction_provider_timeout("nan") == 45.0
     assert corrections.CORRECTION_TERMINAL_BOUND_SECONDS == 150.0
+    assert corrections.CORRECTION_END_TO_END_DEADLINE_SECONDS == 145.0
     assert corrections.CORRECTION_CLIENT_POLL_BUDGET_SECONDS == 330.0
     assert corrections.CORRECTION_RETRY_LEASE_SECONDS == 150.0
 
@@ -3669,6 +4038,25 @@ def test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_
         "_persist_correction_audit",
         lambda uid, cid, corr_id, payload: audit_ref.value.update(payload),
     )
+
+    def claim_reconciliation(**kwargs):
+        audit_ref.value.update(
+            {
+                "status": "canonical_pending",
+                "retry_attempt_token": kwargs["retry_attempt_token"],
+                "retry_lease_expires_at": kwargs["retry_lease_expires_at"],
+            }
+        )
+        return "claimed"
+
+    def finish_reconciliation(**kwargs):
+        if audit_ref.value.get("retry_attempt_token") != kwargs["retry_attempt_token"]:
+            return "stale_attempt"
+        audit_ref.value.update(kwargs["audit_update"])
+        return "finished"
+
+    monkeypatch.setattr(corrections, "_claim_canonical_reconciliation", claim_reconciliation)
+    monkeypatch.setattr(corrections, "_finish_canonical_reconciliation", finish_reconciliation)
 
     def append_event(uid, cid, corr_id, event):
         audit_ref.value.setdefault("events", []).append(event)
@@ -3881,3 +4269,249 @@ def test_source_correction_precedes_downstream_side_effects_and_duplicate_replay
         )
     )
     assert order == ["source_generate", "source_apply", "proposal", "canonical", "propagation"]
+
+
+def test_revoked_consent_terminalizes_background_retry_and_receipt_recovery_without_provider_egress(monkeypatch):
+    correction_id = "revoked-correction"
+    audit = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "trace_id": f"correction:conv-1:{correction_id}",
+        "status": "queued",
+        "source": "ios",
+        "correction_text": "Retained private transcript correction.",
+        "summary_context": {},
+        "current_summary": _conversation()["structured"],
+        "active_summary_version_id": "base-v1",
+        "retry_attempt_token": "attempt-1",
+        "retry_lease_expires_at": "2020-01-01T00:00:00+00:00",
+    }
+    conversation = {
+        **_conversation(),
+        "active_summary_version_id": "base-v1",
+        "summary_versions": [{"id": "base-v1", "is_active": True}],
+        "correction_state": {"correction_id": correction_id, "status": "queued"},
+    }
+    provider_calls = []
+
+    def revoked(uid):
+        raise HTTPException(status_code=403, detail={"code": "ai_consent_required", "decision": "revoked"})
+
+    def finalize(**kwargs):
+        assert kwargs["uid"] == "owner-1"
+        assert kwargs["correction_id"] == correction_id
+        audit.update(
+            {
+                "status": "consent_revoked",
+                "pending": False,
+                "failure_code": "ai_consent_required",
+                "retry_lease_expires_at": None,
+            }
+        )
+        return {"outcome": "finalized", "audit": dict(audit)}
+
+    monkeypatch.setattr(corrections, "require_current_ai_consent", revoked)
+    monkeypatch.setattr(corrections, "_finalize_revoked_correction", finalize)
+    monkeypatch.setattr(corrections, "_read_correction_audit", lambda uid, cid, corr_id: dict(audit))
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(corrections, "_correction_propagation_counts", lambda *args: (0, 0, "known"))
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs)
+        raise AssertionError("revoked consent must prevent retained transcript egress")
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", provider)
+
+    background_result = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            trace_id=audit["trace_id"],
+            request=corrections.ConversationCorrectionRequest(correction_text=audit["correction_text"]),
+            structured=_conversation()["structured"],
+            transcript="retained private transcript",
+            segment_count=1,
+            submitted_at="2026-08-16T00:00:00+00:00",
+            active_summary_version_id="base-v1",
+            retry_attempt_token="attempt-1",
+        )
+    )
+    assert background_result.status == "consent_revoked"
+
+    audit.update({"status": "direct_apply_failed", "retry_lease_expires_at": None})
+    explicit_result = asyncio.run(
+        corrections._retry_failed_conversation_correction(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            background_tasks=_CorrectionBackgroundTasks(),
+        )
+    )
+    assert explicit_result.status == "consent_revoked"
+
+    audit.update({"status": "queued", "retry_lease_expires_at": "2020-01-01T00:00:00+00:00"})
+    receipt = asyncio.run(
+        corrections.get_conversation_correction_receipt(
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            background_tasks=_CorrectionBackgroundTasks(),
+            uid="owner-1",
+        )
+    )
+    assert receipt.status == "consent_revoked"
+    assert receipt.failure_code == "ai_consent_required"
+    assert provider_calls == []
+
+
+def test_initial_submission_transaction_is_stable_across_crash_and_response_loss():
+    class OptionalRef:
+        def __init__(self, value=None):
+            self.value = value
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=self.value is not None, to_dict=lambda: dict(self.value or {}))
+
+        def set(self, payload, merge=False):
+            if merge and self.value is not None:
+                self.value.update(payload)
+            else:
+                self.value = dict(payload)
+
+    class Transaction:
+        def __init__(self):
+            self.writes = []
+
+        def set(self, ref, payload, merge=False):
+            self.writes.append((ref, dict(payload), merge))
+            ref.set(payload, merge=merge)
+
+    correction_id = "1ea6c404-12e1-4c64-b752-d46ad3e06fb6"
+    conversation_ref = OptionalRef({"active_summary_version_id": "base-v1"})
+    audit_ref = OptionalRef()
+    transaction = Transaction()
+    request = corrections.ConversationCorrectionRequest(
+        correction_id=correction_id,
+        correction_text="Correct retained attribution.",
+    )
+    audit_payload = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "trace_id": f"correction:conv-1:{correction_id}",
+        "status": "queued",
+        "correction_text": request.correction_text,
+        "source": request.source,
+        "summary_context": request.summary_context.model_dump(),
+        "active_summary_version_id": "base-v1",
+        "request_fingerprint": corrections._correction_request_fingerprint(request),
+        "retry_attempt_token": "initial-attempt",
+        "retry_lease_expires_at": "2026-08-16T00:02:30+00:00",
+    }
+    kwargs = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "expected_active_summary_version_id": "base-v1",
+        "bootstrap_update": {},
+        "correction_state": {"correction_id": correction_id, "status": "queued", "pending": True},
+        "audit_payload": audit_payload,
+    }
+
+    created = corrections._claim_initial_correction_submission_in_transaction(
+        transaction, conversation_ref, audit_ref, **kwargs
+    )
+    replay_after_lost_response = corrections._claim_initial_correction_submission_in_transaction(
+        transaction, conversation_ref, audit_ref, **kwargs
+    )
+
+    assert created["outcome"] == "created"
+    assert replay_after_lost_response["outcome"] == "replay"
+    assert replay_after_lost_response["audit"]["correction_id"] == correction_id
+    assert replay_after_lost_response["audit"]["retry_attempt_token"] == "initial-attempt"
+    assert replay_after_lost_response["audit"]["retry_lease_expires_at"]
+    assert len(transaction.writes) == 2
+
+
+def test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_writer(monkeypatch):
+    correction_id = "deadline-correction"
+    trace_id = f"correction:conv-1:{correction_id}"
+    conversation = {
+        **_conversation(),
+        "active_summary_version_id": "base-v1",
+        "summary_versions": [{"id": "base-v1", "is_active": True}],
+    }
+    audit = {
+        "uid": "owner-1",
+        "conversation_id": "conv-1",
+        "correction_id": correction_id,
+        "trace_id": trace_id,
+        "status": "processing",
+        "active_summary_version_id": "base-v1",
+    }
+    monkeypatch.setattr(corrections, "CORRECTION_END_TO_END_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(corrections, "_read_correction_audit", lambda uid, cid, corr_id: dict(audit))
+
+    async def slow_resolver(uid, config):
+        await asyncio.sleep(0.05)
+        return config
+
+    monkeypatch.setattr(corrections, "summary_provider_config_for_uid", slow_resolver)
+    runtime_timeout = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=corrections.ConversationCorrectionRequest(correction_text="Correct attribution."),
+            structured=_conversation()["structured"],
+            transcript="retained transcript",
+            segment_count=1,
+            submitted_at="2026-08-16T00:00:00+00:00",
+            active_summary_version_id="base-v1",
+        )
+    )
+    assert runtime_timeout.status == "direct_apply_failed"
+
+    async def generated(**kwargs):
+        return {"title": "Corrected", "overview": "[Ella] Corrected.", "category": "other"}
+
+    async def slow_canonical(**kwargs):
+        conversation["summary_versions"].append(
+            {
+                "id": "corrected-v2",
+                "correction_id": correction_id,
+                "based_on_version_id": "base-v1",
+                "is_active": True,
+            }
+        )
+        conversation["active_summary_version_id"] = "corrected-v2"
+        conversation["enrichment_state"] = {
+            "trace_id": trace_id,
+            "status": "writeback_pending_canonical",
+            "canonical_status": "pending",
+        }
+        await asyncio.sleep(0.05)
+        return {"canonical_confirmed": True, "active_summary_version_id": "corrected-v2"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", generated)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", slow_canonical)
+    canonical_timeout = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="owner-1",
+            conversation_id="conv-1",
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=corrections.ConversationCorrectionRequest(correction_text="Correct attribution."),
+            structured=_conversation()["structured"],
+            transcript="retained transcript",
+            segment_count=1,
+            submitted_at="2026-08-16T00:00:00+00:00",
+            active_summary_version_id="base-v1",
+        )
+    )
+    assert canonical_timeout.status == "canonical_pending"
+    assert canonical_timeout.status != "direct_apply_failed"
+    assert [version["id"] for version in conversation["summary_versions"]].count("corrected-v2") == 1
