@@ -12,6 +12,8 @@ from utils.ella.time_context import annotate_event_time, build_time_context, tim
 DEFAULT_TIMELINE_URL = os.getenv("ELLA_CANONICAL_TIMELINE_URL", "http://127.0.0.1:8000/v1/ella/timeline")
 DEFAULT_TIMEOUT_SECONDS = float(os.getenv("ELLA_CANONICAL_TIMELINE_TIMEOUT", "5"))
 MAX_IOS_VOICE_TEXT_CHARS = 20000
+MAX_CANONICAL_TURN_ORDINAL = 0x7FFFFFFFFFFFFFFF
+MAX_CANONICAL_EVENT_SEQUENCE = 0x7FFFFFFF
 DEFAULT_CONTEXT_CHANNELS = [
     "omi",
     "ios_chat",
@@ -83,7 +85,7 @@ def _turn_identity(event: dict[str, Any]) -> str:
 def _event_sequence(event: dict[str, Any]) -> int:
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     sequence = metadata.get("event_sequence")
-    if isinstance(sequence, int) and sequence >= 0:
+    if isinstance(sequence, int) and not isinstance(sequence, bool) and 0 <= sequence <= MAX_CANONICAL_EVENT_SEQUENCE:
         return sequence
     return 1 if _role_for_event(event) == "assistant" else 0
 
@@ -91,7 +93,7 @@ def _event_sequence(event: dict[str, Any]) -> int:
 def _turn_ordinal(event: dict[str, Any]) -> Optional[int]:
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     ordinal = metadata.get("turn_ordinal")
-    if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 0:
+    if isinstance(ordinal, int) and not isinstance(ordinal, bool) and 0 <= ordinal <= MAX_CANONICAL_TURN_ORDINAL:
         return ordinal
     return None
 

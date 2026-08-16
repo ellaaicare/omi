@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-08-15T20:00:00Z",
+  "records": [
+    {
+      "event_id": "m-legacy-empty:user",
+      "role": "user",
+      "turn_id": "m-legacy-empty",
+      "event_sequence": 0
+    },
+    {
+      "event_id": "z-new-populated:user",
+      "session_id": "z-session",
+      "role": "user",
+      "turn_id": "z-new-populated",
+      "turn_ordinal": 0,
+      "event_sequence": 0
+    },
+    {
+      "event_id": "a-legacy-populated:user",
+      "session_id": "a-session",
+      "role": "user",
+      "turn_id": "z-legacy-populated",
+      "event_sequence": 0
+    }
+  ],
+  "pair_input": [
+    "z-new-populated:user",
+    "m-legacy-empty:user"
+  ],
+  "pair_expected": [
+    "m-legacy-empty:user",
+    "z-new-populated:user"
+  ],
+  "expected_order": [
+    "m-legacy-empty:user",
+    "a-legacy-populated:user",
+    "z-new-populated:user"
+  ]
+}

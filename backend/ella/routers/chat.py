@@ -39,6 +39,7 @@ from ella.routers.trace import RouteTrace, record_trace
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 from utils.ella.canonical_context import (
     DEFAULT_CONTEXT_CHANNELS,
+    MAX_CANONICAL_TURN_ORDINAL,
     MAX_IOS_VOICE_TEXT_CHARS,
     canonical_events_to_server_messages,
     fetch_canonical_timeline,
@@ -187,7 +188,9 @@ def _validated_voice_turn(request: EllaVoiceTurnRequest) -> tuple[str, str]:
     if request.completed_at < request.started_at:
         raise HTTPException(status_code=422, detail="invalid_voice_turn_time")
     if request.turn_ordinal is not None and (
-        isinstance(request.turn_ordinal, bool) or request.turn_ordinal < 0 or request.turn_ordinal > 0x7FFFFFFFFFFFFFFF
+        isinstance(request.turn_ordinal, bool)
+        or request.turn_ordinal < 0
+        or request.turn_ordinal > MAX_CANONICAL_TURN_ORDINAL
     ):
         raise HTTPException(status_code=422, detail="invalid_voice_turn_ordinal")
     return user_text, assistant_text

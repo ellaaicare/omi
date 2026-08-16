@@ -3,6 +3,9 @@ import 'package:uuid/uuid.dart';
 
 enum MessageSender { ai, human }
 
+const int maxCanonicalTurnOrdinal = 0x7FFFFFFFFFFFFFFF;
+const int maxCanonicalEventSequence = 0x7FFFFFFF;
+
 enum MessageType {
   text('text'),
   daySummary('day_summary'),
@@ -286,20 +289,25 @@ class ServerMessage {
     };
   }
 
-  String? get durableTurnId {
-    final explicit = canonicalTurnId?.trim() ?? '';
+  String get durableTurnIdentity {
+    final explicit = canonicalTurnId ?? '';
     if (explicit.isNotEmpty) return explicit;
     for (final suffix in const [':user', ':assistant']) {
       if (id.endsWith(suffix) && id.length > suffix.length) return id.substring(0, id.length - suffix.length);
     }
+    return id;
+  }
+
+  int? get durableTurnOrdinal {
+    final ordinal = canonicalTurnOrdinal;
+    if (ordinal != null && ordinal >= 0 && ordinal <= maxCanonicalTurnOrdinal) return ordinal;
     return null;
   }
 
-  int? get durableEventSequence {
-    if (canonicalEventSequence != null) return canonicalEventSequence;
-    if (id.endsWith(':user')) return 0;
-    if (id.endsWith(':assistant')) return 1;
-    return null;
+  int get durableEventSequence {
+    final sequence = canonicalEventSequence;
+    if (sequence != null && sequence >= 0 && sequence <= maxCanonicalEventSequence) return sequence;
+    return sender == MessageSender.human ? 0 : 1;
   }
 
   bool areFilesOfSameType() {
@@ -348,33 +356,24 @@ int compareServerMessagesChronologically(ServerMessage first, ServerMessage seco
   final timestampOrder = first.createdAt.compareTo(second.createdAt);
   if (timestampOrder != 0) return timestampOrder;
 
-  final firstTurnId = first.durableTurnId;
-  final secondTurnId = second.durableTurnId;
-  if (firstTurnId != null && secondTurnId != null) {
-    final firstConversationId = first.canonicalConversationId?.trim() ?? '';
-    final secondConversationId = second.canonicalConversationId?.trim() ?? '';
-    if (firstConversationId.isNotEmpty && secondConversationId.isNotEmpty) {
-      final conversationOrder = firstConversationId.compareTo(secondConversationId);
-      if (conversationOrder != 0) return conversationOrder;
-    }
-    final firstTurnOrdinal = first.canonicalTurnOrdinal;
-    final secondTurnOrdinal = second.canonicalTurnOrdinal;
-    if (firstTurnOrdinal != null && secondTurnOrdinal != null) {
-      final ordinalOrder = firstTurnOrdinal.compareTo(secondTurnOrdinal);
-      if (ordinalOrder != 0) return ordinalOrder;
-    } else if (firstTurnOrdinal != null || secondTurnOrdinal != null) {
-      return firstTurnOrdinal != null ? -1 : 1;
-    }
-    final turnOrder = firstTurnId.compareTo(secondTurnId);
-    if (turnOrder != 0) return turnOrder;
+  final conversationOrder = (first.canonicalConversationId ?? '').compareTo(second.canonicalConversationId ?? '');
+  if (conversationOrder != 0) return conversationOrder;
 
-    final sequenceOrder = (first.durableEventSequence ?? 2).compareTo(second.durableEventSequence ?? 2);
-    if (sequenceOrder != 0) return sequenceOrder;
-    final firstRoleOrder = first.sender == MessageSender.human ? 0 : 1;
-    final secondRoleOrder = second.sender == MessageSender.human ? 0 : 1;
-    final roleOrder = firstRoleOrder.compareTo(secondRoleOrder);
-    if (roleOrder != 0) return roleOrder;
+  final firstTurnOrdinal = first.durableTurnOrdinal;
+  final secondTurnOrdinal = second.durableTurnOrdinal;
+  final ordinalPresenceOrder = (firstTurnOrdinal == null ? 1 : 0).compareTo(secondTurnOrdinal == null ? 1 : 0);
+  if (ordinalPresenceOrder != 0) return ordinalPresenceOrder;
+  if (firstTurnOrdinal != null && secondTurnOrdinal != null) {
+    final ordinalOrder = firstTurnOrdinal.compareTo(secondTurnOrdinal);
+    if (ordinalOrder != 0) return ordinalOrder;
   }
+
+  final turnOrder = first.durableTurnIdentity.compareTo(second.durableTurnIdentity);
+  if (turnOrder != 0) return turnOrder;
+
+  final sequenceOrder = first.durableEventSequence.compareTo(second.durableEventSequence);
+  if (sequenceOrder != 0) return sequenceOrder;
+
   return first.id.compareTo(second.id);
 }
 

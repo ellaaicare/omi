@@ -416,7 +416,7 @@ void main() {
     expect(prefs.cachedMessages.map((message) => message.id), ['canonical-user', 'canonical-assistant']);
   });
 
-  test('MessageProvider puts a late canonical user before its pre-cached equal-time assistant', () async {
+  test('MessageProvider uses backend empty-conversation ordering for mixed legacy equal-time messages', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     await _grantAuthority(prefs, 'uid-a');
     final timestamp = DateTime.utc(2026, 8, 15, 20);
@@ -459,8 +459,8 @@ void main() {
     );
 
     expect(committed, isTrue);
-    expect(provider.messages.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
-    expect(prefs.cachedMessages.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
+    expect(provider.messages.map((message) => message.id), ['turn-000001:assistant', 'turn-000001:user']);
+    expect(prefs.cachedMessages.map((message) => message.id), ['turn-000001:assistant', 'turn-000001:user']);
   });
 
   test('MessageProvider preserves equal-time turn pairs across out-of-order canonical arrivals', () async {

@@ -1,13 +1,95 @@
 import asyncio
+import json
+import shutil
+import socket
+import subprocess
 from datetime import datetime, timedelta, timezone
+from itertools import permutations
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
 from ella.routers import canonical_events, chat
-from ella.routers.canonical_events import InMemoryCanonicalEventStore
-from utils.ella.canonical_context import canonical_events_to_server_messages
+from ella.routers.canonical_events import CanonicalEventIn, InMemoryCanonicalEventStore, SessionCompleteIn
+from utils.ella.canonical_context import (
+    MAX_CANONICAL_EVENT_SEQUENCE,
+    MAX_CANONICAL_TURN_ORDINAL,
+    canonical_events_to_server_messages,
+)
+
+
+def _postgres_binary(name: str) -> str:
+    direct = shutil.which(name)
+    if direct:
+        return direct
+    for prefix in (Path("/opt/homebrew/opt"), Path("/usr/local/opt")):
+        for candidate in sorted(prefix.glob(f"postgresql*/bin/{name}"), reverse=True):
+            if candidate.is_file():
+                return str(candidate)
+    pytest.fail(f"real PostgreSQL test requires {name}")
+
+
+@pytest.fixture(scope="module")
+def canonical_postgres(tmp_path_factory):
+    initdb = _postgres_binary("initdb")
+    pg_ctl = _postgres_binary("pg_ctl")
+    root = tmp_path_factory.mktemp("canonical-postgres")
+    data_dir = root / "data"
+    socket_dir = root / "socket"
+    socket_dir.mkdir()
+    with socket.socket() as port_socket:
+        port_socket.bind(("127.0.0.1", 0))
+        port = port_socket.getsockname()[1]
+
+    subprocess.run(
+        [initdb, "-D", str(data_dir), "--auth=trust", "--username=postgres", "--no-locale"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            pg_ctl,
+            "-D",
+            str(data_dir),
+            "-l",
+            str(root / "postgres.log"),
+            "-o",
+            f"-F -p {port} -k {socket_dir} -c listen_addresses=''",
+            "-w",
+            "start",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        yield {"host": str(socket_dir), "port": port, "user": "postgres", "database": "postgres"}
+    finally:
+        subprocess.run(
+            [pg_ctl, "-D", str(data_dir), "-w", "stop", "-m", "fast"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _canonical_event(event_id: str, metadata: dict, *, role: str = "user") -> CanonicalEventIn:
+    return CanonicalEventIn(
+        uid="uid-postgres-ordering",
+        canonical_identity="uid-postgres-ordering",
+        event_id=event_id,
+        session_id="session-1",
+        channel="ios_voice",
+        provider="ordering-test",
+        role=role,
+        text=event_id,
+        started_at=datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc),
+        source_ref={"source_identity": "ordering-test-source"},
+        metadata=metadata,
+    )
 
 
 def test_ella_source_ci_checks_out_and_receipts_the_immutable_pr_head():
@@ -275,3 +357,221 @@ def test_equal_timestamp_reverse_lexical_v2v_ids_follow_persisted_turn_ordinal(m
         f"{chronological_turns[1]}:assistant",
     ]
     assert [message["metadata"]["turn_ordinal"] for message in refreshed] == [0, 0, 1, 1]
+
+
+def test_canonical_ingestion_rejects_invalid_ordering_metadata_atomically():
+    invalid_values = [
+        ("turn_ordinal", -1),
+        ("turn_ordinal", "-1"),
+        ("turn_ordinal", MAX_CANONICAL_TURN_ORDINAL + 1),
+        ("turn_ordinal", str(MAX_CANONICAL_TURN_ORDINAL + 1)),
+        ("turn_ordinal", "1.0"),
+        ("turn_ordinal", True),
+        ("event_sequence", -1),
+        ("event_sequence", "-1"),
+        ("event_sequence", MAX_CANONICAL_EVENT_SEQUENCE + 1),
+        ("event_sequence", str(MAX_CANONICAL_EVENT_SEQUENCE + 1)),
+        ("event_sequence", "1.0"),
+        ("event_sequence", False),
+    ]
+    for field_name, invalid_value in invalid_values:
+        store = InMemoryCanonicalEventStore()
+        valid = _canonical_event("valid-before-invalid", {"turn_id": "valid", "event_sequence": "0"})
+        invalid = _canonical_event("invalid", {"turn_id": "invalid", field_name: invalid_value})
+
+        with pytest.raises(HTTPException) as raised:
+            asyncio.run(store.write_batch([valid, invalid]))
+
+        assert raised.value.status_code == 422
+        assert raised.value.detail == f"invalid_{field_name}"
+        assert store._events == {}
+
+    session_store = InMemoryCanonicalEventStore()
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            session_store.complete_session(
+                "session-1",
+                SessionCompleteIn(metadata={"event_sequence": str(MAX_CANONICAL_EVENT_SEQUENCE + 1)}),
+            )
+        )
+    assert raised.value.detail == "invalid_event_sequence"
+    assert session_store._sessions == {}
+
+
+def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe(monkeypatch, canonical_postgres):
+    async def exercise_postgres():
+        pool = await canonical_events.asyncpg.create_pool(min_size=1, max_size=2, **canonical_postgres)
+        try:
+            await pool.execute("""
+                CREATE TABLE canonical_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    uid TEXT NOT NULL,
+                    canonical_identity TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    source_identity TEXT NOT NULL,
+                    session_id TEXT,
+                    channel TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    ended_at TIMESTAMPTZ,
+                    privacy_scope TEXT NOT NULL,
+                    scan_policy TEXT NOT NULL,
+                    source_ref JSONB NOT NULL,
+                    metadata JSONB NOT NULL,
+                    raw_event JSONB NOT NULL,
+                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (event_id, source_identity)
+                )
+                """)
+
+            async def get_pool():
+                return pool
+
+            monkeypatch.setattr(canonical_events, "_get_pool", get_pool)
+            store = canonical_events.PostgresCanonicalEventStore()
+            for field_name in ("turn_ordinal", "event_sequence"):
+                invalid_batch = [
+                    _canonical_event("would-partially-write", {"turn_id": "valid", "event_sequence": 0}),
+                    _canonical_event(
+                        f"oversized-{field_name}-ingestion",
+                        {"turn_id": "invalid", field_name: "9" * 10000},
+                    ),
+                ]
+                with pytest.raises(HTTPException) as raised:
+                    await store.write_batch(invalid_batch)
+                assert raised.value.detail == f"invalid_{field_name}"
+                assert await pool.fetchval("SELECT count(*) FROM canonical_events") == 0
+
+            valid_events = [
+                _canonical_event(
+                    "valid-sequence-near",
+                    {
+                        "turn_id": "turn-sequence",
+                        "turn_ordinal": str(MAX_CANONICAL_TURN_ORDINAL - 1),
+                        "event_sequence": str(MAX_CANONICAL_EVENT_SEQUENCE - 1),
+                    },
+                ),
+                _canonical_event(
+                    "valid-sequence-max",
+                    {
+                        "turn_id": "turn-sequence",
+                        "turn_ordinal": str(MAX_CANONICAL_TURN_ORDINAL - 1),
+                        "event_sequence": str(MAX_CANONICAL_EVENT_SEQUENCE),
+                    },
+                ),
+                _canonical_event(
+                    "valid-ordinal-max",
+                    {
+                        "turn_id": "turn-ordinal",
+                        "turn_ordinal": str(MAX_CANONICAL_TURN_ORDINAL),
+                        "event_sequence": 0,
+                    },
+                ),
+            ]
+            result = await store.write_batch(valid_events)
+            assert result["inserted"] == 3
+
+            insert_legacy_sql = """
+                INSERT INTO canonical_events (
+                    uid, canonical_identity, event_id, source_identity,
+                    session_id, channel, provider, role, text,
+                    started_at, ended_at, privacy_scope, scan_policy,
+                    source_ref, metadata, raw_event
+                )
+                VALUES (
+                    $1, $1, $2, 'ordering-test-source',
+                    'session-1', 'ios_voice', 'legacy-test', $3, $2,
+                    $4, NULL, 'user_private', 'none',
+                    '{}'::jsonb, $5::jsonb, '{}'::jsonb
+                )
+            """
+            timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+            await pool.execute(
+                insert_legacy_sql,
+                "uid-postgres-ordering",
+                "legacy-overflow-ordinal",
+                "user",
+                timestamp,
+                json.dumps(
+                    {
+                        "turn_id": "legacy-a",
+                        "turn_ordinal": str(MAX_CANONICAL_TURN_ORDINAL + 1),
+                        "event_sequence": 0,
+                    }
+                ),
+            )
+            await pool.execute(
+                insert_legacy_sql,
+                "uid-postgres-ordering",
+                "legacy-overflow-sequence",
+                "assistant",
+                timestamp,
+                json.dumps({"turn_id": "legacy-b", "event_sequence": str(MAX_CANONICAL_EVENT_SEQUENCE + 1)}),
+            )
+            await pool.execute(
+                insert_legacy_sql,
+                "uid-postgres-ordering",
+                "legacy-arbitrary-digits",
+                "user",
+                timestamp,
+                json.dumps({"turn_id": "legacy-c", "turn_ordinal": "9" * 10000, "event_sequence": "9" * 10000}),
+            )
+
+            expected_order = [
+                "valid-sequence-near",
+                "valid-sequence-max",
+                "valid-ordinal-max",
+                "legacy-overflow-ordinal",
+                "legacy-overflow-sequence",
+                "legacy-arbitrary-digits",
+            ]
+            timeline = await store.timeline(uid="uid-postgres-ordering", since=None, limit=50, channels=None)
+            assert [event["event_id"] for event in timeline] == expected_order
+            assert timeline[1]["metadata"]["event_sequence"] == MAX_CANONICAL_EVENT_SEQUENCE
+            assert timeline[2]["metadata"]["turn_ordinal"] == MAX_CANONICAL_TURN_ORDINAL
+            assert timeline[1]["raw_event"]["metadata"]["event_sequence"] == MAX_CANONICAL_EVENT_SEQUENCE
+            assert timeline[2]["raw_event"]["metadata"]["turn_ordinal"] == MAX_CANONICAL_TURN_ORDINAL
+
+            readback = await store.events_by_event_ids(
+                uid="uid-postgres-ordering",
+                source_identity="ordering-test-source",
+                event_ids=list(reversed(expected_order)),
+            )
+            assert [event["event_id"] for event in readback] == expected_order
+        finally:
+            await pool.close()
+
+    asyncio.run(exercise_postgres())
+
+
+def test_backend_mixed_legacy_total_key_matches_shared_ios_fixture_for_all_permutations():
+    fixture_path = (
+        Path(__file__).resolve().parents[3] / "app" / "test" / "fixtures" / "canonical_ordering_mixed_legacy.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    timestamp = datetime.fromisoformat(fixture["timestamp"].replace("Z", "+00:00"))
+    records = [
+        {
+            "event_id": record["event_id"],
+            "session_id": record.get("session_id"),
+            "role": record["role"],
+            "started_at": timestamp,
+            "source_ref": {},
+            "metadata": {
+                "turn_id": record["turn_id"],
+                "event_sequence": record["event_sequence"],
+                **({"turn_ordinal": record["turn_ordinal"]} if "turn_ordinal" in record else {}),
+            },
+        }
+        for record in fixture["records"]
+    ]
+    records_by_id = {record["event_id"]: record for record in records}
+    pair = [records_by_id[event_id] for event_id in fixture["pair_input"]]
+    assert [record["event_id"] for record in sorted(pair, key=canonical_events._canonical_event_order)] == fixture[
+        "pair_expected"
+    ]
+    for permutation in permutations(records):
+        ordered = sorted(permutation, key=canonical_events._canonical_event_order)
+        assert [record["event_id"] for record in ordered] == fixture["expected_order"]

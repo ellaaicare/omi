@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -362,6 +363,81 @@ void main() {
       '$secondTurn:assistant',
     ]);
     expect(cacheRoundTrip.map((message) => message.canonicalTurnOrdinal), [0, 0, 1, 1]);
+  });
+
+  test('iOS mixed legacy ordering matches the backend total key for a reversed pair', () async {
+    final fixture = jsonDecode(
+      await File('test/fixtures/canonical_ordering_mixed_legacy.json').readAsString(),
+    ) as Map<String, dynamic>;
+    final timestamp = fixture['timestamp'] as String;
+    final records = (fixture['records'] as List<dynamic>).cast<Map<String, dynamic>>();
+    final messagesById = {
+      for (final record in records)
+        record['event_id'] as String: ServerMessage.fromJson({
+          'id': record['event_id'],
+          'created_at': timestamp,
+          'text': record['event_id'],
+          'sender': record['role'] == 'user' ? 'human' : 'ai',
+          'type': 'text',
+          'metadata': {
+            if (record.containsKey('session_id')) 'conversation_id': record['session_id'],
+            'turn_id': record['turn_id'],
+            if (record.containsKey('turn_ordinal')) 'turn_ordinal': record['turn_ordinal'],
+            'event_sequence': record['event_sequence'],
+          },
+        }),
+    };
+    final pair = (fixture['pair_input'] as List<dynamic>).map((id) => messagesById[id]!).toList()
+      ..sort(compareServerMessagesChronologically);
+
+    expect(pair.map((message) => message.id).toList(), fixture['pair_expected']);
+    expect(compareServerMessagesChronologically(pair.first, pair.last), lessThan(0));
+    expect(compareServerMessagesChronologically(pair.last, pair.first), greaterThan(0));
+  });
+
+  test('iOS mixed legacy ordering matches backend parity for every permutation and is transitive', () async {
+    final fixture = jsonDecode(
+      await File('test/fixtures/canonical_ordering_mixed_legacy.json').readAsString(),
+    ) as Map<String, dynamic>;
+    final timestamp = fixture['timestamp'] as String;
+    final messages = (fixture['records'] as List<dynamic>).cast<Map<String, dynamic>>().map((record) {
+      return ServerMessage.fromJson({
+        'id': record['event_id'],
+        'created_at': timestamp,
+        'text': record['event_id'],
+        'sender': record['role'] == 'user' ? 'human' : 'ai',
+        'type': 'text',
+        'metadata': {
+          if (record.containsKey('session_id')) 'conversation_id': record['session_id'],
+          'turn_id': record['turn_id'],
+          if (record.containsKey('turn_ordinal')) 'turn_ordinal': record['turn_ordinal'],
+          'event_sequence': record['event_sequence'],
+        },
+      });
+    }).toList();
+    final expectedOrder = (fixture['expected_order'] as List<dynamic>).cast<String>();
+
+    for (final first in messages) {
+      for (final second in messages) {
+        for (final third in messages) {
+          if (first.id == second.id || first.id == third.id || second.id == third.id) continue;
+          final permutation = [first, second, third]..sort(compareServerMessagesChronologically);
+          expect(permutation.map((message) => message.id).toList(), expectedOrder);
+        }
+      }
+    }
+
+    for (final first in messages) {
+      for (final second in messages) {
+        for (final third in messages) {
+          final firstBeforeSecond = compareServerMessagesChronologically(first, second) <= 0;
+          final secondBeforeThird = compareServerMessagesChronologically(second, third) <= 0;
+          if (firstBeforeSecond && secondBeforeThird) {
+            expect(compareServerMessagesChronologically(first, third), lessThanOrEqualTo(0));
+          }
+        }
+      }
+    }
   });
 
   test('V2V backend error body is neither accepted nor surfaced as content', () async {
