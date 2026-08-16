@@ -141,6 +141,7 @@ def build_omi_canonical_event(
     summary_source: str = "observer",
     summary_kind: str = "observer_enriched",
     trace_id: Optional[str] = None,
+    publication_fence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build one idempotent canonical event for the active OMI summary."""
     conversation_id = str(_object_get(conversation, "id") or "")
@@ -193,6 +194,8 @@ def build_omi_canonical_event(
             "status": _enum_value(_object_get(conversation, "status")),
         },
     }
+    if publication_fence:
+        event["metadata"]["publication_fence"] = _json_safe(publication_fence)
     return _json_safe(event)
 
 
@@ -204,6 +207,7 @@ def write_omi_canonical_event(
     summary_kind: str = "observer_enriched",
     trace_id: Optional[str] = None,
     timeout: Optional[float] = None,
+    publication_fence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Best-effort synchronous write to the local canonical ledger endpoint."""
     if not CANONICAL_OMI_WRITE_ENABLED:
@@ -215,6 +219,7 @@ def write_omi_canonical_event(
         summary_source=summary_source,
         summary_kind=summary_kind,
         trace_id=trace_id,
+        publication_fence=publication_fence,
     )
     started = time.time()
     response = requests.post(

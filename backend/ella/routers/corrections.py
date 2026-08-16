@@ -47,6 +47,7 @@ from ella.services.summary_writeback import (
 )
 from ella.services import proposal_ingest
 from models.conversation import Conversation, ConversationStatus
+from models.proposals import Proposal, proposal_from_dict, proposal_to_dict
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 logger = logging.getLogger(__name__)
@@ -907,6 +908,144 @@ def _complete_downstream_stage(
     )
 
 
+def _fenced_proposal_id(uid: str, idempotency_key: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"omi-correction-proposal:{uid}:{idempotency_key}"))
+
+
+def _create_fenced_correction_proposal_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    proposal_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: str,
+    stage: str,
+    proposal: Proposal,
+    committed_at: str,
+) -> dict[str, Any]:
+    """Commit the proposal at the sink under the current attempt/stage fence."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    proposal_snapshot = proposal_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return {"outcome": "missing"}
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    work = audit.get("downstream_work") if isinstance(audit.get("downstream_work"), dict) else {}
+    stage_state = work.get(stage) if isinstance(work.get(stage), dict) else {}
+    commit_time = _parse_correction_timestamp(committed_at)
+    stage_lease = _parse_correction_timestamp(stage_state.get("lease_expires_at"))
+    _, corrected = _correction_summary_versions(conversation, correction_id)
+    corrected_id = str(corrected.get("id") or "") if corrected else ""
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("status") or "") != "finalizing"
+        or stage_state.get("status") != "inflight"
+        or str(stage_state.get("attempt_token") or "") != retry_attempt_token
+        or commit_time is None
+        or stage_lease is None
+        or stage_lease <= commit_time
+        or not _correction_operation_is_open(audit, now=commit_time)
+    ):
+        return {"outcome": "stale_attempt"}
+    if not corrected_id or str(conversation.get("active_summary_version_id") or "") != corrected_id:
+        return {"outcome": "version_drift"}
+    if getattr(proposal_snapshot, "exists", False):
+        existing = proposal_from_dict(proposal_snapshot.to_dict() or {})
+        if existing is None or existing.idempotency_key != proposal.idempotency_key:
+            return {"outcome": "idempotency_conflict"}
+        return {"outcome": "duplicate", "proposal": proposal_ingest.proposal_to_public(existing)}
+    transaction.set(proposal_ref, proposal_to_dict(proposal))
+    return {"outcome": "created", "proposal": proposal_ingest.proposal_to_public(proposal)}
+
+
+@transactional
+def _create_fenced_correction_proposal_transaction(transaction, conversation_ref, audit_ref, proposal_ref, **kwargs):
+    return _create_fenced_correction_proposal_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        proposal_ref,
+        **kwargs,
+    )
+
+
+def _create_fenced_correction_proposal(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: str,
+    stage: str,
+    session_claims: dict[str, Any],
+    tool_name: str,
+    proposal_type: str,
+    payload: dict[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    proposal_ingest.check_write_scope(session_claims)
+    proposal_ingest.check_tool_allowed(session_claims, tool_name)
+    proposal_id = _fenced_proposal_id(uid, idempotency_key)
+    proposal = Proposal.from_claims(
+        session_claims=session_claims,
+        tool_name=tool_name,
+        proposal_type=proposal_type,
+        payload=proposal_ingest.sanitize_payload(payload),
+        idempotency_key=idempotency_key,
+        proposal_id=proposal_id,
+    )
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    proposal_ref = db.collection("users").document(uid).collection("proposals").document(proposal_id)
+    result = _create_fenced_correction_proposal_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        proposal_ref,
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+        stage=stage,
+        proposal=proposal,
+        committed_at=_now_iso(),
+    )
+    outcome = str(result.get("outcome") or "")
+    if outcome not in {"created", "duplicate"}:
+        raise CanonicalSummaryWriteUnconfirmedError(f"{stage}_proposal_{outcome or 'unconfirmed'}")
+    return {
+        "created": outcome == "created",
+        "deduped": outcome == "duplicate",
+        "proposal": result.get("proposal") or {},
+    }
+
+
+def _require_current_downstream_stage(
+    *, uid: str, conversation_id: str, correction_id: str, retry_attempt_token: str, stage: str
+) -> None:
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    work = audit.get("downstream_work") if isinstance(audit.get("downstream_work"), dict) else {}
+    stage_state = work.get(stage) if isinstance(work.get(stage), dict) else {}
+    now = datetime.now(timezone.utc)
+    lease_expires_at = _parse_correction_timestamp(stage_state.get("lease_expires_at"))
+    if (
+        str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("status") or "") != "finalizing"
+        or stage_state.get("status") != "inflight"
+        or str(stage_state.get("attempt_token") or "") != retry_attempt_token
+        or lease_expires_at is None
+        or lease_expires_at <= now
+        or not _correction_operation_is_open(audit, now=now)
+    ):
+        raise CanonicalSummaryWriteUnconfirmedError(f"{stage}_stale_attempt")
+
+
 def _claim_canonical_publication_in_transaction(
     transaction,
     audit_ref,
@@ -949,6 +1088,7 @@ def _claim_canonical_publication_in_transaction(
         {
             "canonical_publication_state": "inflight",
             "canonical_publication_attempt_token": retry_attempt_token,
+            "canonical_publication_generation": max(1, int(audit.get("attempt_count") or 1)),
             "canonical_publication_started_at": claimed_at,
             "canonical_publication_lease_expires_at": _bounded_lease_expiry(
                 claim_time,
@@ -1046,7 +1186,7 @@ def _complete_canonical_publication(
 
 def _guard_canonical_publication(
     *, uid: str, conversation_id: str, correction_id: str, retry_attempt_token: str
-) -> bool:
+) -> bool | dict[str, Any]:
     # Both checks run inside the canonical writer's thread. The second is the
     # last operation before external publication after the durable claim.
     require_current_ai_consent(uid)
@@ -1071,7 +1211,18 @@ def _guard_canonical_publication(
             confirmed=False,
         )
         raise
-    return True
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    if (
+        str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("canonical_publication_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("canonical_publication_state") or "") != "inflight"
+    ):
+        raise CanonicalSummaryWriteUnconfirmedError("canonical_publication_stale_attempt")
+    return {
+        "scope": f"correction:{uid}:{conversation_id}:{correction_id}",
+        "attempt_token": retry_attempt_token,
+        "generation": max(1, int(audit.get("canonical_publication_generation") or 1)),
+    }
 
 
 def _read_correction_audit(uid: str, conversation_id: str, correction_id: str) -> dict[str, Any]:
@@ -1831,6 +1982,7 @@ async def _run_correction_propagation_for_submission(
     trace_id: str,
     request: ConversationCorrectionRequest,
     source_conversation: dict[str, Any],
+    retry_attempt_token: Optional[str] = None,
     deadline: Optional[_CorrectionDeadline] = None,
 ) -> None:
     if not CORRECTION_PROPAGATION_ENABLED:
@@ -1840,6 +1992,26 @@ async def _run_correction_propagation_for_submission(
     def propagation_egress_guard() -> None:
         deadline.require_remaining()
         require_current_ai_consent(uid)
+        if retry_attempt_token:
+            _require_current_downstream_stage(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                retry_attempt_token=retry_attempt_token,
+                stage="propagation",
+            )
+
+    def create_propagation_proposal(**kwargs):
+        if not retry_attempt_token:
+            raise CanonicalSummaryWriteUnconfirmedError("propagation_attempt_token_required")
+        return _create_fenced_correction_proposal(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            retry_attempt_token=retry_attempt_token,
+            stage="propagation",
+            **kwargs,
+        )
 
     try:
         run = await deadline.run_blocking(
@@ -1850,6 +2022,7 @@ async def _run_correction_propagation_for_submission(
             trace_id=trace_id,
             correction_text=request.correction_text,
             correction_type=_correction_category(request.correction_text, request.summary_context),
+            create_proposal=create_propagation_proposal,
             egress_guard=propagation_egress_guard,
         )
         payload = propagation_run_to_dict(run)
@@ -2050,6 +2223,7 @@ async def _run_correction_observer_work(
             trace_id=trace_id,
             request=request,
             source_conversation=source_conversation,
+            retry_attempt_token=retry_attempt_token,
             deadline=deadline,
         )
         if retry_attempt_token and CORRECTION_PROPAGATION_ENABLED:
@@ -2139,8 +2313,19 @@ def _create_summary_correction_proposal(
     transcript: str,
     segment_count: int,
     active_summary_version_id: Optional[str],
+    retry_attempt_token: Optional[str] = None,
 ) -> Optional[str]:
-    result = proposal_ingest.create_proposal(
+    create_proposal = proposal_ingest.create_proposal
+    if retry_attempt_token:
+        create_proposal = lambda **kwargs: _create_fenced_correction_proposal(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            retry_attempt_token=retry_attempt_token,
+            stage="proposal",
+            **kwargs,
+        )
+    result = create_proposal(
         session_claims=_summary_correction_claims(uid=uid, trace_id=trace_id),
         tool_name="conversation_correction_submit",
         proposal_type="summary_correction",
@@ -2255,6 +2440,7 @@ async def _run_post_source_correction_side_effects(
                 transcript=transcript,
                 segment_count=segment_count,
                 active_summary_version_id=active_summary_version_id,
+                retry_attempt_token=retry_attempt_token,
             )
             if proposal_id:
                 created_at = _now_iso()
@@ -4326,6 +4512,111 @@ async def retry_failed_conversation_correction(
     )
 
 
+def _finalize_correction_undo_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    corrected_version_id: str,
+    undo_version_id: str,
+    reverted_count: int,
+    related_target_count: int,
+    undone_at: str,
+) -> str:
+    """Atomically terminalize both undo receipt surfaces, including exact repair."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+    ):
+        return "identity_mismatch"
+    if str(audit.get("status") or "") not in {"applied", "undone"}:
+        return "invalid_status"
+    undo_version = _summary_version_by_kind_and_base(
+        conversation,
+        kind="correction_undo",
+        based_on_version_id=corrected_version_id,
+    )
+    if (
+        undo_version is None
+        or str(undo_version.get("id") or "") != undo_version_id
+        or str(conversation.get("active_summary_version_id") or "") != undo_version_id
+    ):
+        return "version_drift"
+    state = conversation.get("correction_state") or {}
+    if state and str(state.get("correction_id") or "") != correction_id:
+        return "state_identity_mismatch"
+    terminal_audit = {
+        "status": "undone",
+        "pending": False,
+        "undone_at": undone_at,
+        "updated_at": undone_at,
+        "propagation_reverted_count": reverted_count,
+        "undo_version_id": undo_version_id,
+        "undo_operation": {
+            "status": "completed",
+            "expected_source_version_id": corrected_version_id,
+            "undo_version_id": undo_version_id,
+            "related_target_count": related_target_count,
+            "propagation_reverted_count": reverted_count,
+            "completed_at": undone_at,
+        },
+    }
+    terminal_state = {
+        **state,
+        "correction_id": correction_id,
+        "status": "undone",
+        "pending": False,
+        "updated_at": undone_at,
+        "active_summary_version_id": undo_version_id,
+    }
+    transaction.set(audit_ref, terminal_audit, merge=True)
+    transaction.set(conversation_ref, {"correction_state": terminal_state}, merge=True)
+    return "finalized"
+
+
+@transactional
+def _finalize_correction_undo_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
+    return _finalize_correction_undo_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _finalize_correction_undo(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    corrected_version_id: str,
+    undo_version_id: str,
+    reverted_count: int,
+    related_target_count: int,
+    undone_at: str,
+) -> str:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _finalize_correction_undo_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        corrected_version_id=corrected_version_id,
+        undo_version_id=undo_version_id,
+        reverted_count=reverted_count,
+        related_target_count=related_target_count,
+        undone_at=undone_at,
+    )
+
+
 @router.post(
     "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo",
     response_model=ConversationCorrectionReceiptResponse,
@@ -4352,6 +4643,30 @@ async def undo_conversation_correction(
         correction_id=correction_id,
     )
     if audit.get("status") == "undone":
+        repaired_undo = _summary_version_by_kind_and_base(
+            conversation,
+            kind="correction_undo",
+            based_on_version_id=str(corrected.get("id") or ""),
+        )
+        repaired_undo_version_id = str(repaired_undo.get("id") or "") if repaired_undo else ""
+        if (
+            not repaired_undo_version_id
+            or str(conversation.get("active_summary_version_id") or "") != repaired_undo_version_id
+        ):
+            raise HTTPException(status_code=409, detail="Correction undo terminal state is inconsistent")
+        repair_result = _finalize_correction_undo(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            corrected_version_id=str(corrected.get("id") or ""),
+            undo_version_id=repaired_undo_version_id,
+            reverted_count=int(audit.get("propagation_reverted_count") or 0),
+            related_target_count=int((audit.get("undo_operation") or {}).get("related_target_count") or 0),
+            undone_at=str(audit.get("undone_at") or _now_iso()),
+        )
+        if repair_result != "finalized":
+            raise HTTPException(status_code=409, detail=f"Correction undo repair failed: {repair_result}")
+        conversation = conversations_db.get_conversation(uid, conversation_id) or conversation
         return _correction_receipt(
             uid=uid,
             conversation_id=conversation_id,
@@ -4450,44 +4765,19 @@ async def undo_conversation_correction(
         raise HTTPException(status_code=500, detail="Correction undo version was not recorded")
     undone_at = _now_iso()
     require_current_ai_consent(uid)
-    _persist_correction_audit(
-        uid,
-        conversation_id,
-        correction_id,
-        {
-            "status": "undone",
-            "undone_at": undone_at,
-            "updated_at": undone_at,
-            "propagation_reverted_count": reverted_count,
-            "undo_version_id": undo_version_id,
-            "undo_operation": {
-                "status": "completed",
-                "expected_source_version_id": corrected_version_id,
-                "undo_version_id": undo_version_id,
-                "related_target_count": len(rollback_plan),
-                "propagation_reverted_count": reverted_count,
-                "completed_at": undone_at,
-            },
-        },
+    finalize_result = _finalize_correction_undo(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        corrected_version_id=corrected_version_id,
+        undo_version_id=undo_version_id,
+        reverted_count=reverted_count,
+        related_target_count=len(rollback_plan),
+        undone_at=undone_at,
     )
+    if finalize_result != "finalized":
+        raise HTTPException(status_code=409, detail=f"Correction undo finalization failed: {finalize_result}")
     latest = conversations_db.get_conversation(uid, conversation_id) or conversation
-    require_current_ai_consent(uid)
-    conversations_db.update_conversation(
-        uid,
-        conversation_id,
-        {
-            "correction_state": {
-                "correction_id": correction_id,
-                "status": "undone",
-                "pending": False,
-                "source": (conversation.get("correction_state") or {}).get("source"),
-                "submitted_at": (conversation.get("correction_state") or {}).get("submitted_at"),
-                "updated_at": datetime.now(timezone.utc),
-                "active_summary_version_id": undo_version_id,
-            }
-        },
-    )
-    latest = conversations_db.get_conversation(uid, conversation_id) or latest
     return _correction_receipt(
         uid=uid,
         conversation_id=conversation_id,

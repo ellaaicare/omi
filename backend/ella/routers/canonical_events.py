@@ -247,6 +247,31 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                                 AND (EXCLUDED.metadata->'summary_version_ancestor_ids')
                                     ? (canonical_events.metadata->>'active_summary_version_id')
                             )
+                            OR (
+                                (canonical_events.metadata->>'active_summary_version_id')
+                                    = (EXCLUDED.metadata->>'active_summary_version_id')
+                                AND (EXCLUDED.metadata->'publication_fence'->>'scope') IS NOT NULL
+                                AND (
+                                    (canonical_events.metadata->'publication_fence'->>'scope') IS NULL
+                                    OR (canonical_events.metadata->'publication_fence'->>'scope')
+                                        = (EXCLUDED.metadata->'publication_fence'->>'scope')
+                                )
+                                AND COALESCE(
+                                    CASE
+                                        WHEN (EXCLUDED.metadata->'publication_fence'->>'generation')
+                                            ~ '^[0-9]{1,18}$'
+                                        THEN (EXCLUDED.metadata->'publication_fence'->>'generation')::bigint
+                                    END,
+                                    0
+                                ) > COALESCE(
+                                    CASE
+                                        WHEN (canonical_events.metadata->'publication_fence'->>'generation')
+                                            ~ '^[0-9]{1,18}$'
+                                        THEN (canonical_events.metadata->'publication_fence'->>'generation')::bigint
+                                    END,
+                                    0
+                                )
+                            )
                         """
                         if _should_replace_existing_event(item)
                         else "DO NOTHING"

@@ -37,14 +37,14 @@ def _publish_canonical_summary(
     summary_source: str,
     summary_kind: str,
     trace_id: Optional[str],
-    canonical_egress_guard: Optional[Callable[[], Optional[bool]]],
+    canonical_egress_guard: Optional[Callable[[], Optional[bool | dict[str, Any]]]],
     canonical_egress_completion: Optional[Callable[[bool], None]],
     canonical_timeout_provider: Optional[Callable[[], float]],
 ) -> dict[str, Any]:
     """Fence, publish, and record completion within one uncancellable thread."""
 
-    should_publish = canonical_egress_guard() if canonical_egress_guard is not None else True
-    if should_publish is False:
+    publication_authority = canonical_egress_guard() if canonical_egress_guard is not None else True
+    if publication_authority is False:
         return {"ok": True, "inserted": 0, "duplicates": 1, "fenced_replay": True}
 
     writer_kwargs: dict[str, Any] = {
@@ -52,6 +52,8 @@ def _publish_canonical_summary(
         "summary_kind": summary_kind,
         "trace_id": trace_id,
     }
+    if isinstance(publication_authority, dict):
+        writer_kwargs["publication_fence"] = publication_authority
     try:
         if canonical_timeout_provider is not None:
             writer_kwargs["timeout"] = max(0.001, canonical_timeout_provider())
@@ -89,7 +91,7 @@ async def write_conversation_summary(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
-    canonical_egress_guard: Optional[Callable[[], Optional[bool]]] = None,
+    canonical_egress_guard: Optional[Callable[[], Optional[bool | dict[str, Any]]]] = None,
     canonical_egress_completion: Optional[Callable[[bool], None]] = None,
     canonical_timeout_provider: Optional[Callable[[], float]] = None,
     correction_attempt_token: Optional[str] = None,

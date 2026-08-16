@@ -419,6 +419,27 @@ def test_undo_restores_source_summary_and_reverts_actual_propagations(monkeypatc
     )
     monkeypatch.setattr(corrections, "_correction_receipt", lambda **kwargs: expected)
 
+    def finalize(**kwargs):
+        audits.append(
+            {
+                "status": "undone",
+                "propagation_reverted_count": kwargs["reverted_count"],
+                "undo_version_id": kwargs["undo_version_id"],
+            }
+        )
+        updates.append(
+            {
+                "correction_state": {
+                    "correction_id": kwargs["correction_id"],
+                    "status": "undone",
+                    "active_summary_version_id": kwargs["undo_version_id"],
+                }
+            }
+        )
+        return "finalized"
+
+    monkeypatch.setattr(corrections, "_finalize_correction_undo", finalize)
+
     receipt = asyncio.run(
         corrections.undo_conversation_correction(
             "conv-1",
@@ -837,7 +858,7 @@ def test_propagation_undo_resumes_after_one_of_multiple_writes_fails(monkeypatch
     assert len(run_writes) == 3
 
 
-def test_repeated_undo_returns_same_recorded_undo_version_without_writing(monkeypatch):
+def test_repeated_undo_repairs_mismatched_terminal_pair_without_appending_version(monkeypatch):
     conversation = {
         "summary_versions": [
             {"id": "before-v1", "title": "Before"},
@@ -855,7 +876,7 @@ def test_repeated_undo_returns_same_recorded_undo_version_without_writing(monkey
             },
         ],
         "active_summary_version_id": "undo-v3",
-        "correction_state": {"correction_id": "corr-1", "status": "undone"},
+        "correction_state": {"correction_id": "corr-1", "status": "applied"},
     }
 
     class AuditRef:
@@ -883,6 +904,12 @@ def test_repeated_undo_returns_same_recorded_undo_version_without_writing(monkey
         "apply_summary_update",
         lambda **kwargs: pytest.fail("repeated undo must not append another version"),
     )
+    repairs = []
+    monkeypatch.setattr(
+        corrections,
+        "_finalize_correction_undo",
+        lambda **kwargs: repairs.append(kwargs) or "finalized",
+    )
 
     receipt = asyncio.run(
         corrections.undo_conversation_correction(
@@ -897,6 +924,7 @@ def test_repeated_undo_returns_same_recorded_undo_version_without_writing(monkey
     assert receipt.after_version_id == "after-v2"
     assert receipt.active_version_id == "undo-v3"
     assert receipt.undo_version_id == "undo-v3"
+    assert repairs[0]["undo_version_id"] == "undo-v3"
 
 
 def test_submit_correction_rejects_locked_conversation(monkeypatch):
@@ -4717,7 +4745,11 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
             return False
         if status != "claimed":
             raise corrections.CanonicalSummaryWriteUnconfirmedError(status)
-        return True
+        return {
+            "scope": f"correction:owner-1:conv-1:{correction_id}",
+            "attempt_token": token,
+            "generation": int(audit_ref.value.get("canonical_publication_generation") or 1),
+        }
 
     def complete(token, confirmed):
         return corrections._complete_canonical_publication_in_transaction(
@@ -4740,8 +4772,10 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
         writer_started.set()
         assert release_writer.wait(timeout=1)
         publications.append(kwargs["trace_id"])
-        if not canonical_commits:
-            canonical_commits.append(kwargs["trace_id"])
+        fence = kwargs["publication_fence"]
+        generation = int(fence["generation"])
+        if not canonical_commits or generation > canonical_commits[-1]:
+            canonical_commits.append(generation)
             return {"ok": True, "inserted": 1, "duplicates": 0}
         return {"ok": True, "inserted": 0, "duplicates": 1}
 
@@ -4822,7 +4856,7 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
 
     asyncio.run(scenario())
     assert publications == [trace_id, trace_id]
-    assert canonical_commits == [trace_id]
+    assert canonical_commits == [1, 2]
 
 
 def test_crash_after_publication_claim_before_remote_write_reclaims_after_bounded_lease():
@@ -5284,6 +5318,202 @@ def test_n8n_submission_is_bounded_by_the_existing_monotonic_deadline(monkeypatc
         )
     assert time.monotonic() - started < 0.1
     assert observed_timeouts and observed_timeouts[0] <= 0.01
+
+
+class _TransactionalRef:
+    def __init__(self, value=None):
+        self.value = value
+
+    def get(self, transaction=None):
+        del transaction
+        value = self.value
+        return SimpleNamespace(exists=value is not None, to_dict=lambda: dict(value or {}))
+
+    def set(self, payload, merge=False):
+        if merge and self.value is not None:
+            self.value.update(payload)
+        else:
+            self.value = dict(payload)
+
+
+class _RecordingTransaction:
+    def __init__(self):
+        self.writes = []
+
+    def set(self, ref, payload, merge=False):
+        self.writes.append((ref, payload, merge))
+        ref.set(payload, merge=merge)
+
+
+def test_propagation_sink_transaction_rejects_expired_reclaimed_and_post_undo_publishers():
+    correction_id = "propagation-fence"
+    conversation_ref = _TransactionalRef(
+        {
+            "active_summary_version_id": "corrected-v2",
+            "summary_versions": [
+                {"id": "base-v1"},
+                {
+                    "id": "corrected-v2",
+                    "based_on_version_id": "base-v1",
+                    "correction_id": correction_id,
+                },
+            ],
+        }
+    )
+    audit_ref = _TransactionalRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": correction_id,
+            "status": "finalizing",
+            "retry_attempt_token": "attempt-b",
+            "operation_deadline_at": "2999-01-01T00:00:00+00:00",
+            "attempt_count": 2,
+            "attempt_budget": 8,
+            "downstream_work": {
+                "propagation": {
+                    "required": True,
+                    "status": "inflight",
+                    "attempt_token": "attempt-b",
+                    "lease_expires_at": "2999-01-01T00:00:00+00:00",
+                }
+            },
+        }
+    )
+    proposal_ref = _TransactionalRef()
+    proposal = corrections.Proposal.from_claims(
+        session_claims={"profile_uid": "owner-1", "trace_id": "trace-1"},
+        tool_name="omi_correction_propagation_propose",
+        proposal_type="summary_correction",
+        payload={"target": {"conversation_id": "related-1"}},
+        idempotency_key="stable-related-effect",
+        proposal_id="proposal-1",
+    )
+
+    stale = corrections._create_fenced_correction_proposal_in_transaction(
+        _RecordingTransaction(),
+        conversation_ref,
+        audit_ref,
+        proposal_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        retry_attempt_token="attempt-a",
+        stage="propagation",
+        proposal=proposal,
+        committed_at="2026-08-16T03:00:00+00:00",
+    )
+    assert stale == {"outcome": "stale_attempt"}
+    assert proposal_ref.value is None
+
+    expired = corrections._create_fenced_correction_proposal_in_transaction(
+        _RecordingTransaction(),
+        conversation_ref,
+        audit_ref,
+        proposal_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        retry_attempt_token="attempt-b",
+        stage="propagation",
+        proposal=proposal,
+        committed_at="3000-01-01T00:00:00+00:00",
+    )
+    assert expired == {"outcome": "stale_attempt"}
+    assert proposal_ref.value is None
+
+    created = corrections._create_fenced_correction_proposal_in_transaction(
+        _RecordingTransaction(),
+        conversation_ref,
+        audit_ref,
+        proposal_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        retry_attempt_token="attempt-b",
+        stage="propagation",
+        proposal=proposal,
+        committed_at="2026-08-16T03:00:00+00:00",
+    )
+    assert created["outcome"] == "created"
+    assert proposal_ref.value["proposal_id"] == "proposal-1"
+
+    conversation_ref.value["summary_versions"].append(
+        {"id": "undo-v3", "based_on_version_id": "corrected-v2", "kind": "correction_undo"}
+    )
+    conversation_ref.value["active_summary_version_id"] = "undo-v3"
+    proposal_after_undo = corrections.Proposal.from_claims(
+        session_claims={"profile_uid": "owner-1", "trace_id": "trace-1"},
+        tool_name="omi_correction_propagation_propose",
+        proposal_type="summary_correction",
+        payload={"target": {"conversation_id": "related-2"}},
+        idempotency_key="late-related-effect",
+        proposal_id="proposal-2",
+    )
+    rejected_after_undo = corrections._create_fenced_correction_proposal_in_transaction(
+        _RecordingTransaction(),
+        conversation_ref,
+        audit_ref,
+        _TransactionalRef(),
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        retry_attempt_token="attempt-b",
+        stage="propagation",
+        proposal=proposal_after_undo,
+        committed_at="2026-08-16T03:00:00+00:00",
+    )
+    assert rejected_after_undo == {"outcome": "version_drift"}
+
+
+def test_undo_terminal_transaction_is_atomic_and_exact_retry_repairs_legacy_pair():
+    conversation_ref = _TransactionalRef(
+        {
+            "active_summary_version_id": "undo-v3",
+            "summary_versions": [
+                {"id": "base-v1"},
+                {"id": "corrected-v2", "based_on_version_id": "base-v1", "correction_id": "corr-1"},
+                {"id": "undo-v3", "based_on_version_id": "corrected-v2", "kind": "correction_undo"},
+            ],
+            "correction_state": {
+                "correction_id": "corr-1",
+                "status": "applied",
+                "pending": False,
+                "active_summary_version_id": "corrected-v2",
+            },
+        }
+    )
+    audit_ref = _TransactionalRef(
+        {
+            "uid": "owner-1",
+            "conversation_id": "conv-1",
+            "correction_id": "corr-1",
+            "status": "undone",
+            "undone_at": "2026-08-16T03:00:00+00:00",
+        }
+    )
+    transaction = _RecordingTransaction()
+
+    result = corrections._finalize_correction_undo_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id="corr-1",
+        corrected_version_id="corrected-v2",
+        undo_version_id="undo-v3",
+        reverted_count=2,
+        related_target_count=2,
+        undone_at="2026-08-16T03:00:00+00:00",
+    )
+
+    assert result == "finalized"
+    assert len(transaction.writes) == 2
+    assert audit_ref.value["status"] == "undone"
+    assert audit_ref.value["undo_operation"]["status"] == "completed"
+    assert conversation_ref.value["correction_state"]["status"] == "undone"
+    assert conversation_ref.value["correction_state"]["active_summary_version_id"] == "undo-v3"
 
 
 def test_hosted_source_ci_checks_out_and_receipts_exact_pull_request_head_with_scans_preserved():

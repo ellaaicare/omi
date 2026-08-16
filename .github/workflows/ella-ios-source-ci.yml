@@ -281,6 +281,10 @@ jobs:
             "tests/unit/test_ella_conversation_corrections.py::test_multiple_lost_reclaimers_exhaust_one_persisted_attempt_budget"
             "tests/unit/test_ella_canonical_event_version_fence.py::test_stale_corrected_publisher_cannot_overwrite_newer_undo"
             "tests/unit/test_ella_canonical_event_version_fence.py::test_ack_loss_replay_of_exact_canonical_version_is_a_confirmed_duplicate"
+            "tests/unit/test_ella_canonical_event_version_fence.py::test_same_version_generation_fences_reclaimed_worker_before_and_after_undo"
+            "tests/unit/test_ella_conversation_corrections.py::test_propagation_sink_transaction_rejects_expired_reclaimed_and_post_undo_publishers"
+            "tests/unit/test_ella_conversation_corrections.py::test_undo_terminal_transaction_is_atomic_and_exact_retry_repairs_legacy_pair"
+            "tests/unit/test_ella_conversation_corrections.py::test_repeated_undo_repairs_mismatched_terminal_pair_without_appending_version"
             "tests/unit/test_ella_conversation_corrections.py::test_revocation_at_final_canonical_and_downstream_boundaries_prevents_all_egress"
             "tests/unit/test_ella_conversation_corrections.py::test_propagation_revalidates_before_related_transcript_read_and_proposal_write"
             "tests/unit/test_ella_conversation_corrections.py::test_receipt_audit_identity_or_status_mismatch_fails_closed_without_echo"
@@ -290,7 +294,7 @@ jobs:
           for required_id in "${required_correction_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 97
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 100
           python -m pytest \
             tests/unit/test_ella_correction_startup_contract.py \
             tests/unit/test_ella_correction_runtime_resolver.py \

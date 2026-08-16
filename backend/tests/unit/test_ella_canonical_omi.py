@@ -50,6 +50,21 @@ def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
     assert event["metadata"]["active_summary_version_id"] == "obs-v2"
     assert event["metadata"]["transcript_segments"][0]["text"] == "Can I get the waffle?"
     assert event["metadata"]["trace_id"] == "trace-cafe"
+    assert "publication_fence" not in event["metadata"]
+
+    fenced_event = build_omi_canonical_event(
+        "5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+        conversation,
+        summary_source="observer",
+        summary_kind="observer_enriched",
+        trace_id="trace-cafe",
+        publication_fence={
+            "scope": "correction:owner-1:cafe-123:corr-1",
+            "attempt_token": "attempt-b",
+            "generation": 2,
+        },
+    )
+    assert fenced_event["metadata"]["publication_fence"]["generation"] == 2
 
 
 def test_build_omi_canonical_event_json_normalizes_nested_timestamps():

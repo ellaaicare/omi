@@ -23,8 +23,9 @@ class _AsyncContext:
 
 
 class _FenceConnection:
-    def __init__(self, existing_active_version_id, *, exact_replay=True):
+    def __init__(self, existing_active_version_id, *, existing_generation=0, exact_replay=True):
         self.existing_active_version_id = existing_active_version_id
+        self.existing_generation = existing_generation
         self.exact_replay = exact_replay
         self.queries = []
 
@@ -36,12 +37,18 @@ class _FenceConnection:
         incoming_metadata = json.loads(args[14])
         incoming_active = incoming_metadata["active_summary_version_id"]
         ancestors = incoming_metadata["summary_version_ancestor_ids"]
+        incoming_fence = incoming_metadata.get("publication_fence") or {}
+        incoming_generation = int(incoming_fence.get("generation") or 0)
         assert "summary_version_ancestor_ids" in query
         assert "canonical_events.metadata" in query
         if self.existing_active_version_id is None:
             return {"inserted": True}
         if self.existing_active_version_id != incoming_active and self.existing_active_version_id in ancestors:
             self.existing_active_version_id = incoming_active
+            self.existing_generation = incoming_generation
+            return {"inserted": False}
+        if self.existing_active_version_id == incoming_active and incoming_generation > self.existing_generation:
+            self.existing_generation = incoming_generation
             return {"inserted": False}
         return None
 
@@ -60,7 +67,7 @@ class _FencePool:
         return _AsyncContext(self.connection)
 
 
-def _summary_event(active_version_id, ancestors):
+def _summary_event(active_version_id, ancestors, *, generation=0, token=""):
     return canonical_events.CanonicalEventIn(
         uid="owner-1",
         canonical_identity="owner-1",
@@ -76,6 +83,11 @@ def _summary_event(active_version_id, ancestors):
             "adapter": "omi-enriched-conversation",
             "active_summary_version_id": active_version_id,
             "summary_version_ancestor_ids": ancestors,
+            "publication_fence": (
+                {"scope": "correction:owner-1:conv-1:corr-1", "generation": generation, "attempt_token": token}
+                if generation
+                else None
+            ),
         },
     )
 
@@ -125,3 +137,44 @@ def test_ack_loss_replay_of_exact_canonical_version_is_a_confirmed_duplicate(mon
     assert mismatched["ok"] is False
     assert mismatched["duplicates"] == 0
     assert mismatched["stale"] == 1
+
+
+def test_same_version_generation_fences_reclaimed_worker_before_and_after_undo(monkeypatch):
+    connection = _FenceConnection("corrected-v2", existing_generation=1, exact_replay=False)
+
+    async def pool():
+        return _FencePool(connection)
+
+    monkeypatch.setattr(canonical_events, "_get_pool", pool)
+    successor = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().write_batch(
+            [_summary_event("corrected-v2", ["base-v1"], generation=2, token="attempt-b")]
+        )
+    )
+    stale_before_undo = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().write_batch(
+            [_summary_event("corrected-v2", ["base-v1"], generation=1, token="attempt-a")]
+        )
+    )
+
+    assert successor["ok"] is True
+    assert successor["updated"] == 1
+    assert connection.existing_generation == 2
+    assert stale_before_undo["ok"] is False
+    assert stale_before_undo["stale"] == 1
+
+    undo = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().write_batch(
+            [_summary_event("undo-v3", ["corrected-v2", "base-v1"])]
+        )
+    )
+    stale_after_undo = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().write_batch(
+            [_summary_event("corrected-v2", ["base-v1"], generation=1, token="attempt-a")]
+        )
+    )
+
+    assert undo["ok"] is True
+    assert connection.existing_active_version_id == "undo-v3"
+    assert stale_after_undo["ok"] is False
+    assert stale_after_undo["stale"] == 1
