@@ -616,8 +616,14 @@ def update_conversation_if_active_summary_version(
     )
 
 
-def _update_conversation_with_builder_transaction(transaction, conversation_ref, uid: str, update_builder):
-    """Read, derive, and update one owner-bound conversation in one transaction."""
+def _update_conversation_with_builder_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    """Read and update one conversation and optional correction audit atomically."""
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
         return None
@@ -628,6 +634,10 @@ def _update_conversation_with_builder_transaction(transaction, conversation_ref,
         doc_level = stored_conversation.get('data_protection_level', 'standard')
         prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
         transaction.update(conversation_ref, prepared_data)
+    correction_audit = result.get('correction_audit') if isinstance(result, dict) else None
+    if correction_id and correction_audit:
+        correction_ref = conversation_ref.collection('corrections').document(correction_id)
+        transaction.set(correction_ref, correction_audit, merge=True)
     return {
         'conversation': conversation,
         'update_data': update_data,
@@ -636,15 +646,38 @@ def _update_conversation_with_builder_transaction(transaction, conversation_ref,
 
 
 @transactional
-def _update_conversation_with_builder(transaction, conversation_ref, uid: str, update_builder):
-    return _update_conversation_with_builder_transaction(transaction, conversation_ref, uid, update_builder)
+def _update_conversation_with_builder(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    return _update_conversation_with_builder_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        update_builder,
+        correction_id,
+    )
 
 
-def update_conversation_with_builder(uid: str, conversation_id: str, update_builder):
+def update_conversation_with_builder(
+    uid: str,
+    conversation_id: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
     )
-    return _update_conversation_with_builder(db.transaction(), conversation_ref, uid, update_builder)
+    return _update_conversation_with_builder(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        update_builder,
+        correction_id,
+    )
 
 
 def _ensure_voice_memory_summary_version_transaction(

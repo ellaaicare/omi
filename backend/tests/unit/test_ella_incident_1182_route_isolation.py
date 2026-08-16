@@ -747,6 +747,9 @@ MOUNTED_ROUTE_CONTRACT = {
     ("callbacks", "GET", "/v1/ella/conversation/{conversation_id}/data"): _contract(
         "get_conversation_data", "ella.routers.callbacks:require_callback_service"
     ),
+    ("callbacks", "GET", "/v1/ella/conversation/summary/capabilities"): _contract(
+        "conversation_summary_capabilities", manual="public_static_capability"
+    ),
     ("callbacks", "GET", "/v1/ella/health"): _contract("ella_health", manual="public_minimal_health"),
     ("callbacks", "POST", "/v1/ella/notification"): _contract(
         "ella_notification", "ella.routers.callbacks:require_callback_service"
@@ -925,7 +928,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
             endpoint_name, dependencies, manual = MOUNTED_ROUTE_CONTRACT[key]
             assert route.endpoint.__name__ == endpoint_name
             assert tuple(_authority_id(item.call) for item in route.dependant.dependencies) == dependencies
-            if manual in {"public_minimal_health", "public_static_config"}:
+            if manual in {"public_minimal_health", "public_static_capability", "public_static_config"}:
                 assert dependencies == ()
             elif manual:
                 assert manual in _direct_call_names(route.endpoint)
@@ -934,7 +937,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
                 assert dependencies, f"unclassified authority: {key}"
 
     assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
-    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 49
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 50
     assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
 
 

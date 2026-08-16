@@ -1655,16 +1655,30 @@ if module_name == "ella.routers.callbacks":
     fake_sanitizer.SummarySanitizationError = type("SummarySanitizationError", (Exception,), {})
     sys.modules["ella.services.summary_sanitizer"] = fake_sanitizer
     fake_writeback = types.ModuleType("ella.services.summary_writeback")
+    fake_writeback.CanonicalConversationSourceMismatchError = type(
+        "CanonicalConversationSourceMismatchError", (Exception,), {}
+    )
+    fake_writeback.CanonicalSummaryDependencyUnavailableError = type(
+        "CanonicalSummaryDependencyUnavailableError", (Exception,), {}
+    )
+    fake_writeback.CanonicalSummaryReconciliationPendingError = type(
+        "CanonicalSummaryReconciliationPendingError", (Exception,), {}
+    )
     fake_writeback.ConversationSummaryNotFoundError = type("ConversationSummaryNotFoundError", (Exception,), {})
+    fake_writeback.ConversationSummaryOutcomeUnknownError = type(
+        "ConversationSummaryOutcomeUnknownError", (Exception,), {}
+    )
     fake_writeback.InvalidConversationSummaryCategoryError = type(
         "InvalidConversationSummaryCategoryError", (Exception,), {}
     )
     fake_writeback.write_conversation_summary = lambda *args, **kwargs: None
+    fake_writeback.write_conversation_summary_cas = lambda *args, **kwargs: None
     sys.modules["ella.services.summary_writeback"] = fake_writeback
     fake_notifications = types.ModuleType("utils.notifications")
     fake_notifications.send_notification = lambda *args, **kwargs: None
     sys.modules["utils.notifications"] = fake_notifications
     fake_canonical_omi = types.ModuleType("utils.ella.canonical_omi")
+    fake_canonical_omi.require_omi_canonical_write_ready = lambda *args, **kwargs: None
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
     fake_exact_auth = types.ModuleType("utils.ella.exact_firebase_auth")

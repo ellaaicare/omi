@@ -15,13 +15,40 @@ The digest covers sorted compact UTF-8 JSON over exactly `type`,
 `emoji`, `category`, `segment_count`, and `transcript`. The compare and the
 Firestore structured-summary/version update occur in one owner-bound
 transaction. A stale digest returns `412`; an incomplete, malformed, or unknown
-precondition returns `428`. Neither response writes the conversation.
+precondition returns `428`. Duplicate raw occurrences of either header return
+`400`, including duplicate identical values. None of these responses writes the
+conversation.
 
-Success returns only `{"status":"ok"}` and:
+The Firestore transaction atomically commits the structured summary, summary
+version, deterministic operation receipt, pending canonical repair state, and
+any correction audit document. This is the source-store atomic boundary. It is
+not a transaction across Firestore and the canonical Postgres ledger.
+
+For `require_canonical=true`, locally knowable missing canonical configuration
+fails with `503` before the Firestore transaction. After the source transaction
+commits, the stable canonical event is published idempotently and the Firestore
+receipt is finalized. Confirmed success returns only `{"status":"ok"}` and:
 
 ```text
 X-Ella-CAS-Applied: ella-canonical-source-v1
 ```
+
+If canonical publication or receipt finalization fails after the source commit,
+the endpoint returns `202` with `{"status":"pending_reconciliation"}`, the same
+applied header, and `X-Ella-CAS-Reconciliation: pending`. The committed
+conversation remains explicitly marked `writeback_pending_canonical` with its
+durable operation receipt. An exact request retry recognizes that receipt,
+retries idempotent canonical publication, and returns the committed outcome
+without creating another summary version. A different CAS write receives `409`
+until reconciliation completes. If the Firestore client loses the transaction
+response and the receipt cannot be read back, the endpoint returns an explicit,
+retryable `503` outcome-unknown response; it does not claim that the write
+failed.
+
+This protocol cannot provide zero writes when Postgres fails after Firestore
+commits. Its guarantee is instead that no required-canonical source commit is
+untracked: the repair receipt and pending state are in the same Firestore
+transaction as the winning summary, and retries reconcile that exact operation.
 
 ## Compatibility gate and capability signal
 
