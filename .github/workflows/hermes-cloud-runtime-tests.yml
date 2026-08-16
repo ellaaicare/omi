@@ -777,7 +777,9 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 69
+          authority_lock_count="$(grep -c '::' <<<"$authority_lock_ids")"
+          echo "observed authority-lock collection count: $authority_lock_count"
+          test "$authority_lock_count" -eq 71
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
