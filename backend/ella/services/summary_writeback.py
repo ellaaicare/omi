@@ -55,8 +55,6 @@ async def write_conversation_summary(
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
         raise ConversationSummaryNotFoundError(conversation_id)
-    if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
-        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     enrichment_state = conversation.get('enrichment_state') or {}
     same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
@@ -106,7 +104,17 @@ async def write_conversation_summary(
                 extra={'uid': uid, 'conversation_id': conversation_id, 'trace_id': trace_id},
             )
             raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from error
-        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+        confirmed_update: dict[str, Any] = {'enrichment_state': confirmed_state}
+        if correction_id:
+            confirmed_update['correction_state'] = {
+                **(conversation.get('correction_state') or {}),
+                'correction_id': correction_id,
+                'status': 'applied',
+                'pending': False,
+                'updated_at': confirmed_state['updated_at'],
+                'active_summary_version_id': conversation.get('active_summary_version_id'),
+            }
+        conversations_db.update_conversation(uid, conversation_id, confirmed_update)
         return {
             'status': 'ok',
             'conversation_id': conversation_id,
@@ -116,6 +124,9 @@ async def write_conversation_summary(
             'idempotent_replay': True,
             'canonical_confirmed': True,
         }
+
+    if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
+        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
     update_data: dict[str, Any] = {}
@@ -188,8 +199,8 @@ async def write_conversation_summary(
         existing_state = conversation.get('correction_state') or {}
         update_data['correction_state'] = {
             'correction_id': correction_id,
-            'status': 'applied',
-            'pending': False,
+            'status': 'canonical_pending' if require_canonical else 'applied',
+            'pending': require_canonical,
             'source': existing_state.get('source'),
             'submitted_at': existing_state.get('submitted_at'),
             'updated_at': state_updated_at,
@@ -227,6 +238,14 @@ async def write_conversation_summary(
         'error': None,
     }
     canonical_conversation['enrichment_state'] = confirmed_state
+    confirmed_correction_state: Optional[dict[str, Any]] = None
+    if correction_id:
+        confirmed_correction_state = {
+            **update_data['correction_state'],
+            'status': 'applied',
+            'pending': False,
+        }
+        canonical_conversation['correction_state'] = confirmed_correction_state
     canonical_result: Optional[dict[str, Any]] = None
     canonical_error: Optional[Exception] = None
     try:
@@ -257,7 +276,10 @@ async def write_conversation_summary(
             }
             conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': failed_state})
             raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from canonical_error
-        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+        confirmed_update = {'enrichment_state': confirmed_state}
+        if confirmed_correction_state is not None:
+            confirmed_update['correction_state'] = confirmed_correction_state
+        conversations_db.update_conversation(uid, conversation_id, confirmed_update)
 
     if correction_id and correction_audit_updater:
         try:

@@ -722,7 +722,21 @@ def assert_current_ai_consent(uid: str) -> str:
 def require_current_ai_consent(
     authenticated_uid: str = Depends(get_exact_firebase_uid),
 ) -> str:
-    return assert_current_ai_consent(authenticated_uid)
+    # Protected correction submissions are never allowed to inherit a rollout
+    # bypass: their transcript egress requires a current durable receipt.
+    status = get_ai_consent_service().status(authenticated_uid)
+    if status["authorized"]:
+        return authenticated_uid
+    consent = status["consent"]
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "ai_consent_required",
+            "decision": consent.get("decision", "not_recorded"),
+            "required_policy_version": CURRENT_POLICY_VERSION,
+            "required_processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
+        },
+    )
 
 
 def require_current_ai_consent_or_internal_tts(

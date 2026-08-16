@@ -402,7 +402,14 @@ class ConversationCorrectionReceipt {
   final DateTime? undoneAt;
   final String? failureCode;
 
-  bool get isPending => const {'submitted', 'queued', 'retry_queued', 'processing', 'pending'}.contains(status);
+  bool get isPending => const {
+        'submitted',
+        'queued',
+        'retry_queued',
+        'processing',
+        'canonical_pending',
+        'pending',
+      }.contains(status);
   bool get isApplied => status == 'applied' && undoneAt == null;
   bool get isUndone => status == 'undone' || undoneAt != null;
   bool get isFailed => !isPending && !isApplied && !isUndone;
@@ -558,6 +565,14 @@ Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
   }
 }
 
+// Mirrors the bounded backend correction SLA: 120s provider + 30s terminal
+// overhead, one reclaimable attempt, and a further 30s client margin. The
+// first poll is immediate.
+const conversationCorrectionBackendTerminalBound = Duration(seconds: 150);
+const conversationCorrectionClientPollMargin = Duration(seconds: 30);
+const conversationCorrectionClientPollBudget = Duration(seconds: 330);
+const conversationCorrectionDefaultPollAttempts = 331;
+
 Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
   required String conversationId,
   required String correctionId,
@@ -566,7 +581,7 @@ Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
   ConversationCorrectionReceiptFetcher fetchReceipt = getConversationCorrectionReceipt,
   Future<void> Function(Duration duration) wait = Future<void>.delayed,
   Duration pollInterval = const Duration(seconds: 1),
-  int maxAttempts = 181,
+  int maxAttempts = conversationCorrectionDefaultPollAttempts,
 }) async {
   if (maxAttempts < 1) return null;
   for (var attempt = 0; attempt < maxAttempts; attempt++) {

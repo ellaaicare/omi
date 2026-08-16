@@ -354,7 +354,7 @@ void main() {
         return ConversationCorrectionReceipt(
           correctionId: correctionId,
           conversationId: conversationId,
-          status: receiptCalls <= 46 ? 'retry_queued' : 'applied',
+          status: receiptCalls <= 151 ? 'canonical_pending' : 'applied',
           before: const ConversationCorrectionSummary(title: 'Before'),
           after: const ConversationCorrectionSummary(title: 'Applied'),
         );
@@ -362,8 +362,8 @@ void main() {
     );
 
     expect(submissionCalls, 1);
-    expect(receiptCalls, 47);
-    expect(waited, const Duration(seconds: 46));
+    expect(receiptCalls, 152);
+    expect(waited, const Duration(seconds: 151));
     expect(receipt?.isApplied, isTrue);
   });
 }

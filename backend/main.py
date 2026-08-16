@@ -5,6 +5,7 @@ import firebase_admin
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from database._client import db as firestore_db
 from modal import Image, App, asgi_app, Secret
 from routers import (
     workflow,
@@ -45,6 +46,8 @@ from routers import (
 
 from utils.other.timeout import TimeoutMiddleware
 from utils.observability import log_langsmith_status
+from ella.routers import ai_consent
+from ella.services.ai_consent import configure_firestore_db as configure_ai_consent_firestore_db
 
 # Log LangSmith tracing status at startup
 log_langsmith_status()
@@ -74,6 +77,10 @@ app.add_middleware(
     max_age=3600,
 )
 
+# Consent authority remains wired even when Ella extensions are disabled so
+# protected generic OMI routes cannot outlive their grant/revoke API.
+configure_ai_consent_firestore_db(firestore_db)
+app.include_router(ai_consent.router)
 app.include_router(transcribe.router)
 app.include_router(conversations.router)
 app.include_router(action_items.router)
@@ -156,6 +163,7 @@ for path in paths:
 # ============================================================================
 try:
     from ella import register_ella_extensions
+
     register_ella_extensions(app)
 except ImportError:
     pass  # Running vanilla OMI
