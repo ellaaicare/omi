@@ -47,7 +47,8 @@ def test_build_honcho_fact_candidate_uses_stable_session_key_and_idempotency():
     assert candidate.source_conversation_id == "source"
     assert candidate.related_conversation_id == "related"
     assert candidate.entity_type == "person"
-    assert candidate.session_key == "ella:omi:user-123:canonical"
+    assert candidate.session_key == contract.honcho_session_key("user-123")
+    assert "user-123" not in candidate.session_key
     assert candidate.idempotency_key.startswith("omi-correction-honcho-fact:user-123:corr-123:")
     assert candidate.durable_owner == "honcho/hermes"
 
@@ -95,7 +96,7 @@ def test_write_honcho_fact_candidate_defaults_to_no_durable_write(monkeypatch):
 
     assert decision.action == "skip"
     assert decision.reason == "durable_write_disabled"
-    assert decision.session_key == "ella:omi:user-123:canonical"
+    assert decision.session_key == contract.honcho_session_key("user-123")
 
 
 def test_write_honcho_fact_candidate_rechecks_active_summary_version(monkeypatch):
@@ -200,7 +201,7 @@ def test_write_honcho_fact_candidate_uses_hermes_session_key_and_requires_confir
     assert decision.reason == "hermes_honcho_write_confirmed"
     assert decision.response_ref["memory_id"] == "honcho-memory-123"
     assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
-    assert calls[0]["headers"]["X-Hermes-Session-Key"] == "ella:omi:user-123:canonical"
+    assert calls[0]["headers"]["X-Hermes-Session-Key"] == contract.honcho_session_key("user-123")
     assert calls[0]["headers"]["X-Idempotency-Key"] == candidate.idempotency_key
     assert calls[0]["json"]["model"] == "test-model"
 
@@ -495,6 +496,56 @@ def test_write_honcho_fact_candidate_native_honcho_profile_map_targets_companion
     assert calls[1]["url"] == "http://honcho.test/v3/workspaces/ella-plato-canonical/peers"
     assert calls[2]["json"]["id"] == "plato"
     assert calls[4]["json"]["filters"] == {"observer_id": "ella", "observed_id": "plato"}
+
+
+def test_honcho_profile_map_requires_exact_case_distinct_dictionary_owner(monkeypatch):
+    monkeypatch.setattr(
+        contract,
+        "HONCHO_PROFILE_MAP_JSON",
+        json.dumps({"caseuid": {"workspace": "wrong-owner", "peerName": "wrong-peer"}}),
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
+
+    assert contract._target_from_profile_map("CaseUID") is None
+    assert contract._target_from_profile_map(" caseuid") is None
+    assert contract._target_from_profile_map("caseuid")["workspace"] == "wrong-owner"
+
+
+def test_honcho_profile_map_requires_exact_case_distinct_list_owner(monkeypatch):
+    monkeypatch.setattr(
+        contract,
+        "HONCHO_PROFILE_MAP_JSON",
+        json.dumps(
+            {
+                "profiles": [
+                    {"uid": "caseuid", "workspace": "wrong-owner", "peerName": "wrong-peer"},
+                    {"uid": "CaseUID", "workspace": "right-owner", "peerName": "right-peer"},
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
+
+    assert contract._target_from_profile_map("CaseUID")["workspace"] == "right-owner"
+    assert contract._target_from_profile_map("caseuid")["workspace"] == "wrong-owner"
+
+
+def test_honcho_profile_config_requires_exact_explicit_owner(monkeypatch, tmp_path):
+    config = tmp_path / "honcho.json"
+    config.write_text(json.dumps({"workspace": "retained", "peerName": "retained-peer"}), encoding="utf-8")
+    candidate = _candidate(uid="CaseUID")
+
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", str(config))
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "caseuid")
+    assert contract._target_from_profile_config(candidate) is None
+
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "")
+    assert contract._target_from_profile_config(candidate) is None
+
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "CaseUID")
+    assert contract._target_from_profile_config(candidate)["workspace"] == "retained"
 
 
 def test_write_honcho_fact_candidate_native_honcho_profile_map_url_targets_companion_scope(monkeypatch):

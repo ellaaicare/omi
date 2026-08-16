@@ -13,12 +13,17 @@ on:
       - backend/ella/routers/escalations.py
       - backend/ella/routers/chat.py
       - backend/ella/routers/voice.py
+      - backend/ella/services/correction_honcho_contract.py
+      - backend/ella/services/hermes_session.py
       - backend/ella/routers/callbacks.py
       - backend/ella/routers/canonical_events.py
       - backend/tests/unit/test_ella_guardian_delivery.py
       - backend/tests/unit/test_ella_canonical_context.py
       - backend/tests/unit/test_ella_user_route_auth.py
       - backend/tests/unit/test_ella_v2v_turn_persistence.py
+      - backend/tests/unit/test_ella_chat_temporal_context.py
+      - backend/tests/unit/test_ella_conversation_corrections.py
+      - backend/tests/unit/test_ella_correction_honcho_contract.py
       - backend/utils/ella/exact_firebase_auth.py
       - backend/utils/ella/scanner.py
       - backend/utils/notifications.py
@@ -143,7 +148,13 @@ jobs:
               app/test/services/wals/wal_account_isolation_test.dart|\
               backend/ella/routers/canonical_events.py|\
               backend/ella/routers/chat.py|\
+              backend/ella/routers/resolve.py|\
               backend/ella/routers/voice.py|\
+              backend/ella/services/correction_honcho_contract.py|\
+              backend/ella/services/hermes_session.py|\
+              backend/tests/unit/test_ella_chat_temporal_context.py|\
+              backend/tests/unit/test_ella_conversation_corrections.py|\
+              backend/tests/unit/test_ella_correction_honcho_contract.py|\
               backend/tests/unit/test_ella_user_route_auth.py|\
               backend/tests/unit/test_ella_v2v_turn_persistence.py|\
               backend/utils/ella/canonical_context.py) ;;
@@ -190,18 +201,22 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/guardian-python"
           source "$RUNNER_TEMP/guardian-python/bin/activate"
-          python -m pip install --disable-pip-version-check \
+          python3 -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
             asyncpg==0.31.0 \
-            python-multipart==0.0.9
-          python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
-          python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
+            python-multipart==0.0.9 \
+            websockets==15.0.1
+          python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
+          python3 -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
-          python -m pytest backend/tests/unit/test_ella_user_route_auth.py
-          python -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
+          python3 -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python3 -m pytest backend/tests/unit/test_ella_chat_temporal_context.py \
+            backend/tests/unit/test_ella_conversation_corrections.py \
+            backend/tests/unit/test_ella_correction_honcho_contract.py
+          python3 -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
             -k 'not test_real_postgres'
 
       - name: Set up Flutter
@@ -448,21 +463,23 @@ jobs:
 
           python3 -m venv "$RUNNER_TEMP/postgres-contract-python"
           source "$RUNNER_TEMP/postgres-contract-python/bin/activate"
-          python -m pip install --disable-pip-version-check \
+          python3 -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
             asyncpg==0.31.0 \
-            python-multipart==0.0.9
+            python-multipart==0.0.9 \
+            websockets==15.0.1
 
-          expected_test_count=3
+          expected_test_count=4
           expected_test_ids=(
             'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
             'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_case_distinct_owner_isolation_and_numeric_string_limit_order'
             'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_mounted_voice_route_and_context_helper_keep_case_distinct_owners_private'
           )
-          collection_output="$(python -m pytest --collect-only -q "${expected_test_ids[@]}")"
+          collection_output="$(python3 -m pytest --collect-only -q "${expected_test_ids[@]}")"
           printf '%s\n' "$collection_output"
           actual_test_ids="$(printf '%s\n' "$collection_output" | grep '::' || true)"
           actual_test_count="$(printf '%s\n' "$actual_test_ids" | grep -c '::' || true)"
@@ -479,7 +496,7 @@ jobs:
           printf 'PostgreSQL regression collection receipt: expectedCount=%s actualCount=%s testIds=%s\n' \
             "$expected_test_count" "$actual_test_count" "${expected_test_ids[*]}"
 
-          execution_output="$(python -m pytest -q -rA "${expected_test_ids[@]}")"
+          execution_output="$(python3 -m pytest -q -rA "${expected_test_ids[@]}")"
           printf '%s\n' "$execution_output"
           actual_pass_count="$(printf '%s\n' "$execution_output" | grep -c '^PASSED .*::' || true)"
           [[ "$actual_pass_count" -eq "$expected_test_count" ]] || {

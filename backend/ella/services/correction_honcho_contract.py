@@ -224,7 +224,8 @@ def _profile_target_from_entry(entry: Any) -> dict[str, str] | None:
 
 
 def _target_from_profile_map(uid: str) -> dict[str, str] | None:
-    uid_norm = str(uid or "").strip().lower()
+    if not isinstance(uid, str) or not uid or uid != uid.strip():
+        return None
     candidates = []
     inline = _safe_json_loads(HONCHO_PROFILE_MAP_JSON)
     if inline is not None:
@@ -238,11 +239,10 @@ def _target_from_profile_map(uid: str) -> dict[str, str] | None:
 
     for data in candidates:
         if isinstance(data, dict):
-            for key in (uid, uid_norm):
-                if key in data:
-                    target = _profile_target_from_entry(data[key])
-                    if target:
-                        return {**target, "source": "profile_map"}
+            if uid in data:
+                target = _profile_target_from_entry(data[uid])
+                if target:
+                    return {**target, "source": "profile_map"}
             profiles = data.get("profiles") or data.get("users")
             if isinstance(profiles, list):
                 data = profiles
@@ -250,8 +250,8 @@ def _target_from_profile_map(uid: str) -> dict[str, str] | None:
             for entry in data:
                 if not isinstance(entry, dict):
                     continue
-                entry_uid = str(entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or "").lower()
-                if entry_uid != uid_norm:
+                entry_uid = entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid")
+                if not isinstance(entry_uid, str) or entry_uid != uid:
                     continue
                 target = _profile_target_from_entry(entry)
                 if target:
@@ -260,7 +260,7 @@ def _target_from_profile_map(uid: str) -> dict[str, str] | None:
 
 
 def _target_from_profile_config(candidate: HonchoFactCandidate) -> dict[str, str] | None:
-    if HONCHO_PROFILE_UID and HONCHO_PROFILE_UID.lower() != candidate.uid.lower():
+    if not HONCHO_PROFILE_UID or HONCHO_PROFILE_UID != candidate.uid:
         return None
     data = _safe_json_file(HONCHO_PROFILE_CONFIG_PATH)
     target = _profile_target_from_entry(data)
