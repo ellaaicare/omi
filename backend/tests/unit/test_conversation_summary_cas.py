@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import threading
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -333,6 +332,51 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         )
     )
     barrier = threading.Barrier(2)
+    boundary_lock = threading.Lock()
+    first_commit_id = [None]
+    transactional_read_ids = []
+    first_commit_waiting = threading.Event()
+    overlapping_read_started = threading.Event()
+    first_commit_rpc_started = threading.Event()
+    transaction_type = type(client.transaction())
+    original_commit = transaction_type._commit
+    original_batch_get_documents = client._firestore_api.batch_get_documents
+
+    def observed_batch_get_documents(*args, **kwargs):
+        response = original_batch_get_documents(*args, **kwargs)
+        request = kwargs.get("request") or args[0]
+        transaction_id = request.get("transaction") if isinstance(request, dict) else request.transaction
+        transaction_id = bytes(transaction_id or b"")
+        if transaction_id:
+            with boundary_lock:
+                transactional_read_ids.append(transaction_id)
+                if (
+                    first_commit_id[0] is not None
+                    and transaction_id != first_commit_id[0]
+                    and not overlapping_read_started.is_set()
+                ):
+                    assert not first_commit_rpc_started.is_set()
+                    overlapping_read_started.set()
+        return response
+
+    def coordinated_commit(transaction):
+        transaction_id = bytes(transaction._id or b"")
+        coordinate = False
+        with boundary_lock:
+            if first_commit_id[0] is None:
+                first_commit_id[0] = transaction_id
+                coordinate = True
+                first_commit_waiting.set()
+                if any(read_id != transaction_id for read_id in transactional_read_ids):
+                    overlapping_read_started.set()
+        if coordinate:
+            if not overlapping_read_started.wait(timeout=10):
+                raise AssertionError("second transaction did not reach the Firestore read boundary")
+            first_commit_rpc_started.set()
+        return original_commit(transaction)
+
+    monkeypatch.setattr(client._firestore_api, "batch_get_documents", observed_batch_get_documents)
+    monkeypatch.setattr(transaction_type, "_commit", coordinated_commit)
     publication_lock = threading.Lock()
     canonical_publications = []
     contenders = {
@@ -384,13 +428,10 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         async def fetch_assessment(_uid, _conversation_id):
             return contender_data["assessment"]
 
-        # Synchronize before either Firestore transaction begins. Blocking from
-        # inside the callback deadlocks against the emulator's transaction lock.
-        # Give A a deterministic head start after both requests are live; the
-        # emulator otherwise permits symmetric abort/retry livelock on macOS.
+        # Start both requests together. The client-boundary instrumentation above
+        # pauses the first commit only until the other transactional read RPC has
+        # started, avoiding a barrier after either lock-holding read completes.
         barrier.wait(timeout=10)
-        if label == "B":
-            time.sleep(0.25)
         return asyncio.run(
             writeback.write_conversation_summary_cas(
                 uid=uid,
@@ -436,6 +477,10 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
             ),
         )
         assert len(canonical_publications) == 1
+        assert first_commit_waiting.is_set()
+        assert overlapping_read_started.is_set()
+        assert first_commit_rpc_started.is_set()
+        assert len(set(transactional_read_ids)) >= 2
 
         stored = conversation_ref.get().to_dict()
         winning_title = stored["structured"]["title"]
@@ -480,6 +525,8 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         assert publication["summary_source"] == f"hermes_parallel_{winning_label.lower()}"
         assert publication["summary_kind"] == f"hermes_enriched_{winning_label.lower()}"
         assert publication["trace_id"] == f"trace-{winning_label}"
+        assert sum(item["trace_id"] == f"trace-{winning_label}" for item in canonical_publications) == 1
+        assert sum(item["trace_id"] == f"trace-{loser_label}" for item in canonical_publications) == 0
         assert contenders[loser_label]["marker"] not in json.dumps(publication, default=str)
     finally:
         conversation_ref.delete()

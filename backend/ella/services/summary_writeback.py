@@ -164,6 +164,12 @@ def _publication_post_image_sha256(conversation: dict[str, Any]) -> str:
     )
 
 
+def _assert_canonical_publication_sha256(conversation: dict[str, Any]) -> None:
+    carried_sha256 = str(conversation.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD) or '')
+    if carried_sha256 != _publication_post_image_sha256(conversation):
+        raise CanonicalSummaryOperationConflictError('canonical_summary_publication_image_mismatch')
+
+
 def _next_publication_sequence(conversation: dict[str, Any], receipt: Optional[dict[str, Any]] = None) -> int:
     candidates = [conversation.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)]
     if receipt:
@@ -408,6 +414,7 @@ async def _reconcile_superseded_canonical_publication(
 
         canonical_conversation = repair['conversation']
         repair_state = canonical_conversation.get('enrichment_state') or {}
+        _assert_canonical_publication_sha256(canonical_conversation)
         try:
             canonical_result = await asyncio.to_thread(
                 canonical_writer,
@@ -668,7 +675,7 @@ async def write_conversation_summary_cas(
             conversation_id=conversation_id,
             conversation=canonical_conversation,
         )
-        post_image_sha256 = _publication_post_image_sha256(canonical_conversation)
+        pending_post_image_sha256 = _publication_post_image_sha256(canonical_conversation)
         confirmed_state = {
             **update_data['enrichment_state'],
             'status': 'writeback_applied',
@@ -681,6 +688,7 @@ async def write_conversation_summary_cas(
             **canonical_conversation,
             'enrichment_state': confirmed_state,
         }
+        completed_post_image_sha256 = _publication_post_image_sha256(completed_conversation)
         receipt = {
             'contract': ELLA_CANONICAL_SOURCE_CONTRACT,
             'token': operation_token,
@@ -696,18 +704,18 @@ async def write_conversation_summary_cas(
             'active_summary_version_id': version_update['active_summary_version_id'],
             'active_summary_version_sha256': _active_summary_version_sha256(canonical_conversation),
             'canonical_source_post_image_sha256': canonical_source_sha256(post_image_source),
-            'post_image_sha256': post_image_sha256,
-            'completed_post_image_sha256': _publication_post_image_sha256(completed_conversation),
+            'post_image_sha256': pending_post_image_sha256,
+            'completed_post_image_sha256': completed_post_image_sha256,
             'publication_sequence': publication_sequence,
             'updated_fields': list(update_data.keys()),
             'created_at': state_updated_at,
             'updated_at': state_updated_at,
         }
         update_data[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
-        update_data[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = post_image_sha256
+        update_data[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = pending_post_image_sha256
         update_data[SUMMARY_WRITEBACK_RECEIPT_FIELD] = receipt
         canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
-        canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = post_image_sha256
+        canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = pending_post_image_sha256
         canonical_conversation[SUMMARY_WRITEBACK_RECEIPT_FIELD] = receipt
         return update_data, {
             'receipt': receipt,
@@ -826,6 +834,8 @@ async def write_conversation_summary_cas(
         'updated_at': receipt.get('created_at'),
     }
     canonical_conversation['enrichment_state'] = confirmed_state
+    canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = receipt['completed_post_image_sha256']
+    _assert_canonical_publication_sha256(canonical_conversation)
     try:
         canonical_result = await asyncio.to_thread(
             canonical_writer,
@@ -891,6 +901,7 @@ async def write_conversation_summary_cas(
         }
         return {
             'enrichment_state': confirmed_state,
+            CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD: current_receipt['completed_post_image_sha256'],
             SUMMARY_WRITEBACK_RECEIPT_FIELD: completed_receipt,
         }, {
             'receipt': completed_receipt,

@@ -627,6 +627,17 @@ def _canonical_publication_tuple(conversation):
     }
 
 
+def _canonical_publication_sha256(conversation):
+    encoded = json.dumps(
+        _canonical_publication_tuple(conversation),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _cas_client(uid="uid-a"):
     app = FastAPI()
     app.include_router(callbacks.router)
@@ -708,6 +719,12 @@ def test_cas_success_is_atomic_and_returns_content_free_receipt_header(monkeypat
     monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
     conversation = _cas_conversation()
     writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    canonical_publications = []
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda _uid, current, **_kwargs: canonical_publications.append(copy.deepcopy(current)) or {"ok": True},
+    )
     token = _cas_token(conversation)
     payload = json.dumps(
         _cas_update().model_dump(mode="json"),
@@ -736,6 +753,15 @@ def test_cas_success_is_atomic_and_returns_content_free_receipt_header(monkeypat
     assert len(writes) == 2
     assert conversation["structured"]["title"] == "Winning summary"
     assert conversation["active_summary_version_id"] == "winner-v2"
+    assert len(canonical_publications) == 1
+    publication = canonical_publications[0]
+    pending_receipt = writes[0]["summary_writeback_receipt"]
+    assert pending_receipt["post_image_sha256"] != pending_receipt["completed_post_image_sha256"]
+    assert writes[0]["canonical_summary_publication_sha256"] == pending_receipt["post_image_sha256"]
+    assert publication["enrichment_state"]["canonical_status"] == "completed"
+    assert publication["canonical_summary_publication_sha256"] == pending_receipt["completed_post_image_sha256"]
+    assert publication["canonical_summary_publication_sha256"] == _canonical_publication_sha256(publication)
+    assert conversation["canonical_summary_publication_sha256"] == publication["canonical_summary_publication_sha256"]
     assert "private transcript" not in response.text
 
 
@@ -1065,6 +1091,10 @@ def test_supersession_finalize_crash_or_lost_ack_is_retry_safe(monkeypatch, fail
     assert retry.status_code == 409
     assert conversation["summary_writeback_receipt"]["status"] == "superseded"
     assert _canonical_publication_tuple(publications[-1]) == _canonical_publication_tuple(conversation)
+    assert all(
+        publication["canonical_summary_publication_sha256"] == _canonical_publication_sha256(publication)
+        for publication in publications
+    )
     assert len(publications) == (3 if failure_point == "before_commit" else 2)
 
 
@@ -1104,6 +1134,7 @@ def test_concurrent_exact_retries_share_one_fenced_repair_and_terminalize_once(m
 
     def fenced_repair(_uid, current, **_kwargs):
         repair_barrier.wait(timeout=10)
+        assert current["canonical_summary_publication_sha256"] == _canonical_publication_sha256(current)
         fence = (
             current["canonical_summary_publication_sequence"],
             current["canonical_summary_publication_sha256"],
