@@ -661,7 +661,7 @@ def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe(monke
     asyncio.run(exercise_postgres())
 
 
-def test_real_postgres_composes_canonical_success_ack_loss_restart_and_new_session_proxy_replay(
+def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay(
     monkeypatch, canonical_postgres
 ):
     async def exercise_postgres():
