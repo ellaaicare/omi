@@ -6,6 +6,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field, validator
 
 from database._client import document_id_from_seed
+from models.generated_image import GeneratedImageAssetRef
 
 
 class MemoryCategory(str, Enum):
@@ -123,6 +124,7 @@ class MemoryDB(Memory):
     data_protection_level: Optional[str] = None
     is_locked: bool = False
     kg_extracted: bool = False
+    generated_image: Optional[GeneratedImageAssetRef] = None
 
     def __init__(self, **data):
         super().__init__(**data)

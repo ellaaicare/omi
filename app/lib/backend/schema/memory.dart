@@ -1,3 +1,5 @@
+import 'package:omi/backend/schema/generated_image.dart';
+
 enum MemoryCategory { system, interesting, manual }
 
 enum MemoryVisibility { private, public }
@@ -31,6 +33,7 @@ class Memory {
   bool deleted;
   MemoryVisibility visibility;
   bool isLocked;
+  final GeneratedImageAsset? generatedImage;
 
   Memory({
     required this.id,
@@ -47,6 +50,7 @@ class Memory {
     this.deleted = false,
     required this.visibility,
     this.isLocked = false,
+    this.generatedImage,
   });
 
   factory Memory.fromJson(Map<String, dynamic> json) {
@@ -67,6 +71,7 @@ class Memory {
           ? (MemoryVisibility.values.asNameMap()[json['visibility']] ?? MemoryVisibility.public)
           : MemoryVisibility.public,
       isLocked: json['is_locked'] ?? false,
+      generatedImage: GeneratedImageAsset.tryFromJson(json['generated_image']),
     );
   }
 
@@ -87,6 +92,7 @@ class Memory {
       'deleted': deleted,
       'visibility': visibility.name,
       'is_locked': isLocked,
+      if (generatedImage != null) 'generated_image': generatedImage!.toJson(),
     };
   }
 }
