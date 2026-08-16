@@ -3502,6 +3502,14 @@ class CaptureProvider extends ChangeNotifier
       return false;
     }
     try {
+      if (closeTranscriptTransportBeforeProcessing) {
+        // Closing the provider is what causes some STT transports to emit
+        // their final tail. Preserve the operation's exact v2 tuple, drain the
+        // provider/backend transport, and only then decide whether the durable
+        // conversation has capturable content.
+        await _socket?.stop(reason: 'capture transport drained before final transcript read');
+        if (!operation.isCurrent) return false;
+      }
       final hasContent = await _awaitFinalCapturableContent(
         operation,
         maxAttempts: maxTranscriptAttempts,
@@ -3512,10 +3520,6 @@ class CaptureProvider extends ChangeNotifier
           _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
         }
         return false;
-      }
-      if (closeTranscriptTransportBeforeProcessing) {
-        await _socket?.stop(reason: 'capture transport drained before exact processing');
-        if (!operation.isCurrent) return false;
       }
       final finalized = await forceProcessingCurrentConversation(operation: operation);
       if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {

@@ -132,10 +132,12 @@ class _FakeMicRecorder implements IMicRecorderService {
 }
 
 class _FakePureSocket implements IPureSocket {
-  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected, this.sendError}) : _status = status;
+  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected, this.sendError, this.onStop})
+      : _status = status;
 
   PureSocketStatus _status;
   final Object? sendError;
+  final FutureOr<void> Function()? onStop;
   IPureSocketListener? listener;
   final List<dynamic> sent = [];
   int stops = 0;
@@ -159,6 +161,7 @@ class _FakePureSocket implements IPureSocket {
   @override
   Future<void> stop() async {
     stops++;
+    await onStop?.call();
     await disconnect();
   }
 
@@ -354,6 +357,70 @@ void main() {
     ]);
   });
 
+  test('close-only provider tail is forwarded before exact server drain acknowledgement', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    late final _FakePureSocket primary;
+    primary = _FakePureSocket(
+      status: PureSocketStatus.notConnected,
+      onStop: () {
+        primary.onMessage(jsonEncode([
+          {
+            'id': 'tail-only',
+            'text': 'Final words emitted only when the provider closes',
+            'speaker': 'SPEAKER_00',
+            'start': 0.0,
+            'end': 1.0,
+            'is_user': false,
+          }
+        ]));
+      },
+    );
+    final secondary = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final composite = CompositeTranscriptionSocket(
+      primarySocket: primary,
+      secondarySocket: secondary,
+      sttProvider: 'close-tail-provider',
+    );
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      composite,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    const authorityTuple = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-tail',
+      'generation': 'generation-tail',
+      'owner_token': 'owner-tail',
+    };
+
+    final start = service.start();
+    await pumpEventQueue();
+    secondary.onMessage(
+      jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}),
+    );
+    await start;
+
+    final stop = service.stop();
+    await pumpEventQueue();
+    final secondaryMessages = secondary.sent.map((value) => jsonDecode(value as String)).toList();
+    final tailIndex = secondaryMessages.indexWhere((value) => value['type'] == 'suggested_transcript');
+    final drainIndex = secondaryMessages.indexWhere((value) => value['type'] == 'capture_drain');
+    expect(tailIndex, greaterThanOrEqualTo(0));
+    expect(drainIndex, greaterThan(tailIndex));
+    expect(secondary.stops, 0, reason: 'backend transport stays open until its durable drain acknowledgement');
+
+    secondary.onMessage(
+      jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authorityTuple}),
+    );
+    await stop;
+
+    expect(primary.stops, 1);
+    expect(secondary.stops, 1);
+  });
+
   test('lost drain acknowledgement closes transport then continues exact-tuple finalization reconciliation', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final authority = _CaptureAuthority('uid-a');
@@ -388,6 +455,7 @@ void main() {
       phoneMicRecorder: mic,
       phoneAudioSender: (_) => true,
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(pure.status, PureSocketStatus.disconnected, reason: 'tail decision must follow exact drain close');
         return [_conversation('capture-b', 'Durable words before the lost acknowledgement')];
       },
       inProgressConversationProcess: (

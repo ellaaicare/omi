@@ -9,6 +9,7 @@ on:
     paths:
       - app/**
       - backend/ella/routers/guardian.py
+      - backend/database/chat.py
       - backend/database/conversations.py
       - backend/database/redis_db.py
       - backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md
@@ -19,6 +20,10 @@ on:
       - backend/routers/transcribe.py
       - backend/utils/conversations/capture_authority.py
       - backend/utils/conversations/process_conversation.py
+      - backend/utils/app_integrations.py
+      - backend/utils/stt/streaming.py
+      - backend/utils/webhooks.py
+      - backend/utils/ella/postprocess.py
       - backend/ella/routers/resolve.py
       - backend/ella/routers/escalations.py
       - backend/ella/routers/chat.py
@@ -138,7 +143,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/database/conversations.py|backend/database/redis_db.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/transcribe.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/database/chat.py|backend/database/conversations.py|backend/database/redis_db.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/transcribe.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/webhooks.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -218,8 +223,17 @@ jobs:
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_body_rejects_missing_wrong_and_stale_authority_fields'
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_pre_v2_clients_are_rejected_before_creation_and_leave_zero_active_state'
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_rechecks_idle_after_provider_returns_with_late_tail'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_barrier_waits_for_copied_final_provider_tail_before_finalization_claim'
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_expired_lease_cannot_be_renewed_or_persisted'
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_reclaimed_finalizer_fences_all_late_side_effect_classes'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_effect_claim_after_successful_guard_rejects_expired_predecessor'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_resumes_after_result_persistence_at_every_terminal_boundary'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_effect_paths_reject_wrong_owner_generation_and_claim_token'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_effect_reclaim_reuses_stable_idempotency_token'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_effect_successful_claim_then_expiry_reclaim_deduplicates_resumed_predecessor'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[completed]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[failed]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_nodes'
           )
           expected_capture_tests="${#capture_tests[@]}"
           echo "Running exact capture-finalization inventory: ${expected_capture_tests} required tests"

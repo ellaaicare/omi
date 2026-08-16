@@ -22,6 +22,7 @@ from utils.app_integrations import (
 )
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
+    CaptureFinalizationEffectRunner,
     mark_unexpected_conversation_processing_failed,
     process_conversation,
 )
@@ -115,6 +116,8 @@ async def _process_conversation_task(
                         uid,
                         conversation_id,
                         claim_token,
+                        generation,
+                        owner_token,
                     )
                     if not renewed:
                         return
@@ -136,13 +139,14 @@ async def _process_conversation_task(
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             # Run blocking operations in thread pool to avoid blocking event loop
-            conversation = await asyncio.to_thread(
-                process_conversation,
-                uid,
-                language,
-                conversation,
-                capture_finalization=capture_finalization,
-            )
+            if conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}:
+                conversation = await asyncio.to_thread(
+                    process_conversation,
+                    uid,
+                    language,
+                    conversation,
+                    capture_finalization=capture_finalization,
+                )
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, conversation_id)
             try:
@@ -155,20 +159,55 @@ async def _process_conversation_task(
             except RuntimeError:
                 pass
             messages = []
+            if capture_finalization:
+                try:
+                    CaptureFinalizationEffectRunner(uid, conversation_id, capture_finalization).run(
+                        'integrations:external', lambda _: []
+                    )
+                    await asyncio.to_thread(
+                        conversations_db.complete_capture_finalization,
+                        uid,
+                        conversation_id,
+                        generation,
+                        owner_token,
+                        claim_token,
+                    )
+                except Exception:
+                    return
         else:
-            if capture_finalization and not conversations_db.complete_capture_finalization(
-                uid,
-                conversation_id,
-                generation,
-                owner_token,
-                claim_token,
-            ):
-                return
             try:
-                messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
+                if capture_finalization:
+                    messages = await asyncio.to_thread(
+                        CaptureFinalizationEffectRunner(uid, conversation_id, capture_finalization).run,
+                        'integrations:external',
+                        lambda operation_token: (
+                            trigger_external_integrations(
+                                uid,
+                                conversation,
+                                idempotency_key=operation_token,
+                            )
+                            if conversation.status == ConversationStatus.completed
+                            else []
+                        ),
+                        encode=lambda values: [value.dict() if hasattr(value, 'dict') else value for value in values],
+                    )
+                    if not conversations_db.complete_capture_finalization(
+                        uid,
+                        conversation_id,
+                        generation,
+                        owner_token,
+                        claim_token,
+                    ):
+                        return
+                    terminal = conversations_db.get_conversation(uid, conversation_id)
+                    if not terminal or terminal.get('capture_state') != 'terminal':
+                        return
+                    conversation = Conversation(**terminal)
+                else:
+                    messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
             except Exception as e:
                 print(f"External integrations failed after conversation processing: {e}", uid, conversation_id)
-                messages = []
+                return
         finally:
             if lease_task:
                 lease_task.cancel()

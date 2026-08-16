@@ -237,6 +237,14 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     _aiConsentLease = null;
     consentLease?.stop();
     if (_requiresCaptureProtocol && _captureProtocolReady && _socket.status == PureSocketStatus.connected) {
+      final transport = _socket;
+      if (transport is CompositeTranscriptionSocket) {
+        // A custom provider may publish its only final segment from stop().
+        // Close just that provider while keeping the exact-owner backend
+        // socket open, so the tail is queued before capture_drain asks the
+        // server to acknowledge durable persistence.
+        await transport.stopPrimaryForDrain();
+      }
       try {
         final authority = _captureAuthority;
         if (authority == null) throw StateError('Capture websocket authority tuple is missing');

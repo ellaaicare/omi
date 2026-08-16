@@ -31,7 +31,7 @@ from models.conversation import (
 from models.transcript_segment import TranscriptSegment
 from models.other import Person
 
-from utils.conversations.process_conversation import process_conversation
+from utils.conversations.process_conversation import CaptureFinalizationEffectRunner, process_conversation
 from utils.conversations.search import search_conversations
 from utils.llm.conversation_processing import generate_summary_with_prompt
 from utils.speaker_identification import extract_speaker_samples
@@ -150,23 +150,14 @@ def process_in_progress_conversation(
         raise HTTPException(status_code=409, detail="Capture finalization protocol tuple is invalid")
 
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
-    settled_statuses = {
-        ConversationStatus.merging.value,
-        ConversationStatus.completed.value,
-        ConversationStatus.failed.value,
-    }
-    if status in settled_statuses:
-        prior_claim_token = conversation.get('capture_finalization_claim_token')
-        if prior_claim_token:
-            conversations_db.complete_capture_finalization(
-                uid,
-                conversation_id,
-                request.generation or '',
-                request.owner_token or '',
-                prior_claim_token,
-            )
+    settled_statuses = {ConversationStatus.completed.value, ConversationStatus.failed.value}
+    if conversation.get('capture_state') == 'terminal' and status in settled_statuses:
         return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
-    if status not in {ConversationStatus.in_progress.value, ConversationStatus.processing.value}:
+    if status not in {
+        ConversationStatus.in_progress.value,
+        ConversationStatus.processing.value,
+        *settled_statuses,
+    }:
         raise HTTPException(status_code=409, detail="Conversation cannot be processed from its current state")
 
     claim_token = str(uuid.uuid4())
@@ -200,8 +191,8 @@ def process_in_progress_conversation(
                 uid,
                 conversation_id,
                 claim_token,
-                generation=request.generation or '',
-                owner_token=request.owner_token or '',
+                request.generation or '',
+                request.owner_token or '',
             ):
                 return
 
@@ -229,30 +220,29 @@ def process_in_progress_conversation(
         if resolved_geolocation:
             conversation.geolocation = resolved_geolocation
 
-        conversation = process_conversation(
+        if conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}:
+            conversation = process_conversation(
+                uid,
+                conversation.language,
+                conversation,
+                force_process=True,
+                capture_finalization=(request.generation or '', request.owner_token or '', claim_token),
+            )
+
+        effect_runner = CaptureFinalizationEffectRunner(
             uid,
-            conversation.language,
-            conversation,
-            force_process=True,
-            capture_finalization=(request.generation or '', request.owner_token or '', claim_token),
+            conversation_id,
+            (request.generation or '', request.owner_token or '', claim_token),
         )
-        if not conversations_db.renew_capture_finalization(
-            uid,
-            conversation_id,
-            claim_token,
-            generation=request.generation or '',
-            owner_token=request.owner_token or '',
-        ):
-            raise HTTPException(status_code=409, detail="Conversation finalization lost its lease before integrations")
-        messages = trigger_external_integrations(uid, conversation)
-        if not conversations_db.renew_capture_finalization(
-            uid,
-            conversation_id,
-            claim_token,
-            generation=request.generation or '',
-            owner_token=request.owner_token or '',
-        ):
-            raise HTTPException(status_code=409, detail="Conversation finalization lost its lease after integrations")
+        messages = effect_runner.run(
+            'integrations:external',
+            lambda operation_token: (
+                trigger_external_integrations(uid, conversation, idempotency_key=operation_token)
+                if conversation.status == ConversationStatus.completed
+                else []
+            ),
+            encode=lambda values: [value.dict() if hasattr(value, 'dict') else value for value in values],
+        )
         if not conversations_db.complete_capture_finalization(
             uid,
             conversation_id,
@@ -271,18 +261,29 @@ def process_in_progress_conversation(
             )
         except Exception as error:
             print('Capture finalization Redis projection failed', uid, conversation_id, error)
-        return CreateConversationResponse(conversation=conversation, messages=messages)
+        terminal = conversations_db.get_conversation(uid, conversation_id)
+        if not terminal or terminal.get('capture_state') != 'terminal':
+            raise HTTPException(status_code=409, detail="Conversation finalization terminal result is unavailable")
+        return CreateConversationResponse(conversation=Conversation(**terminal), messages=messages)
     except Exception:
         failed = conversations_db.get_conversation(uid, conversation_id)
         failed_status = getattr((failed or {}).get('status'), 'value', (failed or {}).get('status'))
         if failed_status == ConversationStatus.failed.value:
-            conversations_db.complete_capture_finalization(
-                uid,
-                conversation_id,
-                request.generation or '',
-                request.owner_token or '',
-                claim_token,
-            )
+            try:
+                CaptureFinalizationEffectRunner(
+                    uid,
+                    conversation_id,
+                    (request.generation or '', request.owner_token or '', claim_token),
+                ).run('integrations:external', lambda _: [])
+                conversations_db.complete_capture_finalization(
+                    uid,
+                    conversation_id,
+                    request.generation or '',
+                    request.owner_token or '',
+                    claim_token,
+                )
+            except Exception:
+                pass
         raise
     finally:
         heartbeat_stop.set()

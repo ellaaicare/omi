@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import binascii
 import os
+from pathlib import Path
+import re
 import sys
 import threading
 import types
@@ -323,6 +325,14 @@ class _FakeTransaction:
         self.sets.append((ref, data))
 
 
+def _apply_updates(document: dict, transaction: _FakeTransaction, ref: _FakeDocumentRef) -> dict:
+    updated = dict(document)
+    for updated_ref, values in transaction.updates:
+        if updated_ref is ref:
+            updated.update(values)
+    return updated
+
+
 def _claim_retry(conversation_data, request_id, retry_data=None):
     transaction = _FakeTransaction()
     conversation_ref = _FakeDocumentRef(conversation_data)
@@ -426,11 +436,25 @@ def _capture_finalization_conversation(conversation_id: str, status: Conversatio
     return conversation.dict()
 
 
-def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a', pointer='capture-a'):
+def _mount_capture_finalization_route(
+    monkeypatch,
+    *,
+    conversation_id='capture-a',
+    pointer='capture-a',
+    protocol_v2=False,
+):
+    initial_conversation = _capture_finalization_conversation(conversation_id, ConversationStatus.in_progress)
+    if protocol_v2:
+        initial_conversation.update(
+            {
+                'capture_protocol_version': 2,
+                'capture_generation': 'generation-a',
+                'capture_owner_token': 'owner-a',
+                'capture_state': 'drained',
+            }
+        )
     state = {
-        'conversations': {
-            conversation_id: _capture_finalization_conversation(conversation_id, ConversationStatus.in_progress)
-        },
+        'conversations': {conversation_id: initial_conversation},
         'pointer': pointer,
         'claims': 0,
         'processes': 0,
@@ -463,7 +487,7 @@ def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a
         conversation['status'] = ConversationStatus.processing
         return True
 
-    def process(uid, language, conversation, force_process=False):
+    def process(uid, language, conversation, force_process=False, capture_finalization=None):
         assert uid == 'authenticated-user'
         assert language == 'en'
         assert force_process is True
@@ -471,10 +495,14 @@ def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a
         if state['successor_during_processing']:
             state['pointer'] = state['successor_during_processing']
         conversation.status = ConversationStatus.completed
-        state['conversations'][conversation.id] = conversation.dict()
+        durable = conversation.dict()
+        durable.update(
+            {key: value for key, value in state['conversations'][conversation.id].items() if key.startswith('capture_')}
+        )
+        state['conversations'][conversation.id] = durable
         return conversation
 
-    def integrations(uid, conversation):
+    def integrations(uid, conversation, idempotency_key=None):
         assert uid == 'authenticated-user'
         assert conversation.id == conversation_id
         state['integrations'] += 1
@@ -512,6 +540,88 @@ def _mount_capture_finalization_route(monkeypatch, *, conversation_id='capture-a
     monkeypatch.setattr(conversations_router.redis_db, 'get_cached_user_geolocation', lambda uid: None)
     monkeypatch.setattr(conversations_router, 'process_conversation', process)
     monkeypatch.setattr(conversations_router, 'trigger_external_integrations', integrations)
+    if protocol_v2:
+
+        def claim_finalization(uid, requested_id, version, generation, owner_token, claim_token):
+            conversation = state['conversations'][requested_id]
+            if (version, generation, owner_token) != (2, 'generation-a', 'owner-a'):
+                return {'outcome': 'mismatch'}
+            if conversation.get('capture_state') == 'terminal':
+                return {'outcome': 'settled', 'conversation': dict(conversation)}
+            conversation['capture_state'] = 'finalizing'
+            conversation['capture_finalization_claim_token'] = claim_token
+            if conversation['status'] not in {
+                ConversationStatus.completed.value,
+                ConversationStatus.failed.value,
+            }:
+                conversation['status'] = ConversationStatus.processing.value
+            return {'outcome': 'claimed', 'conversation': dict(conversation)}
+
+        def renew_finalization(uid, requested_id, claim_token, generation, owner_token, **kwargs):
+            conversation = state['conversations'][requested_id]
+            return (
+                conversation.get('capture_state') == 'finalizing'
+                and conversation.get('capture_generation') == generation
+                and conversation.get('capture_owner_token') == owner_token
+                and conversation.get('capture_finalization_claim_token') == claim_token
+            )
+
+        def claim_effect(uid, requested_id, generation, owner_token, claim_token, effect_id):
+            if not renew_finalization(uid, requested_id, claim_token, generation, owner_token):
+                return {'outcome': 'lost'}
+            effects = state['conversations'][requested_id].setdefault('capture_finalization_effects', {})
+            receipt = effects.get(effect_id)
+            if receipt and receipt['state'] == 'completed':
+                return {'outcome': 'completed', **receipt}
+            operation_token = (receipt or {}).get('operation_token', f'operation:{effect_id}')
+            effects[effect_id] = {
+                'state': 'claimed',
+                'claim_token': claim_token,
+                'operation_token': operation_token,
+            }
+            return {'outcome': 'claimed', 'operation_token': operation_token}
+
+        def complete_effect(
+            uid,
+            requested_id,
+            generation,
+            owner_token,
+            claim_token,
+            effect_id,
+            operation_token,
+            result=None,
+        ):
+            if not renew_finalization(uid, requested_id, claim_token, generation, owner_token):
+                return False
+            receipt = state['conversations'][requested_id]['capture_finalization_effects'][effect_id]
+            if receipt['operation_token'] != operation_token or receipt['claim_token'] != claim_token:
+                return False
+            receipt.update({'state': 'completed', 'result': result})
+            return True
+
+        def complete_finalization(uid, requested_id, generation, owner_token, claim_token):
+            if not renew_finalization(uid, requested_id, claim_token, generation, owner_token):
+                return False
+            integration = (
+                state['conversations'][requested_id]
+                .get('capture_finalization_effects', {})
+                .get('integrations:external', {})
+            )
+            if integration.get('state') != 'completed':
+                return False
+            state['conversations'][requested_id]['capture_state'] = 'terminal'
+            return True
+
+        monkeypatch.setattr(conversations_router.conversations_db, 'claim_capture_finalization', claim_finalization)
+        monkeypatch.setattr(conversations_router.conversations_db, 'renew_capture_finalization', renew_finalization)
+        monkeypatch.setattr(conversations_router.conversations_db, 'claim_capture_finalization_effect', claim_effect)
+        monkeypatch.setattr(
+            conversations_router.conversations_db, 'complete_capture_finalization_effect', complete_effect
+        )
+        monkeypatch.setattr(
+            conversations_router.conversations_db, 'complete_capture_finalization', complete_finalization
+        )
+        monkeypatch.setattr(conversations_router.redis_db, 'project_capture_stream_authority', lambda *args: True)
     app, client = _conversation_api_client()
     return app, client, state
 
@@ -600,12 +710,18 @@ def test_capture_finalization_v2_rejects_missing_and_stale_protocol_authority_tu
 
 
 def test_capture_finalization_lost_ack_and_repeats_converge_without_duplicate_side_effects(monkeypatch):
-    app, client, state = _mount_capture_finalization_route(monkeypatch)
+    app, client, state = _mount_capture_finalization_route(monkeypatch, protocol_v2=True)
+    request = {
+        'conversation_id': 'capture-a',
+        'protocol_version': 2,
+        'generation': 'generation-a',
+        'owner_token': 'owner-a',
+    }
     try:
-        lost_acknowledgement = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+        lost_acknowledgement = client.post('/v1/conversations', json=request)
         state['pointer'] = 'successor-capture'
-        replay = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
-        repeated = client.post('/v1/conversations', json={'conversation_id': 'capture-a'})
+        replay = client.post('/v1/conversations', json=request)
+        repeated = client.post('/v1/conversations', json=request)
     finally:
         app.dependency_overrides.clear()
 
@@ -616,7 +732,12 @@ def test_capture_finalization_lost_ack_and_repeats_converge_without_duplicate_si
     assert replay.json()['conversation']['status'] == ConversationStatus.completed.value
     assert state['processes'] == 1
     assert state['integrations'] == 1
-    assert state['compare_deletes'] == 3
+    assert state['conversations']['capture-a']['capture_protocol_version'] == 2
+    assert state['conversations']['capture-a']['capture_state'] == 'terminal'
+    assert (
+        state['conversations']['capture-a']['capture_finalization_effects']['integrations:external']['state']
+        == 'completed'
+    )
     assert state['pointer'] == 'successor-capture'
 
 
@@ -1184,6 +1305,55 @@ def test_capture_drain_rechecks_idle_after_provider_returns_with_late_tail():
     assert tasks == set()
 
 
+def test_capture_drain_barrier_waits_for_copied_final_provider_tail_before_finalization_claim():
+    async def scenario():
+        buffers = []
+        durable = []
+        tasks = set()
+        buffers_drained = asyncio.Event()
+        buffers_drained.set()
+        copied_and_cleared = asyncio.Event()
+        allow_durable_write = asyncio.Event()
+        claim_attempts = []
+
+        async def persist_like_stream_handler():
+            segments_to_process = list(buffers)
+            buffers.clear()
+            copied_and_cleared.set()
+            await allow_durable_write.wait()
+            durable.extend(segments_to_process)
+            buffers_drained.set()
+
+        async def finish_provider_inputs():
+            buffers_drained.clear()
+            buffers.append('tail-only-final-segment')
+            task = asyncio.create_task(persist_like_stream_handler())
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+
+        drain = asyncio.create_task(
+            capture_authority.flush_capture_before_drained(
+                finish_provider_inputs,
+                tasks,
+                buffers_drained,
+                timeout=1,
+            )
+        )
+        await copied_and_cleared.wait()
+        assert buffers == []
+        assert not drain.done()
+        assert claim_attempts == []
+
+        allow_durable_write.set()
+        assert await drain is True
+        claim_attempts.append('finalization-claim-after-drained-ack')
+        return durable, claim_attempts
+
+    durable, claim_attempts = asyncio.run(scenario())
+    assert durable == ['tail-only-final-segment']
+    assert claim_attempts == ['finalization-claim-after-drained-ack']
+
+
 def test_capture_finalization_expired_lease_cannot_be_renewed_or_persisted():
     now = datetime(2026, 8, 15, 2, 0, tzinfo=timezone.utc)
     expired = {
@@ -1220,6 +1390,409 @@ def test_capture_finalization_expired_lease_cannot_be_renewed_or_persisted():
     assert transaction.sets == []
 
 
+def test_capture_effect_claim_after_successful_guard_rejects_expired_predecessor():
+    started = datetime(2026, 8, 15, 2, 0, tzinfo=timezone.utc)
+    predecessor = {
+        **_v2_conversation(state='finalizing', status='processing'),
+        'capture_finalization_claim_token': 'claim-a',
+        'capture_finalization_lease_expires_at': started + timedelta(seconds=5),
+    }
+    renew_transaction = _FakeTransaction()
+    assert conversations_router.conversations_db._renew_capture_finalization_transaction(
+        renew_transaction,
+        _FakeDocumentRef(predecessor),
+        'claim-a',
+        started,
+        5,
+        'generation-a',
+        'owner-a',
+    )
+
+    expired = {**predecessor, 'capture_finalization_lease_expires_at': started + timedelta(seconds=5)}
+    reclaim_transaction = _FakeTransaction()
+    reclaim_ref = _FakeDocumentRef(expired)
+    reclaimed = conversations_router.conversations_db._claim_capture_finalization_transaction(
+        reclaim_transaction,
+        _FakeDocumentRef(_v2_authority(state='finalizing')),
+        reclaim_ref,
+        'capture-a',
+        2,
+        'generation-a',
+        'owner-a',
+        'claim-b',
+        started + timedelta(seconds=6),
+        5,
+    )
+    assert reclaimed['outcome'] == 'claimed'
+
+    successor_ref = _FakeDocumentRef(reclaimed['conversation'])
+    successor_effect = conversations_router.conversations_db._claim_capture_finalization_effect_transaction(
+        _FakeTransaction(),
+        successor_ref,
+        'generation-a',
+        'owner-a',
+        'claim-b',
+        'integrations:external',
+        started + timedelta(seconds=6),
+    )
+    stale_effect = conversations_router.conversations_db._claim_capture_finalization_effect_transaction(
+        _FakeTransaction(),
+        successor_ref,
+        'generation-a',
+        'owner-a',
+        'claim-a',
+        'integrations:external',
+        started + timedelta(seconds=6),
+    )
+
+    assert successor_effect['outcome'] == 'claimed'
+    assert stale_effect == {'outcome': 'lost'}
+
+
+def test_capture_finalization_resumes_after_result_persistence_at_every_terminal_boundary():
+    started = datetime(2026, 8, 15, 3, 0, tzinfo=timezone.utc)
+    for status in (ConversationStatus.completed.value, ConversationStatus.failed.value):
+        for boundary in ('before_integration', 'before_terminal'):
+            effects = {}
+            if boundary == 'before_terminal':
+                effects['integrations:external'] = {
+                    'state': 'completed',
+                    'operation_token': 'stable-operation',
+                    'claim_token': 'claim-a',
+                    'result': [],
+                }
+            killed = {
+                **_v2_conversation(state='finalizing', status=status),
+                'capture_finalization_claim_token': 'claim-a',
+                'capture_finalization_lease_expires_at': started,
+                'capture_finalization_effects': effects,
+            }
+            claim_transaction = _FakeTransaction()
+            conversation_ref = _FakeDocumentRef(killed)
+            reclaimed = conversations_router.conversations_db._claim_capture_finalization_transaction(
+                claim_transaction,
+                _FakeDocumentRef(_v2_authority(state='finalizing')),
+                conversation_ref,
+                'capture-a',
+                2,
+                'generation-a',
+                'owner-a',
+                'claim-b',
+                started + timedelta(seconds=1),
+                5,
+            )
+            assert reclaimed['outcome'] == 'claimed'
+            assert reclaimed['conversation']['status'] == status
+
+            reclaimed_document = reclaimed['conversation']
+            reclaimed_ref = _FakeDocumentRef(reclaimed_document)
+            effect_transaction = _FakeTransaction()
+            effect = conversations_router.conversations_db._claim_capture_finalization_effect_transaction(
+                effect_transaction,
+                reclaimed_ref,
+                'generation-a',
+                'owner-a',
+                'claim-b',
+                'integrations:external',
+                started + timedelta(seconds=1),
+            )
+            if boundary == 'before_integration':
+                assert effect['outcome'] == 'claimed'
+                effect_document = _apply_updates(reclaimed_document, effect_transaction, reclaimed_ref)
+                effect_ref = _FakeDocumentRef(effect_document)
+                complete_effect_transaction = _FakeTransaction()
+                assert conversations_router.conversations_db._complete_capture_finalization_effect_transaction(
+                    complete_effect_transaction,
+                    effect_ref,
+                    'generation-a',
+                    'owner-a',
+                    'claim-b',
+                    'integrations:external',
+                    effect['operation_token'],
+                    [],
+                    started + timedelta(seconds=1),
+                )
+                terminal_document = _apply_updates(effect_document, complete_effect_transaction, effect_ref)
+            else:
+                assert effect['outcome'] == 'completed'
+                terminal_document = reclaimed_document
+
+            terminal_transaction = _FakeTransaction()
+            assert conversations_router.conversations_db._complete_capture_finalization_transaction(
+                terminal_transaction,
+                _FakeDocumentRef(_v2_authority(state='finalizing')),
+                _FakeDocumentRef(terminal_document),
+                'capture-a',
+                'generation-a',
+                'owner-a',
+                'claim-b',
+                started + timedelta(seconds=1),
+            )
+
+
+def test_capture_finalization_effect_paths_reject_wrong_owner_generation_and_claim_token():
+    now = datetime(2026, 8, 15, 4, 0, tzinfo=timezone.utc)
+    current = {
+        **_v2_conversation(state='finalizing', status='completed'),
+        'capture_finalization_claim_token': 'claim-b',
+        'capture_finalization_lease_expires_at': now + timedelta(seconds=10),
+    }
+    for generation, owner, claim in (
+        ('generation-stale', 'owner-a', 'claim-b'),
+        ('generation-a', 'owner-stale', 'claim-b'),
+        ('generation-a', 'owner-a', 'claim-stale'),
+    ):
+        transaction = _FakeTransaction()
+        assert not conversations_router.conversations_db._renew_capture_finalization_transaction(
+            transaction,
+            _FakeDocumentRef(current),
+            claim,
+            now,
+            15,
+            generation,
+            owner,
+        )
+        assert conversations_router.conversations_db._claim_capture_finalization_effect_transaction(
+            transaction,
+            _FakeDocumentRef(current),
+            generation,
+            owner,
+            claim,
+            'integrations:external',
+            now,
+        ) == {'outcome': 'lost'}
+        assert not conversations_router.conversations_db._upsert_conversation_if_capture_finalizer_transaction(
+            transaction,
+            _FakeDocumentRef(current),
+            'authenticated-user',
+            current,
+            generation,
+            owner,
+            claim,
+            now,
+        )
+        completed_receipt = {
+            **current,
+            'capture_finalization_effects': {'integrations:external': {'state': 'completed'}},
+        }
+        assert not conversations_router.conversations_db._complete_capture_finalization_transaction(
+            transaction,
+            _FakeDocumentRef(_v2_authority(state='finalizing')),
+            _FakeDocumentRef(completed_receipt),
+            'capture-a',
+            generation,
+            owner,
+            claim,
+            now,
+        )
+        assert transaction.updates == []
+
+
+def test_capture_effect_reclaim_reuses_stable_idempotency_token():
+    now = datetime(2026, 8, 15, 4, 30, tzinfo=timezone.utc)
+    current = {
+        **_v2_conversation(state='finalizing', status='completed'),
+        'capture_finalization_claim_token': 'claim-b',
+        'capture_finalization_lease_expires_at': now + timedelta(seconds=10),
+        'capture_finalization_effects': {
+            'integrations:external': {
+                'state': 'claimed',
+                'claim_token': 'claim-a',
+                'operation_token': 'stable-idempotency-token',
+                'attempt_count': 1,
+            }
+        },
+    }
+    transaction = _FakeTransaction()
+    reclaimed = conversations_router.conversations_db._claim_capture_finalization_effect_transaction(
+        transaction,
+        _FakeDocumentRef(current),
+        'generation-a',
+        'owner-a',
+        'claim-b',
+        'integrations:external',
+        now,
+    )
+
+    assert reclaimed == {'outcome': 'claimed', 'operation_token': 'stable-idempotency-token'}
+    receipt = transaction.updates[0][1]['capture_finalization_effects']['integrations:external']
+    assert receipt['claim_token'] == 'claim-b'
+    assert receipt['attempt_count'] == 2
+
+
+def test_capture_effect_successful_claim_then_expiry_reclaim_deduplicates_resumed_predecessor(monkeypatch):
+    state = {
+        'live_claim': 'claim-a',
+        'completed': False,
+        'operation_token': 'stable-effect-operation',
+    }
+    state_lock = threading.Lock()
+    predecessor_entered_operation = threading.Event()
+    successor_completed = threading.Event()
+    deliveries = set()
+    delivery_attempts = []
+    predecessor_failures = []
+
+    def claim_effect(uid, conversation_id, generation, owner_token, claim_token, effect_id):
+        assert (uid, conversation_id, generation, owner_token, effect_id) == (
+            'authenticated-user',
+            'capture-a',
+            'generation-a',
+            'owner-a',
+            'integrations:external',
+        )
+        with state_lock:
+            if state['completed']:
+                return {
+                    'outcome': 'completed',
+                    'operation_token': state['operation_token'],
+                    'result': [],
+                }
+            if claim_token != state['live_claim']:
+                return {'outcome': 'lost'}
+            return {'outcome': 'claimed', 'operation_token': state['operation_token']}
+
+    def complete_effect(
+        uid,
+        conversation_id,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+    ):
+        with state_lock:
+            if claim_token != state['live_claim'] or operation_token != state['operation_token']:
+                return False
+            state['completed'] = True
+            return True
+
+    def idempotent_delivery(operation_token):
+        with state_lock:
+            delivery_attempts.append(operation_token)
+            deliveries.add(operation_token)
+        return []
+
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        'claim_capture_finalization_effect',
+        claim_effect,
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        'complete_capture_finalization_effect',
+        complete_effect,
+    )
+
+    predecessor = conversation_processor.CaptureFinalizationEffectRunner(
+        'authenticated-user',
+        'capture-a',
+        ('generation-a', 'owner-a', 'claim-a'),
+    )
+    successor = conversation_processor.CaptureFinalizationEffectRunner(
+        'authenticated-user',
+        'capture-a',
+        ('generation-a', 'owner-a', 'claim-b'),
+    )
+
+    def paused_predecessor_delivery(operation_token):
+        predecessor_entered_operation.set()
+        assert successor_completed.wait(timeout=2)
+        return idempotent_delivery(operation_token)
+
+    def run_predecessor():
+        try:
+            predecessor.run('integrations:external', paused_predecessor_delivery)
+        except Exception as error:
+            predecessor_failures.append(error)
+
+    predecessor_thread = threading.Thread(target=run_predecessor)
+    predecessor_thread.start()
+    assert predecessor_entered_operation.wait(timeout=2)
+
+    with state_lock:
+        state['live_claim'] = 'claim-b'
+    assert successor.run('integrations:external', idempotent_delivery) == []
+    successor_completed.set()
+    predecessor_thread.join(timeout=2)
+
+    assert not predecessor_thread.is_alive()
+    assert len(predecessor_failures) == 1
+    assert isinstance(predecessor_failures[0], conversation_processor.CaptureFinalizationLeaseLost)
+    assert delivery_attempts == ['stable-effect-operation', 'stable-effect-operation']
+    assert deliveries == {'stable-effect-operation'}
+
+
+def test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_nodes():
+    repo_root = Path(__file__).resolve().parents[3]
+    workflow = (repo_root / '.github/workflows/ella-ios-source-ci.yml').read_text()
+    inventory_match = re.search(r'capture_tests=\(\n(?P<body>.*?)\n\s*\)', workflow, re.DOTALL)
+    assert inventory_match is not None
+    inventory = re.findall(r"'([^']+test_conversation_processing_failures\.py::[^']+)'", inventory_match['body'])
+
+    assert len(inventory) == 36
+    assert len(set(inventory)) == 36
+    required_nodes = {
+        'test_capture_effect_claim_after_successful_guard_rejects_expired_predecessor',
+        'test_capture_finalization_resumes_after_result_persistence_at_every_terminal_boundary',
+        'test_capture_finalization_effect_paths_reject_wrong_owner_generation_and_claim_token',
+        'test_capture_effect_reclaim_reuses_stable_idempotency_token',
+        'test_capture_effect_successful_claim_then_expiry_reclaim_deduplicates_resumed_predecessor',
+        'test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[completed]',
+        'test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[failed]',
+        'test_capture_drain_barrier_waits_for_copied_final_provider_tail_before_finalization_claim',
+        'test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_nodes',
+    }
+    assert required_nodes <= {node.rsplit('::', 1)[1] for node in inventory}
+    assert (
+        "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+        in workflow
+    )
+
+    intentional_paths = {
+        'backend/database/chat.py',
+        'backend/database/conversations.py',
+        'backend/routers/conversations.py',
+        'backend/routers/pusher.py',
+        'backend/routers/transcribe.py',
+        'backend/utils/app_integrations.py',
+        'backend/utils/conversations/process_conversation.py',
+        'backend/utils/ella/postprocess.py',
+        'backend/utils/stt/streaming.py',
+        'backend/utils/webhooks.py',
+        'backend/tests/unit/test_conversation_processing_failures.py',
+    }
+    trigger_block = workflow.split('workflow_dispatch:', 1)[0]
+    diff_allowlist = workflow.split('case "$changed_path" in', 1)[1].split('*)', 1)[0]
+    for path in intentional_paths:
+        assert f'- {path}' in trigger_block
+        assert path in diff_allowlist
+
+
+@pytest.mark.parametrize('status', [ConversationStatus.completed, ConversationStatus.failed])
+def test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects(monkeypatch, status):
+    app, client, state = _mount_capture_finalization_route(monkeypatch, protocol_v2=True)
+    state['conversations']['capture-a']['status'] = status.value
+    state['conversations']['capture-a']['capture_state'] = 'finalizing'
+    request = {
+        'conversation_id': 'capture-a',
+        'protocol_version': 2,
+        'generation': 'generation-a',
+        'owner_token': 'owner-a',
+    }
+    try:
+        response = client.post('/v1/conversations', json=request)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()['conversation']['status'] == status.value
+    assert state['processes'] == 0
+    assert state['integrations'] == (1 if status == ConversationStatus.completed else 0)
+    assert state['conversations']['capture-a']['capture_state'] == 'terminal'
+
+
 def test_capture_reclaimed_finalizer_fences_all_late_side_effect_classes(monkeypatch):
     conversation = _long_conversation()
     conversation.id = 'capture-a'
@@ -1240,12 +1813,16 @@ def test_capture_reclaimed_finalizer_fences_all_late_side_effect_classes(monkeyp
         ),
     )
 
-    def stale_a_renew(*args, **kwargs):
+    def stale_a_effect_claim(*args, **kwargs):
         entered_guard.set()
         assert successor_completed.wait(timeout=2)
-        return False
+        return {'outcome': 'lost'}
 
-    monkeypatch.setattr(conversation_processor.conversations_db, 'renew_capture_finalization', stale_a_renew)
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        'claim_capture_finalization_effect',
+        stale_a_effect_claim,
+    )
     monkeypatch.setattr(
         conversation_processor,
         'record_usage',

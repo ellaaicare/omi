@@ -109,7 +109,7 @@ _InspectedConversationResponse _inspectConversationResponse(
     if (conversationJson['id'] is! String || conversationJson['id'] != conversationId) {
       return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
     }
-    final status = switch (conversationJson['status']) {
+    var status = switch (conversationJson['status']) {
       'in_progress' => _ConversationFinalizationStatus.inProgress,
       'processing' => _ConversationFinalizationStatus.processing,
       'merging' => _ConversationFinalizationStatus.merging,
@@ -117,6 +117,11 @@ _InspectedConversationResponse _inspectConversationResponse(
       'failed' => _ConversationFinalizationStatus.failed,
       _ => _ConversationFinalizationStatus.invalid,
     };
+    if ((status == _ConversationFinalizationStatus.completed || status == _ConversationFinalizationStatus.failed) &&
+        conversationJson['capture_protocol_version'] == 2 &&
+        conversationJson['capture_state'] != 'terminal') {
+      status = _ConversationFinalizationStatus.processing;
+    }
     return _InspectedConversationResponse(
       status: status,
       responseJson: responseJson,

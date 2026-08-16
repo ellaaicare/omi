@@ -77,6 +77,14 @@ Map<String, dynamic> _processResponseJson(String id, String status) => {
       'messages': <dynamic>[],
     };
 
+Map<String, dynamic> _v2ConversationJson(String id, String status, String captureState) => {
+      ..._conversationJson(id, status),
+      'capture_protocol_version': 2,
+      'capture_generation': 'test-generation',
+      'capture_owner_token': 'test-owner-token',
+      'capture_state': captureState,
+    };
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const conversationId = 'capture-conversation';
@@ -178,6 +186,86 @@ void main() {
       expect(getCalls, 1);
     });
   }
+
+  test('v2 completed result remains non-successful until capture effects and terminal receipt finish', () async {
+    var postCalls = 0;
+    var getCalls = 0;
+    final result = await processInProgressConversation(
+      conversationId: conversationId,
+      statusPollInterval: Duration.zero,
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required timeout,
+        required retries,
+        required retryOnUnauthorized,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        if (method == 'POST') {
+          postCalls++;
+          final captureState = postCalls == 1 ? 'finalizing' : 'terminal';
+          return http.Response(
+            jsonEncode({
+              'conversation': _v2ConversationJson(conversationId, 'completed', captureState),
+              'messages': <dynamic>[],
+            }),
+            200,
+          );
+        }
+        getCalls++;
+        return http.Response(
+          jsonEncode(_v2ConversationJson(conversationId, 'completed', 'finalizing')),
+          200,
+        );
+      },
+    );
+
+    expect(result?.conversation?.status, ConversationStatus.completed);
+    expect(postCalls, 2, reason: 'finalizing completed replay must resume the exact-tuple POST');
+    expect(getCalls, 1);
+  });
+
+  test('v2 failed result still resumes final capture receipt before reporting terminal failure', () async {
+    var postCalls = 0;
+    var getCalls = 0;
+    final result = await processInProgressConversation(
+      conversationId: conversationId,
+      statusPollInterval: Duration.zero,
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required timeout,
+        required retries,
+        required retryOnUnauthorized,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        if (method == 'POST') {
+          postCalls++;
+          if (postCalls == 1) return http.Response('lease expired after failed result persistence', 409);
+          return http.Response(
+            jsonEncode({
+              'conversation': _v2ConversationJson(conversationId, 'failed', 'terminal'),
+              'messages': <dynamic>[],
+            }),
+            200,
+          );
+        }
+        getCalls++;
+        return http.Response(
+          jsonEncode(_v2ConversationJson(conversationId, 'failed', 'finalizing')),
+          200,
+        );
+      },
+    );
+
+    expect(result, isNull);
+    expect(postCalls, 2);
+    expect(getCalls, 1);
+  });
 
   test('direct 200 completed succeeds once without a status GET', () async {
     var postCalls = 0;

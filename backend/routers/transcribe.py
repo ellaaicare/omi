@@ -67,6 +67,7 @@ from utils.app_integrations import trigger_external_integrations, trigger_realti
 from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
+    CaptureFinalizationEffectRunner,
     mark_unexpected_conversation_processing_failed,
     process_conversation,
     retrieve_in_progress_conversation,
@@ -714,6 +715,8 @@ async def _stream_handler(
                         uid,
                         conversation.id,
                         claim_token,
+                        capture_authority.generation_id,
+                        capture_authority.owner_token,
                     )
                     if not renewed:
                         return
@@ -736,13 +739,14 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            conversation = await asyncio.to_thread(
-                process_conversation,
-                uid,
-                language,
-                conversation,
-                capture_finalization=capture_finalization,
-            )
+            if conversation.status not in {ConversationStatus.completed, ConversationStatus.failed}:
+                conversation = await asyncio.to_thread(
+                    process_conversation,
+                    uid,
+                    language,
+                    conversation,
+                    capture_finalization=capture_finalization,
+                )
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
             try:
@@ -755,20 +759,57 @@ async def _stream_handler(
             except RuntimeError:
                 pass
             messages = []
+            if capture_finalization:
+                try:
+                    await asyncio.to_thread(
+                        CaptureFinalizationEffectRunner(uid, conversation.id, capture_finalization).run,
+                        'integrations:external',
+                        lambda _: [],
+                    )
+                    await asyncio.to_thread(
+                        conversations_db.complete_capture_finalization,
+                        uid,
+                        conversation.id,
+                        capture_authority.generation_id,
+                        capture_authority.owner_token,
+                        claim_token,
+                    )
+                except Exception:
+                    return
         else:
-            if capture_finalization and not conversations_db.complete_capture_finalization(
-                uid,
-                conversation.id,
-                capture_authority.generation_id,
-                capture_authority.owner_token,
-                claim_token,
-            ):
-                return
             try:
-                messages = trigger_external_integrations(uid, conversation)
+                if capture_finalization:
+                    messages = await asyncio.to_thread(
+                        CaptureFinalizationEffectRunner(uid, conversation.id, capture_finalization).run,
+                        'integrations:external',
+                        lambda operation_token: (
+                            trigger_external_integrations(
+                                uid,
+                                conversation,
+                                idempotency_key=operation_token,
+                            )
+                            if conversation.status == ConversationStatus.completed
+                            else []
+                        ),
+                        encode=lambda values: [value.dict() if hasattr(value, 'dict') else value for value in values],
+                    )
+                    if not conversations_db.complete_capture_finalization(
+                        uid,
+                        conversation.id,
+                        capture_authority.generation_id,
+                        capture_authority.owner_token,
+                        claim_token,
+                    ):
+                        return
+                    terminal = conversations_db.get_conversation(uid, conversation.id)
+                    if not terminal or terminal.get('capture_state') != 'terminal':
+                        return
+                    conversation = Conversation(**terminal)
+                else:
+                    messages = trigger_external_integrations(uid, conversation)
             except Exception as e:
                 print(f"External integrations failed after conversation processing: {e}", uid, session_id)
-                messages = []
+                return
         finally:
             if lease_task:
                 lease_task.cancel()

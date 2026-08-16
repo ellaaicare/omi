@@ -560,6 +560,7 @@ def _upsert_conversation_if_capture_finalizer_transaction(
         'capture_finalization_lease_expires_at',
         'capture_finalization_attempt_count',
         'capture_finalization_started_at',
+        'capture_finalization_effects',
     ):
         if field in current:
             durable[field] = current[field]
@@ -1232,10 +1233,10 @@ def _claim_capture_finalization_transaction(
     )
     if not expected_tuple:
         return {'outcome': 'mismatch'}
-    if status in {ConversationStatus.completed.value, ConversationStatus.failed.value}:
-        return {'outcome': 'settled', 'conversation': conversation}
-
     state = conversation.get('capture_state')
+    settled_statuses = {ConversationStatus.completed.value, ConversationStatus.failed.value}
+    if state == 'terminal' and status in settled_statuses:
+        return {'outcome': 'settled', 'conversation': conversation}
     if state == 'finalizing' and not _capture_lease_expired(
         conversation, now, field='capture_finalization_lease_expires_at'
     ):
@@ -1245,13 +1246,14 @@ def _claim_capture_finalization_transaction(
 
     lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
     update = {
-        'status': ConversationStatus.processing.value,
         'capture_state': 'finalizing',
         'capture_finalization_claim_token': claim_token,
         'capture_finalization_lease_expires_at': lease_expires_at,
         'capture_finalization_attempt_count': int(conversation.get('capture_finalization_attempt_count') or 0) + 1,
         'capture_finalization_started_at': conversation.get('capture_finalization_started_at') or now,
     }
+    if status not in settled_statuses:
+        update['status'] = ConversationStatus.processing.value
     transaction.update(conversation_ref, update)
 
     if authority_snapshot.exists:
@@ -1335,9 +1337,9 @@ def _renew_capture_finalization_transaction(
     conversation_ref,
     claim_token: str,
     now: datetime,
-    lease_seconds: int = capture_finalization_lease_seconds,
-    generation: Optional[str] = None,
-    owner_token: Optional[str] = None,
+    lease_seconds: int,
+    generation: str,
+    owner_token: str,
 ) -> bool:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
@@ -1348,8 +1350,8 @@ def _renew_capture_finalization_transaction(
         or conversation.get('capture_state') != 'finalizing'
         or conversation.get('capture_finalization_claim_token') != claim_token
         or _capture_lease_expired(conversation, now, field='capture_finalization_lease_expires_at')
-        or (generation is not None and conversation.get('capture_generation') != generation)
-        or (owner_token is not None and conversation.get('capture_owner_token') != owner_token)
+        or conversation.get('capture_generation') != generation
+        or conversation.get('capture_owner_token') != owner_token
     ):
         return False
     transaction.update(
@@ -1367,9 +1369,9 @@ def _renew_capture_finalization(
     conversation_ref,
     claim_token: str,
     now: datetime,
-    lease_seconds: int = capture_finalization_lease_seconds,
-    generation: Optional[str] = None,
-    owner_token: Optional[str] = None,
+    lease_seconds: int,
+    generation: str,
+    owner_token: str,
 ) -> bool:
     return _renew_capture_finalization_transaction(
         transaction,
@@ -1386,10 +1388,10 @@ def renew_capture_finalization(
     uid: str,
     conversation_id: str,
     claim_token: str,
+    generation: str,
+    owner_token: str,
     *,
     lease_seconds: int = capture_finalization_lease_seconds,
-    generation: Optional[str] = None,
-    owner_token: Optional[str] = None,
 ) -> bool:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -1402,6 +1404,185 @@ def renew_capture_finalization(
         lease_seconds,
         generation,
         owner_token,
+    )
+
+
+def _claim_capture_finalization_effect_transaction(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    """Claim one retry-safe effect under the exact live finalizer lease."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'outcome': 'not_found'}
+    conversation = snapshot.to_dict() or {}
+    if not _capture_finalization_claim_is_live(conversation, generation, owner_token, claim_token, now):
+        return {'outcome': 'lost'}
+
+    effects = copy.deepcopy(conversation.get('capture_finalization_effects') or {})
+    receipt = copy.deepcopy(effects.get(effect_id) or {})
+    if receipt.get('state') == 'completed':
+        return {
+            'outcome': 'completed',
+            'operation_token': receipt.get('operation_token'),
+            'result': receipt.get('result'),
+        }
+
+    operation_token = receipt.get('operation_token') or str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"omi:capture-finalization:{conversation.get('id')}:{generation}:{owner_token}:{effect_id}",
+        )
+    )
+    effects[effect_id] = {
+        **receipt,
+        'state': 'claimed',
+        'operation_token': operation_token,
+        'claim_token': claim_token,
+        'attempt_count': int(receipt.get('attempt_count') or 0) + 1,
+        'claimed_at': now,
+    }
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_finalization_effects': effects,
+            'capture_finalization_lease_expires_at': now + timedelta(seconds=capture_finalization_lease_seconds),
+        },
+    )
+    return {'outcome': 'claimed', 'operation_token': operation_token}
+
+
+@transactional
+def _claim_capture_finalization_effect(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    return _claim_capture_finalization_effect_transaction(
+        transaction,
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        now,
+    )
+
+
+def claim_capture_finalization_effect(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+) -> Dict[str, Any]:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _claim_capture_finalization_effect(
+        db.transaction(),
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        datetime.now(timezone.utc),
+    )
+
+
+def _complete_capture_finalization_effect_transaction(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    operation_token: str,
+    result: Any,
+    now: datetime,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if not _capture_finalization_claim_is_live(conversation, generation, owner_token, claim_token, now):
+        return False
+    effects = copy.deepcopy(conversation.get('capture_finalization_effects') or {})
+    receipt = copy.deepcopy(effects.get(effect_id) or {})
+    if (
+        receipt.get('state') != 'claimed'
+        or receipt.get('claim_token') != claim_token
+        or receipt.get('operation_token') != operation_token
+    ):
+        return False
+    effects[effect_id] = {
+        **receipt,
+        'state': 'completed',
+        'result': result,
+        'completed_at': now,
+    }
+    transaction.update(conversation_ref, {'capture_finalization_effects': effects})
+    return True
+
+
+@transactional
+def _complete_capture_finalization_effect(
+    transaction,
+    conversation_ref,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    operation_token: str,
+    result: Any,
+    now: datetime,
+) -> bool:
+    return _complete_capture_finalization_effect_transaction(
+        transaction,
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+        now,
+    )
+
+
+def complete_capture_finalization_effect(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    claim_token: str,
+    effect_id: str,
+    operation_token: str,
+    result: Any = None,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _complete_capture_finalization_effect(
+        db.transaction(),
+        conversation_ref,
+        generation,
+        owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+        datetime.now(timezone.utc),
     )
 
 
@@ -1421,16 +1602,29 @@ def _complete_capture_finalization_transaction(
     authority_snapshot = authority_ref.get(transaction=transaction)
     conversation = conversation_snapshot.to_dict() or {}
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
-    if not _capture_finalization_claim_is_live(
-        conversation, generation, owner_token, claim_token, now
-    ) or status not in {ConversationStatus.completed.value, ConversationStatus.failed.value}:
+    integration_receipt = (conversation.get('capture_finalization_effects') or {}).get('integrations:external') or {}
+    if (
+        not _capture_finalization_claim_is_live(conversation, generation, owner_token, claim_token, now)
+        or status
+        not in {
+            ConversationStatus.completed.value,
+            ConversationStatus.failed.value,
+        }
+        or integration_receipt.get('state') != 'completed'
+    ):
         return False
+    compact_effects = copy.deepcopy(conversation.get('capture_finalization_effects') or {})
+    for receipt in compact_effects.values():
+        if receipt.get('state') == 'completed':
+            receipt.pop('result', None)
     transaction.update(
         conversation_ref,
         {
             'capture_state': 'terminal',
             'capture_terminal_at': now,
+            'capture_finalization_completed_at': now,
             'capture_finalization_lease_expires_at': now,
+            'capture_finalization_effects': compact_effects,
         },
     )
     if authority_snapshot.exists:
