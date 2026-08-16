@@ -3,8 +3,7 @@ from typing import Optional, List
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
-from ._client import db
-
+from ._client import db, document_id_from_seed
 
 # Collection name
 action_items_collection = 'action_items'
@@ -82,7 +81,16 @@ def create_action_item(uid: str, action_item_data: dict) -> str:
     return doc_ref.id
 
 
-def create_action_items_batch(uid: str, action_items_data: List[dict]) -> List[str]:
+def capture_action_item_ids(idempotency_key: str, count: int) -> List[str]:
+    """Return stable document IDs for every retry of one capture effect."""
+    return [document_id_from_seed(f'{idempotency_key}:action-item:{index}') for index in range(count)]
+
+
+def create_action_items_batch(
+    uid: str,
+    action_items_data: List[dict],
+    idempotency_key: Optional[str] = None,
+) -> List[str]:
     """
     Create multiple action items in a batch operation.
 
@@ -102,7 +110,8 @@ def create_action_items_batch(uid: str, action_items_data: List[dict]) -> List[s
     batch = db.batch()
     doc_refs = []
 
-    for action_item_data in action_items_data:
+    stable_ids = capture_action_item_ids(idempotency_key, len(action_items_data)) if idempotency_key else []
+    for index, action_item_data in enumerate(action_items_data):
         action_item_data = _prepare_action_item_for_write(action_item_data)
 
         if 'created_at' not in action_item_data:
@@ -114,7 +123,7 @@ def create_action_items_batch(uid: str, action_items_data: List[dict]) -> List[s
         if action_item_data.get('completed', False) and 'completed_at' not in action_item_data:
             action_item_data['completed_at'] = datetime.now(timezone.utc)
 
-        doc_ref = action_items_ref.document()
+        doc_ref = action_items_ref.document(stable_ids[index]) if stable_ids else action_items_ref.document()
         batch.set(doc_ref, action_item_data)
         doc_refs.append(doc_ref.id)
 
@@ -377,7 +386,11 @@ def delete_action_item(uid: str, action_item_id: str) -> bool:
     return True
 
 
-def delete_action_items_for_conversation(uid: str, conversation_id: str) -> int:
+def delete_action_items_for_conversation(
+    uid: str,
+    conversation_id: str,
+    preserve_ids: Optional[List[str]] = None,
+) -> int:
     """
     Delete all action items for a specific conversation.
 
@@ -397,7 +410,10 @@ def delete_action_items_for_conversation(uid: str, conversation_id: str) -> int:
     batch = db.batch()
     count = 0
 
+    preserved = set(preserve_ids or [])
     for doc in docs:
+        if doc.id in preserved:
+            continue
         batch.delete(doc.reference)
         count += 1
 

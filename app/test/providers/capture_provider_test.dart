@@ -82,11 +82,7 @@ class _CaptureAuthority implements AccountCommitAuthority {
 }
 
 class _FakeMicRecorder implements IMicRecorderService {
-  _FakeMicRecorder({
-    this.failuresBeforeStart = 0,
-    this.stopEntered,
-    this.stopGate,
-  });
+  _FakeMicRecorder({this.failuresBeforeStart = 0, this.stopEntered, this.stopGate});
 
   final int failuresBeforeStart;
   final Completer<void>? stopEntered;
@@ -136,10 +132,12 @@ class _FakeMicRecorder implements IMicRecorderService {
 }
 
 class _FakePureSocket implements IPureSocket {
-  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected, this.sendError}) : _status = status;
+  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected, this.sendError, this.onStop})
+      : _status = status;
 
   PureSocketStatus _status;
   final Object? sendError;
+  final FutureOr<void> Function()? onStop;
   IPureSocketListener? listener;
   final List<dynamic> sent = [];
   int stops = 0;
@@ -163,6 +161,7 @@ class _FakePureSocket implements IPureSocket {
   @override
   Future<void> stop() async {
     stops++;
+    await onStop?.call();
     await disconnect();
   }
 
@@ -198,10 +197,7 @@ class _FakeTranscriptSocket {
   late final TranscriptSegmentSocketService service;
 }
 
-Future<TranscriptSegmentSocketService?> _connectedDeviceSocket(
-  BtDevice device, {
-  required bool force,
-}) async =>
+Future<TranscriptSegmentSocketService?> _connectedDeviceSocket(BtDevice device, {required bool force}) async =>
     _FakeTranscriptSocket().service;
 
 ActiveWalAuthority _activeCaptureAuthority(_CaptureAuthority authority) => ActiveWalAuthority(
@@ -247,8 +243,11 @@ Future<void> _grantCaptureEgressAuthority(String uid) async {
   );
 }
 
-ServerConversation _conversation(String id, String transcript,
-    {ConversationStatus status = ConversationStatus.in_progress}) {
+ServerConversation _conversation(
+  String id,
+  String transcript, {
+  ConversationStatus status = ConversationStatus.in_progress,
+}) {
   final startedAt = DateTime.parse('2026-08-10T20:00:00Z');
   return ServerConversation(
     id: id,
@@ -262,6 +261,315 @@ ServerConversation _conversation(String id, String transcript,
 }
 
 void main() {
+  test('capture socket sends no frames until exact-authority protocol readiness is acknowledged', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+
+    var started = false;
+    final start = service.start().whenComplete(() => started = true);
+    await pumpEventQueue();
+    expect(started, isFalse);
+    expect(service.state, SocketServiceState.disconnected);
+    await service.send([1, 2, 3]);
+    expect(pure.sent, isEmpty);
+
+    const authorityTuple = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}));
+    await start;
+    expect(service.state, SocketServiceState.connected);
+    await service.send([1, 2, 3]);
+    expect(pure.sent.single, [1, 2, 3]);
+
+    final stop = service.stop();
+    await pumpEventQueue();
+    expect(
+      jsonDecode(pure.sent.last as String),
+      {'type': 'capture_drain', ...authorityTuple},
+    );
+    expect(pure.stops, 0, reason: 'transport close must wait for the server-side Redis fence');
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authorityTuple}));
+    await stop;
+    expect(pure.stops, 1);
+  });
+
+  test('capture socket atomically adopts successor B and stale A messages cannot kill or replace it', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    const tupleA = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+    const tupleB = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-b',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+
+    final start = service.start();
+    await pumpEventQueue();
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleA}));
+    await start;
+    await service.send([1]);
+
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleB}));
+    expect(service.captureAuthority?.conversationId, 'capture-b');
+    await service.send([2]);
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleA}));
+    expect(service.captureAuthority?.conversationId, 'capture-b', reason: 'retired A cannot replace successor B');
+
+    final stop = service.stop();
+    await pumpEventQueue();
+    expect(jsonDecode(pure.sent.last as String), {'type': 'capture_drain', ...tupleB});
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...tupleA}));
+    await pumpEventQueue();
+    expect(pure.stops, 0, reason: 'stale A acknowledgement must not close B before its exact fence is durable');
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...tupleB}));
+    await stop;
+
+    expect(pure.stops, 1);
+    expect(pure.sent.take(2), [
+      [1],
+      [2],
+    ]);
+  });
+
+  test('close-only provider tail is forwarded before exact server drain acknowledgement', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    late final _FakePureSocket primary;
+    primary = _FakePureSocket(
+      status: PureSocketStatus.notConnected,
+      onStop: () {
+        primary.onMessage(jsonEncode([
+          {
+            'id': 'tail-only',
+            'text': 'Final words emitted only when the provider closes',
+            'speaker': 'SPEAKER_00',
+            'start': 0.0,
+            'end': 1.0,
+            'is_user': false,
+          }
+        ]));
+      },
+    );
+    final secondary = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final composite = CompositeTranscriptionSocket(
+      primarySocket: primary,
+      secondarySocket: secondary,
+      sttProvider: 'close-tail-provider',
+    );
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      composite,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    const authorityTuple = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-tail',
+      'generation': 'generation-tail',
+      'owner_token': 'owner-tail',
+    };
+
+    final start = service.start();
+    await pumpEventQueue();
+    secondary.onMessage(
+      jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}),
+    );
+    await start;
+
+    final stop = service.stop();
+    await pumpEventQueue();
+    final secondaryMessages = secondary.sent.map((value) => jsonDecode(value as String)).toList();
+    final tailIndex = secondaryMessages.indexWhere((value) => value['type'] == 'suggested_transcript');
+    final drainIndex = secondaryMessages.indexWhere((value) => value['type'] == 'capture_drain');
+    expect(tailIndex, greaterThanOrEqualTo(0));
+    expect(drainIndex, greaterThan(tailIndex));
+    expect(secondary.stops, 0, reason: 'backend transport stays open until its durable drain acknowledgement');
+
+    secondary.onMessage(
+      jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authorityTuple}),
+    );
+    await stop;
+
+    expect(primary.stops, 1);
+    expect(secondary.stops, 1);
+  });
+
+  test('lost drain acknowledgement closes transport then continues exact-tuple finalization reconciliation', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final pure = _FakePureSocket();
+    final transcriptService = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    const tupleB = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-b',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...tupleB}));
+
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var processCalls = 0;
+    final processEntered = Completer<void>();
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(pure.status, PureSocketStatus.disconnected, reason: 'tail decision must follow exact drain close');
+        return [_conversation('capture-b', 'Durable words before the lost acknowledgement')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        expect(conversationId, 'capture-b');
+        final operation = exactAuthority as CaptureFinalizationOperation;
+        expect(operation.captureProtocolAuthority?.conversationId, 'capture-b');
+        expect(operation.captureProtocolAuthority?.generation, 'generation-a');
+        expect(operation.captureProtocolAuthority?.ownerToken, 'owner-a');
+        expect(pure.status, PureSocketStatus.disconnected);
+        processEntered.complete();
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'capture-b',
+            'Durable words before the lost acknowledgement',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..reconnectDeviceCaptureSocketForTesting(transcriptService);
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+
+    final stopping = provider.stopStreamRecordingAndFinalize();
+    await pumpEventQueue();
+    expect(jsonDecode(pure.sent.last as String), {'type': 'capture_drain', ...tupleB});
+    pure.onClosed(); // Server committed drained, but the acknowledgement was lost with the socket.
+    await processEntered.future;
+
+    expect(await stopping, isTrue);
+    expect(processCalls, 1);
+    expect(pure.stops, 1);
+  });
+
+  test('capture socket fails closed when a legacy worker never acknowledges protocol authority', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 10),
+    );
+
+    await service.start();
+
+    expect(service.state, SocketServiceState.disconnected);
+    expect(pure.sent, isEmpty);
+    expect(pure.stops, 1);
+  });
+
+  test('capture socket rejects missing ready fields and treats a stale drained tuple as ambiguous', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final missingPure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final missingService = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      missingPure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    final missingStart = missingService.start();
+    await pumpEventQueue();
+    missingPure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready'}));
+    await missingStart;
+    expect(missingService.state, SocketServiceState.disconnected);
+
+    final stalePure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final staleService = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      stalePure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    final staleStart = staleService.start();
+    await pumpEventQueue();
+    stalePure.onMessage(jsonEncode({
+      'type': 'service_status',
+      'status': 'capture_protocol_ready',
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    }));
+    await staleStart;
+    final staleStop = staleService.stop();
+    await pumpEventQueue();
+    stalePure.onMessage(jsonEncode({
+      'type': 'service_status',
+      'status': 'capture_protocol_drained',
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-b',
+      'owner_token': 'owner-a',
+    }));
+    await staleStop;
+    expect(stalePure.stops, 1);
+    expect(staleService.captureAuthority?.conversationId, 'capture-a');
+  });
+
   test('production phone path waits for native capture and a physical frame, not websocket delivery', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();
@@ -524,10 +832,7 @@ void main() {
     );
     addTearDown(provider.dispose);
 
-    expect(
-      await provider.awaitFinalCapturableContent(maxAttempts: 3, retryDelay: Duration.zero),
-      isFalse,
-    );
+    expect(await provider.awaitFinalCapturableContent(maxAttempts: 3, retryDelay: Duration.zero), isFalse);
     expect(refreshes, 3);
   });
 
@@ -694,8 +999,11 @@ void main() {
         await processGate.future;
         return CreateConversationResponse(
           messages: const [],
-          conversation:
-              _conversation('completed-phone', 'Phone words before stop', status: ConversationStatus.completed),
+          conversation: _conversation(
+            'completed-phone',
+            'Phone words before stop',
+            status: ConversationStatus.completed,
+          ),
         );
       },
     )
@@ -723,6 +1031,64 @@ void main() {
     expect(transcriptSocket.pure.status, PureSocketStatus.disconnected);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
     expect(provider.hasUnfinalizedPhoneCaptureContent, isFalse);
+  });
+
+  test('phone diagnostics cannot complete before the exact server status is literally completed', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final transcriptSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final pollEntered = Completer<void>();
+    final completedPoll = Completer<CreateConversationResponse?>();
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('active-phone', 'Phone words before stop')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) {
+        processCalls++;
+        if (!pollEntered.isCompleted) pollEntered.complete();
+        return completedPoll.future;
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..reconnectDeviceCaptureSocketForTesting(transcriptSocket.service);
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+
+    final stopping = provider.stopStreamRecordingAndFinalize();
+    await pollEntered.future;
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.finalizing);
+    expect(provider.captureDiagnostics.phase, isNot(CaptureDiagnosticPhase.completed));
+    expect(conversations.conversations, isEmpty);
+
+    completedPoll.complete(
+      CreateConversationResponse(
+        messages: const [],
+        conversation: _conversation(
+          'active-phone',
+          'Phone words before stop',
+          status: ConversationStatus.completed,
+        ),
+      ),
+    );
+    expect(await stopping, isTrue);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+    expect(processCalls, 1);
   });
 
   test('home stop and voice takeover share one phone finalization', () async {
@@ -860,10 +1226,8 @@ void main() {
     final stopEntered = Completer<void>();
     final stopGate = Completer<void>();
     final mic = _FakeMicRecorder(stopEntered: stopEntered, stopGate: stopGate);
-    final provider = CaptureProvider(
-      activeAccountAuthority: () => authority,
-      phoneMicRecorder: mic,
-    )..updateRecordingState(RecordingState.record);
+    final provider = CaptureProvider(activeAccountAuthority: () => authority, phoneMicRecorder: mic)
+      ..updateRecordingState(RecordingState.record);
     addTearDown(provider.dispose);
 
     final stopping = provider.stopPhoneCaptureForVoiceTakeover();
@@ -1118,10 +1482,14 @@ void main() {
     expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
-  test('continuous necklace boundary replaces the socket before exact processing', () async {
+  test('continuous necklace boundary finalizes before replacement connect or buffered replay', () async {
+    await _grantCaptureEgressAuthority('uid-a');
     final authority = _CaptureAuthority('uid-a');
     final initialSocket = _FakeTranscriptSocket();
     final replacementSocket = _FakeTranscriptSocket();
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
+    final replacementEntered = Completer<void>();
     final conversations = ConversationProvider();
     addTearDown(conversations.dispose);
     var socketPreparations = 0;
@@ -1135,6 +1503,7 @@ void main() {
       captureConsentAuthorityEnsurer: () async => true,
       deviceTranscriptionSocketPreparer: (_, {required force}) async {
         socketPreparations++;
+        if (socketPreparations == 2 && !replacementEntered.isCompleted) replacementEntered.complete();
         return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
       },
       deviceCaptureStarter: () async {
@@ -1148,8 +1517,10 @@ void main() {
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(conversationId, 'pre-boundary-necklace');
-        expect(socketPreparations, 2, reason: 'the replacement socket must own capture before processing');
+        expect(socketPreparations, 1, reason: 'replacement connect must remain fenced until A is terminal');
         processCalls++;
+        processEntered.complete();
+        await processGate.future;
         return CreateConversationResponse(
           messages: const [],
           conversation: _conversation(
@@ -1166,89 +1537,161 @@ void main() {
     await provider.streamDeviceRecording(device: necklace);
     provider.segments = [_segment('local-pre-boundary', 'Local words before the boundary')];
 
-    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+    await processEntered.future;
+    expect(replacementEntered.isCompleted, isFalse);
+    expect(socketPreparations, 1);
+
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 10], codec: BleAudioCodec.pcm8);
+    expect(replacementSocket.pure.sent, isEmpty);
+
+    processGate.complete();
+    await replacementEntered.future;
+    expect(await boundary, isTrue);
     expect(processCalls, 1);
     expect(socketPreparations, 2);
+    expect(replacementSocket.pure.sent, [
+      [10],
+    ]);
     expect(transportStarts, 1, reason: 'BLE capture must continue without a physical restart');
     expect(provider.recordingState, RecordingState.deviceRecord);
     expect(provider.segments, isEmpty, reason: 'the replacement socket starts a fresh local moment');
   });
 
-  test('physical-only necklace boundary quarantines delayed pre-tap transcript and replays non-WAL frames once',
-      () async {
+  test('ambiguous necklace finalization fails closed before replacement connect or replay', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final authority = _CaptureAuthority('uid-a');
     final initialSocket = _FakeTranscriptSocket();
     final replacementSocket = _FakeTranscriptSocket();
-    final replacementEntered = Completer<void>();
-    final replacementGate = Completer<TranscriptSegmentSocketService?>();
+    final processEntered = Completer<void>();
+    final processGate = Completer<void>();
     final conversations = ConversationProvider();
     addTearDown(conversations.dispose);
     var socketPreparations = 0;
-    var processCalls = 0;
     late CaptureProvider provider;
     provider = CaptureProvider(
       activeAccountAuthority: () => authority,
       activeWalAuthority: () => _activeCaptureAuthority(authority),
       captureConsentAuthorityEnsurer: () async => true,
-      deviceTranscriptionSocketPreparer: (_, {required force}) {
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
         socketPreparations++;
-        if (socketPreparations == 1) return Future.value(initialSocket.service);
-        if (!replacementEntered.isCompleted) replacementEntered.complete();
-        return replacementGate.future;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
       },
       deviceCaptureStarter: () async {
         provider.updateRecordingState(RecordingState.deviceRecord);
         return true;
       },
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
-        return [_conversation('pre-tap-necklace', 'Delayed words spoken before the tap')];
+        return [_conversation('ambiguous-boundary', 'Words before an ambiguous POST timeout')];
       },
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
-        expect(conversationId, 'pre-tap-necklace');
-        processCalls++;
-        return CreateConversationResponse(
-          messages: const [],
-          conversation: _conversation(
-            'completed-pre-tap-necklace',
-            'Delayed words spoken before the tap',
-            status: ConversationStatus.completed,
-          ),
-        );
+        processEntered.complete();
+        await processGate.future;
+        return null;
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
     addTearDown(provider.dispose);
-    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
 
-    await provider.streamDeviceRecording(device: necklace);
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
     initialSocket.pure.sent.clear();
-    expect(provider.segments, isEmpty);
-    expect(provider.hasActiveDeviceCaptureBoundaryEvidence, isTrue);
 
     final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
-    await replacementEntered.future;
-    initialSocket.pure.onMessage(jsonEncode([_segment('late-old', 'Late pre-tap transcript').toJson()]));
+    await processEntered.future;
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 10], codec: BleAudioCodec.pcm8);
-    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 11], codec: BleAudioCodec.pcm8);
+    expect(socketPreparations, 1);
 
-    expect(provider.segments, isEmpty, reason: 'the stopped pre-tap socket no longer owns the Home moment');
-    expect(initialSocket.pure.sent, isEmpty, reason: 'post-boundary BLE frames must not return to the old socket');
-    expect(replacementSocket.pure.sent, isEmpty, reason: 'frames remain fenced until replacement assignment');
-
-    replacementGate.complete(replacementSocket.service);
-    expect(await boundary, isTrue);
-
-    expect(processCalls, 1);
-    expect(replacementSocket.pure.sent, [
-      [10],
-      [11],
-    ]);
-    expect(provider.segments, isEmpty, reason: 'delayed pre-tap words must not appear in the new Home moment');
-    expect(provider.recordingState, RecordingState.deviceRecord);
+    processGate.complete();
+    expect(await boundary, isFalse);
+    expect(socketPreparations, 1, reason: 'unknown POST outcome cannot be treated as resumable authority');
+    expect(initialSocket.pure.sent, isEmpty);
+    expect(replacementSocket.pure.sent, isEmpty);
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 1);
   });
+
+  test(
+    'physical-only necklace boundary quarantines delayed pre-tap transcript and replays non-WAL frames once',
+    () async {
+      await _grantCaptureEgressAuthority('uid-a');
+      final authority = _CaptureAuthority('uid-a');
+      final initialSocket = _FakeTranscriptSocket();
+      final replacementSocket = _FakeTranscriptSocket();
+      final replacementEntered = Completer<void>();
+      final replacementGate = Completer<TranscriptSegmentSocketService?>();
+      final conversations = ConversationProvider();
+      addTearDown(conversations.dispose);
+      var socketPreparations = 0;
+      var processCalls = 0;
+      late CaptureProvider provider;
+      provider = CaptureProvider(
+        activeAccountAuthority: () => authority,
+        activeWalAuthority: () => _activeCaptureAuthority(authority),
+        captureConsentAuthorityEnsurer: () async => true,
+        deviceTranscriptionSocketPreparer: (_, {required force}) {
+          socketPreparations++;
+          if (socketPreparations == 1) return Future.value(initialSocket.service);
+          if (!replacementEntered.isCompleted) replacementEntered.complete();
+          return replacementGate.future;
+        },
+        deviceCaptureStarter: () async {
+          provider.updateRecordingState(RecordingState.deviceRecord);
+          return true;
+        },
+        inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+          return [_conversation('pre-tap-necklace', 'Delayed words spoken before the tap')];
+        },
+        inProgressConversationProcess: (
+            {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+          expect(conversationId, 'pre-tap-necklace');
+          processCalls++;
+          return CreateConversationResponse(
+            messages: const [],
+            conversation: _conversation(
+              'completed-pre-tap-necklace',
+              'Delayed words spoken before the tap',
+              status: ConversationStatus.completed,
+            ),
+          );
+        },
+        geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+      )..updateProviderInstances(conversations, null, null, null);
+      addTearDown(provider.dispose);
+      final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+      await provider.streamDeviceRecording(device: necklace);
+      provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+      initialSocket.pure.sent.clear();
+      expect(provider.segments, isEmpty);
+      expect(provider.hasActiveDeviceCaptureBoundaryEvidence, isTrue);
+
+      final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
+      await replacementEntered.future;
+      initialSocket.pure.onMessage(jsonEncode([_segment('late-old', 'Late pre-tap transcript').toJson()]));
+      provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 10], codec: BleAudioCodec.pcm8);
+      provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 11], codec: BleAudioCodec.pcm8);
+
+      expect(provider.segments, isEmpty, reason: 'the stopped pre-tap socket no longer owns the Home moment');
+      expect(initialSocket.pure.sent, isEmpty, reason: 'post-boundary BLE frames must not return to the old socket');
+      expect(replacementSocket.pure.sent, isEmpty, reason: 'frames remain fenced until replacement assignment');
+
+      replacementGate.complete(replacementSocket.service);
+      expect(await boundary, isTrue);
+
+      expect(processCalls, 1);
+      expect(replacementSocket.pure.sent, [
+        [10],
+        [11],
+      ]);
+      expect(provider.segments, isEmpty, reason: 'delayed pre-tap words must not appear in the new Home moment');
+      expect(provider.recordingState, RecordingState.deviceRecord);
+    },
+  );
 
   test('continuous necklace replacement awaits replay failure before acknowledging the boundary', () async {
     await _grantCaptureEgressAuthority('uid-a');
@@ -1282,7 +1725,10 @@ void main() {
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         processCalls++;
-        return CreateConversationResponse(messages: const [], conversation: _conversation(conversationId, 'done'));
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(conversationId, 'done', status: ConversationStatus.completed),
+        );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
@@ -1298,7 +1744,7 @@ void main() {
 
     replacementGate.complete(replacementSocket.service);
     expect(await boundary, isFalse);
-    expect(processCalls, 0, reason: 'the old conversation cannot finalize after replacement replay failed');
+    expect(processCalls, 1, reason: 'A must be terminal before replacement replay is attempted');
     expect(replacementSocket.pure.sent, isEmpty);
     expect(provider.recordingState, RecordingState.error);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.failed);
@@ -1335,6 +1781,13 @@ void main() {
       },
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         return [_conversation('overflow-boundary', 'Words before overflow')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(conversationId, 'done', status: ConversationStatus.completed),
+        );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
@@ -1388,6 +1841,13 @@ void main() {
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         return [_conversation('failed-boundary', 'Words before replacement failure')];
       },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(conversationId, 'done', status: ConversationStatus.completed),
+        );
+      },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
     addTearDown(provider.dispose);
@@ -1430,8 +1890,11 @@ void main() {
         processCalls++;
         return CreateConversationResponse(
           messages: const [],
-          conversation:
-              _conversation('completed-$conversationId', 'Prior moment', status: ConversationStatus.completed),
+          conversation: _conversation(
+            'completed-$conversationId',
+            'Prior moment',
+            status: ConversationStatus.completed,
+          ),
         );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
@@ -1872,8 +2335,11 @@ void main() {
         processCalls++;
         return CreateConversationResponse(
           messages: const [],
-          conversation:
-              _conversation('completed', 'Words captured before disconnect', status: ConversationStatus.completed),
+          conversation: _conversation(
+            'completed',
+            'Words captured before disconnect',
+            status: ConversationStatus.completed,
+          ),
         );
       },
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
@@ -2187,18 +2653,22 @@ void main() {
       final initialVersion = provider.segmentsPhotosVersion;
 
       // Simulate translation event
-      provider.onMessageEventReceived(TranslationEvent(segments: [
-        TranscriptSegment(
-          id: 'a',
-          text: 'hello (translated)',
-          speaker: 'SPEAKER_00',
-          isUser: false,
-          personId: null,
-          start: 0.0,
-          end: 1.0,
-          translations: [],
+      provider.onMessageEventReceived(
+        TranslationEvent(
+          segments: [
+            TranscriptSegment(
+              id: 'a',
+              text: 'hello (translated)',
+              speaker: 'SPEAKER_00',
+              isUser: false,
+              personId: null,
+              start: 0.0,
+              end: 1.0,
+              translations: [],
+            ),
+          ],
         ),
-      ]));
+      );
 
       expect(provider.segmentsPhotosVersion, greaterThan(initialVersion));
     });
@@ -2226,13 +2696,7 @@ void main() {
 
     test('increments on photo processing event and updates id', () {
       final provider = CaptureProvider();
-      provider.photos = [
-        ConversationPhoto(
-          id: 'temp-photo',
-          base64: 'img',
-          createdAt: DateTime.now(),
-        ),
-      ];
+      provider.photos = [ConversationPhoto(id: 'temp-photo', base64: 'img', createdAt: DateTime.now())];
       final initialVersion = provider.segmentsPhotosVersion;
 
       provider.onMessageEventReceived(PhotoProcessingEvent(tempId: 'temp-photo', photoId: 'permanent-photo'));
@@ -2243,18 +2707,10 @@ void main() {
 
     test('increments on photo described event and updates description', () {
       final provider = CaptureProvider();
-      provider.photos = [
-        ConversationPhoto(
-          id: 'photo-1',
-          base64: 'img',
-          createdAt: DateTime.now(),
-        ),
-      ];
+      provider.photos = [ConversationPhoto(id: 'photo-1', base64: 'img', createdAt: DateTime.now())];
       final initialVersion = provider.segmentsPhotosVersion;
 
-      provider.onMessageEventReceived(
-        PhotoDescribedEvent(photoId: 'photo-1', description: 'desc', discarded: true),
-      );
+      provider.onMessageEventReceived(PhotoDescribedEvent(photoId: 'photo-1', description: 'desc', discarded: true));
 
       expect(provider.photos.first.description, 'desc');
       expect(provider.photos.first.discarded, true);
@@ -2268,12 +2724,7 @@ void main() {
       provider.segments = [_segment('seg1', 'hello')];
 
       // Empty personId: backend didn't assign, nothing happens
-      final event = SpeakerLabelSuggestionEvent(
-        speakerId: 0,
-        personId: '',
-        personName: 'Alice',
-        segmentId: 'seg1',
-      );
+      final event = SpeakerLabelSuggestionEvent(speakerId: 0, personId: '', personName: 'Alice', segmentId: 'seg1');
 
       provider.onMessageEventReceived(event);
 
