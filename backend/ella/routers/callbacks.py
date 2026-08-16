@@ -26,6 +26,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import string
 import asyncio
@@ -35,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 import database.conversations as conversations_db
@@ -45,14 +46,25 @@ from database._client import db
 from models.conversation import CategoryEnum
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
+from ella.services.canonical_summary_source import (
+    ELLA_CANONICAL_SOURCE_CONTRACT,
+    conversation_data_payload,
+)
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
+    CanonicalConversationSourceMismatchError,
     ConversationSummaryNotFoundError,
     InvalidConversationSummaryCategoryError,
     write_conversation_summary,
+    write_conversation_summary_cas,
 )
 from utils.notifications import send_guardian_notification
 from utils.ella.canonical_omi import write_omi_canonical_event
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_service_authority,
+)
 from utils.other.storage import storage_client
 
 logger = logging.getLogger(__name__)
@@ -68,6 +80,23 @@ OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
 PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
+CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
+SUMMARY_CAS_MODE_ENV = "ELLA_SUMMARY_CAS_MODE"
+SUMMARY_CAS_OPTIONAL = "optional"
+SUMMARY_CAS_REQUIRED = "required"
+SUMMARY_CAS_IF_MATCH_RE = re.compile(rf'^"{re.escape(ELLA_CANONICAL_SOURCE_CONTRACT)}:([0-9a-f]{{64}})"$')
+
+
+def require_callback_service(
+    service_key: Optional[str] = Header(default=None, alias=CALLBACK_SERVICE_HEADER),
+    subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+) -> EllaRequestAuthority:
+    return get_exact_service_authority(
+        provided_service_key=service_key,
+        configured_service_key=os.getenv("ELLA_CALLBACK_SERVICE_KEY", "").strip(),
+        service_subject_uid=subject_uid,
+        service="ella_callback",
+    )
 
 
 # ============================================================================
@@ -175,6 +204,37 @@ class ConversationSummaryUpdate(BaseModel):
     require_canonical: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
+
+
+def _summary_cas_mode() -> str:
+    value = os.getenv(SUMMARY_CAS_MODE_ENV, SUMMARY_CAS_OPTIONAL).strip().lower()
+    return value if value in {SUMMARY_CAS_OPTIONAL, SUMMARY_CAS_REQUIRED} else SUMMARY_CAS_REQUIRED
+
+
+def _summary_cas_token(contract: Optional[str], if_match: Optional[str]) -> Optional[str]:
+    contract = contract if isinstance(contract, str) else None
+    if_match = if_match if isinstance(if_match, str) else None
+    attempted = contract is not None or if_match is not None
+    if not attempted and _summary_cas_mode() == SUMMARY_CAS_OPTIONAL:
+        return None
+    if contract != ELLA_CANONICAL_SOURCE_CONTRACT or if_match is None:
+        raise HTTPException(status_code=428, detail="Canonical source precondition required")
+    match = SUMMARY_CAS_IF_MATCH_RE.fullmatch(if_match)
+    if match is None:
+        raise HTTPException(status_code=428, detail="Canonical source precondition required")
+    return match.group(1)
+
+
+@router.get("/conversation/summary/capabilities")
+async def conversation_summary_capabilities():
+    """Credential-free rollout signal; contains no owner or conversation data."""
+    mode = _summary_cas_mode()
+    return {
+        "contract": ELLA_CANONICAL_SOURCE_CONTRACT,
+        "conditional_write": True,
+        "enforcement": mode,
+        "headerless_legacy_writes": mode == SUMMARY_CAS_OPTIONAL,
+    }
 
 
 def _active_summary_version(conversation: dict) -> Optional[dict]:
@@ -309,6 +369,10 @@ async def update_conversation_summary(
     conversation_id: str,
     update: ConversationSummaryUpdate,
     uid: str = None,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+    response: Response = None,
+    cas_contract: Optional[str] = Header(default=None, alias="X-Ella-CAS-Contract"),
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
 ):
     """
     Update the structured summary of an OMI conversation.
@@ -317,9 +381,12 @@ async def update_conversation_summary(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation summary callback")
+    expected_source_sha256 = _summary_cas_token(cas_contract, if_match)
 
     try:
-        return await write_conversation_summary(
+        writer = write_conversation_summary_cas if expected_source_sha256 is not None else write_conversation_summary
+        writer_args = dict(
             uid=uid,
             conversation_id=conversation_id,
             title=update.title,
@@ -339,6 +406,14 @@ async def update_conversation_summary(
             canonical_writer=write_omi_canonical_event,
             require_canonical=update.require_canonical,
         )
+        if expected_source_sha256 is not None:
+            writer_args["expected_canonical_source_sha256"] = expected_source_sha256
+        result = await writer(**writer_args)
+        if expected_source_sha256 is not None:
+            if response is not None:
+                response.headers["X-Ella-CAS-Applied"] = ELLA_CANONICAL_SOURCE_CONTRACT
+            return {"status": "ok"}
+        return result
     except SummarySanitizationError as e:
         raise HTTPException(
             status_code=422,
@@ -346,13 +421,15 @@ async def update_conversation_summary(
         )
     except ConversationSummaryNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    except CanonicalConversationSourceMismatchError:
+        raise HTTPException(status_code=412, detail="Canonical source changed")
     except InvalidConversationSummaryCategoryError as e:
         raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logging.error(f"Failed to update conversation summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logging.error("Failed to update conversation summary", extra={"stage": "summary_writeback"})
+        raise HTTPException(status_code=500, detail="Conversation summary update failed")
 
 
 @router.get("/conversations/enrichment/reconcile-candidates")
@@ -420,22 +497,11 @@ async def list_enrichment_reconcile_candidates(
 # ============================================================================
 
 
-def _conversation_field(conversation, key: str, default=None):
-    if isinstance(conversation, dict):
-        return conversation.get(key, default)
-    return getattr(conversation, key, default)
-
-
-def _structured_field(structured, key: str):
-    if isinstance(structured, dict):
-        return structured.get(key)
-    return getattr(structured, key, None)
-
-
 @router.get("/conversation/{conversation_id}/data")
 async def get_conversation_data(
     conversation_id: str,
     uid: Optional[str] = None,
+    service: EllaRequestAuthority = Depends(require_callback_service),
 ):
     """
     Fetch conversation data used by the reprocessing pipeline when re-firing the
@@ -443,6 +509,7 @@ async def get_conversation_data(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation data callback")
 
     try:
         conversation = conversations_db.get_conversation(uid, conversation_id)
@@ -453,110 +520,7 @@ async def get_conversation_data(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    segments = _conversation_field(conversation, "transcript_segments", []) or []
-    transcript_parts = []
-    for segment in segments:
-        if isinstance(segment, dict):
-            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
-            text = segment.get("text", "")
-        else:
-            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
-            text = getattr(segment, "text", "")
-        transcript_parts.append(f"{speaker}: {text}")
-
-    structured_src = _conversation_field(conversation, "structured", {}) or {}
-    structured = {}
-    if structured_src:
-        structured = {
-            "title": _structured_field(structured_src, "title"),
-            "overview": _structured_field(structured_src, "overview"),
-            "emoji": _structured_field(structured_src, "emoji"),
-            "category": _structured_field(structured_src, "category"),
-        }
-        if structured.get("category") and hasattr(structured["category"], "value"):
-            structured["category"] = structured["category"].value
-
-    return {
-        "conversation_id": conversation_id,
-        "uid": uid,
-        "transcript": "\n\n".join(transcript_parts),
-        "segment_count": len(segments),
-        "structured": structured,
-        "started_at": str(_conversation_field(conversation, "started_at", "")),
-        "finished_at": str(_conversation_field(conversation, "finished_at", "")),
-    }
-
-
-# ============================================================================
-# Conversation Data Fetch (for reprocessing pipeline)
-# ============================================================================
-
-
-def _conversation_field(conversation, key: str, default=None):
-    if isinstance(conversation, dict):
-        return conversation.get(key, default)
-    return getattr(conversation, key, default)
-
-
-def _structured_field(structured, key: str):
-    if isinstance(structured, dict):
-        return structured.get(key)
-    return getattr(structured, key, None)
-
-
-@router.get("/conversation/{conversation_id}/data")
-async def get_conversation_data(
-    conversation_id: str,
-    uid: Optional[str] = None,
-):
-    """
-    Fetch conversation data used by the reprocessing pipeline when re-firing the
-    conversation-ready webhook. Internal endpoint; requires uid as query param.
-    """
-    if not uid:
-        raise HTTPException(status_code=400, detail="uid query parameter required")
-
-    try:
-        conversation = conversations_db.get_conversation(uid, conversation_id)
-    except Exception as e:
-        logging.error(f"Failed to fetch conversation {conversation_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    segments = _conversation_field(conversation, "transcript_segments", []) or []
-    transcript_parts = []
-    for segment in segments:
-        if isinstance(segment, dict):
-            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
-            text = segment.get("text", "")
-        else:
-            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
-            text = getattr(segment, "text", "")
-        transcript_parts.append(f"{speaker}: {text}")
-
-    structured_src = _conversation_field(conversation, "structured", {}) or {}
-    structured = {}
-    if structured_src:
-        structured = {
-            "title": _structured_field(structured_src, "title"),
-            "overview": _structured_field(structured_src, "overview"),
-            "emoji": _structured_field(structured_src, "emoji"),
-            "category": _structured_field(structured_src, "category"),
-        }
-        if structured.get("category") and hasattr(structured["category"], "value"):
-            structured["category"] = structured["category"].value
-
-    return {
-        "conversation_id": conversation_id,
-        "uid": uid,
-        "transcript": "\n\n".join(transcript_parts),
-        "segment_count": len(segments),
-        "structured": structured,
-        "started_at": str(_conversation_field(conversation, "started_at", "")),
-        "finished_at": str(_conversation_field(conversation, "finished_at", "")),
-    }
+    return conversation_data_payload(uid=uid, conversation_id=conversation_id, conversation=conversation)
 
 
 # ============================================================================

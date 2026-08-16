@@ -1748,6 +1748,37 @@ def update_conversation_if_active_summary_version(
     )
 
 
+def _update_conversation_with_builder_transaction(transaction, conversation_ref, uid: str, update_builder):
+    """Read, derive, and update one owner-bound conversation in one transaction."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return None
+    stored_conversation = snapshot.to_dict() or {}
+    conversation = _prepare_conversation_for_read(stored_conversation, uid) or {}
+    update_data, result = update_builder(conversation)
+    if update_data:
+        doc_level = stored_conversation.get('data_protection_level', 'standard')
+        prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+        transaction.update(conversation_ref, prepared_data)
+    return {
+        'conversation': conversation,
+        'update_data': update_data,
+        'result': result,
+    }
+
+
+@transactional
+def _update_conversation_with_builder(transaction, conversation_ref, uid: str, update_builder):
+    return _update_conversation_with_builder_transaction(transaction, conversation_ref, uid, update_builder)
+
+
+def update_conversation_with_builder(uid: str, conversation_id: str, update_builder):
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_with_builder(db.transaction(), conversation_ref, uid, update_builder)
+
+
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,

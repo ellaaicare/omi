@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 import database.conversations as conversations_db
+from ella.services.canonical_summary_source import canonical_source_from_conversation, canonical_source_sha256
 from ella.services.summary_sanitizer import sanitize_summary_update
 from models.conversation import CategoryEnum
 from utils.ella.canonical_omi import write_omi_canonical_event
@@ -67,6 +68,207 @@ def _publish_canonical_summary(
     if canonical_egress_completion is not None:
         canonical_egress_completion(confirmed)
     return result
+
+
+class CanonicalConversationSourceMismatchError(RuntimeError):
+    pass
+
+
+async def write_conversation_summary_cas(
+    *,
+    uid: str,
+    conversation_id: str,
+    expected_canonical_source_sha256: str,
+    title: Optional[str] = None,
+    overview: Optional[str] = None,
+    emoji: Optional[str] = None,
+    category: Optional[str] = None,
+    summary_source: str = 'observer',
+    summary_kind: str = 'observer_enriched',
+    correction_id: Optional[str] = None,
+    based_on_version_id: Optional[str] = None,
+    set_active: bool = True,
+    trace_id: Optional[str] = None,
+    ella_tags: Optional[list[str]] = None,
+    ella_signal: Optional[dict[str, Any]] = None,
+    internal_assessment_fetcher: Optional[Callable[[str, str], Awaitable[Optional[dict]]]] = None,
+    correction_audit_updater: Optional[Callable[[str, str, str, dict], None]] = None,
+    canonical_writer: Callable[..., dict] = write_omi_canonical_event,
+    require_canonical: bool = False,
+    preserve_generated_results: bool = False,
+) -> dict[str, Any]:
+    """Apply a canonical-source CAS and summary version update atomically."""
+    sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
+    if sanitized.category is not None:
+        try:
+            CategoryEnum(sanitized.category)
+        except ValueError as error:
+            raise InvalidConversationSummaryCategoryError(sanitized.category) from error
+    if all(value is None for value in (sanitized.title, sanitized.overview, sanitized.emoji, sanitized.category)):
+        raise ValueError('No fields to update')
+
+    internal_assessment = None
+    if internal_assessment_fetcher:
+        internal_assessment = await internal_assessment_fetcher(uid, conversation_id)
+
+    normalized_tags: list[str] = []
+    for tag in ella_tags or []:
+        clean = str(tag).strip().lower().replace(' ', '_')
+        if clean and len(clean) <= 64 and clean not in normalized_tags:
+            normalized_tags.append(clean)
+    normalized_tags = normalized_tags[:12]
+    state_updated_at = datetime.now(timezone.utc)
+
+    def build_update(conversation: dict[str, Any]):
+        current_source = canonical_source_from_conversation(
+            uid=uid,
+            conversation_id=conversation_id,
+            conversation=conversation,
+        )
+        if canonical_source_sha256(current_source) != expected_canonical_source_sha256:
+            raise CanonicalConversationSourceMismatchError('canonical_source_changed')
+
+        structured = dict(conversation.get('structured') or {})
+        update_data: dict[str, Any] = {}
+        if sanitized.title is not None:
+            structured['title'] = sanitized.title
+            update_data['structured.title'] = sanitized.title
+        if sanitized.overview is not None:
+            structured['overview'] = sanitized.overview
+            update_data['structured.overview'] = sanitized.overview
+            if not preserve_generated_results:
+                update_data['apps_results'] = []
+                update_data['plugins_results'] = []
+        if sanitized.emoji is not None:
+            structured['emoji'] = sanitized.emoji
+            update_data['structured.emoji'] = sanitized.emoji
+        if sanitized.category is not None:
+            structured['category'] = sanitized.category
+            update_data['structured.category'] = sanitized.category
+
+        version_update = conversations_db.build_summary_version_update(
+            conversation,
+            next_structured=structured,
+            source=summary_source,
+            kind=summary_kind,
+            correction_id=correction_id,
+            based_on_version_id=based_on_version_id,
+            activate=set_active,
+        )
+        update_data['summary_versions'] = version_update['summary_versions']
+        update_data['active_summary_version_id'] = version_update['active_summary_version_id']
+        update_data['enrichment_state'] = {
+            'status': 'writeback_pending_canonical' if require_canonical else 'writeback_applied',
+            'pending': require_canonical,
+            'source': summary_source,
+            'kind': summary_kind,
+            'trace_id': trace_id,
+            'updated_at': state_updated_at,
+            'error': None,
+            'canonical_status': 'pending' if require_canonical else 'unconfirmed',
+        }
+        if internal_assessment:
+            update_data['internal_assessment'] = internal_assessment
+        if normalized_tags:
+            update_data['ella_tags'] = normalized_tags
+        if ella_signal is not None:
+            update_data['ella_signal'] = ella_signal
+        if correction_id:
+            existing_state = conversation.get('correction_state') or {}
+            update_data['correction_state'] = {
+                'correction_id': correction_id,
+                'status': 'applied',
+                'pending': False,
+                'source': existing_state.get('source'),
+                'submitted_at': existing_state.get('submitted_at'),
+                'updated_at': state_updated_at,
+                'active_summary_version_id': version_update['active_summary_version_id'],
+            }
+        return update_data, {'structured': structured, 'version_update': version_update}
+
+    transaction_result = conversations_db.update_conversation_with_builder(uid, conversation_id, build_update)
+    if transaction_result is None:
+        raise ConversationSummaryNotFoundError(conversation_id)
+
+    conversation = transaction_result['conversation']
+    update_data = transaction_result['update_data']
+    structured = transaction_result['result']['structured']
+    version_update = transaction_result['result']['version_update']
+    canonical_base = dict(conversation)
+    canonical_conversation = {
+        **canonical_base,
+        'id': conversation_id,
+        'structured': structured,
+        'summary_versions': version_update['summary_versions'],
+        'active_summary_version_id': version_update['active_summary_version_id'],
+        'enrichment_state': update_data['enrichment_state'],
+        'internal_assessment': update_data.get('internal_assessment', canonical_base.get('internal_assessment')),
+        'ella_tags': update_data.get('ella_tags', canonical_base.get('ella_tags') or []),
+        'ella_signal': update_data.get('ella_signal', canonical_base.get('ella_signal')),
+    }
+    confirmed_state = {
+        **update_data['enrichment_state'],
+        'status': 'writeback_applied',
+        'pending': False,
+        'canonical_status': 'completed',
+        'error': None,
+    }
+    canonical_conversation['enrichment_state'] = confirmed_state
+    canonical_result: Optional[dict[str, Any]] = None
+    canonical_error: Optional[Exception] = None
+    try:
+        canonical_result = await asyncio.to_thread(
+            canonical_writer,
+            uid,
+            canonical_conversation,
+            summary_source=summary_source,
+            summary_kind=summary_kind,
+            trace_id=trace_id,
+        )
+        if require_canonical and (not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True):
+            raise RuntimeError('canonical_write_unconfirmed')
+    except Exception as error:
+        canonical_error = error
+        logger.error('Failed to write CAS conversation summary to canonical ledger')
+
+    if require_canonical:
+        if canonical_error is not None:
+            failed_state = {
+                **update_data['enrichment_state'],
+                'canonical_status': 'failed',
+                'error': 'canonical_write_unconfirmed',
+                'updated_at': datetime.now(timezone.utc),
+            }
+            conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': failed_state})
+            raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from canonical_error
+        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+
+    if correction_id and correction_audit_updater:
+        try:
+            correction_audit_updater(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    'status': 'applied',
+                    'updated_at': state_updated_at.isoformat(),
+                    'applied_at': state_updated_at.isoformat(),
+                    'applied_summary_version_id': version_update['active_summary_version_id'],
+                    'summary_version_kind': summary_kind,
+                    'summary_version_source': summary_source,
+                },
+            )
+        except Exception:
+            logger.error('Failed to update correction audit after CAS summary apply')
+
+    return {
+        'status': 'ok',
+        'conversation_id': conversation_id,
+        'updated_fields': list(update_data.keys()),
+        'active_summary_version_id': version_update['active_summary_version_id'],
+        'sanitizer_warnings': sanitized.warnings,
+        'canonical_confirmed': bool(isinstance(canonical_result, dict) and canonical_result.get('ok') is True),
+    }
 
 
 async def write_conversation_summary(

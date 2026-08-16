@@ -1,11 +1,15 @@
 import asyncio
+import copy
 import importlib.util
+import json
 import sys
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 sys.modules.setdefault("database._client", MagicMock())
 sys.modules.setdefault("database.conversations", MagicMock())
@@ -29,6 +33,13 @@ _callbacks_spec = importlib.util.spec_from_file_location("ella_callbacks_test_mo
 callbacks = importlib.util.module_from_spec(_callbacks_spec)
 assert _callbacks_spec is not None and _callbacks_spec.loader is not None
 _callbacks_spec.loader.exec_module(callbacks)
+
+from ella.services.canonical_summary_source import (  # noqa: E402
+    canonical_source_bytes,
+    canonical_source_from_conversation,
+    canonical_source_from_payload,
+    canonical_source_sha256,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -482,3 +493,361 @@ def test_update_conversation_summary_same_trace_is_idempotent(monkeypatch):
     assert result["status"] == "ok"
     assert result["active_summary_version_id"] == "recovered-v1"
     assert result["idempotent_replay"] is True
+
+
+def _cas_conversation():
+    return {
+        "started_at": "2026-08-15T12:00:00Z",
+        "finished_at": "2026-08-15T12:01:00Z",
+        "structured": {
+            "title": "Original",
+            "overview": "Original overview",
+            "emoji": "🪽",
+            "category": "other",
+        },
+        "transcript_segments": [{"speaker": "Other", "text": "private transcript"}],
+        "summary_versions": [{"id": "original-v1", "is_active": True}],
+        "active_summary_version_id": "original-v1",
+    }
+
+
+def _cas_token(conversation, *, uid="uid-a", conversation_id="conversation-a"):
+    return canonical_source_sha256(
+        canonical_source_from_conversation(uid=uid, conversation_id=conversation_id, conversation=conversation)
+    )
+
+
+def _cas_update():
+    return callbacks.ConversationSummaryUpdate(
+        title="Winning summary",
+        overview="[Ella] Winning overview with enough detail to safely replace the original summary.",
+        emoji="🧠",
+        category="personal",
+        summary_source="hermes_parallel",
+        summary_kind="hermes_enriched",
+    )
+
+
+def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
+    writes = []
+
+    async def no_assessment(_uid, _conversation_id):
+        return None
+
+    def version_update(_conversation, **kwargs):
+        return {
+            "summary_versions": [
+                {"id": "original-v1", "is_active": False},
+                {"id": "winner-v2", "is_active": True, **kwargs["next_structured"]},
+            ],
+            "active_summary_version_id": "winner-v2",
+            "new_summary_version_id": "winner-v2",
+        }
+
+    def transact(_uid, _conversation_id, builder):
+        if interleave is not None:
+            # Emulate Firestore's optimistic retry: the first transaction read
+            # passes CAS, a concurrent writer wins before commit, and the
+            # transaction callback reruns against the winning document.
+            builder(copy.deepcopy(conversation))
+            interleave(conversation)
+        before = copy.deepcopy(conversation)
+        update_data, result = builder(copy.deepcopy(conversation))
+        writes.append(copy.deepcopy(update_data))
+        for key, value in update_data.items():
+            if key.startswith("structured."):
+                conversation.setdefault("structured", {})[key.split(".", 1)[1]] = value
+            else:
+                conversation[key] = value
+        return {"conversation": before, "update_data": update_data, "result": result}
+
+    monkeypatch.setattr(callbacks, "_fetch_internal_assessment", no_assessment)
+    monkeypatch.setattr(callbacks.conversations_db, "build_summary_version_update", version_update)
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", transact)
+    return writes
+
+
+def _cas_client(uid="uid-a"):
+    app = FastAPI()
+    app.include_router(callbacks.router)
+    app.dependency_overrides[callbacks.require_callback_service] = lambda: _service_authority(uid)
+    return TestClient(app)
+
+
+def test_canonical_source_fixture_vectors_match_hermes_contract_data():
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "ella_canonical_source_v1.json"
+    vectors = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    for vector in vectors:
+        source = canonical_source_from_payload(
+            vector["payload"],
+            uid=vector["uid"],
+            conversation_id=vector["conversation_id"],
+        )
+        assert canonical_source_bytes(source).decode("utf-8") == vector["canonical_json"]
+        assert canonical_source_sha256(source) == vector["sha256"]
+
+
+def test_firestore_conversation_payload_matches_canonical_datetime_segment_and_transcript_representation():
+    conversation = {
+        "started_at": datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
+        "finished_at": datetime(2026, 8, 15, 12, 1, tzinfo=timezone.utc),
+        "structured": {"title": "  A\n title  ", "overview": "Overview", "emoji": "🪽", "category": "other"},
+        "transcript_segments": [
+            {"is_user": True, "text": "First"},
+            {"speaker": "Taylor", "text": "Second"},
+        ],
+    }
+    payload = callbacks.conversation_data_payload(
+        uid="uid-a", conversation_id="conversation-a", conversation=conversation
+    )
+    source = canonical_source_from_conversation(
+        uid="uid-a", conversation_id="conversation-a", conversation=conversation
+    )
+
+    assert payload["started_at"] == "2026-08-15 12:00:00+00:00"
+    assert payload["finished_at"] == "2026-08-15 12:01:00+00:00"
+    assert payload["segment_count"] == 2
+    assert payload["transcript"] == "User: First\n\nTaylor: Second"
+    assert source == canonical_source_from_payload(payload, uid="uid-a", conversation_id="conversation-a")
+    assert source["title"] == "A title"
+
+
+def test_cas_success_is_atomic_and_returns_content_free_receipt_header(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    token = _cas_token(conversation)
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers={
+            "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+            "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert response.headers["X-Ella-CAS-Applied"] == callbacks.ELLA_CANONICAL_SOURCE_CONTRACT
+    assert len(writes) == 1
+    assert conversation["structured"]["title"] == "Winning summary"
+    assert conversation["active_summary_version_id"] == "winner-v2"
+    assert "private transcript" not in response.text
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["transcript", "started_at", "finished_at", "segment_count", "structured_summary"],
+)
+def test_interleaved_canonical_change_returns_412_and_preserves_winner(monkeypatch, change):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    stale_token = _cas_token(conversation)
+
+    def interleave(current):
+        if change == "transcript":
+            current["transcript_segments"][0]["text"] = "winning transcript"
+        elif change == "started_at":
+            current["started_at"] = "2026-08-15T11:59:59Z"
+        elif change == "finished_at":
+            current["finished_at"] = "2026-08-15T12:02:00Z"
+        elif change == "segment_count":
+            current["transcript_segments"].append({"speaker": "Other", "text": "winning second segment"})
+        else:
+            current["structured"]["title"] = "Winning concurrent summary"
+
+    writes = _install_atomic_cas_fake(monkeypatch, conversation, interleave=interleave)
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers={
+            "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+            "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{stale_token}"',
+        },
+    )
+
+    assert response.status_code == 412
+    assert stale_token not in response.text
+    assert "private transcript" not in response.text
+    assert writes == []
+    assert conversation["active_summary_version_id"] == "original-v1"
+    assert conversation["structured"]["title"] != "Winning summary"
+
+
+@pytest.mark.parametrize(
+    ("contract", "if_match"),
+    [
+        (None, None),
+        ("unknown-contract", '"ella-canonical-source-v1:' + "a" * 64 + '"'),
+        ("ella-canonical-source-v1", None),
+        ("ella-canonical-source-v1", "ella-canonical-source-v1:" + "a" * 64),
+        ("ella-canonical-source-v1", 'W/"ella-canonical-source-v1:' + "a" * 64 + '"'),
+        ("ella-canonical-source-v1", '"ella-canonical-source-v1:' + "A" * 64 + '"'),
+        ("ella-canonical-source-v1", '"ella-canonical-source-v1:' + "a" * 63 + '"'),
+    ],
+)
+def test_required_cas_rejects_missing_or_malformed_headers_before_write(monkeypatch, contract, if_match):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    writer = MagicMock()
+    monkeypatch.setattr(callbacks, "write_conversation_summary_cas", writer)
+    monkeypatch.setattr(callbacks, "write_conversation_summary", writer)
+
+    headers = {}
+    if contract is not None:
+        headers["X-Ella-CAS-Contract"] = contract
+    if if_match is not None:
+        headers["If-Match"] = if_match
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+
+    assert response.status_code == 428
+    if if_match:
+        assert if_match not in response.text
+    writer.assert_not_called()
+
+
+def test_optional_mode_allows_only_fully_headerless_legacy_write(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_OPTIONAL)
+    legacy_calls = []
+
+    async def legacy_writer(**kwargs):
+        legacy_calls.append(kwargs)
+        return {"status": "ok", "conversation_id": kwargs["conversation_id"]}
+
+    monkeypatch.setattr(callbacks, "write_conversation_summary", legacy_writer)
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conversation-a",
+            _cas_update(),
+            uid="uid-a",
+            service=_service_authority("uid-a"),
+        )
+    )
+    assert result["conversation_id"] == "conversation-a"
+    assert len(legacy_calls) == 1
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-a",
+                _cas_update(),
+                uid="uid-a",
+                service=_service_authority("uid-a"),
+                cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+            )
+        )
+    assert excinfo.value.status_code == 428
+    assert len(legacy_calls) == 1
+
+
+def test_capability_signal_reports_enforcement_without_credentials(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    app = FastAPI()
+    app.include_router(callbacks.router)
+    response = TestClient(app).get("/v1/ella/conversation/summary/capabilities")
+    assert response.status_code == 200
+    assert response.json() == {
+        "contract": "ella-canonical-source-v1",
+        "conditional_write": True,
+        "enforcement": "required",
+        "headerless_legacy_writes": False,
+    }
+
+
+def test_cas_wrong_owner_and_missing_conversation_never_write(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    actual_cas_writer = callbacks.write_conversation_summary_cas
+    writer = MagicMock()
+    monkeypatch.setattr(callbacks, "write_conversation_summary_cas", writer)
+    token = "a" * 64
+    with pytest.raises(HTTPException) as owner_error:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-a",
+                _cas_update(),
+                uid="uid-b",
+                service=_service_authority("uid-a"),
+                cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+                if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+            )
+        )
+    assert owner_error.value.status_code == 403
+    writer.assert_not_called()
+
+    async def no_assessment(_uid, _conversation_id):
+        return None
+
+    transaction_calls = []
+
+    def missing_transaction(uid, conversation_id, _builder):
+        transaction_calls.append((uid, conversation_id))
+        return None
+
+    monkeypatch.setattr(callbacks, "_fetch_internal_assessment", no_assessment)
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", missing_transaction)
+    monkeypatch.setattr(callbacks, "write_conversation_summary_cas", actual_cas_writer)
+    with pytest.raises(HTTPException) as missing_error:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-missing",
+                _cas_update(),
+                uid="uid-a",
+                service=_service_authority("uid-a"),
+                cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+                if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+            )
+        )
+    assert missing_error.value.status_code == 404
+    assert transaction_calls == [("uid-a", "conversation-missing")]
+
+
+def test_cas_sanitizer_failure_performs_zero_writes(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-a",
+                callbacks.ConversationSummaryUpdate(overview="too short"),
+                uid="uid-a",
+                service=_service_authority("uid-a"),
+                cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+                if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{_cas_token(conversation)}"',
+            )
+        )
+    assert excinfo.value.status_code == 422
+    assert writes == []
+
+
+def test_cas_failure_does_not_log_or_return_headers_secrets_or_payload(monkeypatch, caplog):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    secret = "private transcript bearer-secret"
+    token = "b" * 64
+
+    async def failing_writer(**_kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(callbacks, "write_conversation_summary_cas", failing_writer)
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            callbacks.update_conversation_summary(
+                "conversation-a",
+                _cas_update(),
+                uid="uid-a",
+                service=_service_authority("uid-a"),
+                cas_contract=callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+                if_match=f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+            )
+        )
+
+    assert excinfo.value.status_code == 500
+    assert excinfo.value.detail == "Conversation summary update failed"
+    assert secret not in caplog.text
+    assert token not in caplog.text
