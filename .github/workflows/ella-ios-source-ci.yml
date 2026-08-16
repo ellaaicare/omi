@@ -54,6 +54,7 @@ jobs:
     timeout-minutes: 60
     env:
       ELLA_CI_FLUTTER_VERSION: 3.41.1
+      ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       ELLA_CI_NETWORK_SANDBOX: >-
         (version 1) (allow default) (deny network*)
         (allow network-inbound (local ip "localhost:*"))
@@ -67,8 +68,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify immutable checked-out head
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          expected_head="${ELLA_EXPECTED_HEAD_SHA}"
+          [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character immutable head SHA." >&2
+            exit 1
+          }
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$checked_out_head" == "$expected_head" ]] || {
+            echo "Checked-out HEAD $checked_out_head does not match expected immutable head $expected_head." >&2
+            exit 1
+          }
+          printf 'Exact-head gate receipt: event=%s expected_head=%s checked_out_HEAD=%s\n' \
+            "${GITHUB_EVENT_NAME}" "$expected_head" "$checked_out_head"
+          {
+            echo '### Exact-head gate receipt'
+            printf -- '- Event: `%s`\n' "${GITHUB_EVENT_NAME}"
+            printf -- '- Expected immutable SHA: `%s`\n' "$expected_head"
+            printf -- '- Checked-out HEAD: `%s`\n' "$checked_out_head"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify credential-free source CI scope
         working-directory: .
