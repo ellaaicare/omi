@@ -367,6 +367,7 @@ async def persist_v2v_voice_turn(
             canonical,
             limit=2,
             max_text_chars=_MAX_VOICE_TRANSCRIPT_CHARS,
+            newest_first=False,
         ),
     }
 

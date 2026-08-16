@@ -691,44 +691,65 @@ void main() {
       }
     });
 
-    test('same coarse owner cannot hydrate a turn from a prior exact authority generation', () async {
+    test('cold start sweeps an unmarked obsolete authority without crossing owners or deleting current', () async {
       final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-authority-generation-');
       try {
         final store = FileV2VTurnDurableStore(baseDirectory: directory);
         await store.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
-
-        final authorityBWrites = <V2VTranscriptTurn>[];
-        final authorityBPage = V2VTurnReconciler(
-          durableStore: FileV2VTurnDurableStore(baseDirectory: directory),
-          writer: (turn) async {
-            authorityBWrites.add(turn);
-            return true;
-          },
-        );
-        await beginSession(
-          authorityBPage,
-          authorityFingerprint: authorityFingerprintB,
-          sessionId: 'authority-b',
-          isAuthorityCurrent: () => true,
-        );
-        await authorityBPage.settle();
-
-        expect(authorityBWrites, isEmpty);
-        expect(
-          await store.load(
-            uid: 'uid-a',
-            ownerNamespace: ownerNamespaceA,
-            authorityFingerprint: authorityFingerprintA,
-          ),
-          hasLength(1),
-        );
-        expect(
-          await store.load(
-            uid: 'uid-a',
-            ownerNamespace: ownerNamespaceA,
+        await store.put(
+          ownedTurn(
+            sessionId: 'authority-b',
+            ordinal: 2,
             authorityFingerprint: authorityFingerprintB,
           ),
-          isEmpty,
+        );
+        final currentCleanupMarker = File(
+          '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintB/cleanup_required.json',
+        );
+        await currentCleanupMarker.writeAsString(
+          jsonEncode({
+            'version': 2,
+            'uid': 'uid-a',
+            'owner_namespace': ownerNamespaceA,
+            'authority_fingerprint': authorityFingerprintB,
+            'status': 'cleanup_required',
+          }),
+          flush: true,
+        );
+        await store.put(
+          ownedTurn(
+            sessionId: 'other-owner',
+            ordinal: 3,
+            uid: 'uid-b',
+            ownerNamespace: ownerNamespaceB,
+          ),
+        );
+
+        final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        final currentTurns = await restartedStore.load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintB,
+        );
+
+        expect(currentTurns.map((turn) => turn.sessionId), ['authority-b']);
+        expect(
+          Directory('${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA').existsSync(),
+          isFalse,
+        );
+        expect(
+          Directory('${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintB').existsSync(),
+          isTrue,
+        );
+        expect(currentCleanupMarker.existsSync(), isTrue);
+        expect(
+          (await restartedStore.load(
+            uid: 'uid-b',
+            ownerNamespace: ownerNamespaceB,
+            authorityFingerprint: authorityFingerprintA,
+          ))
+              .map((turn) => turn.sessionId),
+          ['other-owner'],
         );
       } finally {
         await directory.delete(recursive: true);
@@ -891,7 +912,7 @@ void main() {
       }
     });
 
-    test('restart marker scan clears obsolete authority after a crash before manifest rewrite', () async {
+    test('malformed manifest cleanup is marker-first and survives a restart before deletion', () async {
       final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-cleanup-marker-first-');
       try {
         final failingStore = FileV2VTurnDurableStore(
@@ -906,6 +927,13 @@ void main() {
             authorityFingerprint: authorityFingerprintB,
           ),
         );
+        final obsoleteManifest = File(
+          '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/pending_turns.json',
+        );
+        final obsoleteBackup = Directory('${obsoleteManifest.path}.bak');
+        await obsoleteManifest.writeAsString('{malformed private payload', flush: true);
+        await obsoleteBackup.create();
+        await File('${obsoleteBackup.path}/unreadable-private-turns').writeAsString('must not be opened', flush: true);
         await expectLater(
           failingStore.clearOwner(
             uid: 'uid-a',
@@ -913,6 +941,12 @@ void main() {
             authorityFingerprint: authorityFingerprintA,
           ),
           throwsA(isA<FileSystemException>()),
+        );
+        expect(
+          File(
+            '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/cleanup_required.json',
+          ).existsSync(),
+          isTrue,
         );
 
         final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);

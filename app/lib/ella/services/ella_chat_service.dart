@@ -39,6 +39,16 @@ typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+int _chronologicalMessageOrder(ServerMessage first, ServerMessage second) {
+  final timestampOrder = first.createdAt.compareTo(second.createdAt);
+  if (timestampOrder != 0) return timestampOrder;
+  final firstRoleOrder = first.sender == MessageSender.human ? 0 : 1;
+  final secondRoleOrder = second.sender == MessageSender.human ? 0 : 1;
+  final roleOrder = firstRoleOrder.compareTo(secondRoleOrder);
+  if (roleOrder != 0) return roleOrder;
+  return first.id.compareTo(second.id);
+}
+
 const ellaChatInactivityTimeout = Duration(seconds: 75);
 
 Stream<T> withEllaChatInactivityTimeout<T>(Stream<T> stream, {Duration timeout = ellaChatInactivityTimeout}) =>
@@ -179,12 +189,15 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
         ),
       );
     }
+    final messagesById = {for (final message in messages) message.id: message};
     if (messages.length != 2 ||
-        messages.map((message) => message.id).toSet().length != 2 ||
-        messages.map((message) => message.sender).toSet().length != 2) {
+        messagesById.keys.toSet().difference({userEventId, assistantEventId}).isNotEmpty ||
+        messagesById.length != 2 ||
+        messagesById[userEventId]?.sender != MessageSender.human ||
+        messagesById[assistantEventId]?.sender != MessageSender.ai) {
       return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
     }
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    messages.sort(_chronologicalMessageOrder);
     return EllaServiceResult.success(messages);
   } on ExactAccountAuthorityChangedException {
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
@@ -272,7 +285,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     }
 
     // API returns newest first; reverse for chronological UI order
-    result.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    result.sort(_chronologicalMessageOrder);
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
     return EllaServiceResult.success(result);
   } on ClientApiFailure catch (failure) {

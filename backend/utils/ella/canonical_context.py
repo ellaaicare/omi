@@ -67,6 +67,17 @@ def _role_for_event(event: dict[str, Any]) -> str:
     return "user"
 
 
+def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[float, int, str]:
+    try:
+        parsed = _parse_iso(_event_time(event))
+    except (TypeError, ValueError):
+        parsed = None
+    timestamp = parsed.timestamp() if parsed is not None else float("-inf")
+    role_order = 1 if _role_for_event(event) == "assistant" else 0
+    event_id = str(event.get("event_id") or event.get("id") or "")
+    return (-timestamp if newest_first else timestamp, role_order, event_id)
+
+
 async def fetch_canonical_timeline(
     uid: str,
     *,
@@ -162,10 +173,16 @@ def canonical_events_to_chat_turns(events: list[dict[str, Any]], *, limit: int =
 
 
 def canonical_events_to_server_messages(
-    events: list[dict[str, Any]], *, limit: int = 50, max_text_chars: int = 2000
+    events: list[dict[str, Any]],
+    *,
+    limit: int = 50,
+    max_text_chars: int = 2000,
+    newest_first: bool = True,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
-    for event in reversed(list(events)[-limit:]):
+    selected_events = list(events)[-limit:]
+    selected_events.sort(key=lambda event: _server_message_order(event, newest_first=newest_first))
+    for event in selected_events:
         event_max_text_chars = (
             max(max_text_chars, MAX_IOS_VOICE_TEXT_CHARS) if event.get("channel") == "ios_voice" else max_text_chars
         )

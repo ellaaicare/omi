@@ -214,8 +214,13 @@ void main() {
             'session_id': 'session-1',
             'turn_id': 'turn-000001',
             'messages': [
-              {'id': 'canonical-user', 'sender': 'human', 'text': 'Question', 'created_at': '2026-08-15T20:00:00Z'},
-              {'id': 'canonical-assistant', 'sender': 'ai', 'text': 'Answer', 'created_at': '2026-08-15T20:00:02Z'},
+              {'id': 'turn-000001:user', 'sender': 'human', 'text': 'Question', 'created_at': '2026-08-15T20:00:00Z'},
+              {
+                'id': 'turn-000001:assistant',
+                'sender': 'ai',
+                'text': 'Answer',
+                'created_at': '2026-08-15T20:00:02Z',
+              },
             ],
           }),
           200,
@@ -224,8 +229,54 @@ void main() {
     );
 
     expect(result.isSuccess, isTrue);
-    expect(result.value?.map((message) => message.id), ['canonical-user', 'canonical-assistant']);
+    expect(result.value?.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
     expect(result.value?.every((message) => message.fromVoice), isTrue);
+  });
+
+  test('equal-timestamp V2V hydration deterministically restores user before assistant by event identity', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final timestamp = DateTime.utc(2026, 8, 15, 20);
+    final result = await persistEllaV2VTurn(
+      uid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: timestamp,
+      completedAt: timestamp,
+      exactAuthority: authority,
+      transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'session_id': 'session-1',
+            'turn_id': 'turn-000001',
+            'messages': [
+              {
+                'id': 'turn-000001:assistant',
+                'sender': 'ai',
+                'text': 'Answer',
+                'created_at': timestamp.toIso8601String(),
+              },
+              {
+                'id': 'turn-000001:user',
+                'sender': 'human',
+                'text': 'Question',
+                'created_at': timestamp.toIso8601String(),
+              },
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
+    expect(result.value?.map((message) => message.sender), [MessageSender.human, MessageSender.ai]);
+    expect(result.value?.map((message) => message.createdAt.toUtc()), [timestamp, timestamp]);
   });
 
   test('V2V backend error body is neither accepted nor surfaced as content', () async {

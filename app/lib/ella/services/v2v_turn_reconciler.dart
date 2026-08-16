@@ -260,7 +260,11 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
   }) =>
       _serialized(() async {
         await _discardLegacyCoarseManifest(ownerNamespace);
-        await _retryMarkedCleanup(uid, ownerNamespace);
+        await _sweepObsoleteAuthorities(
+          uid: uid,
+          ownerNamespace: ownerNamespace,
+          currentAuthorityFingerprint: authorityFingerprint,
+        );
         return List<V2VTranscriptTurn>.of(
           await _read(
             uid: uid,
@@ -320,13 +324,12 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String authorityFingerprint,
   }) =>
       _serialized(() async {
-        final turns = await _read(
-          uid: uid,
-          ownerNamespace: ownerNamespace,
-          authorityFingerprint: authorityFingerprint,
-        );
         final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
-        if (!await directory.exists()) return;
+        final directoryType = await FileSystemEntity.type(directory.path, followLinks: false);
+        if (directoryType == FileSystemEntityType.notFound) return;
+        if (directoryType != FileSystemEntityType.directory) {
+          throw const FileSystemException('Invalid V2V authority directory');
+        }
         await _writeCleanupMarker(
           directory: directory,
           uid: uid,
@@ -334,14 +337,11 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
           authorityFingerprint: authorityFingerprint,
         );
         await _afterCleanupMarkerWrite?.call(directory);
-        await _write(
-          uid: uid,
+        await _deleteAuthorityDirectory(
+          directory: directory,
           ownerNamespace: ownerNamespace,
           authorityFingerprint: authorityFingerprint,
-          status: _cleanupRequiredStatus,
-          turns: turns,
         );
-        await _deleteAuthorityDirectory(directory);
       });
 
   Future<T> _serialized<T>(Future<T> Function() operation) {
@@ -413,10 +413,6 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
           }
           turns.add(turn);
         }
-        if (json['status'] == _cleanupRequiredStatus) {
-          await _deleteAuthorityDirectory(directory);
-          return [];
-        }
         return turns;
       } catch (error) {
         lastError = error;
@@ -477,29 +473,44 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     }
   }
 
-  Future<void> _retryMarkedCleanup(String uid, String ownerNamespace) async {
+  Future<void> _sweepObsoleteAuthorities({
+    required String uid,
+    required String ownerNamespace,
+    required String currentAuthorityFingerprint,
+  }) async {
+    if (uid.trim().isEmpty) throw ArgumentError.value(uid, 'uid');
+    await _authorityDirectory(ownerNamespace, currentAuthorityFingerprint);
     final ownerDirectory = await _ownerDirectory(ownerNamespace);
-    if (!await ownerDirectory.exists()) return;
+    final ownerDirectoryType = await FileSystemEntity.type(ownerDirectory.path, followLinks: false);
+    if (ownerDirectoryType == FileSystemEntityType.notFound) return;
+    if (ownerDirectoryType != FileSystemEntityType.directory) {
+      throw const FileSystemException('Invalid V2V owner directory');
+    }
     var cleanupAttempts = 0;
     await for (final entity in ownerDirectory.list(followLinks: false)) {
       if (entity is! Directory) continue;
       final fingerprint = entity.uri.pathSegments.where((segment) => segment.isNotEmpty).last;
-      if (!_authorityFingerprintPattern.hasMatch(fingerprint)) continue;
-      final marker = File('${entity.path}/cleanup_required.json');
-      if (!await marker.exists()) continue;
-      final decoded = jsonDecode(await marker.readAsString());
-      if (decoded is! Map) throw const FormatException('Invalid V2V cleanup marker');
-      final json = Map<String, dynamic>.from(decoded);
-      if (json['version'] != _manifestVersion ||
-          json['uid'] != uid ||
-          json['owner_namespace'] != ownerNamespace ||
-          json['authority_fingerprint'] != fingerprint ||
-          json['status'] != _cleanupRequiredStatus) {
-        throw const FormatException('Mismatched V2V cleanup marker');
-      }
-      if (cleanupAttempts >= maxCleanupNamespacesPerLoad) continue;
+      if (!_authorityFingerprintPattern.hasMatch(fingerprint) || fingerprint == currentAuthorityFingerprint) continue;
+      if (cleanupAttempts >= maxCleanupNamespacesPerLoad) break;
       cleanupAttempts++;
-      await _deleteAuthorityDirectory(entity);
+      try {
+        await _writeCleanupMarker(
+          directory: entity,
+          uid: uid,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: fingerprint,
+        );
+        await _afterCleanupMarkerWrite?.call(entity);
+        await _deleteAuthorityDirectory(
+          directory: entity,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: fingerprint,
+        );
+      } on FileSystemException {
+        // A successfully written marker makes the exact obsolete directory
+        // discoverable on the next verified cold start without blocking the
+        // current authority's payload hydration.
+      }
     }
   }
 
@@ -509,6 +520,11 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String ownerNamespace,
     required String authorityFingerprint,
   }) async {
+    await _requireExactAuthorityDirectory(
+      directory: directory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
     final marker = File('${directory.path}/cleanup_required.json');
     final temporary = File('${marker.path}.tmp');
     if (await temporary.exists()) await temporary.delete();
@@ -525,9 +541,37 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     await temporary.rename(marker.path);
   }
 
-  Future<void> _deleteAuthorityDirectory(Directory directory) async {
+  Future<void> _requireExactAuthorityDirectory({
+    required Directory directory,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
+    final expected = await _authorityDirectory(ownerNamespace, authorityFingerprint);
+    if (directory.absolute.path != expected.absolute.path ||
+        await FileSystemEntity.type(directory.path, followLinks: false) != FileSystemEntityType.directory) {
+      throw const FileSystemException('Invalid V2V authority directory');
+    }
+  }
+
+  Future<void> _deleteAuthorityDirectory({
+    required Directory directory,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+  }) async {
+    await _requireExactAuthorityDirectory(
+      directory: directory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
     await _beforeCleanupDelete?.call(directory);
-    if (await directory.exists()) await directory.delete(recursive: true);
+    final directoryType = await FileSystemEntity.type(directory.path, followLinks: false);
+    if (directoryType == FileSystemEntityType.notFound) return;
+    await _requireExactAuthorityDirectory(
+      directory: directory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
+    await directory.delete(recursive: true);
   }
 }
 

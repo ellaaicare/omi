@@ -75,6 +75,24 @@ def test_v2v_turn_returns_full_accepted_transcripts_without_history_truncation(m
     assert messages_by_sender == {"human": long_user_text, "ai": long_assistant_text}
 
 
+def test_v2v_turn_equal_timestamp_returns_user_before_assistant_with_stable_event_ids(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+
+    result = asyncio.run(
+        chat.persist_v2v_voice_turn(
+            _request(started_at=timestamp, completed_at=timestamp),
+            authenticated_uid="uid-a",
+        )
+    )
+
+    assert [(message["id"], message["sender"], message["created_at"]) for message in result["messages"]] == [
+        ("turn-000001:user", "human", timestamp.isoformat()),
+        ("turn-000001:assistant", "ai", timestamp.isoformat()),
+    ]
+
+
 def test_v2v_turn_readback_uses_leading_event_id_index_with_exact_owner_binding(monkeypatch):
     pool = _ReadbackPool()
 
@@ -157,3 +175,21 @@ def test_v2v_turn_survives_canonical_history_refresh(monkeypatch):
     assert len(refreshed) == 2
     assert {message["sender"] for message in refreshed} == {"human", "ai"}
     assert {message["text"] for message in refreshed} == {long_user_text, long_assistant_text}
+
+
+def test_equal_timestamp_canonical_history_preserves_terminal_user_assistant_chronology(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+    asyncio.run(
+        chat.persist_v2v_voice_turn(
+            _request(started_at=timestamp, completed_at=timestamp),
+            authenticated_uid="uid-a",
+        )
+    )
+
+    events = asyncio.run(store.timeline(uid="uid-a", since=None, limit=50, channels=["ios_voice"]))
+    refreshed = canonical_events_to_server_messages(events, limit=50)
+
+    assert [message["id"] for message in refreshed] == ["turn-000001:user", "turn-000001:assistant"]
+    assert [message["sender"] for message in refreshed] == ["human", "ai"]
