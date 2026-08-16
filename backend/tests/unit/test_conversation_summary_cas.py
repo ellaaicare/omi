@@ -333,37 +333,41 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
     )
     barrier = threading.Barrier(2)
     boundary_lock = threading.Lock()
+    first_read_id = [None]
     first_commit_id = [None]
     transactional_read_ids = []
     first_commit_waiting = threading.Event()
     overlapping_read_started = threading.Event()
     first_commit_rpc_started = threading.Event()
+    first_commit_completed = threading.Event()
     transaction_type = type(client.transaction())
     original_commit = transaction_type._commit
     original_batch_get_documents = client._firestore_api.batch_get_documents
 
     def observed_batch_get_documents(*args, **kwargs):
-        response = original_batch_get_documents(*args, **kwargs)
         request = kwargs.get("request") or args[0]
         transaction_id = request.get("transaction") if isinstance(request, dict) else request.transaction
         transaction_id = bytes(transaction_id or b"")
+        wait_for_first_commit = False
         if transaction_id:
             with boundary_lock:
                 transactional_read_ids.append(transaction_id)
-                if (
-                    first_commit_id[0] is not None
-                    and transaction_id != first_commit_id[0]
-                    and not overlapping_read_started.is_set()
-                ):
+                if first_read_id[0] is None:
+                    first_read_id[0] = transaction_id
+                elif transaction_id != first_read_id[0] and not overlapping_read_started.is_set():
                     assert not first_commit_rpc_started.is_set()
                     overlapping_read_started.set()
-        return response
+                    wait_for_first_commit = True
+        if wait_for_first_commit and not first_commit_completed.wait(timeout=10):
+            raise AssertionError("first transaction did not complete its Firestore commit")
+        return original_batch_get_documents(*args, **kwargs)
 
     def coordinated_commit(transaction):
         transaction_id = bytes(transaction._id or b"")
         coordinate = False
         with boundary_lock:
             if first_commit_id[0] is None:
+                assert transaction_id == first_read_id[0]
                 first_commit_id[0] = transaction_id
                 coordinate = True
                 first_commit_waiting.set()
@@ -373,6 +377,10 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
             if not overlapping_read_started.wait(timeout=10):
                 raise AssertionError("second transaction did not reach the Firestore read boundary")
             first_commit_rpc_started.set()
+            try:
+                return original_commit(transaction)
+            finally:
+                first_commit_completed.set()
         return original_commit(transaction)
 
     monkeypatch.setattr(client._firestore_api, "batch_get_documents", observed_batch_get_documents)
