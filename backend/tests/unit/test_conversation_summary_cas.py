@@ -1,8 +1,17 @@
+import asyncio
+import copy
 import importlib.util
+import os
 import sys
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 
 def _load_conversations_module(monkeypatch):
@@ -127,3 +136,234 @@ def test_conversation_builder_reads_and_writes_with_the_same_transaction(monkeyp
     assert missing is None
     assert missing_ref.read_transactions == [missing_transaction]
     assert missing_transaction.updates == []
+
+
+def test_conversation_builder_commits_correction_audit_in_the_same_transaction(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    monkeypatch.setattr(conversations, "_prepare_conversation_for_write", lambda data, _uid, _level: data)
+
+    correction_ref = object()
+
+    class CorrectionCollection:
+        def document(self, correction_id):
+            assert correction_id == "correction-a"
+            return correction_ref
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: {"data_protection_level": "standard"})
+
+        def collection(self, name):
+            assert name == "corrections"
+            return CorrectionCollection()
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+            self.sets = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def set(self, ref, payload, merge=False):
+            self.sets.append((ref, payload, merge))
+
+    ref = ConversationRef()
+    transaction = Transaction()
+    result = conversations._update_conversation_with_builder_transaction(
+        transaction,
+        ref,
+        "uid-1",
+        lambda _current: (
+            {"structured.title": "winner"},
+            {"correction_audit": {"status": "applied", "applied_summary_version_id": "winner-v2"}},
+        ),
+        correction_id="correction-a",
+    )
+
+    assert result["result"]["correction_audit"]["status"] == "applied"
+    assert transaction.updates == [(ref, {"structured.title": "winner"})]
+    assert transaction.sets == [
+        (correction_ref, {"status": "applied", "applied_summary_version_id": "winner-v2"}, True)
+    ]
+
+
+def test_correction_audit_enqueue_failure_aborts_the_conversation_transaction(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    monkeypatch.setattr(conversations, "_prepare_conversation_for_write", lambda data, _uid, _level: data)
+
+    class CorrectionCollection:
+        def document(self, _correction_id):
+            return object()
+
+    class ConversationRef:
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: {"data_protection_level": "standard"})
+
+        def collection(self, _name):
+            return CorrectionCollection()
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def set(self, _ref, _payload, merge=False):
+            raise RuntimeError("synthetic correction audit enqueue failure")
+
+    transaction = Transaction()
+    with pytest.raises(RuntimeError, match="correction audit enqueue failure"):
+        conversations._update_conversation_with_builder_transaction(
+            transaction,
+            ConversationRef(),
+            "uid-1",
+            lambda _current: (
+                {"structured.title": "must-not-commit"},
+                {"correction_audit": {"status": "applied"}},
+            ),
+            correction_id="correction-a",
+        )
+
+    # The real Firestore transaction never commits queued writes when its body raises.
+    assert len(transaction.updates) == 1
+
+
+def _load_emulator_modules(monkeypatch):
+    from google.cloud import firestore
+
+    import utils
+    import utils.other
+
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "omi-ci")
+    client = firestore.Client(project=project)
+    database_client = SimpleNamespace(db=client)
+    monkeypatch.setitem(sys.modules, "database._client", database_client)
+    monkeypatch.setitem(sys.modules, "database.users", MagicMock())
+    monkeypatch.setitem(sys.modules, "database.redis_db", MagicMock())
+    monkeypatch.setitem(sys.modules, "utils.encryption", MagicMock())
+    monkeypatch.setitem(sys.modules, "utils.other.hume", MagicMock())
+    monkeypatch.setitem(sys.modules, "utils.other.storage", MagicMock(list_audio_chunks=MagicMock(return_value=[])))
+
+    backend = Path(__file__).resolve().parents[2]
+    conversations_path = backend / "database" / "conversations.py"
+    conversations_spec = importlib.util.spec_from_file_location(
+        "database.conversations_summary_cas_emulator_test", conversations_path
+    )
+    conversations = importlib.util.module_from_spec(conversations_spec)
+    assert conversations_spec is not None and conversations_spec.loader is not None
+    conversations_spec.loader.exec_module(conversations)
+    monkeypatch.setitem(sys.modules, "database.conversations", conversations)
+
+    writeback_path = backend / "ella" / "services" / "summary_writeback.py"
+    writeback_spec = importlib.util.spec_from_file_location(
+        "ella.services.summary_writeback_emulator_test", writeback_path
+    )
+    writeback = importlib.util.module_from_spec(writeback_spec)
+    assert writeback_spec is not None and writeback_spec.loader is not None
+    writeback_spec.loader.exec_module(writeback)
+    return client, conversations, writeback
+
+
+@pytest.mark.skipif(
+    os.environ.get("ELLA_FIRESTORE_EMULATOR_TESTS") != "true",
+    reason="requires the hosted Firestore emulator gate",
+)
+def test_real_firestore_transaction_contention_preserves_one_complete_canonical_source(monkeypatch):
+    client, _conversations, writeback = _load_emulator_modules(monkeypatch)
+    uid = f"summary-cas-{uuid.uuid4()}"
+    conversation_id = "conversation-a"
+    conversation_ref = client.collection("users").document(uid).collection("conversations").document(conversation_id)
+    original = {
+        "started_at": datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
+        "finished_at": datetime(2026, 8, 15, 12, 1, tzinfo=timezone.utc),
+        "structured": {
+            "title": "Original",
+            "overview": "Original overview",
+            "emoji": "🪽",
+            "category": "other",
+        },
+        "transcript_segments": [{"speaker": "Other", "text": "private transcript"}],
+        "summary_versions": [{"id": "original-v1", "is_active": True}],
+        "active_summary_version_id": "original-v1",
+        "data_protection_level": "standard",
+    }
+    conversation_ref.set(copy.deepcopy(original))
+    expected = writeback.canonical_source_sha256(
+        writeback.canonical_source_from_conversation(
+            uid=uid,
+            conversation_id=conversation_id,
+            conversation=original,
+        )
+    )
+    barrier = threading.Barrier(2)
+    blocked_threads = set()
+    blocked_threads_lock = threading.Lock()
+    actual_source = writeback.canonical_source_from_conversation
+
+    def synchronized_source(**kwargs):
+        thread_id = threading.get_ident()
+        with blocked_threads_lock:
+            first_read = thread_id not in blocked_threads
+            blocked_threads.add(thread_id)
+        if first_read:
+            barrier.wait(timeout=10)
+        return actual_source(**kwargs)
+
+    monkeypatch.setattr(writeback, "canonical_source_from_conversation", synchronized_source)
+
+    def contender(label):
+        return asyncio.run(
+            writeback.write_conversation_summary_cas(
+                uid=uid,
+                conversation_id=conversation_id,
+                expected_canonical_source_sha256=expected,
+                title=f"Winner {label}",
+                overview=f"[Ella] Complete winning overview from contender {label} with stable source data.",
+                emoji="🧠",
+                category="personal",
+                summary_source="hermes_parallel",
+                summary_kind="hermes_enriched",
+                correction_id=f"correction-{label}",
+                canonical_writer=lambda *args, **kwargs: {"ok": True},
+            )
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(contender, label) for label in ("A", "B")]
+            outcomes = []
+            errors = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result(timeout=20))
+                except Exception as error:
+                    errors.append(error)
+
+        assert len(outcomes) == 1, [repr(error) for error in errors]
+        assert outcomes[0]["status"] == "ok"
+        assert len(errors) == 1
+        assert isinstance(errors[0], writeback.CanonicalConversationSourceMismatchError)
+
+        stored = conversation_ref.get().to_dict()
+        winning_title = stored["structured"]["title"]
+        winning_overview = stored["structured"]["overview"]
+        assert winning_title in {"Winner A", "Winner B"}
+        assert stored["transcript_segments"] == original["transcript_segments"]
+        assert stored["started_at"] == original["started_at"]
+        assert stored["finished_at"] == original["finished_at"]
+        assert len(stored["transcript_segments"]) == 1
+        assert len(stored["summary_versions"]) == 2
+        active = next(version for version in stored["summary_versions"] if version["is_active"])
+        assert active["id"] == stored["active_summary_version_id"]
+        assert active["title"] == winning_title
+        assert active["overview"] == winning_overview
+        assert stored["summary_writeback_receipt"]["active_summary_version_id"] == active["id"]
+        winning_label = winning_title.rsplit(" ", 1)[1]
+        corrections = list(conversation_ref.collection("corrections").stream())
+        assert len(corrections) == 1
+        assert corrections[0].id == f"correction-{winning_label}"
+        assert corrections[0].to_dict()["applied_summary_version_id"] == active["id"]
+    finally:
+        conversation_ref.delete()

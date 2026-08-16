@@ -18,6 +18,13 @@ CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "tru
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
 
 
+def require_omi_canonical_write_ready(uid: str) -> None:
+    """Fail before source-store mutation when canonical writes are locally unavailable."""
+    if not CANONICAL_OMI_WRITE_ENABLED:
+        raise RuntimeError("canonical_omi_write_disabled")
+    canonical_event_service_headers(uid)
+
+
 def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 

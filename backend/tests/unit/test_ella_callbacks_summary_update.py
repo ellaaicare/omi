@@ -49,6 +49,7 @@ def disable_canonical_omi_network(monkeypatch):
         "write_omi_canonical_event",
         lambda *args, **kwargs: {"ok": True, "inserted": 1, "duplicates": 0},
     )
+    monkeypatch.setattr(callbacks, "require_omi_canonical_write_ready", lambda _uid: None)
 
 
 def test_update_conversation_summary_clears_stale_app_results(monkeypatch):
@@ -544,7 +545,7 @@ def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
             "new_summary_version_id": "winner-v2",
         }
 
-    def transact(_uid, _conversation_id, builder):
+    def transact(_uid, _conversation_id, builder, correction_id=None):
         if interleave is not None:
             # Emulate Firestore's optimistic retry: the first transaction read
             # passes CAS, a concurrent writer wins before commit, and the
@@ -553,7 +554,8 @@ def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
             interleave(conversation)
         before = copy.deepcopy(conversation)
         update_data, result = builder(copy.deepcopy(conversation))
-        writes.append(copy.deepcopy(update_data))
+        if update_data:
+            writes.append(copy.deepcopy(update_data))
         for key, value in update_data.items():
             if key.startswith("structured."):
                 conversation.setdefault("structured", {})[key.split(".", 1)[1]] = value
@@ -564,6 +566,11 @@ def _install_atomic_cas_fake(monkeypatch, conversation, *, interleave=None):
     monkeypatch.setattr(callbacks, "_fetch_internal_assessment", no_assessment)
     monkeypatch.setattr(callbacks.conversations_db, "build_summary_version_update", version_update)
     monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", transact)
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda _uid, _conversation_id: copy.deepcopy(conversation),
+    )
     return writes
 
 
@@ -634,6 +641,211 @@ def test_cas_success_is_atomic_and_returns_content_free_receipt_header(monkeypat
     assert conversation["structured"]["title"] == "Winning summary"
     assert conversation["active_summary_version_id"] == "winner-v2"
     assert "private transcript" not in response.text
+
+
+def _required_cas_update():
+    update = _cas_update()
+    update.require_canonical = True
+    return update
+
+
+def _cas_headers(token):
+    return {
+        "X-Ella-CAS-Contract": callbacks.ELLA_CANONICAL_SOURCE_CONTRACT,
+        "If-Match": f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{token}"',
+    }
+
+
+@pytest.mark.parametrize("failure", ["exception", "unconfirmed"])
+def test_required_canonical_failure_returns_durable_pending_and_exact_retry_reconciles(monkeypatch, failure):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    token = _cas_token(conversation)
+    canonical_calls = []
+
+    def unavailable_writer(*args, **kwargs):
+        canonical_calls.append((args, kwargs))
+        if failure == "exception":
+            raise RuntimeError("synthetic canonical outage")
+        return {"ok": False}
+
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", unavailable_writer)
+    first = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers(token),
+    )
+
+    assert first.status_code == 202
+    assert first.json() == {"status": "pending_reconciliation"}
+    assert first.headers["X-Ella-CAS-Applied"] == callbacks.ELLA_CANONICAL_SOURCE_CONTRACT
+    assert first.headers["X-Ella-CAS-Reconciliation"] == "pending"
+    assert len(writes) == 1
+    assert conversation["structured"]["title"] == "Winning summary"
+    assert conversation["summary_writeback_receipt"]["status"] == "pending_canonical"
+    assert conversation["enrichment_state"]["canonical_status"] == "pending"
+
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", lambda *args, **kwargs: {"ok": True})
+    retry = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers(token),
+    )
+
+    assert retry.status_code == 200
+    assert retry.json() == {"status": "ok"}
+    assert len(writes) == 2
+    assert len(conversation["summary_versions"]) == 2
+    assert conversation["active_summary_version_id"] == "winner-v2"
+    assert conversation["summary_writeback_receipt"]["status"] == "completed"
+    assert conversation["enrichment_state"]["canonical_status"] == "completed"
+    assert len(canonical_calls) == 1
+
+
+def test_required_canonical_preflight_failure_is_zero_write(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    writer = MagicMock()
+    transaction = MagicMock()
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", writer)
+    monkeypatch.setattr(
+        callbacks,
+        "require_omi_canonical_write_ready",
+        lambda _uid: (_ for _ in ()).throw(RuntimeError("not configured")),
+    )
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", transaction)
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers("a" * 64),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Canonical summary dependency unavailable"}
+    transaction.assert_not_called()
+    writer.assert_not_called()
+
+
+def test_firestore_response_loss_reconciles_committed_receipt_without_second_summary_write(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    transact = callbacks.conversations_db.update_conversation_with_builder
+    calls = [0]
+
+    def response_loss(*args, **kwargs):
+        result = transact(*args, **kwargs)
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("synthetic response loss after commit")
+        return result
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", response_loss)
+    token = _cas_token(conversation)
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert len(writes) == 2
+    assert len(conversation["summary_versions"]) == 2
+    assert conversation["summary_writeback_receipt"]["status"] == "completed"
+
+
+def test_firestore_outcome_without_readable_receipt_is_explicitly_unknown(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    writer = MagicMock()
+    monkeypatch.setattr(callbacks, "write_omi_canonical_event", writer)
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation_with_builder",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic transaction outcome loss")),
+    )
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversation", lambda *args, **kwargs: _cas_conversation())
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers("a" * 64),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Conversation summary outcome unknown; retry exact request"}
+    writer.assert_not_called()
+
+
+def test_canonical_finalize_failure_stays_pending_and_retry_is_idempotent(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    transact = callbacks.conversations_db.update_conversation_with_builder
+    finalize_failures = [0]
+    canonical_calls = []
+
+    def fail_first_finalize(*args, **kwargs):
+        if getattr(args[2], "__name__", "") == "finalize" and finalize_failures[0] == 0:
+            finalize_failures[0] += 1
+            raise RuntimeError("synthetic finalize outage")
+        return transact(*args, **kwargs)
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation_with_builder", fail_first_finalize)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda *args, **kwargs: canonical_calls.append((args, kwargs)) or {"ok": True},
+    )
+    token = _cas_token(conversation)
+    first = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers(token),
+    )
+    retry = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers(token),
+    )
+
+    assert first.status_code == 202
+    assert retry.status_code == 200
+    assert len(writes) == 2
+    assert len(conversation["summary_versions"]) == 2
+    assert conversation["summary_writeback_receipt"]["status"] == "completed"
+    assert len(canonical_calls) == 2
+
+
+def test_different_cas_is_blocked_while_required_reconciliation_is_pending(monkeypatch):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    conversation = _cas_conversation()
+    writes = _install_atomic_cas_fake(monkeypatch, conversation)
+    token = _cas_token(conversation)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic outage")),
+    )
+    first = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_required_cas_update().model_dump(),
+        headers=_cas_headers(token),
+    )
+    different = _required_cas_update()
+    different.title = "Different summary"
+    second = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=different.model_dump(),
+        headers=_cas_headers(token),
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert second.json() == {"detail": "Canonical summary reconciliation pending"}
+    assert len(writes) == 1
+    assert len(conversation["summary_versions"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -711,6 +923,47 @@ def test_required_cas_rejects_missing_or_malformed_headers_before_write(monkeypa
     writer.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("X-Ella-CAS-Contract", "malformed"),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+        ],
+        [
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+        ],
+        [
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+            ("If-Match", "malformed"),
+        ],
+        [
+            ("X-Ella-CAS-Contract", callbacks.ELLA_CANONICAL_SOURCE_CONTRACT),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+            ("If-Match", f'"{callbacks.ELLA_CANONICAL_SOURCE_CONTRACT}:{"a" * 64}"'),
+        ],
+    ],
+)
+def test_cas_rejects_duplicate_raw_precondition_headers_before_write(monkeypatch, headers):
+    monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_REQUIRED)
+    writer = MagicMock()
+    monkeypatch.setattr(callbacks, "write_conversation_summary_cas", writer)
+
+    response = _cas_client().patch(
+        "/v1/ella/conversation/conversation-a/summary?uid=uid-a",
+        json=_cas_update().model_dump(),
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Duplicate canonical source precondition headers"}
+    writer.assert_not_called()
+
+
 def test_optional_mode_allows_only_fully_headerless_legacy_write(monkeypatch):
     monkeypatch.setenv(callbacks.SUMMARY_CAS_MODE_ENV, callbacks.SUMMARY_CAS_OPTIONAL)
     legacy_calls = []
@@ -784,7 +1037,7 @@ def test_cas_wrong_owner_and_missing_conversation_never_write(monkeypatch):
 
     transaction_calls = []
 
-    def missing_transaction(uid, conversation_id, _builder):
+    def missing_transaction(uid, conversation_id, _builder, correction_id=None):
         transaction_calls.append((uid, conversation_id))
         return None
 

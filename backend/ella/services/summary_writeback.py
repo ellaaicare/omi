@@ -1,12 +1,18 @@
 """Shared direct conversation-summary writeback with version and ledger provenance."""
 
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 import database.conversations as conversations_db
-from ella.services.canonical_summary_source import canonical_source_from_conversation, canonical_source_sha256
+from ella.services.canonical_summary_source import (
+    ELLA_CANONICAL_SOURCE_CONTRACT,
+    canonical_source_from_conversation,
+    canonical_source_sha256,
+)
 from ella.services.summary_sanitizer import sanitize_summary_update
 from models.conversation import CategoryEnum
 from utils.ella.canonical_omi import write_omi_canonical_event
@@ -74,6 +80,58 @@ class CanonicalConversationSourceMismatchError(RuntimeError):
     pass
 
 
+class CanonicalSummaryDependencyUnavailableError(RuntimeError):
+    pass
+
+
+class CanonicalSummaryReconciliationPendingError(RuntimeError):
+    pass
+
+
+class ConversationSummaryOutcomeUnknownError(RuntimeError):
+    pass
+
+
+SUMMARY_WRITEBACK_RECEIPT_FIELD = 'summary_writeback_receipt'
+SUMMARY_WRITEBACK_PENDING = 'pending_canonical'
+SUMMARY_WRITEBACK_COMPLETED = 'completed'
+SUMMARY_WRITEBACK_COMMITTED = 'committed'
+
+
+def _cas_operation_id(*, expected_canonical_source_sha256: str, mutation: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        {
+            'contract': ELLA_CANONICAL_SOURCE_CONTRACT,
+            'expected_canonical_source_sha256': expected_canonical_source_sha256,
+            'mutation': mutation,
+        },
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+        default=str,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cas_result(
+    *,
+    conversation_id: str,
+    receipt: dict[str, Any],
+    sanitizer_warnings: list[str],
+    idempotent_replay: bool,
+) -> dict[str, Any]:
+    status = receipt.get('status')
+    return {
+        'status': 'pending_reconciliation' if status == SUMMARY_WRITEBACK_PENDING else 'ok',
+        'conversation_id': conversation_id,
+        'updated_fields': list(receipt.get('updated_fields') or []),
+        'active_summary_version_id': receipt.get('active_summary_version_id'),
+        'sanitizer_warnings': sanitizer_warnings,
+        'idempotent_replay': idempotent_replay,
+        'canonical_confirmed': receipt.get('canonical_status') == 'completed',
+    }
+
+
 async def write_conversation_summary_cas(
     *,
     uid: str,
@@ -92,12 +150,12 @@ async def write_conversation_summary_cas(
     ella_tags: Optional[list[str]] = None,
     ella_signal: Optional[dict[str, Any]] = None,
     internal_assessment_fetcher: Optional[Callable[[str, str], Awaitable[Optional[dict]]]] = None,
-    correction_audit_updater: Optional[Callable[[str, str, str, dict], None]] = None,
     canonical_writer: Callable[..., dict] = write_omi_canonical_event,
+    canonical_preflight: Optional[Callable[[str], None]] = None,
     require_canonical: bool = False,
     preserve_generated_results: bool = False,
 ) -> dict[str, Any]:
-    """Apply a canonical-source CAS and summary version update atomically."""
+    """Commit a source CAS with a durable receipt, then reconcile canonical storage."""
     sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
     if sanitized.category is not None:
         try:
@@ -106,6 +164,12 @@ async def write_conversation_summary_cas(
             raise InvalidConversationSummaryCategoryError(sanitized.category) from error
     if all(value is None for value in (sanitized.title, sanitized.overview, sanitized.emoji, sanitized.category)):
         raise ValueError('No fields to update')
+
+    if require_canonical and canonical_preflight is not None:
+        try:
+            canonical_preflight(uid)
+        except Exception as error:
+            raise CanonicalSummaryDependencyUnavailableError('canonical_summary_dependency_unavailable') from error
 
     internal_assessment = None
     if internal_assessment_fetcher:
@@ -118,8 +182,41 @@ async def write_conversation_summary_cas(
             normalized_tags.append(clean)
     normalized_tags = normalized_tags[:12]
     state_updated_at = datetime.now(timezone.utc)
+    mutation = {
+        'uid': uid,
+        'conversation_id': conversation_id,
+        'title': sanitized.title,
+        'overview': sanitized.overview,
+        'emoji': sanitized.emoji,
+        'category': sanitized.category,
+        'summary_source': summary_source,
+        'summary_kind': summary_kind,
+        'correction_id': correction_id,
+        'based_on_version_id': based_on_version_id,
+        'set_active': set_active,
+        'trace_id': trace_id,
+        'ella_tags': normalized_tags,
+        'ella_signal': ella_signal,
+        'require_canonical': require_canonical,
+        'preserve_generated_results': preserve_generated_results,
+    }
+    operation_id = _cas_operation_id(
+        expected_canonical_source_sha256=expected_canonical_source_sha256,
+        mutation=mutation,
+    )
 
     def build_update(conversation: dict[str, Any]):
+        existing_receipt = conversation.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+        if existing_receipt.get('operation_id') == operation_id:
+            return {}, {
+                'receipt': existing_receipt,
+                'conversation': conversation,
+                'correction_audit': None,
+                'idempotent_replay': True,
+            }
+        if existing_receipt.get('status') == SUMMARY_WRITEBACK_PENDING:
+            raise CanonicalSummaryReconciliationPendingError('canonical_summary_reconciliation_pending')
+
         current_source = canonical_source_from_conversation(
             uid=uid,
             conversation_id=conversation_id,
@@ -184,38 +281,101 @@ async def write_conversation_summary_cas(
                 'updated_at': state_updated_at,
                 'active_summary_version_id': version_update['active_summary_version_id'],
             }
-        return update_data, {'structured': structured, 'version_update': version_update}
+        correction_audit = None
+        if correction_id:
+            correction_audit = {
+                'status': 'applied',
+                'updated_at': state_updated_at.isoformat(),
+                'applied_at': state_updated_at.isoformat(),
+                'applied_summary_version_id': version_update['active_summary_version_id'],
+                'summary_version_kind': summary_kind,
+                'summary_version_source': summary_source,
+            }
+        receipt = {
+            'contract': ELLA_CANONICAL_SOURCE_CONTRACT,
+            'operation_id': operation_id,
+            'status': SUMMARY_WRITEBACK_PENDING if require_canonical else SUMMARY_WRITEBACK_COMMITTED,
+            'canonical_status': 'pending' if require_canonical else 'unconfirmed',
+            'correction_audit_status': 'applied' if correction_id else 'not_requested',
+            'active_summary_version_id': version_update['active_summary_version_id'],
+            'expected_canonical_source_sha256': expected_canonical_source_sha256,
+            'updated_fields': list(update_data.keys()),
+            'created_at': state_updated_at,
+            'updated_at': state_updated_at,
+        }
+        update_data[SUMMARY_WRITEBACK_RECEIPT_FIELD] = receipt
+        canonical_conversation = {
+            **conversation,
+            'id': conversation_id,
+            'structured': structured,
+            'summary_versions': version_update['summary_versions'],
+            'active_summary_version_id': version_update['active_summary_version_id'],
+            'enrichment_state': update_data['enrichment_state'],
+            'internal_assessment': update_data.get('internal_assessment', conversation.get('internal_assessment')),
+            'ella_tags': update_data.get('ella_tags', conversation.get('ella_tags') or []),
+            'ella_signal': update_data.get('ella_signal', conversation.get('ella_signal')),
+            SUMMARY_WRITEBACK_RECEIPT_FIELD: receipt,
+        }
+        return update_data, {
+            'receipt': receipt,
+            'conversation': canonical_conversation,
+            'correction_audit': correction_audit,
+            'idempotent_replay': False,
+        }
 
-    transaction_result = conversations_db.update_conversation_with_builder(uid, conversation_id, build_update)
+    try:
+        transaction_result = conversations_db.update_conversation_with_builder(
+            uid,
+            conversation_id,
+            build_update,
+            correction_id=correction_id,
+        )
+    except (CanonicalConversationSourceMismatchError, CanonicalSummaryReconciliationPendingError):
+        raise
+    except Exception as error:
+        try:
+            conversation = conversations_db.get_conversation(uid, conversation_id)
+        except Exception as read_error:
+            raise ConversationSummaryOutcomeUnknownError('conversation_summary_outcome_unknown') from read_error
+        receipt = (conversation or {}).get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+        if receipt.get('operation_id') != operation_id:
+            raise ConversationSummaryOutcomeUnknownError('conversation_summary_outcome_unknown') from error
+        transaction_result = {
+            'conversation': conversation,
+            'update_data': {},
+            'result': {
+                'receipt': receipt,
+                'conversation': conversation,
+                'correction_audit': None,
+                'idempotent_replay': True,
+            },
+        }
     if transaction_result is None:
         raise ConversationSummaryNotFoundError(conversation_id)
 
-    conversation = transaction_result['conversation']
-    update_data = transaction_result['update_data']
-    structured = transaction_result['result']['structured']
-    version_update = transaction_result['result']['version_update']
-    canonical_base = dict(conversation)
-    canonical_conversation = {
-        **canonical_base,
-        'id': conversation_id,
-        'structured': structured,
-        'summary_versions': version_update['summary_versions'],
-        'active_summary_version_id': version_update['active_summary_version_id'],
-        'enrichment_state': update_data['enrichment_state'],
-        'internal_assessment': update_data.get('internal_assessment', canonical_base.get('internal_assessment')),
-        'ella_tags': update_data.get('ella_tags', canonical_base.get('ella_tags') or []),
-        'ella_signal': update_data.get('ella_signal', canonical_base.get('ella_signal')),
-    }
+    result = transaction_result['result']
+    receipt = result['receipt']
+    idempotent_replay = bool(result['idempotent_replay'])
+    if receipt.get('status') == SUMMARY_WRITEBACK_COMPLETED or (
+        receipt.get('status') == SUMMARY_WRITEBACK_COMMITTED and idempotent_replay
+    ):
+        return _cas_result(
+            conversation_id=conversation_id,
+            receipt=receipt,
+            sanitizer_warnings=sanitized.warnings,
+            idempotent_replay=idempotent_replay,
+        )
+
+    canonical_conversation = result['conversation']
     confirmed_state = {
-        **update_data['enrichment_state'],
+        **(canonical_conversation.get('enrichment_state') or {}),
         'status': 'writeback_applied',
         'pending': False,
         'canonical_status': 'completed',
         'error': None,
+        'updated_at': datetime.now(timezone.utc),
     }
     canonical_conversation['enrichment_state'] = confirmed_state
-    canonical_result: Optional[dict[str, Any]] = None
-    canonical_error: Optional[Exception] = None
     try:
         canonical_result = await asyncio.to_thread(
             canonical_writer,
@@ -225,50 +385,70 @@ async def write_conversation_summary_cas(
             summary_kind=summary_kind,
             trace_id=trace_id,
         )
-        if require_canonical and (not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True):
+        if not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True:
             raise RuntimeError('canonical_write_unconfirmed')
-    except Exception as error:
-        canonical_error = error
-        logger.error('Failed to write CAS conversation summary to canonical ledger')
+    except Exception:
+        logger.error('CAS summary committed with canonical reconciliation pending')
+        return _cas_result(
+            conversation_id=conversation_id,
+            receipt=receipt,
+            sanitizer_warnings=sanitized.warnings,
+            idempotent_replay=idempotent_replay,
+        )
 
-    if require_canonical:
-        if canonical_error is not None:
-            failed_state = {
-                **update_data['enrichment_state'],
-                'canonical_status': 'failed',
-                'error': 'canonical_write_unconfirmed',
-                'updated_at': datetime.now(timezone.utc),
-            }
-            conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': failed_state})
-            raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from canonical_error
-        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+    if receipt.get('status') == SUMMARY_WRITEBACK_COMMITTED:
+        return _cas_result(
+            conversation_id=conversation_id,
+            receipt={**receipt, 'canonical_status': 'completed'},
+            sanitizer_warnings=sanitized.warnings,
+            idempotent_replay=idempotent_replay,
+        )
 
-    if correction_id and correction_audit_updater:
-        try:
-            correction_audit_updater(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    'status': 'applied',
-                    'updated_at': state_updated_at.isoformat(),
-                    'applied_at': state_updated_at.isoformat(),
-                    'applied_summary_version_id': version_update['active_summary_version_id'],
-                    'summary_version_kind': summary_kind,
-                    'summary_version_source': summary_source,
-                },
-            )
-        except Exception:
-            logger.error('Failed to update correction audit after CAS summary apply')
+    completed_at = datetime.now(timezone.utc)
 
-    return {
-        'status': 'ok',
-        'conversation_id': conversation_id,
-        'updated_fields': list(update_data.keys()),
-        'active_summary_version_id': version_update['active_summary_version_id'],
-        'sanitizer_warnings': sanitized.warnings,
-        'canonical_confirmed': bool(isinstance(canonical_result, dict) and canonical_result.get('ok') is True),
-    }
+    def finalize(current: dict[str, Any]):
+        current_receipt = current.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+        if (
+            current_receipt.get('operation_id') != operation_id
+            or current_receipt.get('status') != SUMMARY_WRITEBACK_PENDING
+            or current_receipt.get('active_summary_version_id') != receipt.get('active_summary_version_id')
+        ):
+            raise ConversationSummaryOutcomeUnknownError('canonical_summary_finalize_conflict')
+        completed_receipt = {
+            **current_receipt,
+            'status': SUMMARY_WRITEBACK_COMPLETED,
+            'canonical_status': 'completed',
+            'updated_at': completed_at,
+        }
+        return {
+            'enrichment_state': confirmed_state,
+            SUMMARY_WRITEBACK_RECEIPT_FIELD: completed_receipt,
+        }, {
+            'receipt': completed_receipt,
+            'conversation': current,
+            'correction_audit': None,
+            'idempotent_replay': idempotent_replay,
+        }
+
+    try:
+        finalized = conversations_db.update_conversation_with_builder(uid, conversation_id, finalize)
+        if finalized is None:
+            raise ConversationSummaryOutcomeUnknownError('canonical_summary_finalize_missing')
+    except Exception:
+        logger.error('Canonical summary durable receipt remains pending after ledger confirmation')
+        return _cas_result(
+            conversation_id=conversation_id,
+            receipt=receipt,
+            sanitizer_warnings=sanitized.warnings,
+            idempotent_replay=idempotent_replay,
+        )
+
+    return _cas_result(
+        conversation_id=conversation_id,
+        receipt=finalized['result']['receipt'],
+        sanitizer_warnings=sanitized.warnings,
+        idempotent_replay=idempotent_replay,
+    )
 
 
 async def write_conversation_summary(

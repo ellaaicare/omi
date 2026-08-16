@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 import database.conversations as conversations_db
@@ -52,14 +52,17 @@ from ella.services.canonical_summary_source import (
 )
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
+    CanonicalSummaryDependencyUnavailableError,
+    CanonicalSummaryReconciliationPendingError,
     CanonicalConversationSourceMismatchError,
+    ConversationSummaryOutcomeUnknownError,
     ConversationSummaryNotFoundError,
     InvalidConversationSummaryCategoryError,
     write_conversation_summary,
     write_conversation_summary_cas,
 )
 from utils.notifications import send_guardian_notification
-from utils.ella.canonical_omi import write_omi_canonical_event
+from utils.ella.canonical_omi import require_omi_canonical_write_ready, write_omi_canonical_event
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
     EllaRequestAuthority,
@@ -211,7 +214,30 @@ def _summary_cas_mode() -> str:
     return value if value in {SUMMARY_CAS_OPTIONAL, SUMMARY_CAS_REQUIRED} else SUMMARY_CAS_REQUIRED
 
 
-def _summary_cas_token(contract: Optional[str], if_match: Optional[str]) -> Optional[str]:
+def _raw_header_values(request: Optional[Request], name: str) -> list[str]:
+    if request is None:
+        return []
+    expected_name = name.lower().encode("ascii")
+    return [
+        value.decode("latin-1")
+        for raw_name, value in request.scope.get("headers", [])
+        if raw_name.lower() == expected_name
+    ]
+
+
+def _summary_cas_token(
+    contract: Optional[str],
+    if_match: Optional[str],
+    request: Optional[Request] = None,
+) -> Optional[str]:
+    raw_contracts = _raw_header_values(request, "x-ella-cas-contract")
+    raw_matches = _raw_header_values(request, "if-match")
+    if len(raw_contracts) > 1 or len(raw_matches) > 1:
+        raise HTTPException(status_code=400, detail="Duplicate canonical source precondition headers")
+    if raw_contracts:
+        contract = raw_contracts[0]
+    if raw_matches:
+        if_match = raw_matches[0]
     contract = contract if isinstance(contract, str) else None
     if_match = if_match if isinstance(if_match, str) else None
     attempted = contract is not None or if_match is not None
@@ -368,6 +394,7 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
 async def update_conversation_summary(
     conversation_id: str,
     update: ConversationSummaryUpdate,
+    request: Request = None,
     uid: str = None,
     service: EllaRequestAuthority = Depends(require_callback_service),
     response: Response = None,
@@ -382,7 +409,7 @@ async def update_conversation_summary(
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
     uid = service.require_uid(uid, feature="Conversation summary callback")
-    expected_source_sha256 = _summary_cas_token(cas_contract, if_match)
+    expected_source_sha256 = _summary_cas_token(cas_contract, if_match, request)
 
     try:
         writer = write_conversation_summary_cas if expected_source_sha256 is not None else write_conversation_summary
@@ -404,15 +431,22 @@ async def update_conversation_summary(
             internal_assessment_fetcher=_fetch_internal_assessment,
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
+            canonical_preflight=require_omi_canonical_write_ready,
             require_canonical=update.require_canonical,
         )
         if expected_source_sha256 is not None:
             writer_args["expected_canonical_source_sha256"] = expected_source_sha256
+            writer_args.pop("correction_audit_updater")
+        else:
+            writer_args.pop("canonical_preflight")
         result = await writer(**writer_args)
         if expected_source_sha256 is not None:
             if response is not None:
                 response.headers["X-Ella-CAS-Applied"] = ELLA_CANONICAL_SOURCE_CONTRACT
-            return {"status": "ok"}
+                if result.get("status") == "pending_reconciliation":
+                    response.status_code = 202
+                    response.headers["X-Ella-CAS-Reconciliation"] = "pending"
+            return {"status": result.get("status", "ok")}
         return result
     except SummarySanitizationError as e:
         raise HTTPException(
@@ -423,6 +457,12 @@ async def update_conversation_summary(
         raise HTTPException(status_code=404, detail="Conversation not found")
     except CanonicalConversationSourceMismatchError:
         raise HTTPException(status_code=412, detail="Canonical source changed")
+    except CanonicalSummaryReconciliationPendingError:
+        raise HTTPException(status_code=409, detail="Canonical summary reconciliation pending")
+    except CanonicalSummaryDependencyUnavailableError:
+        raise HTTPException(status_code=503, detail="Canonical summary dependency unavailable")
+    except ConversationSummaryOutcomeUnknownError:
+        raise HTTPException(status_code=503, detail="Conversation summary outcome unknown; retry exact request")
     except InvalidConversationSummaryCategoryError as e:
         raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
     except ValueError as e:
