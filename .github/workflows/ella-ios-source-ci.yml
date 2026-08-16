@@ -20,6 +20,7 @@ on:
       - backend/ella/routers/resolve.py
       - backend/ella/routers/escalations.py
       - backend/ella/routers/chat.py
+      - backend/ella/routers/canonical_events.py
       - backend/ella/routers/corrections.py
       - backend/ella/routers/voice.py
       - backend/ella/routers/callbacks.py
@@ -40,8 +41,11 @@ on:
       - backend/tests/unit/test_ella_correction_runtime_resolver.py
       - backend/tests/unit/test_ella_guardian_delivery.py
       - backend/tests/unit/test_ella_canonical_context.py
+      - backend/tests/unit/test_ella_canonical_event_version_fence.py
+      - backend/tests/unit/test_ella_canonical_omi.py
       - backend/tests/unit/test_ella_user_route_auth.py
       - backend/utils/ella/exact_firebase_auth.py
+      - backend/utils/ella/canonical_omi.py
       - backend/utils/ella/scanner.py
       - backend/utils/notifications.py
       - backend/tests/unit/test_guardian_notification_delivery.py
@@ -150,7 +154,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/main.py|backend/database/authority_advisory_lock.py|backend/database/ella_provisioning.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/runtime_targets.py|backend/database/voice_canary.py|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/main.py|backend/database/authority_advisory_lock.py|backend/database/ella_provisioning.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/runtime_targets.py|backend/database/voice_canary.py|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/utils/ella/canonical_omi.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_canonical_event_version_fence.py|backend/tests/unit/test_ella_canonical_omi.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -220,6 +224,7 @@ jobs:
             backend/database/runtime_targets.py \
             backend/database/voice_canary.py \
             backend/ella/routers/ai_consent.py \
+            backend/ella/routers/canonical_events.py \
             backend/ella/routers/corrections.py \
             backend/ella/services/ai_consent.py \
             backend/ella/services/consent_authority.py \
@@ -233,12 +238,15 @@ jobs:
             backend/ella/services/summary_recovery.py \
             backend/ella/services/summary_writeback.py \
             backend/ella/utils/provision_authority.py \
+            backend/utils/ella/canonical_omi.py \
             backend/utils/ella/exact_firebase_auth.py
           cd backend
           python -m pytest --collect-only -q \
             tests/unit/test_ella_correction_startup_contract.py \
             tests/unit/test_ella_correction_runtime_resolver.py \
-            tests/unit/test_ella_conversation_corrections.py |
+            tests/unit/test_ella_conversation_corrections.py \
+            tests/unit/test_ella_canonical_omi.py \
+            tests/unit/test_ella_canonical_event_version_fence.py |
             tee /tmp/correction-terminal-receipt-collection.log
           correction_ids="$(sed '/^$/d' /tmp/correction-terminal-receipt-collection.log)"
           required_correction_ids=(
@@ -253,18 +261,26 @@ jobs:
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_live_lease"
             "tests/unit/test_ella_conversation_corrections.py::test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_fenced"
             "tests/unit/test_ella_conversation_corrections.py::test_initial_queued_correction_reclaims_expired_lost_background_task_but_not_live_lease"
-            "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_after_source_commit_is_terminal_applied_and_never_reverts_to_pending"
+            "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_after_source_commit_is_terminal_failed_until_required_receipts_exist"
             "tests/unit/test_ella_conversation_corrections.py::test_exact_receipt_poll_reclaims_stale_initial_queue_but_not_live_lease"
             "tests/unit/test_ella_conversation_corrections.py::test_correction_terminal_sla_caps_provider_and_matches_client_budget_with_margin"
             "tests/unit/test_ella_conversation_corrections.py::test_correction_writeback_never_publishes_applied_before_canonical_durability"
             "tests/unit/test_ella_conversation_corrections.py::test_canonical_success_survives_confirmation_marker_failure_and_replays_without_second_source_cas"
             "tests/unit/test_ella_conversation_corrections.py::test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_without_second_provider_or_source_write"
-            "tests/unit/test_ella_conversation_corrections.py::test_receipt_reconciles_stale_failure_to_applied_only_after_canonical_confirmation"
+            "tests/unit/test_ella_conversation_corrections.py::test_receipt_reconciles_stale_failure_to_applied_only_after_all_durable_receipts"
             "tests/unit/test_ella_conversation_corrections.py::test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced"
             "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_terminalizes_background_retry_and_receipt_recovery_without_provider_egress"
             "tests/unit/test_ella_conversation_corrections.py::test_initial_submission_transaction_is_stable_across_crash_and_response_loss"
             "tests/unit/test_ella_conversation_corrections.py::test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_writer"
-            "tests/unit/test_ella_conversation_corrections.py::test_timed_out_canonical_worker_blocks_reclaim_until_late_completion_and_publishes_once"
+            "tests/unit/test_ella_conversation_corrections.py::test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_replay"
+            "tests/unit/test_ella_conversation_corrections.py::test_crash_after_publication_claim_before_remote_write_reclaims_after_bounded_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_undo_cannot_overtake_canonical_pending_or_publication_inflight"
+            "tests/unit/test_ella_conversation_corrections.py::test_terminal_applied_is_fenced_after_source_cas_before_each_downstream_receipt[proposal]"
+            "tests/unit/test_ella_conversation_corrections.py::test_terminal_applied_is_fenced_after_source_cas_before_each_downstream_receipt[canonical_event]"
+            "tests/unit/test_ella_conversation_corrections.py::test_terminal_applied_is_fenced_after_source_cas_before_each_downstream_receipt[propagation]"
+            "tests/unit/test_ella_conversation_corrections.py::test_multiple_lost_reclaimers_exhaust_one_persisted_attempt_budget"
+            "tests/unit/test_ella_canonical_event_version_fence.py::test_stale_corrected_publisher_cannot_overwrite_newer_undo"
+            "tests/unit/test_ella_canonical_event_version_fence.py::test_ack_loss_replay_of_exact_canonical_version_is_a_confirmed_duplicate"
             "tests/unit/test_ella_conversation_corrections.py::test_revocation_at_final_canonical_and_downstream_boundaries_prevents_all_egress"
             "tests/unit/test_ella_conversation_corrections.py::test_propagation_revalidates_before_related_transcript_read_and_proposal_write"
             "tests/unit/test_ella_conversation_corrections.py::test_receipt_audit_identity_or_status_mismatch_fails_closed_without_echo"
@@ -274,11 +290,13 @@ jobs:
           for required_id in "${required_correction_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 86
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 97
           python -m pytest \
             tests/unit/test_ella_correction_startup_contract.py \
             tests/unit/test_ella_correction_runtime_resolver.py \
             tests/unit/test_ella_conversation_corrections.py \
+            tests/unit/test_ella_canonical_omi.py \
+            tests/unit/test_ella_canonical_event_version_fence.py \
             -v | tee /tmp/correction-terminal-receipt-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/correction-terminal-receipt-pytest.log
 

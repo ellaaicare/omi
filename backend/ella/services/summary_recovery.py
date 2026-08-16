@@ -365,8 +365,11 @@ async def apply_summary_update(
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
     canonical_egress_guard: Optional[Callable[[], None]] = None,
+    canonical_egress_completion: Optional[Callable[[bool], None]] = None,
+    canonical_timeout_provider: Optional[Callable[[], float]] = None,
     correction_attempt_token: Optional[str] = None,
     correction_source_compare_and_set: Optional[Callable[[dict[str, Any]], str]] = None,
+    source_mutation_guard: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -387,8 +390,11 @@ async def apply_summary_update(
         require_based_on_match=require_based_on_match,
         preserve_generated_results=preserve_generated_results,
         canonical_egress_guard=canonical_egress_guard,
+        canonical_egress_completion=canonical_egress_completion,
+        canonical_timeout_provider=canonical_timeout_provider,
         correction_attempt_token=correction_attempt_token,
         correction_source_compare_and_set=correction_source_compare_and_set,
+        source_mutation_guard=source_mutation_guard,
     )
 
 

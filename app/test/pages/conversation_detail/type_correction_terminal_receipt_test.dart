@@ -639,4 +639,26 @@ void main() {
     expect(waits, const [Duration(seconds: 1), Duration(milliseconds: 700)]);
     expect(elapsed, const Duration(milliseconds: 2500));
   });
+
+  test('finalizing remains pollable while exhausted reconciliation is terminal', () {
+    final finalizing = ConversationCorrectionReceipt.fromJson({
+      'correction_id': 'corr-1',
+      'conversation_id': 'conv-1',
+      'status': 'finalizing',
+      'before': const <String, dynamic>{},
+      'after': const <String, dynamic>{},
+    });
+    final exhausted = ConversationCorrectionReceipt.fromJson({
+      'correction_id': 'corr-1',
+      'conversation_id': 'conv-1',
+      'status': 'reconciliation_failed',
+      'failure_code': 'downstream_effects_exhausted',
+      'before': const <String, dynamic>{},
+      'after': const <String, dynamic>{},
+    });
+
+    expect(finalizing.isPending, isTrue);
+    expect(exhausted.isPending, isFalse);
+    expect(exhausted.isFailed, isTrue);
+  });
 }

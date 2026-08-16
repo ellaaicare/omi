@@ -107,6 +107,25 @@ def _active_summary_version_id(conversation: Any) -> Optional[str]:
     return str(value) if value else None
 
 
+def _active_summary_ancestor_ids(conversation: Any) -> list[str]:
+    """Return the immutable lineage preceding the active summary version."""
+
+    versions = _summary_versions(conversation)
+    by_id = {str(version.get("id") or ""): version for version in versions if str(version.get("id") or "")}
+    active_id = _active_summary_version_id(conversation)
+    ancestors: list[str] = []
+    seen = {active_id} if active_id else set()
+    cursor = active_id
+    while cursor and len(ancestors) < 256:
+        parent = str((by_id.get(cursor) or {}).get("based_on_version_id") or "")
+        if not parent or parent in seen:
+            break
+        ancestors.append(parent)
+        seen.add(parent)
+        cursor = parent
+    return ancestors
+
+
 def _summary_text(structured: dict[str, Any]) -> str:
     title = str(structured.get("title") or "").strip()
     overview = str(structured.get("overview") or "").strip()
@@ -162,6 +181,7 @@ def build_omi_canonical_event(
             "structured": structured,
             "summary_versions": _summary_versions(conversation),
             "active_summary_version_id": active_summary_version_id,
+            "summary_version_ancestor_ids": _active_summary_ancestor_ids(conversation),
             "enrichment_state": _model_to_dict(_object_get(conversation, "enrichment_state")),
             "internal_assessment": _model_to_dict(_object_get(conversation, "internal_assessment")),
             "ella_tags": _object_get(conversation, "ella_tags") or [],

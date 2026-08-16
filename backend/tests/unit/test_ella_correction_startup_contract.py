@@ -25,6 +25,7 @@ def _run_clean_backend_probe(source: str) -> subprocess.CompletedProcess[str]:
 def test_runtime_resolver_imports_real_in_tree_dependency_closure():
     guarded_paths = (
         BACKEND_ROOT / "ella" / "services" / "provisioning.py",
+        BACKEND_ROOT / "ella" / "services" / "summary_recovery.py",
         BACKEND_ROOT / "ella" / "routers" / "corrections.py",
     )
     violations = []

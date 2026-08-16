@@ -73,3 +73,23 @@ def test_build_omi_canonical_event_json_normalizes_nested_timestamps():
     assert event["metadata"]["structured"]["events"][0]["observed_at"] == "2026-05-07T18:57:12Z"
     assert event["metadata"]["summary_versions"][0]["created_at"] == "2026-05-07T18:57:12Z"
     assert event["metadata"]["transcript_segments"][0]["timestamp"] == "2026-05-07T18:57:12Z"
+
+
+def test_build_omi_canonical_event_receipts_exact_active_version_lineage():
+    event = build_omi_canonical_event(
+        "uid-123",
+        {
+            "id": "conv-1",
+            "created_at": datetime(2026, 8, 16, tzinfo=timezone.utc),
+            "structured": {"title": "Restored"},
+            "summary_versions": [
+                {"id": "base-v1"},
+                {"id": "corrected-v2", "based_on_version_id": "base-v1"},
+                {"id": "undo-v3", "based_on_version_id": "corrected-v2"},
+            ],
+            "active_summary_version_id": "undo-v3",
+        },
+    )
+
+    assert event["metadata"]["active_summary_version_id"] == "undo-v3"
+    assert event["metadata"]["summary_version_ancestor_ids"] == ["corrected-v2", "base-v1"]

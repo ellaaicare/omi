@@ -238,6 +238,15 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             source_ref = EXCLUDED.source_ref,
                             metadata = EXCLUDED.metadata,
                             raw_event = EXCLUDED.raw_event
+                        WHERE
+                            (canonical_events.metadata->>'active_summary_version_id') IS NULL
+                            OR (
+                                (EXCLUDED.metadata->>'active_summary_version_id') IS NOT NULL
+                                AND (canonical_events.metadata->>'active_summary_version_id')
+                                    <> (EXCLUDED.metadata->>'active_summary_version_id')
+                                AND (EXCLUDED.metadata->'summary_version_ancestor_ids')
+                                    ? (canonical_events.metadata->>'active_summary_version_id')
+                            )
                         """
                         if _should_replace_existing_event(item)
                         else "DO NOTHING"
@@ -274,22 +283,59 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         _stable_json(item["metadata"]),
                         _stable_json(item["raw_event"]),
                     )
+                    existing_active_version_id = None
+                    stale = False
+                    duplicate = row is None and not _should_replace_existing_event(item)
+                    if row is None and _should_replace_existing_event(item):
+                        existing_active_version_id = await conn.fetchval(
+                            """
+                            SELECT metadata->>'active_summary_version_id'
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                        )
+                        exact_replay = await conn.fetchval(
+                            """
+                            SELECT raw_event = $3::jsonb
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                            _stable_json(item["raw_event"]),
+                        )
+                        incoming_active_version_id = str(
+                            item.get("metadata", {}).get("active_summary_version_id") or ""
+                        )
+                        duplicate = bool(
+                            incoming_active_version_id
+                            and incoming_active_version_id == str(existing_active_version_id or "")
+                            and exact_replay is True
+                        )
+                        stale = not duplicate
                     statuses.append(
                         {
                             "event_id": item["event_id"],
                             "source_identity": item["source_identity"],
+                            "active_summary_version_id": item.get("metadata", {}).get("active_summary_version_id"),
+                            "existing_active_summary_version_id": existing_active_version_id,
                             "inserted": bool(row and row["inserted"]),
                             "updated": bool(row and not row["inserted"]),
+                            "duplicate": duplicate,
+                            "stale": stale,
                         }
                     )
 
         inserted_count = sum(1 for status in statuses if status["inserted"])
         updated_count = sum(1 for status in statuses if status.get("updated"))
         return {
-            "ok": True,
+            "ok": not any(status.get("stale") for status in statuses),
             "inserted": inserted_count,
             "updated": updated_count,
-            "duplicates": len(statuses) - inserted_count - updated_count,
+            "duplicates": sum(1 for status in statuses if status.get("duplicate")),
+            "stale": sum(1 for status in statuses if status.get("stale")),
             "events": statuses,
         }
 

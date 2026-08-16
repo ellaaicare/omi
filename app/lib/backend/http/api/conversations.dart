@@ -631,6 +631,7 @@ class ConversationCorrectionReceipt {
         'retry_queued',
         'processing',
         'canonical_pending',
+        'finalizing',
         'pending',
       }.contains(status);
   bool get isApplied => status == 'applied' && undoneAt == null;
@@ -791,7 +792,8 @@ Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
 }
 
 // Mirrors the bounded backend correction SLA: 120s provider + 30s terminal
-// overhead, one reclaimable attempt, and a further 30s client margin. The
+// overhead, a 300s durable backend operation window with bounded reclaims, and
+// a further 30s client margin. The
 // first poll is immediate.
 const conversationCorrectionBackendTerminalBound = Duration(seconds: 150);
 const conversationCorrectionSubmitBudget = Duration(seconds: 30);

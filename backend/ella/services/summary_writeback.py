@@ -94,6 +94,7 @@ async def write_conversation_summary(
     canonical_timeout_provider: Optional[Callable[[], float]] = None,
     correction_attempt_token: Optional[str] = None,
     correction_source_compare_and_set: Optional[Callable[[dict[str, Any]], str]] = None,
+    source_mutation_guard: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     conversation = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
     if conversation is None:
@@ -123,7 +124,9 @@ async def write_conversation_summary(
             'pending': False,
             'canonical_status': 'completed',
             'error': None,
-            'updated_at': datetime.now(timezone.utc),
+            # Keep the canonical payload byte-stable so transport ack loss can
+            # replay the exact active version without mutating its event.
+            'updated_at': enrichment_state.get('updated_at'),
         }
         canonical_conversation = {
             **conversation,
@@ -163,6 +166,8 @@ async def write_conversation_summary(
             }
         try:
             if correction_source_compare_and_set is None:
+                if source_mutation_guard is not None:
+                    await asyncio.to_thread(source_mutation_guard)
                 await asyncio.to_thread(conversations_db.update_conversation, uid, conversation_id, confirmed_update)
         except Exception:
             # The canonical writer already returned durable success. A source
@@ -266,6 +271,8 @@ async def write_conversation_summary(
         }
 
     if require_based_on_match:
+        if source_mutation_guard is not None:
+            await asyncio.to_thread(source_mutation_guard)
         if correction_source_compare_and_set is not None:
             update_outcome = await asyncio.to_thread(correction_source_compare_and_set, update_data)
             updated = update_outcome == 'updated'
@@ -280,6 +287,8 @@ async def write_conversation_summary(
         if not updated:
             raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
     else:
+        if source_mutation_guard is not None:
+            await asyncio.to_thread(source_mutation_guard)
         await asyncio.to_thread(conversations_db.update_conversation, uid, conversation_id, update_data)
     canonical_base = dict(conversation)
     canonical_conversation = {
@@ -342,6 +351,8 @@ async def write_conversation_summary(
                 'updated_at': datetime.now(timezone.utc),
             }
             if correction_source_compare_and_set is None:
+                if source_mutation_guard is not None:
+                    await asyncio.to_thread(source_mutation_guard)
                 await asyncio.to_thread(
                     conversations_db.update_conversation,
                     uid,
@@ -354,6 +365,8 @@ async def write_conversation_summary(
             confirmed_update['correction_state'] = confirmed_correction_state
         try:
             if correction_source_compare_and_set is None:
+                if source_mutation_guard is not None:
+                    await asyncio.to_thread(source_mutation_guard)
                 await asyncio.to_thread(conversations_db.update_conversation, uid, conversation_id, confirmed_update)
         except Exception:
             logger.exception(
