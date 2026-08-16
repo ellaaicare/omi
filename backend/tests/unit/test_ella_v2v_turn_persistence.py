@@ -4,6 +4,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
 from pathlib import Path
@@ -58,7 +59,7 @@ async def _ensure_canonical_events_table(pool) -> None:
 
 
 @pytest.fixture(scope="module")
-def canonical_postgres(tmp_path_factory):
+def canonical_postgres():
     service_host = os.environ.get("ELLA_TEST_POSTGRES_HOST")
     if service_host:
         yield {
@@ -72,7 +73,7 @@ def canonical_postgres(tmp_path_factory):
 
     initdb = _postgres_binary("initdb")
     pg_ctl = _postgres_binary("pg_ctl")
-    root = tmp_path_factory.mktemp("canonical-postgres")
+    root = Path(tempfile.mkdtemp(prefix="ella-pg-", dir="/tmp"))
     data_dir = root / "data"
     socket_dir = root / "socket"
     socket_dir.mkdir()
@@ -303,6 +304,41 @@ def test_v2v_turn_readback_uses_leading_event_id_index_with_exact_owner_binding(
     assert args == (event_ids, "ios_voice:uid-a:turn-1", "uid-a")
 
 
+def test_in_memory_timeline_keeps_case_distinct_authenticated_principals_private():
+    store = InMemoryCanonicalEventStore()
+    timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+
+    def private_event(uid: str, event_id: str) -> CanonicalEventIn:
+        return CanonicalEventIn(
+            uid=uid,
+            canonical_identity=uid,
+            event_id=event_id,
+            session_id="private-session",
+            channel="ios_voice",
+            provider="owner-isolation-test",
+            role="user",
+            text=f"private for {uid}",
+            started_at=timestamp,
+            privacy_scope="user_private",
+            source_ref={"source_identity": f"private:{uid}"},
+            metadata={"turn_id": event_id, "event_sequence": 0},
+        )
+
+    asyncio.run(
+        store.write_batch([private_event("uid-case", "lower-private"), private_event("UID-CASE", "upper-private")])
+    )
+
+    lower = asyncio.run(store.timeline(uid="uid-case", since=None, limit=50, channels=["ios_voice"]))
+    upper = asyncio.run(store.timeline(uid="UID-CASE", since=None, limit=50, channels=["ios_voice"]))
+
+    assert [(event["uid"], event["event_id"], event["privacy_scope"]) for event in lower] == [
+        ("uid-case", "lower-private", "user_private")
+    ]
+    assert [(event["uid"], event["event_id"], event["privacy_scope"]) for event in upper] == [
+        ("UID-CASE", "upper-private", "user_private")
+    ]
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -447,12 +483,18 @@ def test_canonical_ingestion_rejects_invalid_ordering_metadata_atomically():
         ("turn_ordinal", "-1"),
         ("turn_ordinal", MAX_CANONICAL_TURN_ORDINAL + 1),
         ("turn_ordinal", str(MAX_CANONICAL_TURN_ORDINAL + 1)),
+        ("turn_ordinal", "00"),
+        ("turn_ordinal", "+1"),
+        ("turn_ordinal", " 1"),
         ("turn_ordinal", "1.0"),
         ("turn_ordinal", True),
         ("event_sequence", -1),
         ("event_sequence", "-1"),
         ("event_sequence", MAX_CANONICAL_EVENT_SEQUENCE + 1),
         ("event_sequence", str(MAX_CANONICAL_EVENT_SEQUENCE + 1)),
+        ("event_sequence", "00"),
+        ("event_sequence", "+1"),
+        ("event_sequence", "1 "),
         ("event_sequence", "1.0"),
         ("event_sequence", False),
     ]
@@ -661,6 +703,126 @@ def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe(monke
     asyncio.run(exercise_postgres())
 
 
+def test_real_postgres_case_distinct_owner_isolation_and_numeric_string_limit_order(monkeypatch, canonical_postgres):
+    async def exercise_postgres():
+        pool = await canonical_events.asyncpg.create_pool(min_size=1, max_size=2, **canonical_postgres)
+        case_uids = ("uid-case-postgres", "UID-CASE-POSTGRES")
+        ordering_uid = "uid-postgres-string-limit"
+        try:
+            await _ensure_canonical_events_table(pool)
+            await pool.execute("DELETE FROM canonical_events WHERE uid = ANY($1::text[])", [*case_uids, ordering_uid])
+
+            async def get_pool():
+                return pool
+
+            monkeypatch.setattr(canonical_events, "_get_pool", get_pool)
+            store = canonical_events.PostgresCanonicalEventStore()
+            timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+            private_events = [
+                CanonicalEventIn(
+                    uid=uid,
+                    canonical_identity=uid,
+                    event_id=event_id,
+                    session_id="private-session",
+                    channel="ios_voice",
+                    provider="owner-isolation-test",
+                    role="user",
+                    text=f"private for {uid}",
+                    started_at=timestamp,
+                    privacy_scope="user_private",
+                    source_ref={"source_identity": f"private:{uid}"},
+                    metadata={"turn_id": event_id, "event_sequence": 0},
+                )
+                for uid, event_id in zip(case_uids, ("lower-private", "upper-private"))
+            ]
+            assert (await store.write_batch(private_events))["inserted"] == 2
+
+            for uid, expected_event_id in zip(case_uids, ("lower-private", "upper-private")):
+                timeline = await store.timeline(uid=uid, since=None, limit=50, channels=["ios_voice"])
+                assert [(event["uid"], event["event_id"], event["privacy_scope"]) for event in timeline] == [
+                    (uid, expected_event_id, "user_private")
+                ]
+
+            fixture_path = (
+                Path(__file__).resolve().parents[3]
+                / "app"
+                / "test"
+                / "fixtures"
+                / "canonical_ordering_mixed_legacy.json"
+            )
+            fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+            insert_legacy_sql = """
+                INSERT INTO canonical_events (
+                    uid, canonical_identity, event_id, source_identity,
+                    session_id, channel, provider, role, text,
+                    started_at, ended_at, privacy_scope, scan_policy,
+                    source_ref, metadata, raw_event
+                )
+                VALUES (
+                    $1, $1, $2, 'numeric-string-limit-source',
+                    $3, 'ios_voice', 'legacy-test', $4, $2,
+                    $5, NULL, 'user_private', 'none',
+                    '{}'::jsonb, $6::jsonb, '{}'::jsonb
+                )
+            """
+            await pool.executemany(
+                insert_legacy_sql,
+                [
+                    (
+                        ordering_uid,
+                        record["event_id"],
+                        record.get("session_id"),
+                        record["role"],
+                        timestamp,
+                        json.dumps(
+                            {
+                                "turn_id": record["turn_id"],
+                                "event_sequence": record["event_sequence"],
+                                **({"turn_ordinal": record["turn_ordinal"]} if "turn_ordinal" in record else {}),
+                            }
+                        ),
+                    )
+                    for record in fixture["records"]
+                ],
+            )
+
+            timeline = await store.timeline(uid=ordering_uid, since=None, limit=50, channels=["ios_voice"])
+            assert [event["event_id"] for event in timeline] == fixture["expected_order"]
+            assert [
+                event["event_id"]
+                for event in await store.timeline(uid=ordering_uid, since=None, limit=1, channels=["ios_voice"])
+            ] == [fixture["expected_order"][-1]]
+
+            raw_records = []
+            for row in await pool.fetch(
+                """
+                SELECT event_id, session_id, role, started_at, source_ref, metadata
+                FROM canonical_events
+                WHERE uid = $1 AND source_identity = 'numeric-string-limit-source'
+                """,
+                ordering_uid,
+            ):
+                record = dict(row)
+                for json_field in ("source_ref", "metadata"):
+                    if isinstance(record[json_field], str):
+                        record[json_field] = json.loads(record[json_field])
+                raw_records.append(record)
+            for permutation in permutations(raw_records):
+                assert [
+                    event["event_id"] for event in sorted(permutation, key=canonical_events._canonical_event_order)
+                ] == fixture["expected_order"]
+                server_messages = canonical_events_to_server_messages(
+                    list(permutation), limit=len(raw_records), newest_first=False
+                )
+                assert [message["id"] for message in server_messages] == fixture["expected_order"]
+                assert [message["id"] for message in server_messages[-1:]] == [fixture["expected_order"][-1]]
+        finally:
+            await pool.execute("DELETE FROM canonical_events WHERE uid = ANY($1::text[])", [*case_uids, ordering_uid])
+            await pool.close()
+
+    asyncio.run(exercise_postgres())
+
+
 def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay(
     monkeypatch, canonical_postgres
 ):
@@ -799,3 +961,4 @@ def test_backend_mixed_legacy_total_key_matches_shared_ios_fixture_for_all_permu
     for permutation in permutations(records):
         ordered = sorted(permutation, key=canonical_events._canonical_event_order)
         assert [record["event_id"] for record in ordered] == fixture["expected_order"]
+        assert [record["event_id"] for record in ordered[-1:]] == [fixture["expected_order"][-1]]

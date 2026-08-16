@@ -5,6 +5,27 @@ enum MessageSender { ai, human }
 
 const int maxCanonicalTurnOrdinal = 0x7FFFFFFFFFFFFFFF;
 const int maxCanonicalEventSequence = 0x7FFFFFFF;
+final RegExp _canonicalOrderingDecimalPattern = RegExp(r'^(0|[1-9][0-9]*)$');
+
+/// Cross-runtime ordering grammar: JSON integers or canonical ASCII decimal
+/// strings (`0` or non-zero digits without a leading zero), within the field's
+/// existing signed range. Invalid legacy values fail closed to the caller's
+/// role/identity fallback rather than participating as partially parsed data.
+int? parseCanonicalOrderingInteger(Object? value, {required int maximum}) {
+  if (value is int) return value >= 0 && value <= maximum ? value : null;
+  if (value is! String || !_canonicalOrderingDecimalPattern.hasMatch(value)) return null;
+  final maximumDigits = maximum.toString();
+  if (value.length > maximumDigits.length ||
+      (value.length == maximumDigits.length && value.compareTo(maximumDigits) > 0)) {
+    return null;
+  }
+  return int.tryParse(value);
+}
+
+int? parseCanonicalTurnOrdinal(Object? value) => parseCanonicalOrderingInteger(value, maximum: maxCanonicalTurnOrdinal);
+
+int? parseCanonicalEventSequence(Object? value) =>
+    parseCanonicalOrderingInteger(value, maximum: maxCanonicalEventSequence);
 
 enum MessageType {
   text('text'),
@@ -256,8 +277,8 @@ class ServerMessage {
       fromVoice: json['from_voice'] ?? false,
       canonicalConversationId: metadata['conversation_id']?.toString(),
       canonicalTurnId: metadata['turn_id']?.toString(),
-      canonicalTurnOrdinal: metadata['turn_ordinal'] as int?,
-      canonicalEventSequence: metadata['event_sequence'] as int?,
+      canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
+      canonicalEventSequence: parseCanonicalEventSequence(metadata['event_sequence']),
     );
   }
 

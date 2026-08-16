@@ -138,6 +138,7 @@ jobs:
               app/test/ella/services/ella_chat_route_contract_test.dart|\
               app/test/ella/services/v2v_client_test.dart|\
               app/test/ella/services/v2v_turn_reconciler_test.dart|\
+              app/test/harness/v2v_composed_replay_app.dart|\
               app/test/fixtures/canonical_ordering_mixed_legacy.json|\
               app/test/services/wals/wal_account_isolation_test.dart|\
               backend/ella/routers/canonical_events.py|\
@@ -201,7 +202,7 @@ jobs:
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
           python -m pytest backend/tests/unit/test_ella_user_route_auth.py
           python -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
-            -k 'not test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
+            -k 'not test_real_postgres'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -455,32 +456,48 @@ jobs:
             asyncpg==0.31.0 \
             python-multipart==0.0.9
 
-          expected_test_count=1
-          expected_test_id='tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
-          collection_output="$(python -m pytest --collect-only -q "$expected_test_id")"
+          expected_test_count=3
+          expected_test_ids=(
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_case_distinct_owner_isolation_and_numeric_string_limit_order'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay'
+          )
+          collection_output="$(python -m pytest --collect-only -q "${expected_test_ids[@]}")"
           printf '%s\n' "$collection_output"
           actual_test_ids="$(printf '%s\n' "$collection_output" | grep '::' || true)"
-          actual_test_count="$(printf '%s\n' "$actual_test_ids" | grep -Fxc "$expected_test_id" || true)"
+          actual_test_count="$(printf '%s\n' "$actual_test_ids" | grep -c '::' || true)"
           [[ "$actual_test_count" -eq "$expected_test_count" ]] || {
-            echo "PostgreSQL regression collection mismatch: expectedCount=$expected_test_count actualCount=$actual_test_count expectedTestId=$expected_test_id" >&2
+            echo "PostgreSQL regression collection mismatch: expectedCount=$expected_test_count actualCount=$actual_test_count" >&2
             exit 1
           }
-          [[ "$actual_test_ids" == "$expected_test_id" ]] || {
-            echo "PostgreSQL regression collected unexpected test IDs: $actual_test_ids" >&2
-            exit 1
-          }
-          printf 'PostgreSQL regression collection receipt: expectedCount=%s actualCount=%s expectedTestId=%s actualTestId=%s\n' \
-            "$expected_test_count" "$actual_test_count" "$expected_test_id" "$actual_test_ids"
+          for expected_test_id in "${expected_test_ids[@]}"; do
+            [[ "$(printf '%s\n' "$actual_test_ids" | grep -Fxc "$expected_test_id" || true)" -eq 1 ]] || {
+              echo "PostgreSQL regression missing or duplicated exact test ID: $expected_test_id" >&2
+              exit 1
+            }
+          done
+          printf 'PostgreSQL regression collection receipt: expectedCount=%s actualCount=%s testIds=%s\n' \
+            "$expected_test_count" "$actual_test_count" "${expected_test_ids[*]}"
 
-          execution_output="$(python -m pytest -q -rA "$expected_test_id")"
+          execution_output="$(python -m pytest -q -rA "${expected_test_ids[@]}")"
           printf '%s\n' "$execution_output"
-          actual_pass_count="$(printf '%s\n' "$execution_output" | grep -Fxc "PASSED $expected_test_id" || true)"
+          actual_pass_count="$(printf '%s\n' "$execution_output" | grep -c '^PASSED .*::' || true)"
           [[ "$actual_pass_count" -eq "$expected_test_count" ]] || {
-            echo "PostgreSQL regression execution mismatch: expectedCount=$expected_test_count actualCount=$actual_pass_count expectedTestId=$expected_test_id" >&2
+            echo "PostgreSQL regression execution mismatch: expectedCount=$expected_test_count actualCount=$actual_pass_count" >&2
             exit 1
           }
-          printf 'PostgreSQL regression execution receipt: expectedCount=%s actualCount=%s expectedTestId=%s actualTestId=%s\n' \
-            "$expected_test_count" "$actual_pass_count" "$expected_test_id" "$expected_test_id"
+          if printf '%s\n' "$execution_output" | grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)'; then
+            echo "PostgreSQL regression gate requires zero skips and zero deselections." >&2
+            exit 1
+          fi
+          for expected_test_id in "${expected_test_ids[@]}"; do
+            [[ "$(printf '%s\n' "$execution_output" | grep -Fxc "PASSED $expected_test_id" || true)" -eq 1 ]] || {
+              echo "PostgreSQL regression did not pass exact test ID once: $expected_test_id" >&2
+              exit 1
+            }
+          done
+          printf 'PostgreSQL regression execution receipt: expectedCount=%s actualCount=%s skipped=0 deselected=0 testIds=%s\n' \
+            "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
           expected_sha="$ELLA_EXPECTED_HEAD_SHA"
           actual_sha="$(git rev-parse HEAD)"
@@ -488,5 +505,5 @@ jobs:
             echo "PostgreSQL contract checkout changed during test: expectedSha=$expected_sha actualSha=$actual_sha" >&2
             exit 1
           }
-          printf 'PostgreSQL contract final receipt: expectedSha=%s actualSha=%s expectedCount=%s actualCount=%s testId=%s\n' \
-            "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "$expected_test_id"
+          printf 'PostgreSQL contract final receipt: expectedSha=%s actualSha=%s expectedCount=%s actualCount=%s skipped=0 deselected=0 testIds=%s\n' \
+            "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"

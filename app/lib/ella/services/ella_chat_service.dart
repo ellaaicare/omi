@@ -180,8 +180,8 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
           fromVoice: true,
           canonicalConversationId: (raw['metadata'] as Map?)?['conversation_id']?.toString() ?? sessionId,
           canonicalTurnId: (raw['metadata'] as Map?)?['turn_id']?.toString() ?? turnId,
-          canonicalTurnOrdinal: (raw['metadata'] as Map?)?['turn_ordinal'] as int?,
-          canonicalEventSequence: (raw['metadata'] as Map?)?['event_sequence'] as int?,
+          canonicalTurnOrdinal: parseCanonicalTurnOrdinal((raw['metadata'] as Map?)?['turn_ordinal']),
+          canonicalEventSequence: parseCanonicalEventSequence((raw['metadata'] as Map?)?['event_sequence']),
         ),
       );
     }
@@ -273,8 +273,8 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           askForNps: false,
           canonicalConversationId: (m['metadata'] as Map?)?['conversation_id']?.toString(),
           canonicalTurnId: (m['metadata'] as Map?)?['turn_id']?.toString(),
-          canonicalTurnOrdinal: (m['metadata'] as Map?)?['turn_ordinal'] as int?,
-          canonicalEventSequence: (m['metadata'] as Map?)?['event_sequence'] as int?,
+          canonicalTurnOrdinal: parseCanonicalTurnOrdinal((m['metadata'] as Map?)?['turn_ordinal']),
+          canonicalEventSequence: parseCanonicalEventSequence((m['metadata'] as Map?)?['event_sequence']),
         ),
       );
     }

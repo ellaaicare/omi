@@ -365,7 +365,7 @@ void main() {
     expect(cacheRoundTrip.map((message) => message.canonicalTurnOrdinal), [0, 0, 1, 1]);
   });
 
-  test('iOS mixed legacy ordering matches the backend total key for a reversed pair', () async {
+  test('iOS canonical numeric-string grammar matches the backend total key for a reversed pair', () async {
     final fixture = jsonDecode(
       await File('test/fixtures/canonical_ordering_mixed_legacy.json').readAsString(),
     ) as Map<String, dynamic>;
@@ -391,11 +391,13 @@ void main() {
       ..sort(compareServerMessagesChronologically);
 
     expect(pair.map((message) => message.id).toList(), fixture['pair_expected']);
+    expect(pair.first.canonicalTurnOrdinal, 0);
+    expect(pair.first.canonicalEventSequence, 0);
     expect(compareServerMessagesChronologically(pair.first, pair.last), lessThan(0));
     expect(compareServerMessagesChronologically(pair.last, pair.first), greaterThan(0));
   });
 
-  test('iOS mixed legacy ordering matches backend parity for every permutation and is transitive', () async {
+  test('iOS numeric-string ordering matches backend permutations, transitivity, and the limit tail', () async {
     final fixture = jsonDecode(
       await File('test/fixtures/canonical_ordering_mixed_legacy.json').readAsString(),
     ) as Map<String, dynamic>;
@@ -423,6 +425,7 @@ void main() {
           if (first.id == second.id || first.id == third.id || second.id == third.id) continue;
           final permutation = [first, second, third]..sort(compareServerMessagesChronologically);
           expect(permutation.map((message) => message.id).toList(), expectedOrder);
+          expect(permutation.last.id, expectedOrder.last);
         }
       }
     }
@@ -437,6 +440,33 @@ void main() {
           }
         }
       }
+    }
+  });
+
+  test('iOS canonical ordering grammar fails closed for ambiguous or out-of-range legacy strings', () {
+    ServerMessage message(String id, Object? ordinal, Object? sequence, MessageSender sender) =>
+        ServerMessage.fromJson({
+          'id': id,
+          'created_at': '2026-08-15T20:00:00Z',
+          'text': id,
+          'sender': sender == MessageSender.human ? 'human' : 'ai',
+          'type': 'text',
+          'metadata': {
+            'conversation_id': 'session-1',
+            'turn_id': 'turn-1',
+            'turn_ordinal': ordinal,
+            'event_sequence': sequence,
+          },
+        });
+
+    final valid = message('valid:user', '9223372036854775807', '2147483647', MessageSender.human);
+    expect(valid.durableTurnOrdinal, maxCanonicalTurnOrdinal);
+    expect(valid.durableEventSequence, maxCanonicalEventSequence);
+
+    for (final invalid in ['00', '+1', ' 1', '1 ', '9223372036854775808']) {
+      final parsed = message('invalid-$invalid:user', invalid, invalid, MessageSender.human);
+      expect(parsed.durableTurnOrdinal, isNull);
+      expect(parsed.durableEventSequence, 0, reason: 'invalid sequence must use the role fallback');
     }
   });
 

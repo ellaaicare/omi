@@ -10,14 +10,17 @@ does not require OpenClaw runtime access.
 import json
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from utils.ella.canonical_context import MAX_CANONICAL_EVENT_SEQUENCE, MAX_CANONICAL_TURN_ORDINAL
+from utils.ella.canonical_context import (
+    MAX_CANONICAL_EVENT_SEQUENCE,
+    MAX_CANONICAL_TURN_ORDINAL,
+    parse_canonical_ordering_integer,
+)
 from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
@@ -64,8 +67,9 @@ def _turn_identity(item: dict[str, Any]) -> str:
 def _event_sequence(item: dict[str, Any]) -> int:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     sequence = metadata.get("event_sequence")
-    if isinstance(sequence, int) and not isinstance(sequence, bool) and 0 <= sequence <= MAX_CANONICAL_EVENT_SEQUENCE:
-        return sequence
+    parsed = parse_canonical_ordering_integer(sequence, maximum=MAX_CANONICAL_EVENT_SEQUENCE)
+    if parsed is not None:
+        return parsed
     if item.get("role") == "user":
         return 0
     if item.get("role") == "assistant":
@@ -76,9 +80,7 @@ def _event_sequence(item: dict[str, Any]) -> int:
 def _turn_ordinal(item: dict[str, Any]) -> Optional[int]:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     ordinal = metadata.get("turn_ordinal")
-    if isinstance(ordinal, int) and not isinstance(ordinal, bool) and 0 <= ordinal <= MAX_CANONICAL_TURN_ORDINAL:
-        return ordinal
-    return None
+    return parse_canonical_ordering_integer(ordinal, maximum=MAX_CANONICAL_TURN_ORDINAL)
 
 
 def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, int, int, str, int, str]:
@@ -141,21 +143,8 @@ def _stable_json(value: Any) -> str:
 
 
 def _normalize_ordering_integer(raw: Any, *, field_name: str, maximum: int) -> int:
-    if isinstance(raw, bool):
-        raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
-    if isinstance(raw, int):
-        value = raw
-    elif isinstance(raw, str) and re.fullmatch(r"[0-9]+", raw):
-        canonical_digits = raw.lstrip("0") or "0"
-        maximum_digits = str(maximum)
-        if len(canonical_digits) > len(maximum_digits) or (
-            len(canonical_digits) == len(maximum_digits) and canonical_digits > maximum_digits
-        ):
-            raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
-        value = int(canonical_digits)
-    else:
-        raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
-    if value < 0 or value > maximum:
+    value = parse_canonical_ordering_integer(raw, maximum=maximum)
+    if value is None:
         raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
     return value
 
@@ -451,7 +440,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         channels: Optional[list[str]],
     ) -> list[dict[str, Any]]:
         params: list[Any] = [uid]
-        filters = ["lower(uid) = lower($1)"]
+        filters = ["uid = $1"]
         if since:
             params.append(since)
             filters.append(f"started_at >= ${len(params)}")
@@ -599,7 +588,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         channel_set = set(channels or [])
         events = []
         for event in self._events.values():
-            if event["uid"].lower() != uid.lower():
+            if event["uid"] != uid:
                 continue
             if since and event["started_at"] < since:
                 continue

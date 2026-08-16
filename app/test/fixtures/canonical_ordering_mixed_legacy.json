@@ -2,38 +2,40 @@
   "timestamp": "2026-08-15T20:00:00Z",
   "records": [
     {
-      "event_id": "m-legacy-empty:user",
+      "event_id": "z-string-ordinal:user",
+      "session_id": "session-1",
       "role": "user",
-      "turn_id": "m-legacy-empty",
-      "event_sequence": 0
+      "turn_id": "z-string-ordinal",
+      "turn_ordinal": "0",
+      "event_sequence": "0"
     },
     {
-      "event_id": "z-new-populated:user",
-      "session_id": "z-session",
-      "role": "user",
-      "turn_id": "z-new-populated",
-      "turn_ordinal": 0,
-      "event_sequence": 0
+      "event_id": "z-string-ordinal:assistant",
+      "session_id": "session-1",
+      "role": "assistant",
+      "turn_id": "z-string-ordinal",
+      "turn_ordinal": "0",
+      "event_sequence": "1"
     },
     {
-      "event_id": "a-legacy-populated:user",
-      "session_id": "a-session",
+      "event_id": "a-no-ordinal:user",
+      "session_id": "session-1",
       "role": "user",
-      "turn_id": "z-legacy-populated",
-      "event_sequence": 0
+      "turn_id": "a-no-ordinal",
+      "event_sequence": "0"
     }
   ],
   "pair_input": [
-    "z-new-populated:user",
-    "m-legacy-empty:user"
+    "a-no-ordinal:user",
+    "z-string-ordinal:user"
   ],
   "pair_expected": [
-    "m-legacy-empty:user",
-    "z-new-populated:user"
+    "z-string-ordinal:user",
+    "a-no-ordinal:user"
   ],
   "expected_order": [
-    "m-legacy-empty:user",
-    "a-legacy-populated:user",
-    "z-new-populated:user"
+    "z-string-ordinal:user",
+    "z-string-ordinal:assistant",
+    "a-no-ordinal:user"
   ]
 }

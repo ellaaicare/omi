@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -14,6 +15,8 @@ DEFAULT_TIMEOUT_SECONDS = float(os.getenv("ELLA_CANONICAL_TIMELINE_TIMEOUT", "5"
 MAX_IOS_VOICE_TEXT_CHARS = 20000
 MAX_CANONICAL_TURN_ORDINAL = 0x7FFFFFFFFFFFFFFF
 MAX_CANONICAL_EVENT_SEQUENCE = 0x7FFFFFFF
+CANONICAL_ORDERING_DECIMAL_GRAMMAR = r"^(0|[1-9][0-9]*)$"
+_CANONICAL_ORDERING_DECIMAL_PATTERN = re.compile(CANONICAL_ORDERING_DECIMAL_GRAMMAR)
 DEFAULT_CONTEXT_CHANNELS = [
     "omi",
     "ios_chat",
@@ -82,20 +85,38 @@ def _turn_identity(event: dict[str, Any]) -> str:
     return event_id
 
 
+def parse_canonical_ordering_integer(value: Any, *, maximum: int) -> Optional[int]:
+    """Parse the cross-runtime ordering grammar without coercive ambiguity.
+
+    Accepted legacy values are JSON integers or canonical ASCII decimal strings:
+    ``0`` or a non-zero digit followed by digits, with no sign, whitespace, or
+    leading zero. Values outside the field's supported signed range fail closed.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= maximum else None
+    if not isinstance(value, str) or _CANONICAL_ORDERING_DECIMAL_PATTERN.fullmatch(value) is None:
+        return None
+    maximum_digits = str(maximum)
+    if len(value) > len(maximum_digits) or (len(value) == len(maximum_digits) and value > maximum_digits):
+        return None
+    return int(value)
+
+
 def _event_sequence(event: dict[str, Any]) -> int:
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     sequence = metadata.get("event_sequence")
-    if isinstance(sequence, int) and not isinstance(sequence, bool) and 0 <= sequence <= MAX_CANONICAL_EVENT_SEQUENCE:
-        return sequence
+    parsed = parse_canonical_ordering_integer(sequence, maximum=MAX_CANONICAL_EVENT_SEQUENCE)
+    if parsed is not None:
+        return parsed
     return 1 if _role_for_event(event) == "assistant" else 0
 
 
 def _turn_ordinal(event: dict[str, Any]) -> Optional[int]:
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     ordinal = metadata.get("turn_ordinal")
-    if isinstance(ordinal, int) and not isinstance(ordinal, bool) and 0 <= ordinal <= MAX_CANONICAL_TURN_ORDINAL:
-        return ordinal
-    return None
+    return parse_canonical_ordering_integer(ordinal, maximum=MAX_CANONICAL_TURN_ORDINAL)
 
 
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
