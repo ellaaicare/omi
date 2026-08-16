@@ -26,6 +26,41 @@ MAX_TIMELINE_LIMIT = 500
 _pool: Optional[asyncpg.Pool] = None
 
 
+def _turn_identity(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    explicit = metadata.get("turn_id") or source_ref.get("client_message_id") or source_ref.get("turn_id")
+    if explicit:
+        return str(explicit)
+    event_id = str(item.get("event_id") or "")
+    for suffix in (":user", ":assistant"):
+        if event_id.endswith(suffix):
+            return event_id[: -len(suffix)]
+    return event_id
+
+
+def _event_sequence(item: dict[str, Any]) -> int:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    sequence = metadata.get("event_sequence")
+    if isinstance(sequence, int) and sequence >= 0:
+        return sequence
+    if item.get("role") == "user":
+        return 0
+    if item.get("role") == "assistant":
+        return 1
+    return 2
+
+
+def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, str, int, str]:
+    return (
+        item["started_at"],
+        str(item.get("session_id") or ""),
+        _turn_identity(item),
+        _event_sequence(item),
+        str(item.get("event_id") or ""),
+    )
+
+
 async def _get_pool() -> asyncpg.Pool:
     """Get or create the Postgres pool used by the OMI backend patches."""
     global _pool
@@ -369,15 +404,25 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                 WHERE {where_clause}
                 ORDER BY
                     started_at DESC,
-                    CASE role WHEN 'assistant' THEN 1 WHEN 'user' THEN 0 ELSE 2 END DESC,
-                    inserted_at DESC,
+                    COALESCE(session_id, '') DESC,
+                    COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
+                             regexp_replace(event_id, ':(user|assistant)$', '')) DESC,
+                    CASE
+                        WHEN metadata->>'event_sequence' ~ '^[0-9]+$' THEN (metadata->>'event_sequence')::integer
+                        WHEN role = 'assistant' THEN 1 WHEN role = 'user' THEN 0 ELSE 2
+                    END DESC,
                     event_id DESC
                 LIMIT {limit_placeholder}
             ) recent_events
             ORDER BY
                 started_at ASC,
-                CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
-                inserted_at ASC,
+                COALESCE(session_id, '') ASC,
+                COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
+                         regexp_replace(event_id, ':(user|assistant)$', '')) ASC,
+                CASE
+                    WHEN metadata->>'event_sequence' ~ '^[0-9]+$' THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
                 event_id ASC
             """,
             *params,
@@ -400,8 +445,13 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
               AND uid = $3
             ORDER BY
                 started_at ASC,
-                CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
-                inserted_at ASC,
+                COALESCE(session_id, '') ASC,
+                COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
+                         regexp_replace(event_id, ':(user|assistant)$', '')) ASC,
+                CASE
+                    WHEN metadata->>'event_sequence' ~ '^[0-9]+$' THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
                 event_id ASC
             """,
             event_ids,
@@ -474,14 +524,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
                 continue
             events.append(event)
 
-        def role_order(item: dict[str, Any]) -> int:
-            if item["role"] == "user":
-                return 0
-            if item["role"] == "assistant":
-                return 1
-            return 2
-
-        events.sort(key=lambda item: (item["started_at"], role_order(item), item["inserted_at"], item["event_id"]))
+        events.sort(key=_canonical_event_order)
         return [_row_to_event(event) for event in events[-limit:]]
 
     async def events_by_event_ids(
@@ -493,14 +536,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             for event in self._events.values()
             if event["event_id"] in expected_ids and event["uid"] == uid and event["source_identity"] == source_identity
         ]
-        events.sort(
-            key=lambda item: (
-                item["started_at"],
-                0 if item["role"] == "user" else 1 if item["role"] == "assistant" else 2,
-                item["inserted_at"],
-                item["event_id"],
-            )
-        )
+        events.sort(key=_canonical_event_order)
         return [_row_to_event(event) for event in events]
 
 

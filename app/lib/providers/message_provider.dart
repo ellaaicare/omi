@@ -679,7 +679,7 @@ class MessageProvider extends ChangeNotifier {
           SharedPreferencesUtil().cachedMessages = messages;
           setHasCachedMessages(messages.isNotEmpty);
         }
-        messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        messages.sort(compareServerMessagesChronologically);
         setLoadingMessages(false);
         notifyListeners();
         return;
@@ -702,7 +702,7 @@ class MessageProvider extends ChangeNotifier {
         SharedPreferencesUtil().cachedMessages = messages;
         setHasCachedMessages(true);
       }
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
       setLoadingMessages(false);
       notifyListeners();
     } finally {
@@ -714,7 +714,7 @@ class MessageProvider extends ChangeNotifier {
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
       messages = SharedPreferencesUtil().cachedMessages;
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
     }
     notifyListeners();
   }
@@ -737,7 +737,7 @@ class MessageProvider extends ChangeNotifier {
         notifyListeners();
       }
       messages = mes;
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
       setLoadingMessages(false);
       notifyListeners();
       return messages;
@@ -771,7 +771,7 @@ class MessageProvider extends ChangeNotifier {
       var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
       if (!_canCommit(lease, generation)) return;
       messages = mes;
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
       setClearingChat(false);
       notifyListeners();
     } finally {
@@ -898,7 +898,7 @@ class MessageProvider extends ChangeNotifier {
           updated[index] = canonicalMessage;
         }
       }
-      updated.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      updated.sort(compareServerMessagesChronologically);
       if (!_canCommit(lease, generation)) return false;
       messages = updated;
       _lastStreamFailure = null;

@@ -10,6 +10,8 @@ const ownerNamespaceB = 'bbbbbbbbbbbbbbbbbbbbbbbb';
 const authorityFingerprintA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const authorityFingerprintB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
+bool authorityIsCurrent() => true;
+
 Future<bool> beginSession(
   V2VTurnReconciler reconciler, {
   String uid = 'uid-a',
@@ -79,11 +81,13 @@ class _SlowHydrationStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) =>
       delegate.clearOwner(
         uid: uid,
         ownerNamespace: ownerNamespace,
         authorityFingerprint: authorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
       );
 
   @override
@@ -91,20 +95,24 @@ class _SlowHydrationStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     await releaseHydration;
     return delegate.load(
       uid: uid,
       ownerNamespace: ownerNamespace,
       authorityFingerprint: authorityFingerprint,
+      isAuthorityCurrent: isAuthorityCurrent,
     );
   }
 
   @override
-  Future<void> put(V2VTranscriptTurn turn) => delegate.put(turn);
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.put(turn, isAuthorityCurrent: isAuthorityCurrent);
 
   @override
-  Future<void> remove(V2VTranscriptTurn turn) => delegate.remove(turn);
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
 }
 
 class _BlockingPutStore implements V2VTurnDurableStore {
@@ -119,12 +127,14 @@ class _BlockingPutStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     clearedOwners.add((uid, ownerNamespace, authorityFingerprint));
     await delegate.clearOwner(
       uid: uid,
       ownerNamespace: ownerNamespace,
       authorityFingerprint: authorityFingerprint,
+      isAuthorityCurrent: isAuthorityCurrent,
     );
   }
 
@@ -133,17 +143,24 @@ class _BlockingPutStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) =>
-      delegate.load(uid: uid, ownerNamespace: ownerNamespace, authorityFingerprint: authorityFingerprint);
+      delegate.load(
+        uid: uid,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
 
   @override
-  Future<void> put(V2VTranscriptTurn turn) async {
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) async {
     await releasePut;
-    await delegate.put(turn);
+    await delegate.put(turn, isAuthorityCurrent: isAuthorityCurrent);
   }
 
   @override
-  Future<void> remove(V2VTranscriptTurn turn) => delegate.remove(turn);
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
 }
 
 void main() {
@@ -347,6 +364,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
         ))
             .map((turn) => turn.turnId),
         [
@@ -381,6 +399,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
         ),
         isEmpty,
       );
@@ -389,7 +408,10 @@ void main() {
     test('listener and microphone wait for slow large outbox hydration and session arming', () async {
       final backingStore = MemoryV2VTurnDurableStore();
       for (var ordinal = 1; ordinal <= 200; ordinal++) {
-        await backingStore.put(ownedTurn(sessionId: 'restored-session', ordinal: ordinal));
+        await backingStore.put(
+          ownedTurn(sessionId: 'restored-session', ordinal: ordinal),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
       }
       final hydrationGate = Completer<void>();
       final reconciler = V2VTurnReconciler(
@@ -428,6 +450,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
         ),
         isEmpty,
       );
@@ -485,6 +508,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
         ),
         isEmpty,
       );
@@ -577,6 +601,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -606,6 +631,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
         );
         expect(durableAfterFailure.map((turn) => turn.turnId), [
           'v2v-turn-00000000000000000000000000000001',
@@ -632,6 +658,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -680,6 +707,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -695,13 +723,14 @@ void main() {
       final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-authority-generation-');
       try {
         final store = FileV2VTurnDurableStore(baseDirectory: directory);
-        await store.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
+        await store.put(ownedTurn(sessionId: 'authority-a', ordinal: 1), isAuthorityCurrent: authorityIsCurrent);
         await store.put(
           ownedTurn(
             sessionId: 'authority-b',
             ordinal: 2,
             authorityFingerprint: authorityFingerprintB,
           ),
+          isAuthorityCurrent: authorityIsCurrent,
         );
         final currentCleanupMarker = File(
           '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintB/cleanup_required.json',
@@ -723,6 +752,7 @@ void main() {
             uid: 'uid-b',
             ownerNamespace: ownerNamespaceB,
           ),
+          isAuthorityCurrent: authorityIsCurrent,
         );
 
         final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);
@@ -730,6 +760,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintB,
+          isAuthorityCurrent: authorityIsCurrent,
         );
 
         expect(currentTurns.map((turn) => turn.sessionId), ['authority-b']);
@@ -747,6 +778,7 @@ void main() {
             uid: 'uid-b',
             ownerNamespace: ownerNamespaceB,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ))
               .map((turn) => turn.sessionId),
           ['other-owner'],
@@ -756,11 +788,207 @@ void main() {
       }
     });
 
+    test('authority replacement after obsolete marker write aborts deletion and preserves the new authority', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-authority-switch-');
+      try {
+        final seedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        await seedStore.put(
+          ownedTurn(sessionId: 'authority-a', ordinal: 1),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
+        await seedStore.put(
+          ownedTurn(
+            sessionId: 'authority-b',
+            ordinal: 2,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
+        var authorityAIsCurrent = true;
+        var authorityBIsCurrent = false;
+        final sweepingStore = FileV2VTurnDurableStore(
+          baseDirectory: directory,
+          afterCleanupMarkerWriteForTesting: (markedDirectory) async {
+            expect(markedDirectory.path, endsWith(authorityFingerprintB));
+            authorityAIsCurrent = false;
+            authorityBIsCurrent = true;
+          },
+        );
+
+        await expectLater(
+          sweepingStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: () => authorityAIsCurrent,
+          ),
+          throwsA(isA<V2VAuthorityChangedException>()),
+        );
+
+        final authorityBDirectory = Directory(
+          '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintB',
+        );
+        expect(authorityBDirectory.existsSync(), isTrue);
+        final authorityBTurns = await FileV2VTurnDurableStore(baseDirectory: directory).load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintB,
+          isAuthorityCurrent: () => authorityBIsCurrent,
+        );
+        expect(authorityBTurns.map((turn) => turn.sessionId), ['authority-b']);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('clearOwner revalidates its cleanup lease after marker write and leaves replacement authority untouched',
+        () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-clear-authority-switch-');
+      try {
+        final seedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        await seedStore.put(
+          ownedTurn(sessionId: 'authority-a', ordinal: 1),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
+        await seedStore.put(
+          ownedTurn(
+            sessionId: 'authority-b',
+            ordinal: 2,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
+        var cleanupLeaseIsCurrent = true;
+        final clearingStore = FileV2VTurnDurableStore(
+          baseDirectory: directory,
+          afterCleanupMarkerWriteForTesting: (_) async {
+            cleanupLeaseIsCurrent = false;
+          },
+        );
+
+        await expectLater(
+          clearingStore.clearOwner(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: () => cleanupLeaseIsCurrent,
+          ),
+          throwsA(isA<V2VAuthorityChangedException>()),
+        );
+
+        expect(
+          File(
+            '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/pending_turns.json',
+          ).existsSync(),
+          isTrue,
+        );
+        expect(
+          File(
+            '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintB/pending_turns.json',
+          ).existsSync(),
+          isTrue,
+        );
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('symlinked configured root is rejected without touching its target', () async {
+      final parent = await Directory.systemTemp.createTemp('ella-v2v-turn-symlink-root-');
+      final external = Directory('${parent.path}/external')..createSync();
+      final sentinel = File('${external.path}/sentinel')..writeAsStringSync('outside');
+      final linkedRoot = Link('${parent.path}/linked-root')..createSync(external.path);
+      try {
+        final store = FileV2VTurnDurableStore(baseDirectory: Directory(linkedRoot.path));
+        await expectLater(
+          store.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+        expect(sentinel.readAsStringSync(), 'outside');
+      } finally {
+        await linkedRoot.delete();
+        await parent.delete(recursive: true);
+      }
+    });
+
+    test('symlinked owner is rejected without touching an external authority tree', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-symlink-owner-');
+      final external = await Directory.systemTemp.createTemp('ella-v2v-turn-external-owner-');
+      final sentinel = File('${external.path}/sentinel')..writeAsStringSync('outside');
+      final outbox = Directory('${directory.path}/ella_v2v_turn_outbox')..createSync();
+      final linkedOwner = Link('${outbox.path}/$ownerNamespaceA')..createSync(external.path);
+      try {
+        final store = FileV2VTurnDurableStore(baseDirectory: directory);
+        await expectLater(
+          store.clearOwner(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+        expect(sentinel.readAsStringSync(), 'outside');
+      } finally {
+        await linkedOwner.delete();
+        await directory.delete(recursive: true);
+        await external.delete(recursive: true);
+      }
+    });
+
+    test('owner ancestor swap before deletion aborts without touching the replacement target', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-ancestor-swap-');
+      final external = await Directory.systemTemp.createTemp('ella-v2v-turn-external-swap-');
+      final sentinel = File('${external.path}/sentinel')..writeAsStringSync('outside');
+      final ownerPath = '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA';
+      final parkedOwner = Directory('$ownerPath.parked');
+      Link? replacement;
+      try {
+        final seedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        await seedStore.put(
+          ownedTurn(sessionId: 'authority-a', ordinal: 1),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
+        final swappingStore = FileV2VTurnDurableStore(
+          baseDirectory: directory,
+          beforeCleanupDeleteForTesting: (_) async {
+            await Directory(ownerPath).rename(parkedOwner.path);
+            replacement = Link(ownerPath)..createSync(external.path);
+          },
+        );
+
+        await expectLater(
+          swappingStore.clearOwner(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        expect(sentinel.readAsStringSync(), 'outside');
+        expect(
+          File('${parkedOwner.path}/$authorityFingerprintA/pending_turns.json').existsSync(),
+          isTrue,
+        );
+      } finally {
+        if (replacement?.existsSync() == true) await replacement!.delete();
+        await directory.delete(recursive: true);
+        await external.delete(recursive: true);
+      }
+    });
+
     test('manifest and every record persist and verify the exact authority fingerprint', () async {
       final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-fingerprint-');
       try {
         final store = FileV2VTurnDurableStore(baseDirectory: directory);
-        await store.put(ownedTurn(sessionId: 'session-1', ordinal: 1));
+        await store.put(ownedTurn(sessionId: 'session-1', ordinal: 1), isAuthorityCurrent: authorityIsCurrent);
         final manifest = File(
           '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/pending_turns.json',
         );
@@ -780,6 +1008,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           throwsA(isA<FormatException>()),
         );
@@ -807,6 +1036,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintB,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -848,6 +1078,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -863,19 +1094,24 @@ void main() {
           baseDirectory: directory,
           beforeCleanupDeleteForTesting: (_) async => throw const FileSystemException('injected cleanup failure'),
         );
-        await failingStore.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
+        await failingStore.put(
+          ownedTurn(sessionId: 'authority-a', ordinal: 1),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
         await failingStore.put(
           ownedTurn(
             sessionId: 'authority-b',
             ordinal: 2,
             authorityFingerprint: authorityFingerprintB,
           ),
+          isAuthorityCurrent: authorityIsCurrent,
         );
         await expectLater(
           failingStore.clearOwner(
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           throwsA(isA<FileSystemException>()),
         );
@@ -893,6 +1129,7 @@ void main() {
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintB,
+          isAuthorityCurrent: authorityIsCurrent,
         );
         expect(authorityBTurns.map((turn) => turn.sessionId), ['authority-b']);
         final obsoleteDirectory = Directory(
@@ -904,6 +1141,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintB,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           hasLength(1),
         );
@@ -919,13 +1157,17 @@ void main() {
           baseDirectory: directory,
           afterCleanupMarkerWriteForTesting: (_) async => throw const FileSystemException('injected process death'),
         );
-        await failingStore.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
+        await failingStore.put(
+          ownedTurn(sessionId: 'authority-a', ordinal: 1),
+          isAuthorityCurrent: authorityIsCurrent,
+        );
         await failingStore.put(
           ownedTurn(
             sessionId: 'authority-b',
             ordinal: 2,
             authorityFingerprint: authorityFingerprintB,
           ),
+          isAuthorityCurrent: authorityIsCurrent,
         );
         final obsoleteManifest = File(
           '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA/pending_turns.json',
@@ -939,6 +1181,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           throwsA(isA<FileSystemException>()),
         );
@@ -955,6 +1198,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintB,
+            isAuthorityCurrent: authorityIsCurrent,
           ))
               .map((turn) => turn.sessionId),
           ['authority-b'],
@@ -1006,6 +1250,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           hasLength(1),
         );
@@ -1014,6 +1259,7 @@ void main() {
             uid: 'uid-b',
             ownerNamespace: ownerNamespaceB,
             authorityFingerprint: authorityFingerprintB,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -1027,6 +1273,7 @@ void main() {
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintA,
+            isAuthorityCurrent: authorityIsCurrent,
           ),
           isEmpty,
         );
@@ -1042,13 +1289,14 @@ void main() {
         final first = ownedTurn(sessionId: 'session-1', ordinal: 1);
         final overflow = ownedTurn(sessionId: 'session-1', ordinal: 2);
 
-        await store.put(first);
-        await expectLater(store.put(overflow), throwsStateError);
+        await store.put(first, isAuthorityCurrent: authorityIsCurrent);
+        await expectLater(store.put(overflow, isAuthorityCurrent: authorityIsCurrent), throwsStateError);
 
         final retained = await store.load(
           uid: 'uid-a',
           ownerNamespace: ownerNamespaceA,
           authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
         );
         expect(retained.map((turn) => turn.turnId), [first.turnId]);
       } finally {

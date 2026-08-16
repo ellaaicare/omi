@@ -67,15 +67,42 @@ def _role_for_event(event: dict[str, Any]) -> str:
     return "user"
 
 
-def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[float, int, str]:
+def _turn_identity(event: dict[str, Any]) -> str:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    source_ref = event.get("source_ref") if isinstance(event.get("source_ref"), dict) else {}
+    explicit = metadata.get("turn_id") or source_ref.get("client_message_id") or source_ref.get("turn_id")
+    if explicit:
+        return str(explicit)
+    event_id = str(event.get("event_id") or event.get("id") or "")
+    for suffix in (":user", ":assistant"):
+        if event_id.endswith(suffix):
+            return event_id[: -len(suffix)]
+    return event_id
+
+
+def _event_sequence(event: dict[str, Any]) -> int:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    sequence = metadata.get("event_sequence")
+    if isinstance(sequence, int) and sequence >= 0:
+        return sequence
+    return 1 if _role_for_event(event) == "assistant" else 0
+
+
+def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[float, str, str, int, str]:
     try:
         parsed = _parse_iso(_event_time(event))
     except (TypeError, ValueError):
         parsed = None
     timestamp = parsed.timestamp() if parsed is not None else float("-inf")
-    role_order = 1 if _role_for_event(event) == "assistant" else 0
+    conversation_id = str(event.get("session_id") or "")
     event_id = str(event.get("event_id") or event.get("id") or "")
-    return (-timestamp if newest_first else timestamp, role_order, event_id)
+    return (
+        -timestamp if newest_first else timestamp,
+        conversation_id,
+        _turn_identity(event),
+        _event_sequence(event),
+        event_id,
+    )
 
 
 async def fetch_canonical_timeline(
@@ -203,6 +230,9 @@ def canonical_events_to_server_messages(
                     "provider": event.get("provider"),
                     "source_identity": event.get("source_identity"),
                     "title": _event_title(event),
+                    "conversation_id": event.get("session_id"),
+                    "turn_id": _turn_identity(event),
+                    "event_sequence": _event_sequence(event),
                 },
             }
         )

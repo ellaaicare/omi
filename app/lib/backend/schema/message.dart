@@ -202,6 +202,12 @@ class ServerMessage {
   /// Whether this message originated from voice chat (client-side only, not persisted)
   bool fromVoice;
 
+  /// Durable canonical ordering fields. These survive cache round-trips so an
+  /// equal-time user/assistant pair cannot be reordered when history is merged.
+  String? canonicalConversationId;
+  String? canonicalTurnId;
+  int? canonicalEventSequence;
+
   List<String> thinkings = [];
   ChartData? chartData;
 
@@ -220,9 +226,14 @@ class ServerMessage {
     this.rating,
     this.chartData,
     this.fromVoice = false,
+    this.canonicalConversationId,
+    this.canonicalTurnId,
+    this.canonicalEventSequence,
   });
 
   static ServerMessage fromJson(Map<String, dynamic> json) {
+    final metadata =
+        json['metadata'] is Map ? Map<String, dynamic>.from(json['metadata'] as Map) : const <String, dynamic>{};
     return ServerMessage(
       json['id'],
       DateTime.parse(json['created_at']).toLocal(),
@@ -238,6 +249,9 @@ class ServerMessage {
       rating: json['rating'],
       chartData: json['chart_data'] != null ? ChartData.fromJson(json['chart_data']) : null,
       fromVoice: json['from_voice'] ?? false,
+      canonicalConversationId: metadata['conversation_id']?.toString(),
+      canonicalTurnId: metadata['turn_id']?.toString(),
+      canonicalEventSequence: metadata['event_sequence'] as int?,
     );
   }
 
@@ -256,7 +270,29 @@ class ServerMessage {
       'rating': rating,
       'chart_data': chartData?.toJson(),
       'from_voice': fromVoice,
+      if (canonicalConversationId != null || canonicalTurnId != null || canonicalEventSequence != null)
+        'metadata': {
+          if (canonicalConversationId != null) 'conversation_id': canonicalConversationId,
+          if (canonicalTurnId != null) 'turn_id': canonicalTurnId,
+          if (canonicalEventSequence != null) 'event_sequence': canonicalEventSequence,
+        },
     };
+  }
+
+  String? get durableTurnId {
+    final explicit = canonicalTurnId?.trim() ?? '';
+    if (explicit.isNotEmpty) return explicit;
+    for (final suffix in const [':user', ':assistant']) {
+      if (id.endsWith(suffix) && id.length > suffix.length) return id.substring(0, id.length - suffix.length);
+    }
+    return null;
+  }
+
+  int? get durableEventSequence {
+    if (canonicalEventSequence != null) return canonicalEventSequence;
+    if (id.endsWith(':user')) return 0;
+    if (id.endsWith(':assistant')) return 1;
+    return null;
   }
 
   bool areFilesOfSameType() {
@@ -299,6 +335,32 @@ class ServerMessage {
   }
 
   bool get isEmpty => id == '0000';
+}
+
+int compareServerMessagesChronologically(ServerMessage first, ServerMessage second) {
+  final timestampOrder = first.createdAt.compareTo(second.createdAt);
+  if (timestampOrder != 0) return timestampOrder;
+
+  final firstTurnId = first.durableTurnId;
+  final secondTurnId = second.durableTurnId;
+  if (firstTurnId != null && secondTurnId != null) {
+    final firstConversationId = first.canonicalConversationId?.trim() ?? '';
+    final secondConversationId = second.canonicalConversationId?.trim() ?? '';
+    if (firstConversationId.isNotEmpty && secondConversationId.isNotEmpty) {
+      final conversationOrder = firstConversationId.compareTo(secondConversationId);
+      if (conversationOrder != 0) return conversationOrder;
+    }
+    final turnOrder = firstTurnId.compareTo(secondTurnId);
+    if (turnOrder != 0) return turnOrder;
+
+    final sequenceOrder = (first.durableEventSequence ?? 2).compareTo(second.durableEventSequence ?? 2);
+    if (sequenceOrder != 0) return sequenceOrder;
+    final firstRoleOrder = first.sender == MessageSender.human ? 0 : 1;
+    final secondRoleOrder = second.sender == MessageSender.human ? 0 : 1;
+    final roleOrder = firstRoleOrder.compareTo(secondRoleOrder);
+    if (roleOrder != 0) return roleOrder;
+  }
+  return first.id.compareTo(second.id);
 }
 
 enum MessageChunkType {

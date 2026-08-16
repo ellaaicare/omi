@@ -282,7 +282,9 @@ def _ios_voice_event(
         metadata={
             "adapter": "ios-v2v-chat-writeback",
             "terminal_transcript": True,
+            "conversation_id": session_id,
             "turn_id": turn_id,
+            "event_sequence": 0 if role == "user" else 1,
         },
     )
 

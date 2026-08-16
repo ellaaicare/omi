@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 const int maxV2VTranscriptChars = 20000;
@@ -151,6 +152,11 @@ class V2VTranscriptTurn {
 }
 
 typedef V2VTranscriptTurnWriter = Future<bool> Function(V2VTranscriptTurn turn);
+typedef V2VAuthorityCurrent = bool Function();
+
+class V2VAuthorityChangedException extends StateError {
+  V2VAuthorityChangedException() : super('V2V authority changed during durable store operation');
+}
 
 Future<bool> activateV2VTransportInOrder({
   required Future<bool> Function() armSession,
@@ -167,16 +173,18 @@ abstract interface class V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   });
 
-  Future<void> put(V2VTranscriptTurn turn);
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent});
 
-  Future<void> remove(V2VTranscriptTurn turn);
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent});
 
   Future<void> clearOwner({
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   });
 }
 
@@ -191,11 +199,15 @@ class MemoryV2VTurnDurableStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
-  }) async =>
-      List<V2VTranscriptTurn>.of(_turnsByOwner[_key(uid, ownerNamespace, authorityFingerprint)] ?? const []);
+    required V2VAuthorityCurrent isAuthorityCurrent,
+  }) async {
+    if (!isAuthorityCurrent()) throw V2VAuthorityChangedException();
+    return List<V2VTranscriptTurn>.of(_turnsByOwner[_key(uid, ownerNamespace, authorityFingerprint)] ?? const []);
+  }
 
   @override
-  Future<void> put(V2VTranscriptTurn turn) async {
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) async {
+    if (!isAuthorityCurrent()) throw V2VAuthorityChangedException();
     final turns = _turnsByOwner.putIfAbsent(_key(turn.uid, turn.ownerNamespace, turn.authorityFingerprint), () => []);
     final existing = turns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
     if (existing == null) {
@@ -206,7 +218,8 @@ class MemoryV2VTurnDurableStore implements V2VTurnDurableStore {
   }
 
   @override
-  Future<void> remove(V2VTranscriptTurn turn) async {
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) async {
+    if (!isAuthorityCurrent()) throw V2VAuthorityChangedException();
     final key = _key(turn.uid, turn.ownerNamespace, turn.authorityFingerprint);
     final turns = _turnsByOwner[key];
     turns?.removeWhere((candidate) => candidate.samePayload(turn));
@@ -218,7 +231,9 @@ class MemoryV2VTurnDurableStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
+    if (!isAuthorityCurrent()) throw V2VAuthorityChangedException();
     _turnsByOwner.remove(_key(uid, ownerNamespace, authorityFingerprint));
   }
 }
@@ -250,36 +265,45 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
   final int maxCleanupNamespacesPerLoad;
   final Future<void> Function(Directory directory)? _afterCleanupMarkerWrite;
   final Future<void> Function(Directory directory)? _beforeCleanupDelete;
-  static Future<void> _operationTail = Future<void>.value();
+  static final Map<String, Future<void>> _operationTails = {};
+  String? _boundCanonicalBasePath;
 
   @override
   Future<List<V2VTranscriptTurn>> load({
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) =>
-      _serialized(() async {
-        await _discardLegacyCoarseManifest(ownerNamespace);
+      _serialized(ownerNamespace, () async {
+        _requireAuthorityCurrent(isAuthorityCurrent);
+        await _discardLegacyCoarseManifest(ownerNamespace, isAuthorityCurrent);
         await _sweepObsoleteAuthorities(
           uid: uid,
           ownerNamespace: ownerNamespace,
           currentAuthorityFingerprint: authorityFingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
+        _requireAuthorityCurrent(isAuthorityCurrent);
         return List<V2VTranscriptTurn>.of(
           await _read(
             uid: uid,
             ownerNamespace: ownerNamespace,
             authorityFingerprint: authorityFingerprint,
+            isAuthorityCurrent: isAuthorityCurrent,
           ),
         );
       });
 
   @override
-  Future<void> put(V2VTranscriptTurn turn) => _serialized(() async {
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      _serialized(turn.ownerNamespace, () async {
+        _requireAuthorityCurrent(isAuthorityCurrent);
         final turns = await _read(
           uid: turn.uid,
           ownerNamespace: turn.ownerNamespace,
           authorityFingerprint: turn.authorityFingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
         final existing = turns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
         if (existing == null) {
@@ -295,15 +319,19 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
           authorityFingerprint: turn.authorityFingerprint,
           status: _readyStatus,
           turns: turns,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
       });
 
   @override
-  Future<void> remove(V2VTranscriptTurn turn) => _serialized(() async {
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      _serialized(turn.ownerNamespace, () async {
+        _requireAuthorityCurrent(isAuthorityCurrent);
         final turns = await _read(
           uid: turn.uid,
           ownerNamespace: turn.ownerNamespace,
           authorityFingerprint: turn.authorityFingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
         final originalLength = turns.length;
         turns.removeWhere((candidate) => candidate.samePayload(turn));
@@ -314,6 +342,7 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
           authorityFingerprint: turn.authorityFingerprint,
           status: _readyStatus,
           turns: turns,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
       });
 
@@ -322,68 +351,209 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) =>
-      _serialized(() async {
-        final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
+      _serialized(ownerNamespace, () async {
+        _requireAuthorityCurrent(isAuthorityCurrent);
+        final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint, create: false);
         final directoryType = await FileSystemEntity.type(directory.path, followLinks: false);
+        _requireAuthorityCurrent(isAuthorityCurrent);
         if (directoryType == FileSystemEntityType.notFound) return;
-        if (directoryType != FileSystemEntityType.directory) {
-          throw const FileSystemException('Invalid V2V authority directory');
-        }
+        await _requireExactAuthorityDirectory(
+          directory: directory,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: authorityFingerprint,
+        );
         await _writeCleanupMarker(
           directory: directory,
           uid: uid,
           ownerNamespace: ownerNamespace,
           authorityFingerprint: authorityFingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
         await _afterCleanupMarkerWrite?.call(directory);
+        _requireAuthorityCurrent(isAuthorityCurrent);
         await _deleteAuthorityDirectory(
           directory: directory,
           ownerNamespace: ownerNamespace,
           authorityFingerprint: authorityFingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
       });
 
-  Future<T> _serialized<T>(Future<T> Function() operation) {
+  Future<T> _serialized<T>(String ownerNamespace, Future<T> Function() operation) {
+    if (!_ownerNamespacePattern.hasMatch(ownerNamespace)) throw ArgumentError.value(ownerNamespace, 'ownerNamespace');
     final result = Completer<T>();
-    _operationTail = _operationTail.then((_) async {
+    final previous = _operationTails[ownerNamespace] ?? Future<void>.value();
+    late final Future<void> tail;
+    tail = previous.then((_) async {
       try {
         result.complete(await operation());
       } catch (error, stackTrace) {
         result.completeError(error, stackTrace);
       }
     });
+    _operationTails[ownerNamespace] = tail;
+    unawaited(
+      tail.whenComplete(() {
+        if (identical(_operationTails[ownerNamespace], tail)) _operationTails.remove(ownerNamespace);
+      }),
+    );
     return result.future;
   }
 
-  Future<Directory> _ownerDirectory(String ownerNamespace) async {
-    if (!_ownerNamespacePattern.hasMatch(ownerNamespace)) throw ArgumentError.value(ownerNamespace, 'ownerNamespace');
-    final base = _configuredBaseDirectory ?? await getApplicationSupportDirectory();
-    return Directory('${base.path}/ella_v2v_turn_outbox/$ownerNamespace');
+  void _requireAuthorityCurrent(V2VAuthorityCurrent isAuthorityCurrent) {
+    if (!isAuthorityCurrent()) throw V2VAuthorityChangedException();
   }
 
-  Future<Directory> _authorityDirectory(String ownerNamespace, String authorityFingerprint) async {
+  Future<String> _canonicalBasePath() async {
+    final configured = _configuredBaseDirectory ?? await getApplicationSupportDirectory();
+    final lexicalPath = p.normalize(p.absolute(configured.path));
+    final lexicalType = await FileSystemEntity.type(lexicalPath, followLinks: false);
+    if (lexicalType != FileSystemEntityType.directory) {
+      throw const FileSystemException('Invalid V2V trusted base directory');
+    }
+    final canonicalPath = p.normalize(await Directory(lexicalPath).resolveSymbolicLinks());
+    await _requireNonSymlinkDirectoryChain(canonicalPath);
+    final bound = _boundCanonicalBasePath;
+    if (bound != null && bound != canonicalPath) {
+      throw const FileSystemException('V2V trusted base directory changed');
+    }
+    _boundCanonicalBasePath = canonicalPath;
+    return canonicalPath;
+  }
+
+  Future<void> _requireNonSymlinkDirectoryChain(String path, {bool allowMissing = false}) async {
+    final normalized = p.normalize(p.absolute(path));
+    final parts = p.split(normalized);
+    if (parts.isEmpty || !p.isAbsolute(normalized)) throw const FileSystemException('Invalid V2V absolute path');
+    var current = parts.first;
+    for (final part in parts.skip(1)) {
+      current = p.join(current, part);
+      final type = await FileSystemEntity.type(current, followLinks: false);
+      if (type == FileSystemEntityType.notFound && allowMissing) return;
+      if (type != FileSystemEntityType.directory) {
+        throw const FileSystemException('Symlinked or invalid V2V path component');
+      }
+      final resolved = p.normalize(await Directory(current).resolveSymbolicLinks());
+      if (resolved != p.normalize(current)) {
+        throw const FileSystemException('Symlinked V2V path component');
+      }
+    }
+  }
+
+  Future<Directory> _safeDirectory(
+    String path, {
+    required bool create,
+    V2VAuthorityCurrent? isAuthorityCurrent,
+  }) async {
+    if (create && isAuthorityCurrent == null) throw StateError('Authority lease required for V2V directory creation');
+    final basePath = await _canonicalBasePath();
+    final normalized = p.normalize(p.absolute(path));
+    if (normalized != basePath && !p.isWithin(basePath, normalized)) {
+      throw const FileSystemException('V2V path escapes trusted base');
+    }
+    if (create) {
+      var current = basePath;
+      final relative = p.relative(normalized, from: basePath);
+      for (final component in p.split(relative).where((value) => value != '.')) {
+        await _requireNonSymlinkDirectoryChain(current);
+        current = p.join(current, component);
+        final type = await FileSystemEntity.type(current, followLinks: false);
+        if (type == FileSystemEntityType.notFound) {
+          _requireAuthorityCurrent(isAuthorityCurrent!);
+          await Directory(current).create();
+        } else if (type != FileSystemEntityType.directory) {
+          throw const FileSystemException('Symlinked or invalid V2V directory');
+        }
+        await _requireNonSymlinkDirectoryChain(current);
+      }
+    } else {
+      await _requireNonSymlinkDirectoryChain(normalized, allowMissing: true);
+    }
+    return Directory(normalized);
+  }
+
+  Future<Directory> _ownerDirectory(
+    String ownerNamespace, {
+    required bool create,
+    V2VAuthorityCurrent? isAuthorityCurrent,
+  }) async {
+    if (!_ownerNamespacePattern.hasMatch(ownerNamespace)) throw ArgumentError.value(ownerNamespace, 'ownerNamespace');
+    final basePath = await _canonicalBasePath();
+    return _safeDirectory(
+      p.join(basePath, 'ella_v2v_turn_outbox', ownerNamespace),
+      create: create,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
+  Future<Directory> _authorityDirectory(
+    String ownerNamespace,
+    String authorityFingerprint, {
+    required bool create,
+    V2VAuthorityCurrent? isAuthorityCurrent,
+  }) async {
     if (!_authorityFingerprintPattern.hasMatch(authorityFingerprint)) {
       throw ArgumentError.value(authorityFingerprint, 'authorityFingerprint');
     }
-    final ownerDirectory = await _ownerDirectory(ownerNamespace);
-    return Directory('${ownerDirectory.path}/$authorityFingerprint');
+    final ownerDirectory = await _ownerDirectory(
+      ownerNamespace,
+      create: create,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+    return _safeDirectory(
+      p.join(ownerDirectory.path, authorityFingerprint),
+      create: create,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
+  Future<FileSystemEntityType> _safeFileType(File file, Directory parent) async {
+    await _requireNonSymlinkDirectoryChain(parent.path);
+    final normalized = p.normalize(p.absolute(file.path));
+    if (p.dirname(normalized) != p.normalize(parent.absolute.path)) {
+      throw const FileSystemException('V2V file escapes validated directory');
+    }
+    final type = await FileSystemEntity.type(normalized, followLinks: false);
+    if (type != FileSystemEntityType.notFound && type != FileSystemEntityType.file) {
+      throw const FileSystemException('Symlinked or invalid V2V file');
+    }
+    return type;
   }
 
   Future<List<V2VTranscriptTurn>> _read({
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     if (uid.trim().isEmpty) throw ArgumentError.value(uid, 'uid');
-    final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
-    final manifest = File('${directory.path}/pending_turns.json');
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint, create: false);
+    final directoryType = await FileSystemEntity.type(directory.path, followLinks: false);
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    if (directoryType == FileSystemEntityType.notFound) return [];
+    await _requireExactAuthorityDirectory(
+      directory: directory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
+    final manifest = File(p.join(directory.path, 'pending_turns.json'));
     final backup = File('${manifest.path}.bak');
     Object? lastError;
     for (final candidate in [manifest, backup]) {
-      if (!await candidate.exists()) continue;
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      if (await _safeFileType(candidate, directory) == FileSystemEntityType.notFound) continue;
       try {
+        _requireAuthorityCurrent(isAuthorityCurrent);
         final decoded = jsonDecode(await candidate.readAsString());
+        _requireAuthorityCurrent(isAuthorityCurrent);
+        await _requireExactAuthorityDirectory(
+          directory: directory,
+          ownerNamespace: ownerNamespace,
+          authorityFingerprint: authorityFingerprint,
+        );
         if (decoded is! Map) throw const FormatException('Invalid V2V outbox manifest');
         final json = Map<String, dynamic>.from(decoded);
         if (json['version'] != _manifestVersion ||
@@ -428,6 +598,7 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String authorityFingerprint,
     required String status,
     required List<V2VTranscriptTurn> turns,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     if (!const {_readyStatus, _cleanupRequiredStatus}.contains(status)) throw ArgumentError.value(status, 'status');
     if (turns.length > maxPendingTurns) throw StateError('V2V outbox capacity reached');
@@ -440,36 +611,78 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
       'turns': turns.map((turn) => turn.toJson()).toList(),
     });
     if (utf8.encode(encoded).length > maxManifestBytes) throw StateError('V2V outbox byte capacity reached');
-    final directory = await _authorityDirectory(ownerNamespace, authorityFingerprint);
-    await directory.create(recursive: true);
-    final manifest = File('${directory.path}/pending_turns.json');
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    final directory = await _authorityDirectory(
+      ownerNamespace,
+      authorityFingerprint,
+      create: true,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    final manifest = File(p.join(directory.path, 'pending_turns.json'));
     final backup = File('${manifest.path}.bak');
     final temporary = File('${manifest.path}.tmp');
-    if (await temporary.exists()) await temporary.delete();
+    if (await _safeFileType(temporary, directory) == FileSystemEntityType.file) {
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      await temporary.delete();
+    }
+    _requireAuthorityCurrent(isAuthorityCurrent);
     await temporary.writeAsString(encoded, flush: true);
 
     var movedOriginal = false;
     try {
-      if (await manifest.exists()) {
-        if (await backup.exists()) await backup.delete();
+      await _requireExactAuthorityDirectory(
+        directory: directory,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+      );
+      if (await _safeFileType(manifest, directory) == FileSystemEntityType.file) {
+        if (await _safeFileType(backup, directory) == FileSystemEntityType.file) {
+          _requireAuthorityCurrent(isAuthorityCurrent);
+          await backup.delete();
+        }
+        _requireAuthorityCurrent(isAuthorityCurrent);
         await manifest.rename(backup.path);
         movedOriginal = true;
       }
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      await _requireExactAuthorityDirectory(
+        directory: directory,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+      );
       await temporary.rename(manifest.path);
-      if (await backup.exists()) await backup.delete();
+      if (await _safeFileType(backup, directory) == FileSystemEntityType.file) {
+        _requireAuthorityCurrent(isAuthorityCurrent);
+        await backup.delete();
+      }
     } catch (_) {
-      if (!await manifest.exists() && movedOriginal && await backup.exists()) {
+      if (isAuthorityCurrent() &&
+          await _safeFileType(manifest, directory) == FileSystemEntityType.notFound &&
+          movedOriginal &&
+          await _safeFileType(backup, directory) == FileSystemEntityType.file) {
         await backup.rename(manifest.path);
       }
       rethrow;
     }
   }
 
-  Future<void> _discardLegacyCoarseManifest(String ownerNamespace) async {
-    final ownerDirectory = await _ownerDirectory(ownerNamespace);
+  Future<void> _discardLegacyCoarseManifest(
+    String ownerNamespace,
+    V2VAuthorityCurrent isAuthorityCurrent,
+  ) async {
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    final ownerDirectory = await _ownerDirectory(ownerNamespace, create: false);
+    final ownerType = await FileSystemEntity.type(ownerDirectory.path, followLinks: false);
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    if (ownerType == FileSystemEntityType.notFound) return;
+    await _requireNonSymlinkDirectoryChain(ownerDirectory.path);
     for (final name in const ['pending_turns.json', 'pending_turns.json.bak', 'pending_turns.json.tmp']) {
-      final file = File('${ownerDirectory.path}/$name');
-      if (await file.exists()) await file.delete();
+      final file = File(p.join(ownerDirectory.path, name));
+      if (await _safeFileType(file, ownerDirectory) == FileSystemEntityType.file) {
+        _requireAuthorityCurrent(isAuthorityCurrent);
+        await file.delete();
+      }
     }
   }
 
@@ -477,34 +690,39 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String currentAuthorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     if (uid.trim().isEmpty) throw ArgumentError.value(uid, 'uid');
-    await _authorityDirectory(ownerNamespace, currentAuthorityFingerprint);
-    final ownerDirectory = await _ownerDirectory(ownerNamespace);
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    await _authorityDirectory(ownerNamespace, currentAuthorityFingerprint, create: false);
+    final ownerDirectory = await _ownerDirectory(ownerNamespace, create: false);
     final ownerDirectoryType = await FileSystemEntity.type(ownerDirectory.path, followLinks: false);
+    _requireAuthorityCurrent(isAuthorityCurrent);
     if (ownerDirectoryType == FileSystemEntityType.notFound) return;
-    if (ownerDirectoryType != FileSystemEntityType.directory) {
-      throw const FileSystemException('Invalid V2V owner directory');
-    }
+    await _requireNonSymlinkDirectoryChain(ownerDirectory.path);
     var cleanupAttempts = 0;
     await for (final entity in ownerDirectory.list(followLinks: false)) {
-      if (entity is! Directory) continue;
-      final fingerprint = entity.uri.pathSegments.where((segment) => segment.isNotEmpty).last;
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      final fingerprint = p.basename(entity.path);
       if (!_authorityFingerprintPattern.hasMatch(fingerprint) || fingerprint == currentAuthorityFingerprint) continue;
       if (cleanupAttempts >= maxCleanupNamespacesPerLoad) break;
       cleanupAttempts++;
       try {
+        final exactDirectory = await _authorityDirectory(ownerNamespace, fingerprint, create: false);
         await _writeCleanupMarker(
-          directory: entity,
+          directory: exactDirectory,
           uid: uid,
           ownerNamespace: ownerNamespace,
           authorityFingerprint: fingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
-        await _afterCleanupMarkerWrite?.call(entity);
+        await _afterCleanupMarkerWrite?.call(exactDirectory);
+        _requireAuthorityCurrent(isAuthorityCurrent);
         await _deleteAuthorityDirectory(
-          directory: entity,
+          directory: exactDirectory,
           ownerNamespace: ownerNamespace,
           authorityFingerprint: fingerprint,
+          isAuthorityCurrent: isAuthorityCurrent,
         );
       } on FileSystemException {
         // A successfully written marker makes the exact obsolete directory
@@ -519,15 +737,21 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     await _requireExactAuthorityDirectory(
       directory: directory,
       ownerNamespace: ownerNamespace,
       authorityFingerprint: authorityFingerprint,
     );
-    final marker = File('${directory.path}/cleanup_required.json');
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    final marker = File(p.join(directory.path, 'cleanup_required.json'));
     final temporary = File('${marker.path}.tmp');
-    if (await temporary.exists()) await temporary.delete();
+    if (await _safeFileType(temporary, directory) == FileSystemEntityType.file) {
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      await temporary.delete();
+    }
+    _requireAuthorityCurrent(isAuthorityCurrent);
     await temporary.writeAsString(
         jsonEncode({
           'version': _manifestVersion,
@@ -537,7 +761,16 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
           'status': _cleanupRequiredStatus,
         }),
         flush: true);
-    if (await marker.exists()) await marker.delete();
+    await _requireExactAuthorityDirectory(
+      directory: directory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
+    if (await _safeFileType(marker, directory) == FileSystemEntityType.file) {
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      await marker.delete();
+    }
+    _requireAuthorityCurrent(isAuthorityCurrent);
     await temporary.rename(marker.path);
   }
 
@@ -546,32 +779,103 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String ownerNamespace,
     required String authorityFingerprint,
   }) async {
-    final expected = await _authorityDirectory(ownerNamespace, authorityFingerprint);
-    if (directory.absolute.path != expected.absolute.path ||
+    final expected = await _authorityDirectory(ownerNamespace, authorityFingerprint, create: false);
+    if (p.normalize(directory.absolute.path) != p.normalize(expected.absolute.path) ||
         await FileSystemEntity.type(directory.path, followLinks: false) != FileSystemEntityType.directory) {
       throw const FileSystemException('Invalid V2V authority directory');
     }
+    await _requireNonSymlinkDirectoryChain(directory.path);
   }
 
   Future<void> _deleteAuthorityDirectory({
     required Directory directory,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
+    _requireAuthorityCurrent(isAuthorityCurrent);
     await _requireExactAuthorityDirectory(
       directory: directory,
       ownerNamespace: ownerNamespace,
       authorityFingerprint: authorityFingerprint,
     );
     await _beforeCleanupDelete?.call(directory);
-    final directoryType = await FileSystemEntity.type(directory.path, followLinks: false);
-    if (directoryType == FileSystemEntityType.notFound) return;
+    _requireAuthorityCurrent(isAuthorityCurrent);
     await _requireExactAuthorityDirectory(
       directory: directory,
       ownerNamespace: ownerNamespace,
       authorityFingerprint: authorityFingerprint,
     );
-    await directory.delete(recursive: true);
+    await _deleteValidatedTree(
+      path: directory.path,
+      authorityDirectory: directory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
+  Future<void> _deleteValidatedTree({
+    required String path,
+    required Directory authorityDirectory,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
+  }) async {
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    await _requireExactAuthorityDirectory(
+      directory: authorityDirectory,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+    );
+    final normalized = p.normalize(p.absolute(path));
+    final authorityPath = p.normalize(authorityDirectory.absolute.path);
+    if (normalized != authorityPath && !p.isWithin(authorityPath, normalized)) {
+      throw const FileSystemException('V2V deletion escapes authority directory');
+    }
+    final type = await FileSystemEntity.type(normalized, followLinks: false);
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    if (type == FileSystemEntityType.notFound) return;
+    if (type == FileSystemEntityType.link) {
+      await _requireNonSymlinkDirectoryChain(p.dirname(normalized));
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      await Link(normalized).delete();
+      return;
+    }
+    if (type == FileSystemEntityType.file) {
+      await _requireNonSymlinkDirectoryChain(p.dirname(normalized));
+      _requireAuthorityCurrent(isAuthorityCurrent);
+      await File(normalized).delete();
+      return;
+    }
+    if (type != FileSystemEntityType.directory) {
+      throw const FileSystemException('Invalid V2V deletion entry');
+    }
+    await _requireNonSymlinkDirectoryChain(normalized);
+    final children = await Directory(normalized).list(followLinks: false).toList();
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    children.sort((first, second) => first.path.compareTo(second.path));
+    for (final child in children) {
+      await _deleteValidatedTree(
+        path: child.path,
+        authorityDirectory: authorityDirectory,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+    }
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    if (normalized == authorityPath) {
+      await _requireExactAuthorityDirectory(
+        directory: authorityDirectory,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+      );
+    } else {
+      await _requireNonSymlinkDirectoryChain(normalized);
+    }
+    _requireAuthorityCurrent(isAuthorityCurrent);
+    await Directory(normalized).delete();
   }
 }
 
@@ -627,6 +931,7 @@ class V2VTurnReconciler {
         uid: normalizedUid,
         ownerNamespace: normalizedOwnerNamespace,
         authorityFingerprint: normalizedAuthorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
       );
     } catch (_) {
       _onWriteFailure?.call();
@@ -845,7 +1150,7 @@ class V2VTurnReconciler {
         return;
       }
       try {
-        await _durableStore.remove(turn);
+        await _durableStore.remove(turn, isAuthorityCurrent: state.isAuthorityCurrent);
       } catch (_) {
         state.failedAtRevision = attemptRevision;
         _onWriteFailure?.call();
@@ -879,6 +1184,7 @@ class V2VTurnReconciler {
         uid: state.uid,
         ownerNamespace: state.ownerNamespace,
         authorityFingerprint: state.authorityFingerprint,
+        isAuthorityCurrent: () => state.unauthorized && !state.isAuthorityCurrent(),
       );
       final sameOwnerStates = _sessions.values
           .where(
@@ -930,7 +1236,7 @@ class V2VTurnReconciler {
 
   Future<bool> _enqueueAcceptedTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) async {
     try {
-      await _durableStore.put(turn);
+      await _durableStore.put(turn, isAuthorityCurrent: state.isAuthorityCurrent);
     } catch (_) {
       _releaseTurnReservation(state, turn);
       _onWriteFailure?.call();

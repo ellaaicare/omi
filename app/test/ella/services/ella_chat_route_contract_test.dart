@@ -162,6 +162,45 @@ void main() {
     expect(result.value![1].createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
   });
 
+  test('history preserves equal-time turn pairs instead of grouping by role', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        Map<String, dynamic> message(String turnId, String sender, int sequence) => {
+              'id': '$turnId:${sender == 'human' ? 'user' : 'assistant'}',
+              'sender': sender,
+              'text': '$sender $turnId',
+              'created_at': '2026-08-15T20:00:00Z',
+              'metadata': {
+                'conversation_id': 'session-1',
+                'turn_id': turnId,
+                'event_sequence': sequence,
+              },
+            };
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              message('turn-000002', 'ai', 1),
+              message('turn-000001', 'ai', 1),
+              message('turn-000002', 'human', 0),
+              message('turn-000001', 'human', 0),
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.value?.map((message) => message.id), [
+      'turn-000001:user',
+      'turn-000001:assistant',
+      'turn-000002:user',
+      'turn-000002:assistant',
+    ]);
+  });
+
   test('history rejects a nonempty unsupported message shape so cache can be preserved', () async {
     const authority = _CurrentAuthority('uid-a');
     final result = await fetchEllaChatHistory(

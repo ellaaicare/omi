@@ -193,3 +193,35 @@ def test_equal_timestamp_canonical_history_preserves_terminal_user_assistant_chr
 
     assert [message["id"] for message in refreshed] == ["turn-000001:user", "turn-000001:assistant"]
     assert [message["sender"] for message in refreshed] == ["human", "ai"]
+
+
+def test_multiple_equal_timestamp_turns_preserve_turn_pairs_across_store_and_serializer(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+    for ordinal in (2, 1):
+        turn_id = f"turn-{ordinal:06d}"
+        asyncio.run(
+            chat.persist_v2v_voice_turn(
+                _request(
+                    turn_id=turn_id,
+                    user_event_id=f"{turn_id}:user",
+                    assistant_event_id=f"{turn_id}:assistant",
+                    started_at=timestamp,
+                    completed_at=timestamp,
+                ),
+                authenticated_uid="uid-a",
+            )
+        )
+
+    events = asyncio.run(store.timeline(uid="uid-a", since=None, limit=50, channels=["ios_voice"]))
+    refreshed = canonical_events_to_server_messages(events, limit=50, newest_first=False)
+
+    assert [message["id"] for message in refreshed] == [
+        "turn-000001:user",
+        "turn-000001:assistant",
+        "turn-000002:user",
+        "turn-000002:assistant",
+    ]
+    assert [message["metadata"]["event_sequence"] for message in refreshed] == [0, 1, 0, 1]
+    assert {message["metadata"]["conversation_id"] for message in refreshed} == {"session-1"}

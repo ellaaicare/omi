@@ -25,11 +25,13 @@ class _HydrationGateStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) =>
       delegate.clearOwner(
         uid: uid,
         ownerNamespace: ownerNamespace,
         authorityFingerprint: authorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
       );
 
   @override
@@ -37,6 +39,7 @@ class _HydrationGateStore implements V2VTurnDurableStore {
     required String uid,
     required String ownerNamespace,
     required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
   }) async {
     loadedAuthorityFingerprint = authorityFingerprint;
     await releaseHydration;
@@ -44,14 +47,17 @@ class _HydrationGateStore implements V2VTurnDurableStore {
       uid: uid,
       ownerNamespace: ownerNamespace,
       authorityFingerprint: authorityFingerprint,
+      isAuthorityCurrent: isAuthorityCurrent,
     );
   }
 
   @override
-  Future<void> put(V2VTranscriptTurn turn) => delegate.put(turn);
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.put(turn, isAuthorityCurrent: isAuthorityCurrent);
 
   @override
-  Future<void> remove(V2VTranscriptTurn turn) => delegate.remove(turn);
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
 }
 
 Future<void> _grantOperationalAuthority(String uid) async {
@@ -516,6 +522,7 @@ void main() {
             startedAt: baseTime.add(Duration(seconds: ordinal * 2)),
             completedAt: baseTime.add(Duration(seconds: ordinal * 2 + 1)),
           ),
+          isAuthorityCurrent: () => true,
         );
       }
 
@@ -619,6 +626,7 @@ void main() {
           uid: owner.uid,
           ownerNamespace: owner.storageNamespace,
           authorityFingerprint: owner.authorityFingerprint,
+          isAuthorityCurrent: testAuthority.isExactCurrent,
         ))
             .map((turn) => turn.turnId),
         contains('v2v-turn-ffffffffffffffffffffffffffffffff'),
@@ -652,6 +660,7 @@ void main() {
           startedAt: DateTime.utc(2026, 8, 15, 21),
           completedAt: DateTime.utc(2026, 8, 15, 21, 0, 1),
         ),
+        isAuthorityCurrent: () => true,
       );
 
       SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();

@@ -39,16 +39,6 @@ typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
-int _chronologicalMessageOrder(ServerMessage first, ServerMessage second) {
-  final timestampOrder = first.createdAt.compareTo(second.createdAt);
-  if (timestampOrder != 0) return timestampOrder;
-  final firstRoleOrder = first.sender == MessageSender.human ? 0 : 1;
-  final secondRoleOrder = second.sender == MessageSender.human ? 0 : 1;
-  final roleOrder = firstRoleOrder.compareTo(secondRoleOrder);
-  if (roleOrder != 0) return roleOrder;
-  return first.id.compareTo(second.id);
-}
-
 const ellaChatInactivityTimeout = Duration(seconds: 75);
 
 Stream<T> withEllaChatInactivityTimeout<T>(Stream<T> stream, {Duration timeout = ellaChatInactivityTimeout}) =>
@@ -186,6 +176,9 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
           [],
           askForNps: false,
           fromVoice: true,
+          canonicalConversationId: (raw['metadata'] as Map?)?['conversation_id']?.toString() ?? sessionId,
+          canonicalTurnId: (raw['metadata'] as Map?)?['turn_id']?.toString() ?? turnId,
+          canonicalEventSequence: (raw['metadata'] as Map?)?['event_sequence'] as int?,
         ),
       );
     }
@@ -197,7 +190,7 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
         messagesById[assistantEventId]?.sender != MessageSender.ai) {
       return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
     }
-    messages.sort(_chronologicalMessageOrder);
+    messages.sort(compareServerMessagesChronologically);
     return EllaServiceResult.success(messages);
   } on ExactAccountAuthorityChangedException {
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
@@ -275,6 +268,9 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           [],
           [],
           askForNps: false,
+          canonicalConversationId: (m['metadata'] as Map?)?['conversation_id']?.toString(),
+          canonicalTurnId: (m['metadata'] as Map?)?['turn_id']?.toString(),
+          canonicalEventSequence: (m['metadata'] as Map?)?['event_sequence'] as int?,
         ),
       );
     }
@@ -285,7 +281,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     }
 
     // API returns newest first; reverse for chronological UI order
-    result.sort(_chronologicalMessageOrder);
+    result.sort(compareServerMessagesChronologically);
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
     return EllaServiceResult.success(result);
   } on ClientApiFailure catch (failure) {

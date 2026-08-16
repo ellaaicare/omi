@@ -67,6 +67,32 @@ class _TestEnv implements EnvFields {
   bool? get useWebAuth => false;
 }
 
+ServerMessage _canonicalVoiceMessage({
+  required String turnId,
+  required MessageSender sender,
+  required DateTime timestamp,
+  String? text,
+}) {
+  final isUser = sender == MessageSender.human;
+  return ServerMessage(
+    '$turnId:${isUser ? 'user' : 'assistant'}',
+    timestamp,
+    text ?? (isUser ? 'Question $turnId' : 'Answer $turnId'),
+    sender,
+    MessageType.text,
+    null,
+    false,
+    [],
+    [],
+    [],
+    askForNps: false,
+    fromVoice: true,
+    canonicalConversationId: 'session-1',
+    canonicalTurnId: turnId,
+    canonicalEventSequence: isUser ? 0 : 1,
+  );
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   Env.init(_TestEnv());
@@ -382,6 +408,105 @@ void main() {
     expect(provider.messages.map((message) => message.id), ['canonical-user', 'canonical-assistant']);
     expect(provider.messages.map((message) => message.text), ['Canonical question', 'Canonical answer']);
     expect(prefs.cachedMessages.map((message) => message.id), ['canonical-user', 'canonical-assistant']);
+  });
+
+  test('MessageProvider puts a late canonical user before its pre-cached equal-time assistant', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final timestamp = DateTime.utc(2026, 8, 15, 20);
+    final assistant = _canonicalVoiceMessage(turnId: 'turn-000001', sender: MessageSender.ai, timestamp: timestamp);
+    assistant
+      ..canonicalConversationId = null
+      ..canonicalTurnId = null
+      ..canonicalEventSequence = null;
+    final user = _canonicalVoiceMessage(turnId: 'turn-000001', sender: MessageSender.human, timestamp: timestamp);
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      aiConsentEnsurer: () async => true,
+      v2vTurnPersister: ({
+        required uid,
+        required sessionId,
+        required turnId,
+        required userEventId,
+        required assistantEventId,
+        required userTranscript,
+        required assistantTranscript,
+        required startedAt,
+        required completedAt,
+        required exactAuthority,
+      }) async =>
+          EllaServiceResult.success([assistant, user]),
+    )..messages = [assistant];
+
+    final committed = await provider.persistV2VTurn(
+      expectedUid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: timestamp,
+      completedAt: timestamp,
+    );
+
+    expect(committed, isTrue);
+    expect(provider.messages.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
+    expect(prefs.cachedMessages.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
+  });
+
+  test('MessageProvider preserves equal-time turn pairs across out-of-order canonical arrivals', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final timestamp = DateTime.utc(2026, 8, 15, 20);
+    final canonicalByTurn = {
+      for (final turnId in ['turn-000001', 'turn-000002'])
+        turnId: [
+          _canonicalVoiceMessage(turnId: turnId, sender: MessageSender.ai, timestamp: timestamp),
+          _canonicalVoiceMessage(turnId: turnId, sender: MessageSender.human, timestamp: timestamp),
+        ],
+    };
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      aiConsentEnsurer: () async => true,
+      v2vTurnPersister: ({
+        required uid,
+        required sessionId,
+        required turnId,
+        required userEventId,
+        required assistantEventId,
+        required userTranscript,
+        required assistantTranscript,
+        required startedAt,
+        required completedAt,
+        required exactAuthority,
+      }) async =>
+          EllaServiceResult.success(canonicalByTurn[turnId]!),
+    );
+
+    for (final turnId in ['turn-000002', 'turn-000001']) {
+      expect(
+        await provider.persistV2VTurn(
+          expectedUid: 'uid-a',
+          sessionId: 'session-1',
+          turnId: turnId,
+          userEventId: '$turnId:user',
+          assistantEventId: '$turnId:assistant',
+          userTranscript: 'Question',
+          assistantTranscript: 'Answer',
+          startedAt: timestamp,
+          completedAt: timestamp,
+        ),
+        isTrue,
+      );
+    }
+
+    expect(provider.messages.map((message) => message.id), [
+      'turn-000001:user',
+      'turn-000001:assistant',
+      'turn-000002:user',
+      'turn-000002:assistant',
+    ]);
   });
 
   test('V2V authority loss after backend response has zero local side effects', () async {
