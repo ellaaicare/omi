@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -9,6 +10,48 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+
+class _FakeV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
+  _FakeV2VMicrophoneRecorder(this.operations);
+
+  final List<String> operations;
+  final StreamController<Uint8List> _controller = StreamController<Uint8List>.broadcast();
+  RecordConfig? config;
+  bool _stopped = false;
+
+  @override
+  Future<void> useEllaManagedAudioSession() async {
+    operations.add('recorder.disableAudioSessionManagement');
+  }
+
+  @override
+  Future<bool> hasPermission() async {
+    operations.add('recorder.permission');
+    return true;
+  }
+
+  @override
+  Future<Stream<Uint8List>> startStream(RecordConfig config) async {
+    operations.add('recorder.startStream');
+    this.config = config;
+    return _controller.stream;
+  }
+
+  @override
+  Future<String?> stop() async {
+    operations.add('recorder.stop');
+    if (!_stopped) {
+      _stopped = true;
+      await _controller.close();
+    }
+    return null;
+  }
+
+  @override
+  Future<void> dispose() async {
+    operations.add('recorder.dispose');
+  }
+}
 
 void main() {
   group('typed voice policy outcomes', () {
@@ -556,6 +599,90 @@ void main() {
         isTrue,
       );
       expect(microphoneStarts, 1);
+      await client.disconnect();
+    });
+
+    test('real recorder adapter yields session ownership then re-verifies accepted speaker and external routes',
+        () async {
+      for (final acceptedRoute in ['speaker', 'bluetoothHFP', 'bluetoothA2DP', 'airPlay']) {
+        grantCurrentConsent();
+        final authority = AiConsentAuthoritySnapshot.capture(
+          preferences: SharedPreferencesUtil(),
+          expectedUid: 'uid-a',
+        );
+        expect(authority, isNotNull);
+
+        final operations = <String>[];
+        final recorder = _FakeV2VMicrophoneRecorder(operations);
+        final client = V2VClient(
+          onEvent: (_) {},
+          onConnectionChanged: (_) {},
+          microphoneRecorderFactory: () => recorder,
+          audibleOutputEnforcer: () async {
+            operations.add('ella.verifyInteractiveRoute:$acceptedRoute');
+            return true;
+          },
+        );
+
+        expect(
+          await client.startAuthorizedMicrophoneForTesting(
+            authority: authority!,
+            shouldContinue: () => true,
+          ),
+          isTrue,
+          reason: '$acceptedRoute must remain an accepted interactive output',
+        );
+        expect(operations.take(4), [
+          'recorder.disableAudioSessionManagement',
+          'recorder.permission',
+          'recorder.startStream',
+          'ella.verifyInteractiveRoute:$acceptedRoute',
+        ]);
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.defaultToSpeaker));
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.allowBluetooth));
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.allowBluetoothA2DP));
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.allowAirPlay));
+        await client.disconnect();
+      }
+    });
+
+    test('real recorder adapter fails closed after start when post-start route verification fails', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(
+        preferences: SharedPreferencesUtil(),
+        expectedUid: 'uid-a',
+      );
+      expect(authority, isNotNull);
+
+      final operations = <String>[];
+      final recorder = _FakeV2VMicrophoneRecorder(operations);
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneRecorderFactory: () => recorder,
+        audibleOutputEnforcer: () async {
+          operations.add('ella.verifyInteractiveRoute:receiver');
+          return false;
+        },
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isFalse,
+      );
+      expect(operations, [
+        'recorder.disableAudioSessionManagement',
+        'recorder.permission',
+        'recorder.startStream',
+        'ella.verifyInteractiveRoute:receiver',
+        'recorder.stop',
+        'recorder.dispose',
+      ]);
+      expect(client.micChunksSentForTesting, 0);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
       await client.disconnect();
     });
 

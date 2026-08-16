@@ -8,16 +8,87 @@ import 'package:path_provider/path_provider.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
+
+abstract interface class OnDeviceTtsAdapter {
+  Future<dynamic> setSharedInstance(bool sharedSession);
+  Future<dynamic> autoStopSharedSession(bool autoStop);
+  Future<dynamic> setIosAudioCategory(
+    IosTextToSpeechAudioCategory category,
+    List<IosTextToSpeechAudioCategoryOptions> options,
+    IosTextToSpeechAudioMode mode,
+  );
+  Future<dynamic> setLanguage(String language);
+  Future<dynamic> setSpeechRate(double rate);
+  Future<dynamic> setPitch(double pitch);
+  Future<dynamic> setVolume(double volume);
+  Future<dynamic> awaitSpeakCompletion(bool awaitCompletion);
+  void setCompletionHandler(VoidCallback handler);
+  void setErrorHandler(void Function(dynamic message) handler);
+  void setCancelHandler(VoidCallback handler);
+  Future<dynamic> speak(String text);
+  Future<dynamic> stop();
+}
+
+final class FlutterOnDeviceTtsAdapter implements OnDeviceTtsAdapter {
+  FlutterOnDeviceTtsAdapter(this._tts);
+
+  final FlutterTts _tts;
+
+  @override
+  Future<dynamic> setSharedInstance(bool sharedSession) => _tts.setSharedInstance(sharedSession);
+
+  @override
+  Future<dynamic> autoStopSharedSession(bool autoStop) => _tts.autoStopSharedSession(autoStop);
+
+  @override
+  Future<dynamic> setIosAudioCategory(
+    IosTextToSpeechAudioCategory category,
+    List<IosTextToSpeechAudioCategoryOptions> options,
+    IosTextToSpeechAudioMode mode,
+  ) =>
+      _tts.setIosAudioCategory(category, options, mode);
+
+  @override
+  Future<dynamic> setLanguage(String language) => _tts.setLanguage(language);
+
+  @override
+  Future<dynamic> setSpeechRate(double rate) => _tts.setSpeechRate(rate);
+
+  @override
+  Future<dynamic> setPitch(double pitch) => _tts.setPitch(pitch);
+
+  @override
+  Future<dynamic> setVolume(double volume) => _tts.setVolume(volume);
+
+  @override
+  Future<dynamic> awaitSpeakCompletion(bool awaitCompletion) => _tts.awaitSpeakCompletion(awaitCompletion);
+
+  @override
+  void setCompletionHandler(VoidCallback handler) => _tts.setCompletionHandler(handler);
+
+  @override
+  void setErrorHandler(void Function(dynamic message) handler) => _tts.setErrorHandler(handler);
+
+  @override
+  void setCancelHandler(VoidCallback handler) => _tts.setCancelHandler(handler);
+
+  @override
+  Future<dynamic> speak(String text) => _tts.speak(text);
+
+  @override
+  Future<dynamic> stop() => _tts.stop();
+}
 
 /// TTS client that calls the backend TTS proxy (Kokoro local or ElevenLabs).
 /// Falls back to on-device iOS TTS if the backend is unavailable.
 class ElevenLabsTts {
   ElevenLabsTts._();
 
-  static FlutterTts? _flutterTts;
+  static OnDeviceTtsAdapter? _onDeviceTts;
   static String? _cachedTempDir;
 
   @visibleForTesting
@@ -26,12 +97,14 @@ class ElevenLabsTts {
     List<IosTextToSpeechAudioCategoryOptions> options,
     IosTextToSpeechAudioMode mode,
   }) get onDeviceIosAudioConfiguration => (
-        category: IosTextToSpeechAudioCategory.playback,
+        category: IosTextToSpeechAudioCategory.playAndRecord,
         options: const [
+          IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
+          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
           IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
           IosTextToSpeechAudioCategoryOptions.allowAirPlay,
         ],
-        mode: IosTextToSpeechAudioMode.spokenAudio,
+        mode: IosTextToSpeechAudioMode.defaultMode,
       );
 
   /// Synthesize [text] to speech via the backend TTS proxy.
@@ -151,13 +224,16 @@ class ElevenLabsTts {
   static Future<void> speakOnDevice(
     String text, {
     ExactAccountAuthorityVerifier? exactAuthority,
+    @visibleForTesting OnDeviceTtsAdapter? adapter,
+    @visibleForTesting bool? isIos,
+    @visibleForTesting Future<bool> Function()? audibleOutputEnforcer,
   }) async {
     if (text.trim().isEmpty) return;
     _requireCurrent(exactAuthority, 'before on-device TTS');
-    _flutterTts ??= FlutterTts();
-    final tts = _flutterTts!;
+    final tts = adapter ?? (_onDeviceTts ??= FlutterOnDeviceTtsAdapter(FlutterTts()));
+    final usesIosAudioSession = isIos ?? Platform.isIOS;
 
-    if (Platform.isIOS) {
+    if (usesIosAudioSession) {
       final configuration = onDeviceIosAudioConfiguration;
       await tts.setSharedInstance(true);
       _requireCurrent(exactAuthority, 'during on-device TTS setup');
@@ -193,6 +269,14 @@ class ElevenLabsTts {
       if (!completer.isCompleted) completer.complete();
     });
 
+    if (usesIosAudioSession) {
+      final routeIsAudible = await (audibleOutputEnforcer ??
+          () => EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback))();
+      if (!routeIsAudible) {
+        throw StateError('Ella on-device TTS route verification failed');
+      }
+    }
+    _requireCurrent(exactAuthority, 'after on-device TTS route verification');
     final result = await tts.speak(text);
     if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
       await tts.stop();
@@ -208,8 +292,8 @@ class ElevenLabsTts {
 
   /// Stop any active on-device TTS playback.
   static Future<void> stopOnDevice() async {
-    if (_flutterTts != null) {
-      await _flutterTts!.stop();
+    if (_onDeviceTts != null) {
+      await _onDeviceTts!.stop();
     }
   }
 

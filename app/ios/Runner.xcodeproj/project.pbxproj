@@ -45,6 +45,7 @@
 		AB12345678901234567890AC /* AppleHealthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD12345678901234567890CE /* AppleHealthService.swift */; };
 		CE7B938264FB7372447F8E21 /* prodLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ACE7BEFB9654B6DF5B9E1790 /* prodLaunchScreen.storyboard */; };
 		EF12345678901234567890EF /* WifiNetworkPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = FG12345678901234567890FG /* WifiNetworkPlugin.swift */; };
+		EAVR11111111111111111111 /* EllaVoiceAudioRoutePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAVR00000000000000000001 /* EllaVoiceAudioRoutePolicy.swift */; };
 		ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */; };
 		FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
@@ -145,6 +146,7 @@
 		E7A9F5F37DDF9FA87AC8A5CD /* GoogleService-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = "GoogleService-Info.plist"; path = "Runner/GoogleService-Info.plist"; sourceTree = "<group>"; };
 		EDFF6508A941E8259906DDE2 /* Pods-Runner.debug-dev.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug-dev.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug-dev.xcconfig"; sourceTree = "<group>"; };
 		EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = file.storyboard; name = devLaunchScreen.storyboard; path = Runner/devLaunchScreen.storyboard; sourceTree = "<group>"; };
+		EAVR00000000000000000001 /* EllaVoiceAudioRoutePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EllaVoiceAudioRoutePolicy.swift; sourceTree = "<group>"; };
 		ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = EllaLaunchScreen.storyboard; path = Runner/Base.lproj/EllaLaunchScreen.storyboard; sourceTree = "<group>"; };
 		FG12345678901234567890FG /* WifiNetworkPlugin.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = WifiNetworkPlugin.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -280,6 +282,7 @@
 				1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */,
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
+				EAVR00000000000000000001 /* EllaVoiceAudioRoutePolicy.swift */,
 				CD12345678901234567890CD /* AppleRemindersService.swift */,
 				A11D00000000000000000002 /* AppleRemindersSyncIdempotency.swift */,
 				A11D00000000000000000004 /* AppleRemindersSyncService.swift */,
@@ -572,6 +575,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
+				EAVR11111111111111111111 /* EllaVoiceAudioRoutePolicy.swift in Sources */,
 				AB12345678901234567890AB /* AppleRemindersService.swift in Sources */,
 				A11D00000000000000000001 /* AppleRemindersSyncIdempotency.swift in Sources */,
 				A11D00000000000000000003 /* AppleRemindersSyncService.swift in Sources */,
