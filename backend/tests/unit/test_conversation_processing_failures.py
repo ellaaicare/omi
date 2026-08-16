@@ -1821,36 +1821,138 @@ def _capture_failure(failures, operation, *args):
         failures.append(error)
 
 
-def test_capture_usage_sink_receipt_and_increment_commit_atomically_once():
-    class UsageTransaction:
-        def __init__(self):
-            self.sets = []
+def test_capture_usage_sink_receipt_and_increment_commit_atomically_once(monkeypatch):
+    from utils import analytics
 
-        def set(self, ref, data, **kwargs):
-            self.sets.append((ref, data, kwargs))
+    class UsageRef:
+        def __init__(self, path):
+            self.path = path
 
-    hourly_ref = _FakeDocumentRef()
-    missing_receipt = _FakeDocumentRef()
-    transaction = UsageTransaction()
-    assert user_usage_db._apply_hourly_usage_once_transaction(
-        transaction,
-        hourly_ref,
-        missing_receipt,
-        {'insights_gained': 1},
-        {'idempotency_key': 'stable-usage-operation'},
+        def collection(self, name):
+            return UsageRef(f'{self.path}/{name}')
+
+        def document(self, name):
+            return UsageRef(f'{self.path}/{name}')
+
+    class UsageDB:
+        def collection(self, name):
+            return UsageRef(name)
+
+        def transaction(self):
+            return object()
+
+    timestamps = [
+        datetime(2026, 8, 15, 11, 59, 59),
+        datetime(2026, 8, 15, 12, 0, 1),
+    ]
+    timestamp_lock = threading.Lock()
+
+    class AttemptDateTime:
+        @classmethod
+        def utcnow(cls):
+            with timestamp_lock:
+                return timestamps.pop(0)
+
+    predecessor_entered = threading.Event()
+    successor_completed = threading.Event()
+    apply_lock = threading.Lock()
+    receipts = set()
+    increments = []
+    observed = []
+    apply_calls = 0
+
+    def apply_once(transaction, hourly_ref, receipt_ref, update_doc, receipt_doc):
+        nonlocal apply_calls
+        with apply_lock:
+            apply_calls += 1
+            is_predecessor = apply_calls == 1
+            observed.append((hourly_ref.path, receipt_ref.path, receipt_doc['hourly_usage_id']))
+        if is_predecessor:
+            predecessor_entered.set()
+            assert successor_completed.wait(timeout=2)
+        with apply_lock:
+            if receipt_ref.path in receipts:
+                return False
+            receipts.add(receipt_ref.path)
+            increments.append(hourly_ref.path)
+            return True
+
+    monkeypatch.setattr(analytics, 'datetime', AttemptDateTime)
+    monkeypatch.setattr(user_usage_db, 'db', UsageDB())
+    monkeypatch.setattr(user_usage_db, '_apply_hourly_usage_once', apply_once)
+
+    predecessor_results = []
+    predecessor = threading.Thread(
+        target=lambda: predecessor_results.append(
+            analytics.record_usage(
+                'authenticated-user',
+                insights_gained=1,
+                idempotency_key='stable-usage-operation',
+            )
+        )
     )
-    assert [entry[0] for entry in transaction.sets] == [hourly_ref, missing_receipt]
-    assert transaction.sets[0][2] == {'merge': True}
+    predecessor.start()
+    assert predecessor_entered.wait(timeout=2)
 
-    duplicate = UsageTransaction()
-    assert not user_usage_db._apply_hourly_usage_once_transaction(
-        duplicate,
-        hourly_ref,
-        _FakeDocumentRef({'idempotency_key': 'stable-usage-operation'}),
-        {'insights_gained': 1},
-        {'idempotency_key': 'stable-usage-operation'},
+    successor_result = analytics.record_usage(
+        'authenticated-user',
+        insights_gained=1,
+        idempotency_key='stable-usage-operation',
     )
-    assert duplicate.sets == []
+    successor_completed.set()
+    predecessor.join(timeout=2)
+
+    assert not predecessor.is_alive()
+    assert predecessor_results == [False]
+    assert successor_result is True
+    assert observed[0][0] != observed[1][0]
+    assert observed[0][1] == observed[1][1]
+    assert observed[0][2] != observed[1][2]
+    assert increments == ['users/authenticated-user/hourly_usage/2026-08-15-12']
+
+
+def test_capture_action_items_auto_sync_threads_stable_effect_operation_to_real_batch_caller(monkeypatch):
+    conversation = _long_conversation()
+    conversation.id = 'capture-a'
+    conversation.structured = Structured(action_items=[{'description': 'Create a task'}])
+    received = []
+
+    class EffectRunner:
+        def run(self, effect_id, operation, **kwargs):
+            operation_tokens = {
+                'action_items:create': 'stable-action-item-create',
+                'action_items:delete_existing': 'stable-action-item-delete',
+                'action_items:auto_sync': 'stable-action-items-auto-sync',
+            }
+            return operation(operation_tokens[effect_id])
+
+    async def capture_batch(uid, action_items, idempotency_key=None):
+        received.append((uid, action_items, idempotency_key))
+        return []
+
+    monkeypatch.setattr(
+        conversation_processor.action_items_db,
+        'create_action_items_batch',
+        lambda *args, **kwargs: ['action-item-a'],
+    )
+    monkeypatch.setattr(
+        conversation_processor.action_items_db,
+        'delete_action_items_for_conversation',
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(conversation_processor, 'auto_sync_action_items_batch', capture_batch)
+
+    conversation_processor._save_action_items(
+        'authenticated-user',
+        conversation,
+        side_effect_guard=lambda boundary: None,
+        effect_runner=EffectRunner(),
+    )
+
+    assert len(received) == 1
+    assert received[0][0] == 'authenticated-user'
+    assert received[0][1][0]['id'] == 'action-item-a'
+    assert received[0][2] == 'stable-action-items-auto-sync'
 
 
 def test_capture_completed_result_is_fetchable_before_webhooks_and_lost_ack_recovery_is_idempotent(monkeypatch):
@@ -2011,9 +2113,11 @@ def test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_
         'backend/database/conversations.py',
         'backend/database/action_items.py',
         'backend/database/folders.py',
+        'backend/database/task_sync.py',
         'backend/database/user_usage.py',
         'backend/routers/conversations.py',
         'backend/routers/pusher.py',
+        'backend/routers/task_integrations.py',
         'backend/routers/transcribe.py',
         'backend/utils/app_integrations.py',
         'backend/utils/analytics.py',
@@ -2022,7 +2126,9 @@ def test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_
         'backend/utils/llm/knowledge_graph.py',
         'backend/utils/notifications.py',
         'backend/utils/stt/streaming.py',
+        'backend/utils/task_sync.py',
         'backend/utils/webhooks.py',
+        'backend/tests/unit/test_capture_task_sync_idempotency.py',
         'backend/tests/unit/test_conversation_processing_failures.py',
     }
     trigger_block = workflow.split('workflow_dispatch:', 1)[0]

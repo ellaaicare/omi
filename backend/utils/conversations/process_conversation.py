@@ -797,11 +797,17 @@ def _save_action_items(
         # Auto-sync to task integration
         created_items = [{"id": aid, **data} for aid, data in zip(action_item_ids, action_items_data)]
 
-        def _run_auto_sync():
-            asyncio.run(auto_sync_action_items_batch(uid, created_items))
+        def _run_auto_sync(operation_token=None):
+            return asyncio.run(
+                auto_sync_action_items_batch(
+                    uid,
+                    created_items,
+                    idempotency_key=operation_token,
+                )
+            )
 
         if side_effect_guard:
-            _run_side_effect(effect_runner, 'action_items:auto_sync', lambda _: _run_auto_sync())
+            _run_side_effect(effect_runner, 'action_items:auto_sync', _run_auto_sync)
         else:
             threading.Thread(target=_run_auto_sync, daemon=True).start()
 

@@ -526,28 +526,31 @@ extension FlutterError: Error {}
           return nil
       }()
 
-      // Create reminder
-      let reminder = EKReminder(eventStore: syncEventStore)
-      reminder.title = description
-      reminder.notes = "From Omi"
-      reminder.calendar = syncEventStore.defaultCalendarForNewReminders()
+      let idempotencyKey = (userInfo["idempotency_key"] as? String) ?? actionItemId
+      let outcome = AppleRemindersSyncIdempotency.shared.performOnce(idempotencyKey: idempotencyKey) {
+          let reminder = EKReminder(eventStore: syncEventStore)
+          reminder.title = description
+          reminder.notes = "From Omi"
+          reminder.calendar = syncEventStore.defaultCalendarForNewReminders()
 
-      if let due = dueDate {
-          reminder.dueDateComponents = Calendar.current.dateComponents(
-              [.year, .month, .day, .hour, .minute], from: due
-          )
+          if let due = dueDate {
+              reminder.dueDateComponents = Calendar.current.dateComponents(
+                  [.year, .month, .day, .hour, .minute], from: due
+              )
+          }
+          try syncEventStore.save(reminder, commit: true)
       }
 
-      do {
-          try syncEventStore.save(reminder, commit: true)
-
+      switch outcome {
+      case .performed:
           // Notify Flutter to mark as exported via API
           DispatchQueue.main.async {
               self.appleRemindersChannel?.invokeMethod("markExported", arguments: ["action_item_id": actionItemId])
           }
-
           completionHandler(.newData)
-      } catch {
+      case .alreadyCompleted:
+          completionHandler(.noData)
+      case .failed:
           completionHandler(.failed)
       }
   }

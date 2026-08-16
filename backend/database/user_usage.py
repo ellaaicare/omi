@@ -2,7 +2,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+from google.cloud.firestore_v1 import FieldFilter, transactional
 
 from ._client import db
 from models.user_usage import UsageStats
@@ -27,7 +27,7 @@ def _apply_hourly_usage_once_transaction(
     return True
 
 
-@firestore.transactional
+@transactional
 def _apply_hourly_usage_once(transaction, hourly_usage_ref, receipt_ref, update_doc: dict, receipt_doc: dict) -> bool:
     return _apply_hourly_usage_once_transaction(
         transaction,
@@ -63,7 +63,7 @@ def update_hourly_usage(uid: str, date: datetime, updates: dict, idempotency_key
     update_doc['id'] = doc_id
 
     if idempotency_key:
-        receipt_ref = hourly_usage_ref.collection('capture_effect_receipts').document(
+        receipt_ref = user_ref.collection('capture_usage_receipts').document(
             usage_idempotency_receipt_id(idempotency_key)
         )
         return _apply_hourly_usage_once(
@@ -73,6 +73,7 @@ def update_hourly_usage(uid: str, date: datetime, updates: dict, idempotency_key
             update_doc,
             {
                 'idempotency_key': idempotency_key,
+                'hourly_usage_id': doc_id,
                 'applied_at': datetime.now(timezone.utc),
             },
         )

@@ -11,6 +11,7 @@ import httpx
 
 import database.users as users_db
 import database.redis_db as redis_db
+import database.task_sync as task_sync_db
 from utils.other import endpoints as auth
 
 router = APIRouter()
@@ -480,6 +481,9 @@ async def _create_task_internal(
     title: str,
     description: Optional[str] = None,
     due_date: Optional[datetime] = None,
+    idempotency_key: Optional[str] = None,
+    action_item_id: Optional[str] = None,
+    sync_claim_token: Optional[str] = None,
 ) -> dict:
     """
     Internal function to create task in external service.
@@ -504,6 +508,27 @@ async def _create_task_internal(
         - api_error: External API returned an error
         - unsupported: Unsupported integration
     """
+    if idempotency_key:
+        if not action_item_id or not sync_claim_token:
+            return {"success": False, "error": "Incomplete task-sync identity", "error_code": "stale_sync_claim"}
+        claim = task_sync_db.observe_task_sync_claim(
+            uid,
+            idempotency_key,
+            action_item_id,
+            app_key,
+            sync_claim_token,
+        )
+        if claim.get('outcome') == 'completed':
+            result = claim.get('result') or {}
+            return {
+                "success": result.get('synced', False),
+                "external_task_id": result.get('external_task_id'),
+                "error": result.get('error'),
+                "deduplicated": True,
+            }
+        if claim.get('outcome') != 'claimed':
+            return {"success": False, "error": "Stale task-sync claim", "error_code": "stale_sync_claim"}
+
     if app_key in ['google_tasks', 'asana']:
         integration = await ensure_valid_oauth_token(
             uid, app_key, integration, refresh_if_missing_expires_at=(app_key == 'google_tasks')
@@ -526,9 +551,12 @@ async def _create_task_internal(
             if due_date:
                 body['due_string'] = due_date.strftime('%Y-%m-%d')
 
+            headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
+            if idempotency_key:
+                headers['X-Request-Id'] = task_sync_db.provider_request_id(idempotency_key)
             response = await client.post(
                 'https://api.todoist.com/rest/v2/tasks',
-                headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'},
+                headers=headers,
                 json=body,
             )
 

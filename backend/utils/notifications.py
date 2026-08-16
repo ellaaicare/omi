@@ -392,7 +392,13 @@ def send_action_item_data_message(
     _send_to_user(user_id, tag, data=data, is_background=True, priority='high')
 
 
-def send_apple_reminders_sync_push(user_id: str, action_item_id: str, description: str, due_at=None) -> bool:
+def send_apple_reminders_sync_push(
+    user_id: str,
+    action_item_id: str,
+    description: str,
+    due_at=None,
+    idempotency_key: str = None,
+) -> bool:
     """
     Sends a silent push notification to trigger Apple Reminders creation on device.
     iOS will wake the app in background to create the reminder locally.
@@ -420,8 +426,9 @@ def send_apple_reminders_sync_push(user_id: str, action_item_id: str, descriptio
         'action_item_id': action_item_id,
         'description': description,
         'due_at': due_at_str or '',
+        'idempotency_key': idempotency_key or action_item_id,
     }
-    tag = _generate_tag(f"{user_id}:apple_reminders_sync:{action_item_id}")
+    tag = _generate_tag(f"{user_id}:apple_reminders_sync:{idempotency_key or action_item_id}")
     success_count = _send_to_user(user_id, tag, data=data, is_background=True, priority='high')
     return success_count > 0
 

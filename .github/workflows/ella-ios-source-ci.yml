@@ -14,12 +14,14 @@ on:
       - backend/database/conversations.py
       - backend/database/folders.py
       - backend/database/redis_db.py
+      - backend/database/task_sync.py
       - backend/database/user_usage.py
       - backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md
       - backend/models/conversation.py
       - backend/models/message_event.py
       - backend/routers/conversations.py
       - backend/routers/pusher.py
+      - backend/routers/task_integrations.py
       - backend/routers/transcribe.py
       - backend/utils/conversations/capture_authority.py
       - backend/utils/conversations/process_conversation.py
@@ -40,7 +42,9 @@ on:
       - backend/utils/ella/exact_firebase_auth.py
       - backend/utils/ella/scanner.py
       - backend/utils/notifications.py
+      - backend/utils/task_sync.py
       - backend/tests/unit/test_guardian_notification_delivery.py
+      - backend/tests/unit/test_capture_task_sync_idempotency.py
       - backend/tests/unit/test_conversation_processing_failures.py
       - .github/workflows/ella-ios-source-ci.yml
   workflow_dispatch:
@@ -148,7 +152,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/database/action_items.py|backend/database/chat.py|backend/database/conversations.py|backend/database/folders.py|backend/database/redis_db.py|backend/database/user_usage.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/transcribe.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/webhooks.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/database/action_items.py|backend/database/chat.py|backend/database/conversations.py|backend/database/folders.py|backend/database/redis_db.py|backend/database/task_sync.py|backend/database/user_usage.py|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/task_integrations.py|backend/routers/transcribe.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/task_sync.py|backend/utils/webhooks.py|backend/tests/unit/test_capture_task_sync_idempotency.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -187,6 +191,16 @@ jobs:
             -o "$RUNNER_TEMP/guardian-native-policy-tests"
           "$RUNNER_TEMP/guardian-native-policy-tests"
 
+      - name: Run Apple Reminders replay-idempotency production boundary
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc -warnings-as-errors \
+            app/ios/Runner/AppleRemindersSyncIdempotency.swift \
+            app/ios/Tests/AppleRemindersSyncIdempotencyTests.swift \
+            -o "$RUNNER_TEMP/apple-reminders-sync-idempotency-tests"
+          "$RUNNER_TEMP/apple-reminders-sync-idempotency-tests"
+
       - name: Run Guardian data-only production boundary tests
         working-directory: .
         run: |
@@ -202,6 +216,32 @@ jobs:
           python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
           python -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          task_sync_tests=(
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_receipt_reclaim_and_completion_are_exact_claim_cas'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[asana]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[google_tasks]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[clickup]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[apple_reminders]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_action_items_auto_sync_threads_stable_effect_operation_to_real_batch_caller'
+          )
+          expected_task_sync_tests="${#task_sync_tests[@]}"
+          echo "Running exact task-sync replay inventory: ${expected_task_sync_tests} required tests"
+          set +e
+          python -m pytest -q -rs "${task_sync_tests[@]}" | tee "$RUNNER_TEMP/task-sync-replay-pytest.txt"
+          task_sync_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$task_sync_status" -ne 0 ]]; then
+            exit "$task_sync_status"
+          fi
+          if grep -Eq '[0-9]+ skipped|[0-9]+ deselected' "$RUNNER_TEMP/task-sync-replay-pytest.txt"; then
+            echo 'Task-sync replay inventory may not skip or deselect required tests.' >&2
+            exit 1
+          fi
+          if ! grep -Eq "${expected_task_sync_tests} passed" "$RUNNER_TEMP/task-sync-replay-pytest.txt"; then
+            echo "Task-sync replay inventory did not execute exactly ${expected_task_sync_tests} tests." >&2
+            exit 1
+          fi
           capture_tests=(
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_requires_exact_id_and_rejects_non_owner_before_mutation'
             'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_successor_mismatch_fails_before_any_conversation_mutation'
