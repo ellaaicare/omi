@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -78,6 +79,21 @@ Future<void> _grantOperationalAuthority(String uid) async {
     scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
     scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
   );
+}
+
+Future<ActiveWalAuthority> _restoreOperationalAuthorityFromPreferences(String uid) async {
+  final preferences = SharedPreferencesUtil();
+  await preferences.markEllaProvisioningVerified(uid);
+  preferences.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: preferences.aiConsentReceiptId,
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: preferences.aiConsentProfileBindingId,
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+  return WalOwnerAuthority.active(preferences: preferences, authenticatedUid: uid)!;
 }
 
 void main() {
@@ -469,17 +485,48 @@ void main() {
       await client.disconnect();
     });
 
-    test('connect arms the page exact-authority outbox before synchronous buffered transcript delivery and mic',
-        () async {
+    test('cold process restores stable authority before synchronous buffered transcript delivery and mic', () async {
       await _grantOperationalAuthority('uid-a');
-      final activeAuthority = WalOwnerAuthority.active(
+      final firstProcessAuthority = WalOwnerAuthority.active(
         preferences: SharedPreferencesUtil(),
         authenticatedUid: 'uid-a',
       );
-      expect(activeAuthority, isNotNull);
+      expect(firstProcessAuthority, isNotNull);
 
-      final backingStore = MemoryV2VTurnDurableStore();
-      final owner = activeAuthority!.owner;
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-cold-process-');
+      addTearDown(() async {
+        if (directory.existsSync()) await directory.delete(recursive: true);
+      });
+      final firstProcessStore = FileV2VTurnDurableStore(baseDirectory: directory);
+      final firstProcessOwner = firstProcessAuthority!.owner;
+      final baseTime = DateTime.utc(2026, 8, 15, 20);
+      for (var ordinal = 1; ordinal <= 200; ordinal++) {
+        final turnId = 'v2v-turn-${ordinal.toRadixString(16).padLeft(32, '0')}';
+        await firstProcessStore.put(
+          V2VTranscriptTurn(
+            uid: firstProcessOwner.uid,
+            ownerNamespace: firstProcessOwner.storageNamespace,
+            authorityFingerprint: firstProcessOwner.authorityFingerprint,
+            sessionId: 'restored-session',
+            turnId: turnId,
+            userEventId: '$turnId:user',
+            assistantEventId: '$turnId:assistant',
+            userTranscript: 'Restored question',
+            assistantTranscript: 'Restored answer',
+            startedAt: baseTime.add(Duration(seconds: ordinal * 2)),
+            completedAt: baseTime.add(Duration(seconds: ordinal * 2 + 1)),
+          ),
+        );
+      }
+
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final activeAuthority = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      final owner = activeAuthority.owner;
+      expect(owner.authorityGenerationAtCapture, isNot(firstProcessOwner.authorityGenerationAtCapture));
+      expect(owner.authorityFingerprint, firstProcessOwner.authorityFingerprint);
+      expect(owner.matches(firstProcessOwner), isFalse);
+
       final testAuthority = ActiveWalAuthority(
         owner: owner,
         consent: activeAuthority.consent,
@@ -493,26 +540,8 @@ void main() {
               activeAuthority.consent.isCurrent(preferences: SharedPreferencesUtil());
         },
       );
-      final baseTime = DateTime.utc(2026, 8, 15, 20);
-      for (var ordinal = 1; ordinal <= 200; ordinal++) {
-        final turnId = 'v2v-turn-${ordinal.toRadixString(16).padLeft(32, '0')}';
-        await backingStore.put(
-          V2VTranscriptTurn(
-            uid: owner.uid,
-            ownerNamespace: owner.storageNamespace,
-            authorityFingerprint: owner.authorityFingerprint,
-            sessionId: 'restored-session',
-            turnId: turnId,
-            userEventId: '$turnId:user',
-            assistantEventId: '$turnId:assistant',
-            userTranscript: 'Restored question',
-            assistantTranscript: 'Restored answer',
-            startedAt: baseTime.add(Duration(seconds: ordinal * 2)),
-            completedAt: baseTime.add(Duration(seconds: ordinal * 2 + 1)),
-          ),
-        );
-      }
       final releaseHydration = Completer<void>();
+      final backingStore = FileV2VTurnDurableStore(baseDirectory: directory);
       final gatedStore = _HydrationGateStore(backingStore, releaseHydration.future);
       final reconciler = V2VTurnReconciler(durableStore: gatedStore, writer: (_) async => false);
       const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
@@ -595,6 +624,92 @@ void main() {
         contains('v2v-turn-ffffffffffffffffffffffffffffffff'),
       );
       await client.disconnect();
+    });
+
+    test('cold re-grant cannot ABA-hydrate the revoked server authority outbox', () async {
+      await _grantOperationalAuthority('uid-a');
+      final authorityA = WalOwnerAuthority.active(
+        preferences: SharedPreferencesUtil(),
+        authenticatedUid: 'uid-a',
+      )!;
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-cold-regrant-');
+      addTearDown(() async {
+        if (directory.existsSync()) await directory.delete(recursive: true);
+      });
+      final firstProcessStore = FileV2VTurnDurableStore(baseDirectory: directory);
+      const oldTurnId = 'v2v-turn-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      await firstProcessStore.put(
+        V2VTranscriptTurn(
+          uid: authorityA.uid,
+          ownerNamespace: authorityA.owner.storageNamespace,
+          authorityFingerprint: authorityA.owner.authorityFingerprint,
+          sessionId: 'revoked-session',
+          turnId: oldTurnId,
+          userEventId: '$oldTurnId:user',
+          assistantEventId: '$oldTurnId:assistant',
+          userTranscript: 'Old question',
+          assistantTranscript: 'Old answer',
+          startedAt: DateTime.utc(2026, 8, 15, 21),
+          completedAt: DateTime.utc(2026, 8, 15, 21, 0, 1),
+        ),
+      );
+
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final restoredAuthorityA = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      expect(restoredAuthorityA.owner.authorityFingerprint, authorityA.owner.authorityFingerprint);
+
+      final preferences = SharedPreferencesUtil();
+      preferences.declineAiConsent();
+      preferences.acceptAiConsent(
+        receiptId: 'aicr_uid-a-regrant',
+        uid: 'uid-a',
+        profileBindingId: 'profile-uid-a',
+        serverDecidedAt: '2026-08-15T01:00:00Z',
+      );
+      final authorityB = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      expect(authorityB.owner.storageNamespace, authorityA.owner.storageNamespace);
+      expect(authorityB.owner.authorityFingerprint, isNot(authorityA.owner.authorityFingerprint));
+
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final coldAuthorityB = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      expect(coldAuthorityB.owner.authorityFingerprint, authorityB.owner.authorityFingerprint);
+
+      final writes = <V2VTranscriptTurn>[];
+      final reconciler = V2VTurnReconciler(
+        durableStore: FileV2VTurnDurableStore(baseDirectory: directory),
+        writer: (turn) async {
+          writes.add(turn);
+          return true;
+        },
+      );
+      final testAuthority = ActiveWalAuthority(
+        owner: coldAuthorityB.owner,
+        consent: coldAuthorityB.consent,
+        currentCheck: () {
+          final currentOwner = WalOwnerAuthority.currentOwner(
+            preferences: SharedPreferencesUtil(),
+            authenticatedUid: 'uid-a',
+          );
+          return currentOwner != null &&
+              coldAuthorityB.owner.matches(currentOwner) &&
+              coldAuthorityB.consent.isCurrent(preferences: SharedPreferencesUtil());
+        },
+      );
+      expect(
+        await armEllaVoiceTranscriptSessionBeforeTransport(
+          reconciler: reconciler,
+          authenticatedUid: 'uid-a',
+          sessionId: 'new-session',
+          persistTranscriptTurns: true,
+          isStartupCurrent: () => true,
+          authorityCapture: (_) => testAuthority,
+        ),
+        isTrue,
+      );
+      await reconciler.settle();
+      expect(writes, isEmpty);
     });
 
     test('revocation during delayed startup produces zero protected egress and zero microphone frames', () async {

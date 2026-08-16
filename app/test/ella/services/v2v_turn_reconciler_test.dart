@@ -864,6 +864,7 @@ void main() {
         expect(cleanupMarker.existsSync(), isTrue);
         final markerJson = Map<String, dynamic>.from(jsonDecode(await cleanupMarker.readAsString()) as Map);
         expect(markerJson['authority_fingerprint'], authorityFingerprintA);
+        expect(markerJson['status'], 'cleanup_required');
         expect(markerJson.containsKey('turns'), isFalse);
 
         final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);
@@ -873,21 +874,60 @@ void main() {
           authorityFingerprint: authorityFingerprintB,
         );
         expect(authorityBTurns.map((turn) => turn.sessionId), ['authority-b']);
-        expect(
-          await restartedStore.load(
-            uid: 'uid-a',
-            ownerNamespace: ownerNamespaceA,
-            authorityFingerprint: authorityFingerprintA,
-          ),
-          isEmpty,
+        final obsoleteDirectory = Directory(
+          '${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA',
         );
+        expect(obsoleteDirectory.existsSync(), isFalse);
         expect(
-          await restartedStore.load(
+          await FileV2VTurnDurableStore(baseDirectory: directory).load(
             uid: 'uid-a',
             ownerNamespace: ownerNamespaceA,
             authorityFingerprint: authorityFingerprintB,
           ),
           hasLength(1),
+        );
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('restart marker scan clears obsolete authority after a crash before manifest rewrite', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-cleanup-marker-first-');
+      try {
+        final failingStore = FileV2VTurnDurableStore(
+          baseDirectory: directory,
+          afterCleanupMarkerWriteForTesting: (_) async => throw const FileSystemException('injected process death'),
+        );
+        await failingStore.put(ownedTurn(sessionId: 'authority-a', ordinal: 1));
+        await failingStore.put(
+          ownedTurn(
+            sessionId: 'authority-b',
+            ordinal: 2,
+            authorityFingerprint: authorityFingerprintB,
+          ),
+        );
+        await expectLater(
+          failingStore.clearOwner(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintA,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        final restartedStore = FileV2VTurnDurableStore(baseDirectory: directory);
+        expect(
+          (await restartedStore.load(
+            uid: 'uid-a',
+            ownerNamespace: ownerNamespaceA,
+            authorityFingerprint: authorityFingerprintB,
+          ))
+              .map((turn) => turn.sessionId),
+          ['authority-b'],
+        );
+        expect(
+          Directory('${directory.path}/ella_v2v_turn_outbox/$ownerNamespaceA/$authorityFingerprintA').existsSync(),
+          isFalse,
         );
       } finally {
         await directory.delete(recursive: true);

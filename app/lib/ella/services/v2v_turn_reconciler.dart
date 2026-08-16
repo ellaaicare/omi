@@ -229,10 +229,12 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     this.maxPendingTurns = 256,
     this.maxManifestBytes = 16 * 1024 * 1024,
     this.maxCleanupNamespacesPerLoad = 64,
+    Future<void> Function(Directory directory)? afterCleanupMarkerWriteForTesting,
     Future<void> Function(Directory directory)? beforeCleanupDeleteForTesting,
   })  : assert(maxPendingTurns > 0),
         assert(maxManifestBytes > 0),
         assert(maxCleanupNamespacesPerLoad > 0),
+        _afterCleanupMarkerWrite = afterCleanupMarkerWriteForTesting,
         _beforeCleanupDelete = beforeCleanupDeleteForTesting,
         _configuredBaseDirectory = baseDirectory;
 
@@ -246,6 +248,7 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
   final int maxPendingTurns;
   final int maxManifestBytes;
   final int maxCleanupNamespacesPerLoad;
+  final Future<void> Function(Directory directory)? _afterCleanupMarkerWrite;
   final Future<void> Function(Directory directory)? _beforeCleanupDelete;
   static Future<void> _operationTail = Future<void>.value();
 
@@ -330,6 +333,7 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
           ownerNamespace: ownerNamespace,
           authorityFingerprint: authorityFingerprint,
         );
+        await _afterCleanupMarkerWrite?.call(directory);
         await _write(
           uid: uid,
           ownerNamespace: ownerNamespace,
@@ -484,17 +488,18 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
       final marker = File('${entity.path}/cleanup_required.json');
       if (!await marker.exists()) continue;
       final decoded = jsonDecode(await marker.readAsString());
-      if (decoded is! Map) continue;
+      if (decoded is! Map) throw const FormatException('Invalid V2V cleanup marker');
       final json = Map<String, dynamic>.from(decoded);
-      if (json['version'] == _manifestVersion &&
-          json['uid'] == uid &&
-          json['owner_namespace'] == ownerNamespace &&
-          json['authority_fingerprint'] == fingerprint &&
-          json['status'] == _cleanupRequiredStatus &&
-          cleanupAttempts < maxCleanupNamespacesPerLoad) {
-        cleanupAttempts++;
-        await _deleteAuthorityDirectory(entity);
+      if (json['version'] != _manifestVersion ||
+          json['uid'] != uid ||
+          json['owner_namespace'] != ownerNamespace ||
+          json['authority_fingerprint'] != fingerprint ||
+          json['status'] != _cleanupRequiredStatus) {
+        throw const FormatException('Mismatched V2V cleanup marker');
       }
+      if (cleanupAttempts >= maxCleanupNamespacesPerLoad) continue;
+      cleanupAttempts++;
+      await _deleteAuthorityDirectory(entity);
     }
   }
 
@@ -505,15 +510,19 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
     required String authorityFingerprint,
   }) async {
     final marker = File('${directory.path}/cleanup_required.json');
-    await marker.writeAsString(
-      jsonEncode({
-        'version': _manifestVersion,
-        'uid': uid,
-        'owner_namespace': ownerNamespace,
-        'authority_fingerprint': authorityFingerprint,
-      }),
-      flush: true,
-    );
+    final temporary = File('${marker.path}.tmp');
+    if (await temporary.exists()) await temporary.delete();
+    await temporary.writeAsString(
+        jsonEncode({
+          'version': _manifestVersion,
+          'uid': uid,
+          'owner_namespace': ownerNamespace,
+          'authority_fingerprint': authorityFingerprint,
+          'status': _cleanupRequiredStatus,
+        }),
+        flush: true);
+    if (await marker.exists()) await marker.delete();
+    await temporary.rename(marker.path);
   }
 
   Future<void> _deleteAuthorityDirectory(Directory directory) async {

@@ -251,7 +251,7 @@ void main() {
     expect(captured.every((wal) => wal.status == WalStatus.quarantined), isTrue);
   });
 
-  test('owner equality includes authority generation and revocation fails closed', () async {
+  test('process-local generation fences equality without changing the stable authority fingerprint', () async {
     final original = _owner('uid-a');
     final newerGeneration = WalOwner(
       uid: original.uid,
@@ -261,7 +261,7 @@ void main() {
       authorityGenerationAtCapture: original.authorityGenerationAtCapture + 1,
     );
     expect(original.storageNamespace, newerGeneration.storageNamespace);
-    expect(original.authorityFingerprint, isNot(newerGeneration.authorityFingerprint));
+    expect(original.authorityFingerprint, newerGeneration.authorityFingerprint);
     expect(original.matches(newerGeneration), isFalse);
 
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
@@ -269,6 +269,63 @@ void main() {
     expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNotNull);
     prefs.declineAiConsent();
     expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
+  });
+
+  test('authority fingerprint uses canonical fields and malformed identifiers fail closed', () async {
+    final first = _owner('uid-a');
+    final second = WalOwner(
+      uid: first.uid,
+      profileBindingId: '${first.profileBindingId}-other',
+      bindingRevision: first.bindingRevision,
+      consentReceiptId: first.consentReceiptId,
+      authorityGenerationAtCapture: first.authorityGenerationAtCapture,
+    );
+    expect(first.authorityFingerprint, isNot(second.authorityFingerprint));
+
+    // These two owners collided under the former newline-delimited preimage.
+    const malformedFirst = WalOwner(
+      uid: 'uid-a\nprofile',
+      profileBindingId: 'binding',
+      bindingRevision: 3,
+      consentReceiptId: 'aicr_receipt',
+      authorityGenerationAtCapture: 1,
+    );
+    const malformedSecond = WalOwner(
+      uid: 'uid-a',
+      profileBindingId: 'profile\nbinding',
+      bindingRevision: 3,
+      consentReceiptId: 'aicr_receipt',
+      authorityGenerationAtCapture: 1,
+    );
+    String formerPreimage(WalOwner owner) =>
+        '${owner.uid}\n${owner.profileBindingId}\n${owner.bindingRevision}\n${owner.consentReceiptId}';
+    expect(formerPreimage(malformedFirst), formerPreimage(malformedSecond));
+    expect(malformedFirst.hasValidAuthorityIdentity, isFalse);
+    expect(malformedSecond.hasValidAuthorityIdentity, isFalse);
+    expect(() => malformedFirst.authorityFingerprint, throwsStateError);
+    expect(() => malformedSecond.storageNamespace, throwsStateError);
+    expect(malformedFirst.matches(malformedSecond), isFalse);
+
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt',
+      uid: 'uid-a',
+      profileBindingId: 'profile\nbinding',
+      serverDecidedAt: '2026-08-15T00:00:00Z',
+    );
+    await preferences.saveEllaProvisioningReceipt('uid-a', _provisioningReceipt());
+    await preferences.markEllaProvisioningVerified('uid-a');
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile\nbinding',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    expect(WalOwnerAuthority.currentOwner(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
   test('persisted-only provisioning and consent cannot create active authority', () async {
