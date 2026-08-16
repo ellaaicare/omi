@@ -161,6 +161,7 @@ class EllaVoiceTurnRequest(BaseModel):
     assistant_terminal: bool = False
     started_at: datetime
     completed_at: datetime
+    turn_ordinal: int | None = None
 
 
 _VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -185,6 +186,10 @@ def _validated_voice_turn(request: EllaVoiceTurnRequest) -> tuple[str, str]:
         raise HTTPException(status_code=422, detail="invalid_voice_event_identity")
     if request.completed_at < request.started_at:
         raise HTTPException(status_code=422, detail="invalid_voice_turn_time")
+    if request.turn_ordinal is not None and (
+        isinstance(request.turn_ordinal, bool) or request.turn_ordinal < 0 or request.turn_ordinal > 0x7FFFFFFFFFFFFFFF
+    ):
+        raise HTTPException(status_code=422, detail="invalid_voice_turn_ordinal")
     return user_text, assistant_text
 
 
@@ -259,6 +264,7 @@ def _ios_voice_event(
     text: str,
     started_at: datetime,
     ended_at: datetime,
+    turn_ordinal: int | None,
 ) -> CanonicalEventIn:
     source_identity = f"ios_voice:{uid}:{session_id}:{turn_id}"
     return CanonicalEventIn(
@@ -285,6 +291,7 @@ def _ios_voice_event(
             "conversation_id": session_id,
             "turn_id": turn_id,
             "event_sequence": 0 if role == "user" else 1,
+            **({"turn_ordinal": turn_ordinal} if turn_ordinal is not None else {}),
         },
     )
 
@@ -329,6 +336,7 @@ async def persist_v2v_voice_turn(
             text=user_text,
             started_at=request.started_at,
             ended_at=request.completed_at,
+            turn_ordinal=request.turn_ordinal,
         ),
         _ios_voice_event(
             uid=uid,
@@ -339,6 +347,7 @@ async def persist_v2v_voice_turn(
             text=assistant_text,
             started_at=request.completed_at,
             ended_at=request.completed_at,
+            turn_ordinal=request.turn_ordinal,
         ),
     ]
 

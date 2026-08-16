@@ -58,8 +58,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify immutable checked-out head
+        working-directory: .
+        env:
+          ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          head_sha="$ELLA_EXPECTED_HEAD_SHA"
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character immutable head SHA." >&2
+            exit 1
+          }
+          [[ "$checked_out_head" == "$head_sha" ]] || {
+            echo "Source CI checkout mismatch: headSha=$head_sha checkedOutHead=$checked_out_head" >&2
+            exit 1
+          }
+          printf 'headSha=%s checkedOutHead=%s\n' "$head_sha" "$checked_out_head"
+          printf '%s\n' "$head_sha" > /tmp/ella-ios-source-ci-head-sha.txt
 
       - name: Verify credential-free source CI scope
         working-directory: .
@@ -332,3 +353,17 @@ jobs:
 
       - name: Run full Flutter tests
         run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub
+
+      - name: Print exact-head gate receipt
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          head_sha="$(cat /tmp/ella-ios-source-ci-head-sha.txt)"
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$checked_out_head" == "$head_sha" ]] || {
+            echo "Source CI checkout changed during gate: headSha=$head_sha checkedOutHead=$checked_out_head" >&2
+            exit 1
+          }
+          printf 'Ella source gate receipt: headSha=%s checkedOutHead=%s baseSha=%s\n' \
+            "$head_sha" "$checked_out_head" "$(cat /tmp/ella-ios-source-ci-base-ref.txt)"

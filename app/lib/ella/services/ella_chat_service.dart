@@ -94,6 +94,7 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
   required String assistantTranscript,
   required DateTime startedAt,
   required DateTime completedAt,
+  required int? turnOrdinal,
   required ExactAccountAuthorityVerifier exactAuthority,
   EllaVoiceTurnTransport? transport,
 }) async {
@@ -125,6 +126,7 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
         'assistant_terminal': true,
         'started_at': startedAt.toUtc().toIso8601String(),
         'completed_at': completedAt.toUtc().toIso8601String(),
+        if (turnOrdinal != null) 'turn_ordinal': turnOrdinal,
       }),
       expectedAuthenticatedUid: uid,
       exactAuthority: exactAuthority,
@@ -178,6 +180,7 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
           fromVoice: true,
           canonicalConversationId: (raw['metadata'] as Map?)?['conversation_id']?.toString() ?? sessionId,
           canonicalTurnId: (raw['metadata'] as Map?)?['turn_id']?.toString() ?? turnId,
+          canonicalTurnOrdinal: (raw['metadata'] as Map?)?['turn_ordinal'] as int?,
           canonicalEventSequence: (raw['metadata'] as Map?)?['event_sequence'] as int?,
         ),
       );
@@ -270,6 +273,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           askForNps: false,
           canonicalConversationId: (m['metadata'] as Map?)?['conversation_id']?.toString(),
           canonicalTurnId: (m['metadata'] as Map?)?['turn_id']?.toString(),
+          canonicalTurnOrdinal: (m['metadata'] as Map?)?['turn_ordinal'] as int?,
           canonicalEventSequence: (m['metadata'] as Map?)?['event_sequence'] as int?,
         ),
       );

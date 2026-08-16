@@ -88,7 +88,15 @@ def _event_sequence(event: dict[str, Any]) -> int:
     return 1 if _role_for_event(event) == "assistant" else 0
 
 
-def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[float, str, str, int, str]:
+def _turn_ordinal(event: dict[str, Any]) -> Optional[int]:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    ordinal = metadata.get("turn_ordinal")
+    if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 0:
+        return ordinal
+    return None
+
+
+def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple[float, str, int, int, str, int, str]:
     try:
         parsed = _parse_iso(_event_time(event))
     except (TypeError, ValueError):
@@ -96,9 +104,12 @@ def _server_message_order(event: dict[str, Any], *, newest_first: bool) -> tuple
     timestamp = parsed.timestamp() if parsed is not None else float("-inf")
     conversation_id = str(event.get("session_id") or "")
     event_id = str(event.get("event_id") or event.get("id") or "")
+    turn_ordinal = _turn_ordinal(event)
     return (
         -timestamp if newest_first else timestamp,
         conversation_id,
+        0 if turn_ordinal is not None else 1,
+        turn_ordinal or 0,
         _turn_identity(event),
         _event_sequence(event),
         event_id,
@@ -233,6 +244,7 @@ def canonical_events_to_server_messages(
                     "conversation_id": event.get("session_id"),
                     "turn_id": _turn_identity(event),
                     "event_sequence": _event_sequence(event),
+                    **({"turn_ordinal": turn_ordinal} if (turn_ordinal := _turn_ordinal(event)) is not None else {}),
                 },
             }
         )

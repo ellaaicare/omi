@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -7,6 +8,20 @@ from fastapi import HTTPException
 from ella.routers import canonical_events, chat
 from ella.routers.canonical_events import InMemoryCanonicalEventStore
 from utils.ella.canonical_context import canonical_events_to_server_messages
+
+
+def test_ella_source_ci_checks_out_and_receipts_the_immutable_pr_head():
+    workflow = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ella-ios-source-ci.yml"
+    source = workflow.read_text(encoding="utf-8")
+
+    immutable_head_expression = (
+        "github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha"
+    )
+    assert f"ref: ${{{{ {immutable_head_expression} }}}}" in source
+    assert f"ELLA_EXPECTED_HEAD_SHA: ${{{{ {immutable_head_expression} }}}}" in source
+    assert 'checked_out_head="$(git rev-parse HEAD)"' in source
+    assert '[[ "$checked_out_head" == "$head_sha" ]]' in source
+    assert "Ella source gate receipt: headSha=%s checkedOutHead=%s baseSha=%s" in source
 
 
 class _ReadbackPool:
@@ -225,3 +240,38 @@ def test_multiple_equal_timestamp_turns_preserve_turn_pairs_across_store_and_ser
     ]
     assert [message["metadata"]["event_sequence"] for message in refreshed] == [0, 1, 0, 1]
     assert {message["metadata"]["conversation_id"] for message in refreshed} == {"session-1"}
+
+
+def test_equal_timestamp_reverse_lexical_v2v_ids_follow_persisted_turn_ordinal(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    timestamp = datetime(2026, 8, 15, 20, 0, tzinfo=timezone.utc)
+    chronological_turns = [
+        "v2v-turn-ffffffffffffffffffffffffffffffff",
+        "v2v-turn-00000000000000000000000000000000",
+    ]
+    for turn_ordinal, turn_id in enumerate(chronological_turns):
+        asyncio.run(
+            chat.persist_v2v_voice_turn(
+                _request(
+                    turn_id=turn_id,
+                    user_event_id=f"{turn_id}:user",
+                    assistant_event_id=f"{turn_id}:assistant",
+                    started_at=timestamp,
+                    completed_at=timestamp,
+                    turn_ordinal=turn_ordinal,
+                ),
+                authenticated_uid="uid-a",
+            )
+        )
+
+    events = asyncio.run(store.timeline(uid="uid-a", since=None, limit=50, channels=["ios_voice"]))
+    refreshed = canonical_events_to_server_messages(events, limit=50, newest_first=False)
+
+    assert [message["id"] for message in refreshed] == [
+        f"{chronological_turns[0]}:user",
+        f"{chronological_turns[0]}:assistant",
+        f"{chronological_turns[1]}:user",
+        f"{chronological_turns[1]}:assistant",
+    ]
+    assert [message["metadata"]["turn_ordinal"] for message in refreshed] == [0, 0, 1, 1]

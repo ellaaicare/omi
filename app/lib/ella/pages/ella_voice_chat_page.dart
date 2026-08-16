@@ -65,6 +65,7 @@ Future<bool> armEllaVoiceTranscriptSessionBeforeTransport({
     authorityFingerprint: activeAuthority.owner.authorityFingerprint,
     sessionId: sessionId,
     isAuthorityCurrent: activeAuthority.isCurrent,
+    authorityGenerationAtCapture: activeAuthority.owner.authorityGenerationAtCapture,
   );
   return armed && activeAuthority.isCurrent() && isStartupCurrent();
 }
@@ -1508,6 +1509,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       assistantTranscript: turn.assistantTranscript,
       startedAt: turn.startedAt,
       completedAt: turn.completedAt,
+      turnOrdinal: turn.turnOrdinal,
     );
   }
 

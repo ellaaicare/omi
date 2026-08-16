@@ -234,6 +234,7 @@ void main() {
       assistantTranscript: 'Answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),
       completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
       exactAuthority: authority,
       transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(Uri.parse(url).path, '/v1/ella/chat/voice-turns');
@@ -245,6 +246,7 @@ void main() {
         expect(request['turn_id'], 'turn-000001');
         expect(request['user_event_id'], 'turn-000001:user');
         expect(request['assistant_event_id'], 'turn-000001:assistant');
+        expect(request['turn_ordinal'], 0);
         expect(request['user_terminal'], isTrue);
         expect(request['assistant_terminal'], isTrue);
         return http.Response(
@@ -285,6 +287,7 @@ void main() {
       assistantTranscript: 'Answer',
       startedAt: timestamp,
       completedAt: timestamp,
+      turnOrdinal: 0,
       exactAuthority: authority,
       transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async {
         return http.Response(
@@ -318,6 +321,49 @@ void main() {
     expect(result.value?.map((message) => message.createdAt.toUtc()), [timestamp, timestamp]);
   });
 
+  test('history and cache preserve equal-time reverse-lexical V2V turn chronology', () async {
+    const authority = _CurrentAuthority('uid-a');
+    const firstTurn = 'v2v-turn-ffffffffffffffffffffffffffffffff';
+    const secondTurn = 'v2v-turn-00000000000000000000000000000000';
+    Map<String, dynamic> message(String turnId, String sender, int eventSequence, int turnOrdinal) => {
+          'id': '$turnId:${sender == 'human' ? 'user' : 'assistant'}',
+          'sender': sender,
+          'text': '$sender $turnId',
+          'created_at': '2026-08-15T20:00:00Z',
+          'metadata': {
+            'conversation_id': 'session-1',
+            'turn_id': turnId,
+            'turn_ordinal': turnOrdinal,
+            'event_sequence': eventSequence,
+          },
+        };
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+        jsonEncode({
+          'messages': [
+            message(secondTurn, 'ai', 1, 1),
+            message(firstTurn, 'ai', 1, 0),
+            message(secondTurn, 'human', 0, 1),
+            message(firstTurn, 'human', 0, 0),
+          ],
+        }),
+        200,
+      ),
+    );
+    final cacheRoundTrip = result.value!.map((message) => ServerMessage.fromJson(message.toJson())).toList()
+      ..sort(compareServerMessagesChronologically);
+
+    expect(cacheRoundTrip.map((message) => message.id), [
+      '$firstTurn:user',
+      '$firstTurn:assistant',
+      '$secondTurn:user',
+      '$secondTurn:assistant',
+    ]);
+    expect(cacheRoundTrip.map((message) => message.canonicalTurnOrdinal), [0, 0, 1, 1]);
+  });
+
   test('V2V backend error body is neither accepted nor surfaced as content', () async {
     const authority = _CurrentAuthority('uid-a');
     const privateErrorBody = '{"detail":"private transcript must never be logged"}';
@@ -331,6 +377,7 @@ void main() {
       assistantTranscript: 'Answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),
       completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
       exactAuthority: authority,
       transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async =>
           http.Response(privateErrorBody, 503),

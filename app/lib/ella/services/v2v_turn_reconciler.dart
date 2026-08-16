@@ -79,6 +79,7 @@ class V2VTranscriptTurn {
     required this.assistantTranscript,
     required this.startedAt,
     required this.completedAt,
+    this.turnOrdinal,
   });
 
   final String uid;
@@ -92,6 +93,7 @@ class V2VTranscriptTurn {
   final String assistantTranscript;
   final DateTime startedAt;
   final DateTime completedAt;
+  final int? turnOrdinal;
 
   Map<String, dynamic> toJson() => {
         'uid': uid,
@@ -105,6 +107,7 @@ class V2VTranscriptTurn {
         'assistant_transcript': assistantTranscript,
         'started_at': startedAt.toUtc().toIso8601String(),
         'completed_at': completedAt.toUtc().toIso8601String(),
+        if (turnOrdinal != null) 'turn_ordinal': turnOrdinal,
       };
 
   static V2VTranscriptTurn? tryParse(
@@ -112,6 +115,7 @@ class V2VTranscriptTurn {
     required String expectedUid,
     required String expectedOwnerNamespace,
     required String expectedAuthorityFingerprint,
+    int? fallbackTurnOrdinal,
   }) {
     if (value is! Map) return null;
     final json = Map<String, dynamic>.from(value);
@@ -127,6 +131,10 @@ class V2VTranscriptTurn {
       'started_at': json['started_at'],
       'completed_at': json['completed_at'],
     });
+    final persistedTurnOrdinal = json['turn_ordinal'];
+    if (persistedTurnOrdinal != null && (persistedTurnOrdinal is! int || persistedTurnOrdinal < 0)) return null;
+    final turnOrdinal = persistedTurnOrdinal as int? ?? fallbackTurnOrdinal;
+    if (turnOrdinal != null && turnOrdinal < 0) return null;
     if (terminal == null ||
         json['uid'] != expectedUid ||
         json['owner_namespace'] != expectedOwnerNamespace ||
@@ -145,10 +153,34 @@ class V2VTranscriptTurn {
       assistantTranscript: terminal.assistantTranscript,
       startedAt: terminal.startedAt,
       completedAt: terminal.completedAt,
+      turnOrdinal: turnOrdinal,
     );
   }
 
-  bool samePayload(V2VTranscriptTurn other) => jsonEncode(toJson()) == jsonEncode(other.toJson());
+  V2VTranscriptTurn withTurnOrdinal(int value) => V2VTranscriptTurn(
+        uid: uid,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+        sessionId: sessionId,
+        turnId: turnId,
+        userEventId: userEventId,
+        assistantEventId: assistantEventId,
+        userTranscript: userTranscript,
+        assistantTranscript: assistantTranscript,
+        startedAt: startedAt,
+        completedAt: completedAt,
+        turnOrdinal: value,
+      );
+
+  bool samePayload(V2VTranscriptTurn other) {
+    final first = toJson();
+    final second = other.toJson();
+    if (turnOrdinal == null || other.turnOrdinal == null) {
+      first.remove('turn_ordinal');
+      second.remove('turn_ordinal');
+    }
+    return jsonEncode(first) == jsonEncode(second);
+  }
 }
 
 typedef V2VTranscriptTurnWriter = Future<bool> Function(V2VTranscriptTurn turn);
@@ -156,6 +188,13 @@ typedef V2VAuthorityCurrent = bool Function();
 
 class V2VAuthorityChangedException extends StateError {
   V2VAuthorityChangedException() : super('V2V authority changed during durable store operation');
+}
+
+class _V2VAuthorityLease {
+  _V2VAuthorityLease(this.key, this.authorityGenerationAtCapture);
+
+  final String key;
+  final int authorityGenerationAtCapture;
 }
 
 Future<bool> activateV2VTransportInOrder({
@@ -568,12 +607,16 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
         final turnIds = <String>{};
         final userEventIds = <String>{};
         final assistantEventIds = <String>{};
+        final nextLegacyOrdinalBySession = <String, int>{};
         for (final value in json['turns'] as List) {
+          final sessionId = value is Map ? value['session_id']?.toString() ?? '' : '';
+          final fallbackTurnOrdinal = nextLegacyOrdinalBySession[sessionId] ?? 0;
           final turn = V2VTranscriptTurn.tryParse(
             value,
             expectedUid: uid,
             expectedOwnerNamespace: ownerNamespace,
             expectedAuthorityFingerprint: authorityFingerprint,
+            fallbackTurnOrdinal: fallbackTurnOrdinal,
           );
           if (turn == null ||
               !turnIds.add(turn.turnId) ||
@@ -582,6 +625,10 @@ class FileV2VTurnDurableStore implements V2VTurnDurableStore {
             throw const FormatException('Invalid V2V outbox turn');
           }
           turns.add(turn);
+          final nextTurnOrdinal = turn.turnOrdinal! + 1;
+          if (nextTurnOrdinal > (nextLegacyOrdinalBySession[turn.sessionId] ?? 0)) {
+            nextLegacyOrdinalBySession[turn.sessionId] = nextTurnOrdinal;
+          }
         }
         return turns;
       } catch (error) {
@@ -901,11 +948,38 @@ class V2VTurnReconciler {
   final void Function()? _onWriteFailure;
   final List<Duration> _unauthorizedCleanupRetryDelays;
   final Map<String, _V2VSessionTurns> _sessions = {};
+  static final Map<String, _V2VAuthorityLease> _authorityLeases = {};
   String _activeSessionId = '';
 
   int get sessionCountForTesting => _sessions.length;
 
   int pendingTurnCountForTesting(String sessionId) => _sessions[sessionId]?.pendingTurns.length ?? 0;
+
+  String _authorityKey(String uid, String ownerNamespace, String authorityFingerprint) =>
+      '$uid\n$ownerNamespace\n$authorityFingerprint';
+
+  bool _ownsAuthorityLease(_V2VSessionTurns state) =>
+      state.authorityGenerationAtCapture == state.authorityLease.authorityGenerationAtCapture &&
+      identical(_authorityLeases[state.authorityLease.key], state.authorityLease);
+
+  void _retireReplacedAuthorityStates(_V2VAuthorityLease replacement) {
+    for (final state in _sessions.values.toList()) {
+      if (state.authorityLease.key != replacement.key || identical(state.authorityLease, replacement)) continue;
+      state
+        ..unauthorized = true
+        ..unauthorizedClearPending = false
+        ..ended = true
+        ..rerunRequested = false
+        ..pendingTurns.clear();
+      state.cleanupRetryTimer?.cancel();
+      state.cleanupRetryTimer = null;
+      if (state.cleanupRetryCompleter?.isCompleted == false) state.cleanupRetryCompleter!.complete();
+      state.cleanupRetryCompleter = null;
+      state.cleanupRetryFuture = null;
+      if (identical(_sessions[state.sessionId], state)) _sessions.remove(state.sessionId);
+      if (_activeSessionId == state.sessionId) _activeSessionId = '';
+    }
+  }
 
   Future<bool> beginSession({
     required String uid,
@@ -913,6 +987,7 @@ class V2VTurnReconciler {
     required String authorityFingerprint,
     required String sessionId,
     required bool Function() isAuthorityCurrent,
+    int authorityGenerationAtCapture = 0,
   }) async {
     final normalizedUid = uid.trim();
     final normalizedOwnerNamespace = ownerNamespace.trim();
@@ -922,22 +997,28 @@ class V2VTurnReconciler {
         !FileV2VTurnDurableStore._ownerNamespacePattern.hasMatch(normalizedOwnerNamespace) ||
         !FileV2VTurnDurableStore._authorityFingerprintPattern.hasMatch(normalizedAuthorityFingerprint) ||
         normalizedSessionId.isEmpty ||
+        authorityGenerationAtCapture < 0 ||
         !isAuthorityCurrent()) {
       return false;
     }
+    final authorityKey = _authorityKey(normalizedUid, normalizedOwnerNamespace, normalizedAuthorityFingerprint);
+    final authorityLease = _V2VAuthorityLease(authorityKey, authorityGenerationAtCapture);
+    _authorityLeases[authorityKey] = authorityLease;
+    _retireReplacedAuthorityStates(authorityLease);
+    bool exactAuthorityIsCurrent() => identical(_authorityLeases[authorityKey], authorityLease) && isAuthorityCurrent();
     late final List<V2VTranscriptTurn> restored;
     try {
       restored = await _durableStore.load(
         uid: normalizedUid,
         ownerNamespace: normalizedOwnerNamespace,
         authorityFingerprint: normalizedAuthorityFingerprint,
-        isAuthorityCurrent: isAuthorityCurrent,
+        isAuthorityCurrent: exactAuthorityIsCurrent,
       );
     } catch (_) {
       _onWriteFailure?.call();
       return false;
     }
-    if (!isAuthorityCurrent()) return false;
+    if (!exactAuthorityIsCurrent()) return false;
     for (final turn in restored) {
       final restoredState = _sessions.putIfAbsent(
         turn.sessionId,
@@ -946,7 +1027,10 @@ class V2VTurnReconciler {
           ownerNamespace: normalizedOwnerNamespace,
           authorityFingerprint: normalizedAuthorityFingerprint,
           sessionId: turn.sessionId,
-          isAuthorityCurrent: isAuthorityCurrent,
+          authorityGenerationAtCapture: authorityGenerationAtCapture,
+          authorityLease: authorityLease,
+          capturedAuthorityIsCurrent: isAuthorityCurrent,
+          isAuthorityCurrent: exactAuthorityIsCurrent,
         )..ended = true,
       );
       if (restoredState.uid != normalizedUid ||
@@ -954,7 +1038,9 @@ class V2VTurnReconciler {
           restoredState.authorityFingerprint != normalizedAuthorityFingerprint) {
         return false;
       }
-      restoredState.isAuthorityCurrent = isAuthorityCurrent;
+      restoredState
+        ..capturedAuthorityIsCurrent = isAuthorityCurrent
+        ..isAuthorityCurrent = exactAuthorityIsCurrent;
       if (!_rememberTurn(restoredState, turn)) return false;
     }
     final existing = _sessions[normalizedSessionId];
@@ -971,10 +1057,14 @@ class V2VTurnReconciler {
           ownerNamespace: normalizedOwnerNamespace,
           authorityFingerprint: normalizedAuthorityFingerprint,
           sessionId: normalizedSessionId,
-          isAuthorityCurrent: isAuthorityCurrent,
+          authorityGenerationAtCapture: authorityGenerationAtCapture,
+          authorityLease: authorityLease,
+          capturedAuthorityIsCurrent: isAuthorityCurrent,
+          isAuthorityCurrent: exactAuthorityIsCurrent,
         );
     state
-      ..isAuthorityCurrent = isAuthorityCurrent
+      ..capturedAuthorityIsCurrent = isAuthorityCurrent
+      ..isAuthorityCurrent = exactAuthorityIsCurrent
       ..ended = false;
     _sessions[normalizedSessionId] = state;
     _activeSessionId = normalizedSessionId;
@@ -1017,6 +1107,7 @@ class V2VTurnReconciler {
       assistantTranscript: terminal.assistantTranscript,
       startedAt: terminal.startedAt,
       completedAt: terminal.completedAt,
+      turnOrdinal: state.nextTurnOrdinal++,
     );
     if (!_reserveTurn(state, turn)) return Future<bool>.value(false);
 
@@ -1179,19 +1270,35 @@ class V2VTurnReconciler {
   }
 
   Future<void> _clearUnauthorized(_V2VSessionTurns state) async {
+    if (!_ownsAuthorityLease(state)) {
+      state
+        ..unauthorizedClearPending = false
+        ..pendingTurns.clear();
+      _maybeEvict(state);
+      return;
+    }
     try {
       await _durableStore.clearOwner(
         uid: state.uid,
         ownerNamespace: state.ownerNamespace,
         authorityFingerprint: state.authorityFingerprint,
-        isAuthorityCurrent: () => state.unauthorized && !state.isAuthorityCurrent(),
+        isAuthorityCurrent: () =>
+            _ownsAuthorityLease(state) && state.unauthorized && !state.capturedAuthorityIsCurrent(),
       );
+      if (!_ownsAuthorityLease(state)) {
+        state
+          ..unauthorizedClearPending = false
+          ..pendingTurns.clear();
+        _maybeEvict(state);
+        return;
+      }
       final sameOwnerStates = _sessions.values
           .where(
             (candidate) =>
                 candidate.uid == state.uid &&
                 candidate.ownerNamespace == state.ownerNamespace &&
-                candidate.authorityFingerprint == state.authorityFingerprint,
+                candidate.authorityFingerprint == state.authorityFingerprint &&
+                identical(candidate.authorityLease, state.authorityLease),
           )
           .toList();
       for (final candidate in sameOwnerStates) {
@@ -1208,6 +1315,13 @@ class V2VTurnReconciler {
         _maybeEvict(candidate);
       }
     } catch (_) {
+      if (!_ownsAuthorityLease(state)) {
+        state
+          ..unauthorizedClearPending = false
+          ..pendingTurns.clear();
+        _maybeEvict(state);
+        return;
+      }
       state.unauthorizedClearPending = true;
       state.failedAtRevision = state.revision;
       _onWriteFailure?.call();
@@ -1274,10 +1388,13 @@ class V2VTurnReconciler {
   }
 
   bool _rememberTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) {
-    final existing = state.pendingTurns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
-    if (existing != null) return existing.samePayload(turn);
-    if (!_reserveTurn(state, turn)) return false;
-    state.pendingTurns.add(turn);
+    final normalizedTurn = turn.turnOrdinal == null ? turn.withTurnOrdinal(state.nextTurnOrdinal) : turn;
+    final existing = state.pendingTurns.where((candidate) => candidate.turnId == normalizedTurn.turnId).firstOrNull;
+    if (existing != null) return existing.samePayload(normalizedTurn);
+    if (!_reserveTurn(state, normalizedTurn)) return false;
+    state.pendingTurns.add(normalizedTurn);
+    final followingOrdinal = normalizedTurn.turnOrdinal! + 1;
+    if (followingOrdinal > state.nextTurnOrdinal) state.nextTurnOrdinal = followingOrdinal;
     return true;
   }
 
@@ -1296,6 +1413,9 @@ class _V2VSessionTurns {
     required this.ownerNamespace,
     required this.authorityFingerprint,
     required this.sessionId,
+    required this.authorityGenerationAtCapture,
+    required this.authorityLease,
+    required this.capturedAuthorityIsCurrent,
     required this.isAuthorityCurrent,
   });
 
@@ -1303,12 +1423,16 @@ class _V2VSessionTurns {
   final String ownerNamespace;
   final String authorityFingerprint;
   final String sessionId;
+  final int authorityGenerationAtCapture;
+  final _V2VAuthorityLease authorityLease;
+  bool Function() capturedAuthorityIsCurrent;
   bool Function() isAuthorityCurrent;
   final List<V2VTranscriptTurn> pendingTurns = [];
   final Set<String> turnIds = {};
   final Set<String> userEventIds = {};
   final Set<String> assistantEventIds = {};
   int revision = 0;
+  int nextTurnOrdinal = 0;
   int failedAtRevision = -1;
   bool rerunRequested = false;
   bool ended = false;

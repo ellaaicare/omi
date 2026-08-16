@@ -72,6 +72,7 @@ ServerMessage _canonicalVoiceMessage({
   required MessageSender sender,
   required DateTime timestamp,
   String? text,
+  int? turnOrdinal,
 }) {
   final isUser = sender == MessageSender.human;
   return ServerMessage(
@@ -89,6 +90,7 @@ ServerMessage _canonicalVoiceMessage({
     fromVoice: true,
     canonicalConversationId: 'session-1',
     canonicalTurnId: turnId,
+    canonicalTurnOrdinal: turnOrdinal,
     canonicalEventSequence: isUser ? 0 : 1,
   );
 }
@@ -318,6 +320,7 @@ void main() {
         required assistantTranscript,
         required startedAt,
         required completedAt,
+        required turnOrdinal,
         required exactAuthority,
       }) async =>
           const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)),
@@ -333,6 +336,7 @@ void main() {
       assistantTranscript: 'Private answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),
       completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
     );
 
     expect(committed, isFalse);
@@ -387,6 +391,7 @@ void main() {
         required assistantTranscript,
         required startedAt,
         required completedAt,
+        required turnOrdinal,
         required exactAuthority,
       }) async =>
           EllaServiceResult.success(canonical),
@@ -402,6 +407,7 @@ void main() {
       assistantTranscript: 'Untrusted local answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),
       completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
     );
 
     expect(committed, isTrue);
@@ -433,6 +439,7 @@ void main() {
         required assistantTranscript,
         required startedAt,
         required completedAt,
+        required turnOrdinal,
         required exactAuthority,
       }) async =>
           EllaServiceResult.success([assistant, user]),
@@ -448,6 +455,7 @@ void main() {
       assistantTranscript: 'Answer',
       startedAt: timestamp,
       completedAt: timestamp,
+      turnOrdinal: 0,
     );
 
     expect(committed, isTrue);
@@ -479,6 +487,7 @@ void main() {
         required assistantTranscript,
         required startedAt,
         required completedAt,
+        required turnOrdinal,
         required exactAuthority,
       }) async =>
           EllaServiceResult.success(canonicalByTurn[turnId]!),
@@ -496,6 +505,7 @@ void main() {
           assistantTranscript: 'Answer',
           startedAt: timestamp,
           completedAt: timestamp,
+          turnOrdinal: turnId == 'turn-000002' ? 1 : 0,
         ),
         isTrue,
       );
@@ -507,6 +517,71 @@ void main() {
       'turn-000002:user',
       'turn-000002:assistant',
     ]);
+  });
+
+  test('MessageProvider cache keeps reverse-lexical equal-time turns in captured ordinal order', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final timestamp = DateTime.utc(2026, 8, 15, 20);
+    const firstTurn = 'v2v-turn-ffffffffffffffffffffffffffffffff';
+    const secondTurn = 'v2v-turn-00000000000000000000000000000000';
+    final canonicalByTurn = {
+      firstTurn: [
+        _canonicalVoiceMessage(turnId: firstTurn, sender: MessageSender.ai, timestamp: timestamp, turnOrdinal: 0),
+        _canonicalVoiceMessage(turnId: firstTurn, sender: MessageSender.human, timestamp: timestamp, turnOrdinal: 0),
+      ],
+      secondTurn: [
+        _canonicalVoiceMessage(turnId: secondTurn, sender: MessageSender.ai, timestamp: timestamp, turnOrdinal: 1),
+        _canonicalVoiceMessage(turnId: secondTurn, sender: MessageSender.human, timestamp: timestamp, turnOrdinal: 1),
+      ],
+    };
+    final provider = MessageProvider(
+      activeAuthority: () => _activeAuthority('uid-a', () => true),
+      aiConsentEnsurer: () async => true,
+      v2vTurnPersister: ({
+        required uid,
+        required sessionId,
+        required turnId,
+        required userEventId,
+        required assistantEventId,
+        required userTranscript,
+        required assistantTranscript,
+        required startedAt,
+        required completedAt,
+        required turnOrdinal,
+        required exactAuthority,
+      }) async =>
+          EllaServiceResult.success(canonicalByTurn[turnId]!),
+    );
+
+    for (final (turnId, turnOrdinal) in [(secondTurn, 1), (firstTurn, 0)]) {
+      expect(
+        await provider.persistV2VTurn(
+          expectedUid: 'uid-a',
+          sessionId: 'session-1',
+          turnId: turnId,
+          userEventId: '$turnId:user',
+          assistantEventId: '$turnId:assistant',
+          userTranscript: 'Question',
+          assistantTranscript: 'Answer',
+          startedAt: timestamp,
+          completedAt: timestamp,
+          turnOrdinal: turnOrdinal,
+        ),
+        isTrue,
+      );
+    }
+
+    expect(provider.messages.map((message) => message.id), [
+      '$firstTurn:user',
+      '$firstTurn:assistant',
+      '$secondTurn:user',
+      '$secondTurn:assistant',
+    ]);
+    expect(
+      prefs.cachedMessages.map((message) => message.canonicalTurnOrdinal),
+      [0, 0, 1, 1],
+    );
   });
 
   test('V2V authority loss after backend response has zero local side effects', () async {
@@ -556,6 +631,7 @@ void main() {
         required assistantTranscript,
         required startedAt,
         required completedAt,
+        required turnOrdinal,
         required exactAuthority,
       }) async {
         authorityCurrent = false;
@@ -573,6 +649,7 @@ void main() {
       assistantTranscript: 'Answer',
       startedAt: DateTime.utc(2026, 8, 15, 20),
       completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
     );
 
     expect(committed, isFalse);

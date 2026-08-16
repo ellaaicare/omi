@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
+import 'package:omi/services/wals/wal.dart';
 
 const ownerNamespaceA = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const ownerNamespaceB = 'bbbbbbbbbbbbbbbbbbbbbbbb';
@@ -19,6 +20,7 @@ Future<bool> beginSession(
   String authorityFingerprint = authorityFingerprintA,
   required String sessionId,
   required bool Function() isAuthorityCurrent,
+  int authorityGenerationAtCapture = 0,
 }) =>
     reconciler.beginSession(
       uid: uid,
@@ -26,6 +28,7 @@ Future<bool> beginSession(
       authorityFingerprint: authorityFingerprint,
       sessionId: sessionId,
       isAuthorityCurrent: isAuthorityCurrent,
+      authorityGenerationAtCapture: authorityGenerationAtCapture,
     );
 
 V2VTerminalTranscriptTurn terminalTurn({
@@ -163,6 +166,54 @@ class _BlockingPutStore implements V2VTurnDurableStore {
       delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
 }
 
+class _RetryInterleavingStore implements V2VTurnDurableStore {
+  final MemoryV2VTurnDurableStore delegate = MemoryV2VTurnDurableStore();
+  final Completer<void> staleRetryEntered = Completer<void>();
+  final Completer<void> releaseStaleRetry = Completer<void>();
+  int clearAttempts = 0;
+
+  @override
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
+  }) async {
+    clearAttempts++;
+    if (clearAttempts == 1) throw const FileSystemException('injected transient cleanup failure');
+    if (!staleRetryEntered.isCompleted) staleRetryEntered.complete();
+    await releaseStaleRetry.future;
+    await delegate.clearOwner(
+      uid: uid,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
+  @override
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
+  }) =>
+      delegate.load(
+        uid: uid,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+
+  @override
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.put(turn, isAuthorityCurrent: isAuthorityCurrent);
+
+  @override
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
+}
+
 void main() {
   group('V2VTurnReconciler', () {
     test('persists only one complete proxy-owned terminal turn', () async {
@@ -185,6 +236,52 @@ void main() {
       expect(writes.single.assistantEventId, '${writes.single.turnId}:assistant');
       expect(writes.single.userTranscript, 'Question');
       expect(writes.single.assistantTranscript, 'Answer');
+    });
+
+    test('assigns and persists chronology independent of reverse-lexical production turn ids', () async {
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-turn-chronology-');
+      try {
+        final writes = <V2VTranscriptTurn>[];
+        final store = FileV2VTurnDurableStore(baseDirectory: directory);
+        final reconciler = V2VTurnReconciler(
+          durableStore: store,
+          writer: (turn) async {
+            writes.add(turn);
+            return false;
+          },
+        );
+        await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => true);
+        final timestamp = DateTime.utc(2026, 8, 15, 20);
+        V2VTerminalTranscriptTurn turn(String turnId) => V2VTerminalTranscriptTurn(
+              sessionId: 'session-1',
+              turnId: turnId,
+              userEventId: '$turnId:user',
+              assistantEventId: '$turnId:assistant',
+              userTranscript: 'Question',
+              assistantTranscript: 'Answer',
+              startedAt: timestamp,
+              completedAt: timestamp,
+            );
+        const firstTurn = 'v2v-turn-ffffffffffffffffffffffffffffffff';
+        const secondTurn = 'v2v-turn-00000000000000000000000000000000';
+
+        expect(await reconciler.addTerminalTurn('session-1', turn(firstTurn)), isTrue);
+        expect(await reconciler.addTerminalTurn('session-1', turn(secondTurn)), isTrue);
+        await reconciler.settle();
+        final durable = await FileV2VTurnDurableStore(baseDirectory: directory).load(
+          uid: 'uid-a',
+          ownerNamespace: ownerNamespaceA,
+          authorityFingerprint: authorityFingerprintA,
+          isAuthorityCurrent: authorityIsCurrent,
+        );
+
+        expect(durable.map((turn) => turn.turnId), [firstTurn, secondTurn]);
+        expect(durable.map((turn) => turn.turnOrdinal), [0, 1]);
+        expect(writes, isNotEmpty);
+        expect(writes.every((turn) => turn.turnOrdinal == 0), isTrue);
+      } finally {
+        await directory.delete(recursive: true);
+      }
     });
 
     test('preserves two legitimate identical consecutive utterances by stable turn identity', () async {
@@ -1085,6 +1182,84 @@ void main() {
       } finally {
         await directory.delete(recursive: true);
       }
+    });
+
+    test('stale generation cleanup retry cannot delete replacement generation pending state', () async {
+      var authorityAIsCurrent = true;
+      var authorityBIsCurrent = true;
+      const authorityA = WalOwner(
+        uid: 'uid-a',
+        profileBindingId: 'binding-a',
+        bindingRevision: 7,
+        consentReceiptId: 'receipt-a',
+        authorityGenerationAtCapture: 41,
+      );
+      const authorityB = WalOwner(
+        uid: 'uid-a',
+        profileBindingId: 'binding-a',
+        bindingRevision: 7,
+        consentReceiptId: 'receipt-a',
+        authorityGenerationAtCapture: 42,
+      );
+      expect(authorityB.storageNamespace, authorityA.storageNamespace);
+      expect(authorityB.authorityFingerprint, authorityA.authorityFingerprint);
+      final store = _RetryInterleavingStore();
+      final reconcilerA = V2VTurnReconciler(
+        durableStore: store,
+        writer: (_) async => false,
+        unauthorizedCleanupRetryDelays: const [Duration.zero],
+      );
+      await beginSession(
+        reconcilerA,
+        uid: authorityA.uid,
+        ownerNamespace: authorityA.storageNamespace,
+        authorityFingerprint: authorityA.authorityFingerprint,
+        sessionId: 'generation-a',
+        isAuthorityCurrent: () => authorityAIsCurrent,
+        authorityGenerationAtCapture: authorityA.authorityGenerationAtCapture,
+      );
+      expect(
+        await reconcilerA.addTerminalTurn('generation-a', terminalTurn(sessionId: 'generation-a', ordinal: 1)),
+        isTrue,
+      );
+      await reconcilerA.settle();
+
+      authorityAIsCurrent = false;
+      reconcilerA.retryAuthorizedPending();
+      await store.staleRetryEntered.future;
+      expect(store.clearAttempts, 2);
+
+      final reconcilerB = V2VTurnReconciler(durableStore: store, writer: (_) async => false);
+      expect(
+        await beginSession(
+          reconcilerB,
+          uid: authorityB.uid,
+          ownerNamespace: authorityB.storageNamespace,
+          authorityFingerprint: authorityB.authorityFingerprint,
+          sessionId: 'generation-b',
+          isAuthorityCurrent: () => authorityBIsCurrent,
+          authorityGenerationAtCapture: authorityB.authorityGenerationAtCapture,
+        ),
+        isTrue,
+      );
+      expect(
+        await reconcilerB.addTerminalTurn('generation-b', terminalTurn(sessionId: 'generation-b', ordinal: 2)),
+        isTrue,
+      );
+      expect(reconcilerB.pendingTurnCountForTesting('generation-b'), 1);
+
+      store.releaseStaleRetry.complete();
+      await Future.wait([reconcilerA.settle(), reconcilerB.settle()]);
+      final durable = await store.delegate.load(
+        uid: authorityB.uid,
+        ownerNamespace: authorityB.storageNamespace,
+        authorityFingerprint: authorityB.authorityFingerprint,
+        isAuthorityCurrent: () => authorityBIsCurrent,
+      );
+
+      expect(durable.map((turn) => turn.sessionId), contains('generation-b'));
+      expect(reconcilerB.pendingTurnCountForTesting('generation-b'), 1);
+      expect(authorityBIsCurrent, isTrue);
     });
 
     test('cleanup marker survives failure and a new store instance clears only that exact authority', () async {

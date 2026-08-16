@@ -51,10 +51,21 @@ def _event_sequence(item: dict[str, Any]) -> int:
     return 2
 
 
-def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, str, int, str]:
+def _turn_ordinal(item: dict[str, Any]) -> Optional[int]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    ordinal = metadata.get("turn_ordinal")
+    if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 0:
+        return ordinal
+    return None
+
+
+def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, int, int, str, int, str]:
+    turn_ordinal = _turn_ordinal(item)
     return (
         item["started_at"],
         str(item.get("session_id") or ""),
+        0 if turn_ordinal is not None else 1,
+        turn_ordinal or 0,
         _turn_identity(item),
         _event_sequence(item),
         str(item.get("event_id") or ""),
@@ -405,6 +416,11 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                 ORDER BY
                     started_at DESC,
                     COALESCE(session_id, '') DESC,
+                    CASE WHEN metadata->>'turn_ordinal' ~ '^[0-9]+$' THEN 0 ELSE 1 END DESC,
+                    CASE
+                        WHEN metadata->>'turn_ordinal' ~ '^[0-9]+$' THEN (metadata->>'turn_ordinal')::bigint
+                        ELSE 0
+                    END DESC,
                     COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
                              regexp_replace(event_id, ':(user|assistant)$', '')) DESC,
                     CASE
@@ -417,6 +433,11 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             ORDER BY
                 started_at ASC,
                 COALESCE(session_id, '') ASC,
+                CASE WHEN metadata->>'turn_ordinal' ~ '^[0-9]+$' THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN metadata->>'turn_ordinal' ~ '^[0-9]+$' THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
                 COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
                          regexp_replace(event_id, ':(user|assistant)$', '')) ASC,
                 CASE
@@ -446,6 +467,11 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             ORDER BY
                 started_at ASC,
                 COALESCE(session_id, '') ASC,
+                CASE WHEN metadata->>'turn_ordinal' ~ '^[0-9]+$' THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN metadata->>'turn_ordinal' ~ '^[0-9]+$' THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
                 COALESCE(metadata->>'turn_id', source_ref->>'client_message_id',
                          regexp_replace(event_id, ':(user|assistant)$', '')) ASC,
                 CASE

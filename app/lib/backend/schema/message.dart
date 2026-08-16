@@ -206,6 +206,7 @@ class ServerMessage {
   /// equal-time user/assistant pair cannot be reordered when history is merged.
   String? canonicalConversationId;
   String? canonicalTurnId;
+  int? canonicalTurnOrdinal;
   int? canonicalEventSequence;
 
   List<String> thinkings = [];
@@ -228,6 +229,7 @@ class ServerMessage {
     this.fromVoice = false,
     this.canonicalConversationId,
     this.canonicalTurnId,
+    this.canonicalTurnOrdinal,
     this.canonicalEventSequence,
   });
 
@@ -251,6 +253,7 @@ class ServerMessage {
       fromVoice: json['from_voice'] ?? false,
       canonicalConversationId: metadata['conversation_id']?.toString(),
       canonicalTurnId: metadata['turn_id']?.toString(),
+      canonicalTurnOrdinal: metadata['turn_ordinal'] as int?,
       canonicalEventSequence: metadata['event_sequence'] as int?,
     );
   }
@@ -270,10 +273,14 @@ class ServerMessage {
       'rating': rating,
       'chart_data': chartData?.toJson(),
       'from_voice': fromVoice,
-      if (canonicalConversationId != null || canonicalTurnId != null || canonicalEventSequence != null)
+      if (canonicalConversationId != null ||
+          canonicalTurnId != null ||
+          canonicalTurnOrdinal != null ||
+          canonicalEventSequence != null)
         'metadata': {
           if (canonicalConversationId != null) 'conversation_id': canonicalConversationId,
           if (canonicalTurnId != null) 'turn_id': canonicalTurnId,
+          if (canonicalTurnOrdinal != null) 'turn_ordinal': canonicalTurnOrdinal,
           if (canonicalEventSequence != null) 'event_sequence': canonicalEventSequence,
         },
     };
@@ -349,6 +356,14 @@ int compareServerMessagesChronologically(ServerMessage first, ServerMessage seco
     if (firstConversationId.isNotEmpty && secondConversationId.isNotEmpty) {
       final conversationOrder = firstConversationId.compareTo(secondConversationId);
       if (conversationOrder != 0) return conversationOrder;
+    }
+    final firstTurnOrdinal = first.canonicalTurnOrdinal;
+    final secondTurnOrdinal = second.canonicalTurnOrdinal;
+    if (firstTurnOrdinal != null && secondTurnOrdinal != null) {
+      final ordinalOrder = firstTurnOrdinal.compareTo(secondTurnOrdinal);
+      if (ordinalOrder != 0) return ordinalOrder;
+    } else if (firstTurnOrdinal != null || secondTurnOrdinal != null) {
+      return firstTurnOrdinal != null ? -1 : 1;
     }
     final turnOrder = firstTurnId.compareTo(secondTurnId);
     if (turnOrder != 0) return turnOrder;

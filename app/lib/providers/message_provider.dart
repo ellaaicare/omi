@@ -69,6 +69,7 @@ typedef V2VTurnPersister = Future<EllaServiceResult<List<ServerMessage>>> Functi
   required String assistantTranscript,
   required DateTime startedAt,
   required DateTime completedAt,
+  required int? turnOrdinal,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
@@ -847,6 +848,7 @@ class MessageProvider extends ChangeNotifier {
     required String assistantTranscript,
     required DateTime startedAt,
     required DateTime completedAt,
+    required int? turnOrdinal,
   }) async {
     final lease = _beginAccountCommit();
     if (lease == null || lease.uid != expectedUid) {
@@ -866,6 +868,7 @@ class MessageProvider extends ChangeNotifier {
         assistantTranscript: assistantTranscript,
         startedAt: startedAt,
         completedAt: completedAt,
+        turnOrdinal: turnOrdinal,
         exactAuthority: lease,
       );
       if (!_canCommit(lease, generation)) return false;
