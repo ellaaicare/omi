@@ -144,6 +144,16 @@ class V2VTranscriptTurn {
 
 typedef V2VTranscriptTurnWriter = Future<bool> Function(V2VTranscriptTurn turn);
 
+Future<bool> activateV2VTransportInOrder({
+  required Future<bool> Function() armSession,
+  required void Function() attachListener,
+  required Future<bool> Function() startMicrophone,
+}) async {
+  if (!await armSession()) return false;
+  attachListener();
+  return startMicrophone();
+}
+
 abstract interface class V2VTurnDurableStore {
   Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace});
 
@@ -440,34 +450,50 @@ class V2VTurnReconciler {
     _maybeEvict(state);
   }
 
-  void addTerminalTurn(String sessionId, V2VTerminalTranscriptTurn terminal) {
+  Future<bool> addTerminalTurn(String sessionId, V2VTerminalTranscriptTurn terminal) {
     final state = _authorizedActiveState(sessionId);
-    if (state == null || terminal.sessionId != state.sessionId) return;
+    if (state == null || terminal.sessionId != state.sessionId) return Future<bool>.value(false);
     if (state.turnIds.contains(terminal.turnId) ||
         state.userEventIds.contains(terminal.userEventId) ||
         state.assistantEventIds.contains(terminal.assistantEventId)) {
-      return;
+      return Future<bool>.value(false);
     }
-    _rememberTurn(
-      state,
-      V2VTranscriptTurn(
-        uid: state.uid,
-        ownerNamespace: state.ownerNamespace,
-        sessionId: state.sessionId,
-        turnId: terminal.turnId,
-        userEventId: terminal.userEventId,
-        assistantEventId: terminal.assistantEventId,
-        userTranscript: terminal.userTranscript,
-        assistantTranscript: terminal.assistantTranscript,
-        startedAt: terminal.startedAt,
-        completedAt: terminal.completedAt,
-      ),
+    final turn = V2VTranscriptTurn(
+      uid: state.uid,
+      ownerNamespace: state.ownerNamespace,
+      sessionId: state.sessionId,
+      turnId: terminal.turnId,
+      userEventId: terminal.userEventId,
+      assistantEventId: terminal.assistantEventId,
+      userTranscript: terminal.userTranscript,
+      assistantTranscript: terminal.assistantTranscript,
+      startedAt: terminal.startedAt,
+      completedAt: terminal.completedAt,
     );
-    _signal(state);
+    if (!_reserveTurn(state, turn)) return Future<bool>.value(false);
+
+    late final Future<bool> enqueueFuture;
+    enqueueFuture = _enqueueAcceptedTurn(state, turn);
+    state.enqueueFutures.add(enqueueFuture);
+    unawaited(
+      enqueueFuture.then<void>((_) {
+        state.enqueueFutures.remove(enqueueFuture);
+        if (state.unauthorized && state.unauthorizedClearPending && state.enqueueFutures.isEmpty) {
+          _markUnauthorized(state);
+          return;
+        }
+        _maybeEvict(state);
+      }),
+    );
+    return enqueueFuture;
   }
 
   void retryAuthorizedPending() {
     for (final state in _sessions.values.toList()) {
+      if (state.unauthorized) {
+        if (state.unauthorizedClearPending) _markUnauthorized(state);
+        continue;
+      }
       if (!state.isAuthorityCurrent()) {
         _markUnauthorized(state);
         continue;
@@ -478,7 +504,11 @@ class V2VTurnReconciler {
 
   Future<void> settle() async {
     while (true) {
-      final pending = _sessions.values.map((state) => state.drainFuture).whereType<Future<void>>().toList();
+      final pending = <Future<void>>[
+        for (final state in _sessions.values)
+          for (final enqueueFuture in state.enqueueFutures) enqueueFuture.then<void>((_) {}),
+        ..._sessions.values.map((state) => state.drainFuture).whereType<Future<void>>(),
+      ];
       if (pending.isEmpty) return;
       await Future.wait(pending);
     }
@@ -528,9 +558,18 @@ class V2VTurnReconciler {
   }
 
   Future<void> _drain(_V2VSessionTurns state) async {
+    if (state.unauthorized || !state.isAuthorityCurrent()) {
+      state
+        ..unauthorized = true
+        ..unauthorizedClearPending = true;
+      await _clearUnauthorized(state);
+      return;
+    }
     while (state.pendingTurns.isNotEmpty) {
       if (state.unauthorized || !state.isAuthorityCurrent()) {
-        state.unauthorized = true;
+        state
+          ..unauthorized = true
+          ..unauthorizedClearPending = true;
         await _clearUnauthorized(state);
         return;
       }
@@ -539,13 +578,14 @@ class V2VTurnReconciler {
       final attemptRevision = state.revision;
       var committed = false;
       try {
-        await _durableStore.put(turn);
         committed = await _writer(turn);
       } catch (_) {
         committed = false;
       }
       if (!state.isAuthorityCurrent()) {
-        state.unauthorized = true;
+        state
+          ..unauthorized = true
+          ..unauthorizedClearPending = true;
         await _clearUnauthorized(state);
         return;
       }
@@ -567,9 +607,11 @@ class V2VTurnReconciler {
   }
 
   void _markUnauthorized(_V2VSessionTurns state) {
-    state.unauthorized = true;
-    if (state.pendingTurns.isEmpty) {
-      _maybeEvict(state);
+    state
+      ..unauthorized = true
+      ..unauthorizedClearPending = true;
+    if (state.enqueueFutures.isNotEmpty) {
+      state.rerunRequested = true;
       return;
     }
     state.revision++;
@@ -588,19 +630,40 @@ class V2VTurnReconciler {
           .toList();
       for (final candidate in sameOwnerStates) {
         candidate.unauthorized = true;
+        candidate.unauthorizedClearPending = false;
         candidate.pendingTurns.clear();
         candidate.failedAtRevision = -1;
         _maybeEvict(candidate);
       }
     } catch (_) {
+      state.unauthorizedClearPending = true;
       state.failedAtRevision = state.revision;
       _onWriteFailure?.call();
     }
   }
 
-  bool _rememberTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) {
-    final existing = state.pendingTurns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
-    if (existing != null) return existing.samePayload(turn);
+  Future<bool> _enqueueAcceptedTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) async {
+    try {
+      await _durableStore.put(turn);
+    } catch (_) {
+      _releaseTurnReservation(state, turn);
+      _onWriteFailure?.call();
+      if (!state.isAuthorityCurrent()) _markUnauthorized(state);
+      return false;
+    }
+    if (state.unauthorized || !state.isAuthorityCurrent()) {
+      state
+        ..unauthorized = true
+        ..unauthorizedClearPending = true;
+      await _clearUnauthorized(state);
+      return false;
+    }
+    state.pendingTurns.add(turn);
+    _signal(state);
+    return true;
+  }
+
+  bool _reserveTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) {
     if (state.turnIds.contains(turn.turnId) ||
         state.userEventIds.contains(turn.userEventId) ||
         state.assistantEventIds.contains(turn.assistantEventId)) {
@@ -609,13 +672,27 @@ class V2VTurnReconciler {
     state.turnIds.add(turn.turnId);
     state.userEventIds.add(turn.userEventId);
     state.assistantEventIds.add(turn.assistantEventId);
+    return true;
+  }
+
+  void _releaseTurnReservation(_V2VSessionTurns state, V2VTranscriptTurn turn) {
+    state.turnIds.remove(turn.turnId);
+    state.userEventIds.remove(turn.userEventId);
+    state.assistantEventIds.remove(turn.assistantEventId);
+  }
+
+  bool _rememberTurn(_V2VSessionTurns state, V2VTranscriptTurn turn) {
+    final existing = state.pendingTurns.where((candidate) => candidate.turnId == turn.turnId).firstOrNull;
+    if (existing != null) return existing.samePayload(turn);
+    if (!_reserveTurn(state, turn)) return false;
     state.pendingTurns.add(turn);
     return true;
   }
 
   void _maybeEvict(_V2VSessionTurns state) {
-    if (state.drainFuture != null) return;
-    if ((state.unauthorized || state.ended) && state.pendingTurns.isEmpty) {
+    if (state.drainFuture != null || state.enqueueFutures.isNotEmpty) return;
+    final clearedUnauthorized = state.unauthorized && !state.unauthorizedClearPending;
+    if ((clearedUnauthorized || state.ended) && state.pendingTurns.isEmpty) {
       _sessions.remove(state.sessionId);
     }
   }
@@ -642,5 +719,7 @@ class _V2VSessionTurns {
   bool rerunRequested = false;
   bool ended = false;
   bool unauthorized = false;
+  bool unauthorizedClearPending = false;
+  final Set<Future<bool>> enqueueFutures = {};
   Future<void>? drainFuture;
 }

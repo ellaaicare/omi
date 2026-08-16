@@ -56,6 +56,56 @@ V2VTranscriptTurn ownedTurn({required String sessionId, required int ordinal}) {
   );
 }
 
+class _SlowHydrationStore implements V2VTurnDurableStore {
+  _SlowHydrationStore(this.delegate, this.releaseHydration);
+
+  final V2VTurnDurableStore delegate;
+  final Future<void> releaseHydration;
+
+  @override
+  Future<void> clearOwner({required String uid, required String ownerNamespace}) =>
+      delegate.clearOwner(uid: uid, ownerNamespace: ownerNamespace);
+
+  @override
+  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace}) async {
+    await releaseHydration;
+    return delegate.load(uid: uid, ownerNamespace: ownerNamespace);
+  }
+
+  @override
+  Future<void> put(V2VTranscriptTurn turn) => delegate.put(turn);
+
+  @override
+  Future<void> remove(V2VTranscriptTurn turn) => delegate.remove(turn);
+}
+
+class _BlockingPutStore implements V2VTurnDurableStore {
+  _BlockingPutStore(this.releasePut);
+
+  final Future<void> releasePut;
+  final MemoryV2VTurnDurableStore delegate = MemoryV2VTurnDurableStore();
+  final List<(String, String)> clearedOwners = [];
+
+  @override
+  Future<void> clearOwner({required String uid, required String ownerNamespace}) async {
+    clearedOwners.add((uid, ownerNamespace));
+    await delegate.clearOwner(uid: uid, ownerNamespace: ownerNamespace);
+  }
+
+  @override
+  Future<List<V2VTranscriptTurn>> load({required String uid, required String ownerNamespace}) =>
+      delegate.load(uid: uid, ownerNamespace: ownerNamespace);
+
+  @override
+  Future<void> put(V2VTranscriptTurn turn) async {
+    await releasePut;
+    await delegate.put(turn);
+  }
+
+  @override
+  Future<void> remove(V2VTranscriptTurn turn) => delegate.remove(turn);
+}
+
 void main() {
   group('V2VTurnReconciler', () {
     test('persists only one complete proxy-owned terminal turn', () async {
@@ -225,6 +275,154 @@ void main() {
       await reconciler.settle();
 
       expect(attempts, 2);
+    });
+
+    test('later accepted turns reach the durable outbox before an in-flight canonical write finishes', () async {
+      final store = MemoryV2VTurnDurableStore();
+      final firstWriteStarted = Completer<void>();
+      final releaseFirstWrite = Completer<void>();
+      final firstPage = V2VTurnReconciler(
+        durableStore: store,
+        writer: (_) async {
+          firstWriteStarted.complete();
+          await releaseFirstWrite.future;
+          return false;
+        },
+      );
+      await beginSession(firstPage, sessionId: 'session-1', isAuthorityCurrent: () => true);
+      expect(
+        await firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 1)),
+        isTrue,
+      );
+      await firstWriteStarted.future;
+
+      final laterAcceptances = await Future.wait([
+        firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 2)),
+        firstPage.addTerminalTurn('session-1', terminalTurn(sessionId: 'session-1', ordinal: 3)),
+      ]);
+
+      expect(laterAcceptances, everyElement(isTrue));
+      expect(
+        (await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA)).map((turn) => turn.turnId),
+        [
+          'v2v-turn-00000000000000000000000000000001',
+          'v2v-turn-00000000000000000000000000000002',
+          'v2v-turn-00000000000000000000000000000003',
+        ],
+      );
+
+      firstPage.endSession('session-1');
+      releaseFirstWrite.complete();
+      await firstPage.settle();
+
+      final relaunchedWrites = <V2VTranscriptTurn>[];
+      final relaunchedPage = V2VTurnReconciler(
+        durableStore: store,
+        writer: (turn) async {
+          relaunchedWrites.add(turn);
+          return true;
+        },
+      );
+      await beginSession(relaunchedPage, sessionId: 'session-2', isAuthorityCurrent: () => true);
+      await relaunchedPage.settle();
+
+      expect(relaunchedWrites.map((turn) => turn.turnId), [
+        'v2v-turn-00000000000000000000000000000001',
+        'v2v-turn-00000000000000000000000000000002',
+        'v2v-turn-00000000000000000000000000000003',
+      ]);
+      expect(await store.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+    });
+
+    test('listener and microphone wait for slow large outbox hydration and session arming', () async {
+      final backingStore = MemoryV2VTurnDurableStore();
+      for (var ordinal = 1; ordinal <= 200; ordinal++) {
+        await backingStore.put(ownedTurn(sessionId: 'restored-session', ordinal: ordinal));
+      }
+      final hydrationGate = Completer<void>();
+      final reconciler = V2VTurnReconciler(
+        durableStore: _SlowHydrationStore(backingStore, hydrationGate.future),
+        writer: (_) async => true,
+      );
+      final order = <String>[];
+
+      final activation = activateV2VTransportInOrder(
+        armSession: () async {
+          order.add('hydrate-started');
+          final armed = await beginSession(
+            reconciler,
+            sessionId: 'active-session',
+            isAuthorityCurrent: () => true,
+          );
+          order.add('session-armed');
+          return armed;
+        },
+        attachListener: () => order.add('listener-attached'),
+        startMicrophone: () async {
+          order.add('microphone-started');
+          return true;
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(order, ['hydrate-started']);
+      hydrationGate.complete();
+      expect(await activation, isTrue);
+      expect(order, ['hydrate-started', 'session-armed', 'listener-attached', 'microphone-started']);
+
+      await reconciler.settle();
+      expect(await backingStore.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+    });
+
+    test('failed session arming attaches neither listener nor microphone', () async {
+      final order = <String>[];
+
+      expect(
+        await activateV2VTransportInOrder(
+          armSession: () async {
+            order.add('arming-rejected');
+            return false;
+          },
+          attachListener: () => order.add('listener-attached'),
+          startMicrophone: () async {
+            order.add('microphone-started');
+            return true;
+          },
+        ),
+        isFalse,
+      );
+      expect(order, ['arming-rejected']);
+    });
+
+    test('authority loss waits for an in-flight enqueue then clears only the exact owner', () async {
+      var authorityCurrent = true;
+      final releasePut = Completer<void>();
+      final store = _BlockingPutStore(releasePut.future);
+      var writes = 0;
+      final reconciler = V2VTurnReconciler(
+        durableStore: store,
+        writer: (_) async {
+          writes++;
+          return true;
+        },
+      );
+      await beginSession(reconciler, sessionId: 'session-1', isAuthorityCurrent: () => authorityCurrent);
+      final acceptance = reconciler.addTerminalTurn(
+        'session-1',
+        terminalTurn(sessionId: 'session-1', ordinal: 1),
+      );
+
+      authorityCurrent = false;
+      reconciler.retryAuthorizedPending();
+      expect(store.clearedOwners, isEmpty);
+      releasePut.complete();
+
+      expect(await acceptance, isFalse);
+      await reconciler.settle();
+      expect(writes, 0);
+      expect(store.clearedOwners, [('uid-a', ownerNamespaceA)]);
+      expect(await store.delegate.load(uid: 'uid-a', ownerNamespace: ownerNamespaceA), isEmpty);
+      expect(reconciler.sessionCountForTesting, 0);
     });
 
     test('ended session is evicted only after its in-flight write settles', () async {

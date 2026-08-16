@@ -187,6 +187,8 @@ enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSes
 
 enum V2VProtectedEgressBoundary { providerRegistry, session, websocket, microphoneCapture, microphoneFrame }
 
+typedef V2VBeforeTransportActivation = Future<bool> Function(String sessionId);
+
 /// Redacted connection result safe to show in UI and persist in debug logs.
 /// It intentionally excludes session tokens, endpoint URLs, and response bodies.
 class V2VConnectionReceipt {
@@ -523,6 +525,7 @@ class V2VClient {
     required String provider,
     V2VSessionScope? sessionScope,
     bool Function()? shouldContinue,
+    V2VBeforeTransportActivation? beforeTransportActivation,
   }) async {
     provider = normalizeProvider(provider);
 
@@ -759,43 +762,56 @@ class V2VClient {
       final websocketInvalid = await stopIfStartupInvalid(V2VConnectionStage.websocket, voiceMode: confirmedVoiceMode);
       if (websocketInvalid != null) return websocketInvalid;
 
-      // 3. Listen for messages from proxy
-      _isConnected = true;
-      _wsSub = _channel!.stream.listen(
-        _handleMessage,
-        onError: (error) {
-          Logger.error('[V2V] WebSocket error: ${error.runtimeType}');
-          disconnect();
+      var listenerAttached = false;
+      final micStarted = await activateV2VTransportInOrder(
+        armSession: () async {
+          if (beforeTransportActivation != null && !await beforeTransportActivation(sessionId)) return false;
+          return _hasCurrentSessionAuthority();
         },
-        onDone: () {
-          Logger.debug('[V2V] WebSocket closed');
-          _isConnected = false;
-          if (_connectionAnnounced) {
-            _connectionAnnounced = false;
-            onConnectionChanged?.call(false);
-          }
+        attachListener: () {
+          // Registering the listener can synchronously release buffered proxy frames. The
+          // caller's session/outbox must therefore be armed before this point.
+          listenerAttached = true;
+          _isConnected = true;
+          _wsSub = _channel!.stream.listen(
+            _handleMessage,
+            onError: (error) {
+              Logger.error('[V2V] WebSocket error: ${error.runtimeType}');
+              disconnect();
+            },
+            onDone: () {
+              Logger.debug('[V2V] WebSocket closed');
+              _isConnected = false;
+              if (_connectionAnnounced) {
+                _connectionAnnounced = false;
+                onConnectionChanged?.call(false);
+              }
+            },
+          );
         },
-      );
-
-      // 4. Start recording mic audio and streaming to WebSocket
-      final micStarted = await _startAuthorizedMicrophone(
-        authority: authority,
-        shouldContinue: _sessionShouldContinue!,
+        startMicrophone: () => _startAuthorizedMicrophone(
+          authority: authority,
+          shouldContinue: _sessionShouldContinue!,
+        ),
       );
       final microphoneInvalid = await stopIfStartupInvalid(
         V2VConnectionStage.microphone,
         voiceMode: confirmedVoiceMode,
       );
       if (microphoneInvalid != null) return microphoneInvalid;
-      if (!micStarted || !_isConnected) {
+      if (!listenerAttached || !micStarted || !_isConnected) {
         await disconnect();
         return _completeReceipt(
           V2VConnectionReceipt(
             connected: false,
             provider: provider,
             voiceMode: confirmedVoiceMode,
-            stage: micStarted ? V2VConnectionStage.websocket : V2VConnectionStage.microphone,
-            errorCode: micStarted ? 'websocket_closed' : 'microphone_unavailable',
+            stage: !listenerAttached || micStarted ? V2VConnectionStage.websocket : V2VConnectionStage.microphone,
+            errorCode: !listenerAttached
+                ? 'session_activation_failed'
+                : micStarted
+                    ? 'websocket_closed'
+                    : 'microphone_unavailable',
           ),
         );
       }

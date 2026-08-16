@@ -796,17 +796,44 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
     _v2vClient = client;
 
+    var armedSessionId = '';
     final receipt = await client.connect(
       provider: provider,
       sessionScope: _sessionScope,
       shouldContinue: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
+      beforeTransportActivation: (sessionId) async {
+        if (sessionId.isEmpty || !hasCurrentStartupAuthority() || !identical(_v2vClient, client)) return false;
+        var transcriptSessionReady = true;
+        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
+          final activeAuthority = WalOwnerAuthority.active(authenticatedUid: authority!.uid);
+          transcriptSessionReady = activeAuthority != null &&
+              await _v2vTurnReconciler.beginSession(
+                uid: activeAuthority.uid,
+                ownerNamespace: activeAuthority.owner.storageNamespace,
+                sessionId: sessionId,
+                isAuthorityCurrent: activeAuthority.isCurrent,
+              );
+        }
+        if (!transcriptSessionReady || !hasCurrentStartupAuthority() || !identical(_v2vClient, client)) {
+          if (transcriptSessionReady) _v2vTurnReconciler.endSession(sessionId);
+          return false;
+        }
+        armedSessionId = sessionId;
+        _activeSessionId = sessionId;
+        _v2vTurnReconciler.retryAuthorizedPending();
+        return true;
+      },
     );
     if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
+      if (armedSessionId.isNotEmpty) _v2vTurnReconciler.endSession(armedSessionId);
+      if (_activeSessionId == armedSessionId) _activeSessionId = '';
       await client.disconnect();
       return;
     }
 
     if (!receipt.connected) {
+      if (armedSessionId.isNotEmpty) _v2vTurnReconciler.endSession(armedSessionId);
+      if (_activeSessionId == armedSessionId) _activeSessionId = '';
       debugPrint('[VoiceChat] V2V connect failed: ${receipt.toDebugFields()}');
       _v2vClient = null;
       await client.disconnect();
@@ -825,9 +852,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _isV2VMode = false;
         _voiceModeActive = false;
         _orbState = VoiceOrbState.idle;
-        _statusText = _sessionScope != null && receipt.errorCode == 'voice_session_scope_unavailable'
-            ? context.l10n.memoryTalkUnavailable
-            : receipt.safeDetail;
+        _statusText = receipt.errorCode == 'session_activation_failed'
+            ? context.l10n.ellaVoiceTechnicalFailure
+            : _sessionScope != null && receipt.errorCode == 'voice_session_scope_unavailable'
+                ? context.l10n.memoryTalkUnavailable
+                : receipt.safeDetail;
         _audioLevel = 0.0;
       });
 
@@ -861,20 +890,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       return;
     }
 
-    _voiceStartupGuard.complete(startupGeneration);
-    var transcriptSessionReady = receipt.sessionId.isNotEmpty;
-    if (transcriptSessionReady && EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-      final activeAuthority = WalOwnerAuthority.active(authenticatedUid: authority!.uid);
-      transcriptSessionReady = activeAuthority != null &&
-          await _v2vTurnReconciler.beginSession(
-            uid: activeAuthority.uid,
-            ownerNamespace: activeAuthority.owner.storageNamespace,
-            sessionId: receipt.sessionId,
-            isAuthorityCurrent: activeAuthority.isCurrent,
-          );
-    }
-    if (!transcriptSessionReady || !_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
+    if (receipt.sessionId.isEmpty || receipt.sessionId != armedSessionId || _activeSessionId != armedSessionId) {
       _v2vClient = null;
+      if (armedSessionId.isNotEmpty) _v2vTurnReconciler.endSession(armedSessionId);
+      if (_activeSessionId == armedSessionId) _activeSessionId = '';
       await client.disconnect();
       if (!mounted) return;
       setState(() {
@@ -885,8 +904,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       });
       return;
     }
-    _activeSessionId = receipt.sessionId;
-    _v2vTurnReconciler.retryAuthorizedPending();
+    _voiceStartupGuard.complete(startupGeneration);
     _memorySessionNotificationKey = null;
     _memoryReinterpretationEvent = null;
     _memoryReceiptPollTimer?.cancel();
@@ -1056,7 +1074,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         final terminalTurn = event.terminalTurn;
         if (terminalTurn == null) break;
         if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-          _v2vTurnReconciler.addTerminalTurn(_activeSessionId, terminalTurn);
+          unawaited(_v2vTurnReconciler.addTerminalTurn(_activeSessionId, terminalTurn));
         }
         setState(() {
           _lastUserText = terminalTurn.userTranscript;
