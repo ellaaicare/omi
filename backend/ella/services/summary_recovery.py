@@ -3,17 +3,24 @@
 import asyncio
 import hashlib
 import json
+import inspect
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
 import database.conversations as conversations_db
+from database import vector_db
 from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime as _resolve_isolated_runtime,
+    revalidate_runtime_authority as _revalidate_runtime_authority,
+    runtime_authority_identity as _runtime_authority_identity,
+)
 from ella.services.summary_writeback import CanonicalSummaryWriteUnconfirmedError, write_conversation_summary
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from utils.conversations.generic_summary import generate_stock_conversation_summary
@@ -42,14 +49,10 @@ def _active_summary_version(conversation: dict[str, Any]) -> dict[str, Any]:
 
 
 def _conversation_vector_present(uid: str, conversation_id: str) -> bool:
-    from database import vector_db
-
     return conversation_id in vector_db.fetch_existing_conversation_vector_ids(uid, [conversation_id])
 
 
 def _conversation_vector_metadata(uid: str, conversation_id: str) -> Optional[dict[str, Any]]:
-    from database import vector_db
-
     return vector_db.fetch_conversation_vector_metadata(uid, conversation_id)
 
 
@@ -135,6 +138,7 @@ class SummaryProviderConfig:
     legacy_model: str
     legacy_api_key: str
     timeout_seconds: float
+    cloud_authority: Optional[Any] = None
 
 
 class ConcurrentConversationRecoveryChangeError(RuntimeError):
@@ -164,6 +168,50 @@ def default_summary_provider_config() -> SummaryProviderConfig:
             os.getenv('ELLA_CORRECTION_API_KEY') or os.getenv('XAI_API_KEY') or os.getenv('HERMES_API_KEY') or ''
         ),
         timeout_seconds=float(os.getenv('ELLA_CORRECTION_TIMEOUT_SECONDS', '45')),
+    )
+
+
+async def resolve_isolated_runtime(uid: str, *, target_mode: str):
+    return await _resolve_isolated_runtime(uid, target_mode=target_mode)
+
+
+def runtime_authority_identity(runtime):
+    return _runtime_authority_identity(runtime)
+
+
+async def revalidate_runtime_authority(identity):
+    return await _revalidate_runtime_authority(identity)
+
+
+async def summary_provider_config_for_uid(
+    uid: str,
+    config: Optional[SummaryProviderConfig] = None,
+) -> SummaryProviderConfig:
+    """Bind transcript summary work to the exact owner's current runtime."""
+    selected = config or default_summary_provider_config()
+    runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+    if runtime is None:
+        return selected
+    return replace(
+        selected,
+        provider='hermes-api',
+        hermes_url='',
+        hermes_model='',
+        hermes_api_key='',
+        legacy_api_key='',
+        cloud_authority=runtime_authority_identity(runtime),
+    )
+
+
+async def resolve_summary_provider_send(config: SummaryProviderConfig) -> tuple[str, str, str]:
+    """Revalidate the exact cloud authority immediately before provider egress."""
+    if config.cloud_authority is None:
+        return config.hermes_url, config.hermes_model, config.hermes_api_key
+    current = await revalidate_runtime_authority(config.cloud_authority)
+    return (
+        f"{current.gateway_url.rstrip('/')}/v1/chat/completions",
+        current.agent_id,
+        current.gateway_token,
     )
 
 
@@ -254,29 +302,39 @@ async def generate_summary_from_prompt(
     required_tags: tuple[str, ...],
     config: SummaryProviderConfig,
     async_client_factory: Any = httpx.AsyncClient,
+    egress_guard: Optional[Callable[[], Any]] = None,
 ) -> dict[str, Any]:
     if config.provider == 'hermes-api':
-        if not config.hermes_api_key:
+        if config.cloud_authority is None and not config.hermes_api_key:
             raise RuntimeError('No Hermes summary API key configured')
-        headers = {
-            'Authorization': f'Bearer {config.hermes_api_key}',
-            'Content-Type': 'application/json',
-            'X-Hermes-Session-Id': session_id,
-            'X-Hermes-Session-Key': session_key,
-            'X-Trace-Id': trace_id,
-        }
         url = config.hermes_url
         model = config.hermes_model
+        api_key = config.hermes_api_key
         max_tokens = 900
     else:
         if not config.legacy_api_key:
             raise RuntimeError('No legacy summary API key configured')
-        headers = {'Authorization': f'Bearer {config.legacy_api_key}', 'Content-Type': 'application/json'}
         url = config.legacy_url
         model = config.legacy_model
+        api_key = config.legacy_api_key
         max_tokens = 800
 
     async with async_client_factory(timeout=config.timeout_seconds) as client:
+        if config.provider == 'hermes-api' and config.cloud_authority is not None:
+            url, model, api_key = await resolve_summary_provider_send(config)
+        if egress_guard is not None:
+            guard_result = egress_guard()
+            if inspect.isawaitable(guard_result):
+                await guard_result
+        headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+        if config.provider == 'hermes-api':
+            headers.update(
+                {
+                    'X-Hermes-Session-Id': session_id,
+                    'X-Hermes-Session-Key': session_key,
+                    'X-Trace-Id': trace_id,
+                }
+            )
         response = await client.post(
             url,
             headers=headers,
@@ -306,6 +364,12 @@ async def apply_summary_update(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
+    canonical_egress_guard: Optional[Callable[[], None]] = None,
+    canonical_egress_completion: Optional[Callable[[bool], None]] = None,
+    canonical_timeout_provider: Optional[Callable[[], float]] = None,
+    correction_attempt_token: Optional[str] = None,
+    correction_source_compare_and_set: Optional[Callable[[dict[str, Any]], str]] = None,
+    source_mutation_guard: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -325,6 +389,12 @@ async def apply_summary_update(
         require_canonical=require_canonical,
         require_based_on_match=require_based_on_match,
         preserve_generated_results=preserve_generated_results,
+        canonical_egress_guard=canonical_egress_guard,
+        canonical_egress_completion=canonical_egress_completion,
+        canonical_timeout_provider=canonical_timeout_provider,
+        correction_attempt_token=correction_attempt_token,
+        correction_source_compare_and_set=correction_source_compare_and_set,
+        source_mutation_guard=source_mutation_guard,
     )
 
 

@@ -8355,6 +8355,15 @@ class AppLocalizationsZh extends AppLocalizations {
   String get memoryCorrectionFailed => 'Ella couldn\'t update this memory';
 
   @override
+  String get memoryCorrectionRuntimeUnavailable => 'Ella can\'t reach your correction service right now';
+
+  @override
+  String get memoryCorrectionMemoryChanged => 'This memory changed before Ella could apply your correction';
+
+  @override
+  String get memoryCorrectionServiceUnavailable => 'Ella\'s correction service is temporarily unavailable';
+
+  @override
   String get memoryCorrectionReview => 'Review';
 
   @override

@@ -29,15 +29,17 @@ void main() {
     await expectLater(_expectConsentFailure(sendVoiceMessageStreamServer([file])), completes);
     await expectLater(
       uploadFilesServer([file]),
-      throwsA(
-        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
-      ),
+      throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired)),
     );
     expect(await sendStorageToBackend(file, '2026-07-27T00:00:00Z'), isEmpty);
     expect(await updateUserGeolocation(geolocation: Geolocation(latitude: 1, longitude: 2)), isFalse);
     expect(
-      await submitConversationCorrection(conversationId: 'conversation-a', correctionText: 'private correction'),
-      isFalse,
+      await submitConversationCorrection(
+        conversationId: 'conversation-a',
+        correctionId: '00000000-0000-4000-8000-000000000001',
+        correctionText: 'private correction',
+      ),
+      isNull,
     );
     expect(await testConversationPrompt('private prompt', 'conversation-a'), isEmpty);
     expect(await retryConversationProcessing('conversation-a', 'request-a'), isNull);
@@ -146,8 +148,6 @@ class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
 Future<void> _expectConsentFailure(Stream<Object?> stream) async {
   await expectLater(
     stream.toList(),
-    throwsA(
-      isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
-    ),
+    throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired)),
   );
 }
