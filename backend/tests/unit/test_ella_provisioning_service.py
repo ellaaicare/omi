@@ -1661,6 +1661,9 @@ if module_name == "ella.routers.callbacks":
     fake_writeback.CanonicalSummaryDependencyUnavailableError = type(
         "CanonicalSummaryDependencyUnavailableError", (Exception,), {}
     )
+    fake_writeback.CanonicalSummaryOperationConflictError = type(
+        "CanonicalSummaryOperationConflictError", (Exception,), {}
+    )
     fake_writeback.CanonicalSummaryReconciliationPendingError = type(
         "CanonicalSummaryReconciliationPendingError", (Exception,), {}
     )

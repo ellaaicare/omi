@@ -785,7 +785,7 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 46
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_conversation_corrections.py -v
@@ -818,7 +818,7 @@ jobs:
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_unexpected_runtime_failure_logs_fixed_content_free_classification"
             "tests/unit/test_ella_reviewed_route_integration.py::test_resolve_expected_provisioning_failure_logs_fixed_content_free_classification"
             "tests/unit/test_ella_reviewed_route_integration.py::test_legacy_history_proxy_unexpected_failure_logs_no_runtime_material"
-            "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_declines_before_firestore_or_firebase_removal"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_completes_unlink_receipt_without_destructive_removal"
           )
           for required_id in "${required_reviewed_route_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$reviewed_route_ids"

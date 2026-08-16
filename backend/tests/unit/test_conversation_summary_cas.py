@@ -37,8 +37,9 @@ def test_active_summary_version_compare_and_set_is_atomic_and_fail_closed(monkey
     conversations = _load_conversations_module(monkeypatch)
 
     class ConversationRef:
-        def __init__(self, active_version):
+        def __init__(self, active_version, receipt=None):
             self.active_version = active_version
+            self.receipt = receipt
 
         def get(self, transaction=None):
             return SimpleNamespace(
@@ -46,6 +47,7 @@ def test_active_summary_version_compare_and_set_is_atomic_and_fail_closed(monkey
                 to_dict=lambda: {
                     "active_summary_version_id": self.active_version,
                     "data_protection_level": "standard",
+                    "summary_writeback_receipt": self.receipt,
                 },
             )
 
@@ -83,6 +85,34 @@ def test_active_summary_version_compare_and_set_is_atomic_and_fail_closed(monkey
         is False
     )
     assert stale_transaction.updates == []
+
+    pending_ref = ConversationRef("expected-v1", {"status": "pending_reconciliation"})
+    pending_transaction = Transaction()
+    with pytest.raises(
+        conversations.PendingConversationSummaryReconciliationError,
+        match="canonical_summary_reconciliation_pending",
+    ):
+        conversations._update_conversation_if_active_summary_version_transaction(
+            pending_transaction,
+            pending_ref,
+            "uid-1",
+            "expected-v1",
+            {"structured.title": "legacy-b", "summary_writeback_receipt": None},
+        )
+    assert pending_transaction.updates == []
+
+    completed_ref = ConversationRef("expected-v1", {"status": "completed"})
+    completed_transaction = Transaction()
+    assert conversations._update_conversation_if_active_summary_version_transaction(
+        completed_transaction,
+        completed_ref,
+        "uid-1",
+        "expected-v1",
+        {"structured.title": "legacy-b", "summary_writeback_receipt": None},
+    )
+    assert completed_transaction.updates == [
+        (completed_ref, {"structured.title": "legacy-b", "summary_writeback_receipt": None})
+    ]
 
 
 def test_conversation_builder_reads_and_writes_with_the_same_transaction(monkeypatch):
@@ -298,27 +328,19 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
         )
     )
     barrier = threading.Barrier(2)
-    blocked_threads = set()
-    blocked_threads_lock = threading.Lock()
-    actual_source = writeback.canonical_source_from_conversation
-
-    def synchronized_source(**kwargs):
-        thread_id = threading.get_ident()
-        with blocked_threads_lock:
-            first_read = thread_id not in blocked_threads
-            blocked_threads.add(thread_id)
-        if first_read:
-            barrier.wait(timeout=10)
-        return actual_source(**kwargs)
-
-    monkeypatch.setattr(writeback, "canonical_source_from_conversation", synchronized_source)
 
     def contender(label):
+        # Synchronize before either Firestore transaction begins. Blocking from
+        # inside the callback deadlocks against the emulator's transaction lock.
+        barrier.wait(timeout=10)
         return asyncio.run(
             writeback.write_conversation_summary_cas(
                 uid=uid,
                 conversation_id=conversation_id,
                 expected_canonical_source_sha256=expected,
+                operation_token=label * 64,
+                source_version="2026-08-15 12:01:00+00:00",
+                payload_sha256=("a" if label == "A" else "b") * 64,
                 title=f"Winner {label}",
                 overview=f"[Ella] Complete winning overview from contender {label} with stable source data.",
                 emoji="🧠",
@@ -342,9 +364,15 @@ def test_real_firestore_transaction_contention_preserves_one_complete_canonical_
                     errors.append(error)
 
         assert len(outcomes) == 1, [repr(error) for error in errors]
-        assert outcomes[0]["status"] == "ok"
+        assert outcomes[0]["status"] == "completed"
         assert len(errors) == 1
-        assert isinstance(errors[0], writeback.CanonicalConversationSourceMismatchError)
+        assert isinstance(
+            errors[0],
+            (
+                writeback.CanonicalConversationSourceMismatchError,
+                writeback.CanonicalSummaryReconciliationPendingError,
+            ),
+        )
 
         stored = conversation_ref.get().to_dict()
         winning_title = stored["structured"]["title"]
