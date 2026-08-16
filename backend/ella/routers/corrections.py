@@ -48,6 +48,7 @@ from ella.services.summary_writeback import (
 from ella.services import proposal_ingest
 from models.conversation import Conversation, ConversationStatus
 from models.proposals import Proposal, proposal_from_dict, proposal_to_dict
+from utils.ella.canonical_omi import reserve_omi_canonical_publication
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 logger = logging.getLogger(__name__)
@@ -1046,6 +1047,38 @@ def _require_current_downstream_stage(
         raise CanonicalSummaryWriteUnconfirmedError(f"{stage}_stale_attempt")
 
 
+def _canonical_publication_fence(
+    *, uid: str, conversation_id: str, correction_id: str, retry_attempt_token: str, generation: int
+) -> dict[str, Any]:
+    return {
+        "scope": f"correction:{uid}:{conversation_id}:{correction_id}",
+        "attempt_token": retry_attempt_token,
+        "generation": max(1, generation),
+    }
+
+
+def _reserve_canonical_publication_fence(
+    *, uid: str, conversation_id: str, correction_id: str, retry_attempt_token: str, generation: int
+) -> dict[str, Any]:
+    fence = _canonical_publication_fence(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+        generation=generation,
+    )
+    result = reserve_omi_canonical_publication(fence)
+    if (
+        not isinstance(result, dict)
+        or result.get("ok") is not True
+        or str(result.get("scope") or "") != fence["scope"]
+        or str(result.get("attempt_token") or "") != retry_attempt_token
+        or int(result.get("generation") or 0) != fence["generation"]
+    ):
+        raise CanonicalSummaryWriteUnconfirmedError("canonical_publication_reservation_unconfirmed")
+    return fence
+
+
 def _claim_canonical_publication_in_transaction(
     transaction,
     audit_ref,
@@ -1088,7 +1121,11 @@ def _claim_canonical_publication_in_transaction(
         {
             "canonical_publication_state": "inflight",
             "canonical_publication_attempt_token": retry_attempt_token,
-            "canonical_publication_generation": max(1, int(audit.get("attempt_count") or 1)),
+            "canonical_publication_generation": max(
+                1,
+                int(audit.get("attempt_count") or 1),
+                int(audit.get("canonical_publication_generation") or 0),
+            ),
             "canonical_publication_started_at": claimed_at,
             "canonical_publication_lease_expires_at": _bounded_lease_expiry(
                 claim_time,
@@ -1218,11 +1255,24 @@ def _guard_canonical_publication(
         or str(audit.get("canonical_publication_state") or "") != "inflight"
     ):
         raise CanonicalSummaryWriteUnconfirmedError("canonical_publication_stale_attempt")
-    return {
-        "scope": f"correction:{uid}:{conversation_id}:{correction_id}",
-        "attempt_token": retry_attempt_token,
-        "generation": max(1, int(audit.get("canonical_publication_generation") or 1)),
-    }
+    generation = max(1, int(audit.get("canonical_publication_generation") or 1))
+    try:
+        return _reserve_canonical_publication_fence(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            retry_attempt_token=retry_attempt_token,
+            generation=generation,
+        )
+    except Exception as exc:
+        _complete_canonical_publication(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            retry_attempt_token=retry_attempt_token,
+            confirmed=False,
+        )
+        raise CanonicalSummaryWriteUnconfirmedError("canonical_publication_reservation_unconfirmed") from exc
 
 
 def _read_correction_audit(uid: str, conversation_id: str, correction_id: str) -> dict[str, Any]:
@@ -3598,6 +3648,12 @@ def _claim_canonical_reconciliation_in_transaction(
         and lease_expires_at > retry_now
     ):
         return "already_queued"
+    next_attempt_count = int(audit.get("attempt_count") or 0) + 1
+    next_publication_generation = max(
+        1,
+        next_attempt_count,
+        int(audit.get("canonical_publication_generation") or 0) + 1,
+    )
     transaction.set(
         audit_ref,
         {
@@ -3605,19 +3661,64 @@ def _claim_canonical_reconciliation_in_transaction(
             "pending": True,
             "retry_attempt_token": retry_attempt_token,
             "retry_lease_expires_at": retry_lease_expires_at,
-            "attempt_count": int(audit.get("attempt_count") or 0) + 1,
+            "attempt_count": next_attempt_count,
             "attempt_budget": int(audit.get("attempt_budget") or CORRECTION_MAX_ATTEMPTS),
             "operation_deadline_at": operation_deadline.isoformat(),
+            "canonical_publication_generation": next_publication_generation,
+            "canonical_publication_reservation_state": "pending",
             "updated_at": retry_queued_at,
         },
         merge=True,
     )
-    return "claimed"
+    return "reservation_pending"
 
 
 @transactional
 def _claim_canonical_reconciliation_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
     return _claim_canonical_reconciliation_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _confirm_canonical_publication_reservation_in_transaction(
+    transaction,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    retry_attempt_token: str,
+    generation: int,
+    reserved_at: str,
+) -> str:
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or int(audit.get("canonical_publication_generation") or 0) != generation
+        or str(audit.get("canonical_publication_reservation_state") or "") != "pending"
+        or str(audit.get("status") or "") != "canonical_pending"
+    ):
+        return "stale_attempt"
+    transaction.set(
+        audit_ref,
+        {
+            "canonical_publication_reservation_state": "reserved",
+            "canonical_publication_reservation_attempt_token": retry_attempt_token,
+            "canonical_publication_reserved_at": reserved_at,
+            "updated_at": reserved_at,
+        },
+        merge=True,
+    )
+    return "reserved"
+
+
+@transactional
+def _confirm_canonical_publication_reservation_transaction(transaction, audit_ref, **kwargs) -> str:
+    return _confirm_canonical_publication_reservation_in_transaction(transaction, audit_ref, **kwargs)
 
 
 def _claim_canonical_reconciliation(
@@ -3631,10 +3732,11 @@ def _claim_canonical_reconciliation(
     retry_attempt_token: str,
 ) -> str:
     conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
-    return _claim_canonical_reconciliation_transaction(
+    audit_ref = _audit_ref(uid, conversation_id, correction_id)
+    claim_status = _claim_canonical_reconciliation_transaction(
         db.transaction(),
         conversation_ref,
-        _audit_ref(uid, conversation_id, correction_id),
+        audit_ref,
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
@@ -3643,6 +3745,43 @@ def _claim_canonical_reconciliation(
         retry_lease_expires_at=retry_lease_expires_at,
         retry_attempt_token=retry_attempt_token,
     )
+    if claim_status != "reservation_pending":
+        return claim_status
+
+    audit = _read_correction_audit(uid, conversation_id, correction_id)
+    generation = int(audit.get("canonical_publication_generation") or 0)
+    if (
+        str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("canonical_publication_reservation_state") or "") != "pending"
+        or generation < 1
+    ):
+        return "publication_reservation_unconfirmed"
+    try:
+        _reserve_canonical_publication_fence(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            retry_attempt_token=retry_attempt_token,
+            generation=generation,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to reserve canonical correction publication generation",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+        return "publication_reservation_unconfirmed"
+    reserved_at = _now_iso()
+    reservation_status = _confirm_canonical_publication_reservation_transaction(
+        db.transaction(),
+        audit_ref,
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        retry_attempt_token=retry_attempt_token,
+        generation=generation,
+        reserved_at=reserved_at,
+    )
+    return "claimed" if reservation_status == "reserved" else "publication_reservation_unconfirmed"
 
 
 def _finish_canonical_reconciliation_in_transaction(

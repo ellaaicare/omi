@@ -10,6 +10,10 @@ from typing import Any, Optional
 import requests
 
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
+CANONICAL_PUBLICATION_FENCES_URL = os.getenv(
+    "ELLA_CANONICAL_PUBLICATION_FENCES_URL",
+    f"{CANONICAL_EVENTS_URL.rsplit('/', 1)[0]}/publication-fences/reserve",
+)
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
 
@@ -234,3 +238,22 @@ def write_omi_canonical_event(
     payload = response.json()
     payload["latency_ms"] = elapsed_ms
     return payload
+
+
+def reserve_omi_canonical_publication(
+    publication_fence: dict[str, Any], *, timeout: Optional[float] = None
+) -> dict[str, Any]:
+    """Durably advance the canonical sink authority before releasing a reclaimed worker."""
+    if not CANONICAL_OMI_WRITE_ENABLED:
+        return {"ok": False, "skipped": True, "reason": "disabled"}
+
+    response = requests.post(
+        CANONICAL_PUBLICATION_FENCES_URL,
+        json=_json_safe(publication_fence),
+        headers={"Content-Type": "application/json"},
+        timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"canonical_publication_fence_http_{response.status_code}: {response.text[:200]}")
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {"ok": False, "reason": "invalid_response"}

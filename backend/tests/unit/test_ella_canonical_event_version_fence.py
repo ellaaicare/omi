@@ -23,17 +23,45 @@ class _AsyncContext:
 
 
 class _FenceConnection:
-    def __init__(self, existing_active_version_id, *, existing_generation=0, exact_replay=True):
+    def __init__(
+        self,
+        existing_active_version_id,
+        *,
+        existing_generation=0,
+        exact_replay=True,
+        authority_generation=0,
+        authority_token="",
+    ):
         self.existing_active_version_id = existing_active_version_id
         self.existing_generation = existing_generation
         self.exact_replay = exact_replay
+        self.authority_generation = authority_generation
+        self.authority_token = authority_token
         self.queries = []
 
     def transaction(self):
         return _AsyncContext(self)
 
+    async def execute(self, query, *args):
+        del args
+        self.queries.append(query)
+        assert "canonical_publication_fences" in query
+
     async def fetchrow(self, query, *args):
         self.queries.append(query)
+        if "INSERT INTO canonical_publication_fences" in query:
+            _, generation, token = args
+            if generation > self.authority_generation or (
+                generation == self.authority_generation and token == self.authority_token
+            ):
+                self.authority_generation = generation
+                self.authority_token = token
+                return {"generation": generation, "attempt_token": token}
+            return None
+        if "FROM canonical_publication_fences" in query:
+            if self.authority_generation < 1:
+                return None
+            return {"generation": self.authority_generation, "attempt_token": self.authority_token}
         incoming_metadata = json.loads(args[14])
         incoming_active = incoming_metadata["active_summary_version_id"]
         ancestors = incoming_metadata["summary_version_ancestor_ids"]
@@ -146,9 +174,22 @@ def test_same_version_generation_fences_reclaimed_worker_before_and_after_undo(m
         return _FencePool(connection)
 
     monkeypatch.setattr(canonical_events, "_get_pool", pool)
-    successor = asyncio.run(
-        canonical_events.PostgresCanonicalEventStore().write_batch(
-            [_summary_event("corrected-v2", ["base-v1"], generation=2, token="attempt-b")]
+    reservation = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().reserve_publication_fence(
+            canonical_events.CanonicalPublicationFenceReservationIn(
+                scope="correction:owner-1:conv-1:corr-1",
+                generation=2,
+                attempt_token="attempt-b",
+            )
+        )
+    )
+    same_generation_collision = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().reserve_publication_fence(
+            canonical_events.CanonicalPublicationFenceReservationIn(
+                scope="correction:owner-1:conv-1:corr-1",
+                generation=2,
+                attempt_token="attempt-c",
+            )
         )
     )
     stale_before_undo = asyncio.run(
@@ -156,7 +197,15 @@ def test_same_version_generation_fences_reclaimed_worker_before_and_after_undo(m
             [_summary_event("corrected-v2", ["base-v1"], generation=1, token="attempt-a")]
         )
     )
+    successor = asyncio.run(
+        canonical_events.PostgresCanonicalEventStore().write_batch(
+            [_summary_event("corrected-v2", ["base-v1"], generation=2, token="attempt-b")]
+        )
+    )
 
+    assert reservation["ok"] is True
+    assert same_generation_collision["ok"] is False
+    assert same_generation_collision["attempt_token"] == "attempt-b"
     assert successor["ok"] is True
     assert successor["updated"] == 1
     assert connection.existing_generation == 2

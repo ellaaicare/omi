@@ -3890,7 +3890,7 @@ def test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_
         **{**claim, "retry_attempt_token": "repair-2"},
     )
 
-    assert first == "claimed"
+    assert first == "reservation_pending"
     assert duplicate == "already_queued"
     assert audit_ref.value["retry_attempt_token"] == "repair-1"
     assert len(transaction.writes) == 1
@@ -4731,8 +4731,9 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
         def set(self, ref, payload, merge=False):
             ref.set(payload, merge=merge)
 
-    def guard(token):
-        status = corrections._claim_canonical_publication_in_transaction(
+    def claim_publication(**kwargs):
+        token = kwargs["retry_attempt_token"]
+        return corrections._claim_canonical_publication_in_transaction(
             Transaction(),
             audit_ref,
             uid="owner-1",
@@ -4741,25 +4742,16 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
             retry_attempt_token=token,
             claimed_at=("2026-08-16T01:00:00+00:00" if token == "attempt-a" else "2026-08-16T01:03:00+00:00"),
         )
-        if status == "already_completed":
-            return False
-        if status != "claimed":
-            raise corrections.CanonicalSummaryWriteUnconfirmedError(status)
-        return {
-            "scope": f"correction:owner-1:conv-1:{correction_id}",
-            "attempt_token": token,
-            "generation": int(audit_ref.value.get("canonical_publication_generation") or 1),
-        }
 
-    def complete(token, confirmed):
+    def complete_publication(**kwargs):
         return corrections._complete_canonical_publication_in_transaction(
             Transaction(),
             audit_ref,
             uid="owner-1",
             conversation_id="conv-1",
             correction_id=correction_id,
-            retry_attempt_token=token,
-            confirmed=confirmed,
+            retry_attempt_token=kwargs["retry_attempt_token"],
+            confirmed=kwargs["confirmed"],
             completed_at="2026-08-16T01:03:00+00:00",
         )
 
@@ -4767,18 +4759,58 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
     release_writer = threading.Event()
     publications = []
     canonical_commits = []
+    authority = {"generation": 0, "attempt_token": ""}
+    authority_lock = threading.Lock()
+
+    def reserve_at_sink(fence):
+        with authority_lock:
+            generation = int(fence["generation"])
+            token = str(fence["attempt_token"])
+            if generation > authority["generation"] or (
+                generation == authority["generation"] and token == authority["attempt_token"]
+            ):
+                authority.update(generation=generation, attempt_token=token)
+            return {
+                "ok": authority == {"generation": generation, "attempt_token": token},
+                **authority,
+                "scope": fence["scope"],
+            }
 
     def canonical_writer(*args, **kwargs):
         writer_started.set()
         assert release_writer.wait(timeout=1)
-        publications.append(kwargs["trace_id"])
         fence = kwargs["publication_fence"]
         generation = int(fence["generation"])
-        if not canonical_commits or generation > canonical_commits[-1]:
+        publications.append(generation)
+        with authority_lock:
+            authorized = authority == {
+                "generation": generation,
+                "attempt_token": str(fence["attempt_token"]),
+            }
+        if authorized:
             canonical_commits.append(generation)
             return {"ok": True, "inserted": 1, "duplicates": 0}
-        return {"ok": True, "inserted": 0, "duplicates": 1}
+        return {"ok": False, "inserted": 0, "duplicates": 0, "stale": 1}
 
+    monkeypatch.setattr(corrections, "require_current_ai_consent", lambda uid: None)
+    monkeypatch.setattr(corrections, "_claim_canonical_publication", claim_publication)
+    monkeypatch.setattr(corrections, "_complete_canonical_publication", complete_publication)
+    monkeypatch.setattr(corrections, "_read_correction_audit", lambda *args: dict(audit_ref.value))
+    monkeypatch.setattr(corrections, "reserve_omi_canonical_publication", reserve_at_sink)
+    monkeypatch.setattr(
+        corrections,
+        "_claim_canonical_reconciliation_transaction",
+        lambda transaction, conversation_arg, audit_arg, **kwargs: corrections._claim_canonical_reconciliation_in_transaction(
+            Transaction(), conversation_ref, audit_ref, **kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_confirm_canonical_publication_reservation_transaction",
+        lambda transaction, audit_arg, **kwargs: corrections._confirm_canonical_publication_reservation_in_transaction(
+            Transaction(), audit_ref, **kwargs
+        ),
+    )
     monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation_ref.value)
 
     async def publish(token):
@@ -4790,8 +4822,19 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
             trace_id=trace_id,
             require_canonical=True,
             canonical_writer=canonical_writer,
-            canonical_egress_guard=lambda: guard(token),
-            canonical_egress_completion=lambda confirmed: complete(token, confirmed),
+            canonical_egress_guard=lambda: corrections._guard_canonical_publication(
+                uid="owner-1",
+                conversation_id="conv-1",
+                correction_id=correction_id,
+                retry_attempt_token=token,
+            ),
+            canonical_egress_completion=lambda confirmed: corrections._complete_canonical_publication(
+                uid="owner-1",
+                conversation_id="conv-1",
+                correction_id=correction_id,
+                retry_attempt_token=token,
+                confirmed=confirmed,
+            ),
             correction_source_compare_and_set=lambda update: "updated",
         )
 
@@ -4807,10 +4850,7 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
             await stale_task
 
         audit_ref.value["retry_lease_expires_at"] = "2026-08-16T01:00:01+00:00"
-        blocked_reclaim = corrections._claim_canonical_reconciliation_in_transaction(
-            Transaction(),
-            conversation_ref,
-            audit_ref,
+        blocked_reclaim = corrections._claim_canonical_reconciliation(
             uid="owner-1",
             conversation_id="conv-1",
             correction_id=correction_id,
@@ -4830,10 +4870,7 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
         assert corrections._correction_work_lease_is_reclaimable(
             audit_ref.value, now=datetime(2026, 8, 16, 1, 2, tzinfo=timezone.utc)
         )
-        expired_reclaim = corrections._claim_canonical_reconciliation_in_transaction(
-            Transaction(),
-            conversation_ref,
-            audit_ref,
+        expired_reclaim = corrections._claim_canonical_reconciliation(
             uid="owner-1",
             conversation_id="conv-1",
             correction_id=correction_id,
@@ -4843,20 +4880,23 @@ def test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_repla
             retry_attempt_token="attempt-b",
         )
         assert expired_reclaim == "claimed"
+        assert authority == {"generation": 2, "attempt_token": "attempt-b"}
 
+        # The expired generation reaches the production writer first after B's
+        # reclaim has returned, but the sink reservation rejects it.
         release_writer.set()
         for _ in range(100):
             if publications:
                 break
             await asyncio.sleep(0.001)
-        assert publications == [trace_id]
-        assert audit_ref.value["canonical_publication_state"] == "inflight"
+        assert publications == [1]
+        assert canonical_commits == []
         replay = await publish("attempt-b")
         assert replay["canonical_confirmed"] is True
 
     asyncio.run(scenario())
-    assert publications == [trace_id, trace_id]
-    assert canonical_commits == [1, 2]
+    assert publications == [1, 2]
+    assert canonical_commits == [2]
 
 
 def test_crash_after_publication_claim_before_remote_write_reclaims_after_bounded_lease():
@@ -4949,7 +4989,7 @@ def test_crash_after_publication_claim_before_remote_write_reclaims_after_bounde
 
     assert first_claim == "claimed"
     assert live_reclaim == "already_queued"
-    assert expired_reclaim == "claimed"
+    assert expired_reclaim == "reservation_pending"
     assert second_claim == "claimed"
     assert stale_ack == "stale_attempt"
     assert audit_ref.value["canonical_publication_attempt_token"] == "attempt-b"
@@ -5185,7 +5225,7 @@ def test_multiple_lost_reclaimers_exhaust_one_persisted_attempt_budget():
             retry_lease_expires_at=f"2026-08-16T01:0{attempt_number + 1}:00+00:00",
             retry_attempt_token=f"attempt-{attempt_number}",
         )
-        assert outcome == "claimed"
+        assert outcome == "reservation_pending"
         audit_ref.value["downstream_work"]["proposal"].update(
             {
                 "status": "inflight",

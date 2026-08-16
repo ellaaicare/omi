@@ -1,10 +1,11 @@
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from utils.ella.canonical_omi import build_omi_canonical_event
+from utils.ella.canonical_omi import build_omi_canonical_event, reserve_omi_canonical_publication
 
 
-def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
+def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript(monkeypatch):
     conversation = {
         "id": "cafe-123",
         "created_at": datetime(2026, 5, 7, 18, 56, 59, tzinfo=timezone.utc),
@@ -65,6 +66,23 @@ def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
         },
     )
     assert fenced_event["metadata"]["publication_fence"]["generation"] == 2
+
+    reservation_requests = []
+
+    def reserve(url, **kwargs):
+        reservation_requests.append({"url": url, **kwargs})
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True, **kwargs["json"]})
+
+    monkeypatch.setattr("utils.ella.canonical_omi.requests.post", reserve)
+    reservation = reserve_omi_canonical_publication(fenced_event["metadata"]["publication_fence"])
+    assert reservation == {
+        "ok": True,
+        "scope": "correction:owner-1:cafe-123:corr-1",
+        "attempt_token": "attempt-b",
+        "generation": 2,
+    }
+    assert reservation_requests[0]["url"].endswith("/v1/ella/publication-fences/reserve")
+    assert reservation_requests[0]["timeout"] == 5.0
 
 
 def test_build_omi_canonical_event_json_normalizes_nested_timestamps():
