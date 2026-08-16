@@ -31,6 +31,32 @@ def _postgres_binary(name: str) -> str:
     pytest.fail(f"real PostgreSQL test requires {name}")
 
 
+async def _ensure_canonical_events_table(pool) -> None:
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS canonical_events (
+            id BIGSERIAL PRIMARY KEY,
+            uid TEXT NOT NULL,
+            canonical_identity TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            source_identity TEXT NOT NULL,
+            session_id TEXT,
+            channel TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            role TEXT NOT NULL,
+            text TEXT NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL,
+            ended_at TIMESTAMPTZ,
+            privacy_scope TEXT NOT NULL,
+            scan_policy TEXT NOT NULL,
+            source_ref JSONB NOT NULL,
+            metadata JSONB NOT NULL,
+            raw_event JSONB NOT NULL,
+            inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (event_id, source_identity)
+        )
+    """)
+
+
 @pytest.fixture(scope="module")
 def canonical_postgres(tmp_path_factory):
     service_host = os.environ.get("ELLA_TEST_POSTGRES_HOST")
@@ -146,24 +172,68 @@ def _request(**overrides):
     return chat.EllaVoiceTurnRequest(**values)
 
 
-def test_v2v_turn_write_is_idempotent_and_returns_existing_canonical_content(monkeypatch):
+def test_v2v_turn_write_is_idempotent_across_rebound_transport_sessions(monkeypatch):
     store = InMemoryCanonicalEventStore()
     monkeypatch.setattr(chat, "_canonical_event_store", store)
 
-    first = asyncio.run(chat.persist_v2v_voice_turn(_request(), authenticated_uid="uid-a"))
+    first = asyncio.run(chat.persist_v2v_voice_turn(_request(session_id="session-jti-1"), authenticated_uid="uid-a"))
     replay = asyncio.run(
         chat.persist_v2v_voice_turn(
-            _request(user_transcript="Conflicting retry", assistant_transcript="Conflicting reply"),
+            _request(session_id="session-jti-2"),
             authenticated_uid="uid-a",
         )
     )
 
     assert first["idempotent_replay"] is False
     assert replay["idempotent_replay"] is True
+    assert replay["session_id"] == "session-jti-2"
     assert {message["text"] for message in replay["messages"]} == {
         "Durable user turn",
         "Durable assistant turn",
     }
+    assert len(store._events) == 2
+    assert {source_identity for _, source_identity in store._events} == {"ios_voice:uid-a:turn-000001"}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"user_transcript": "Conflicting retry"},
+        {"assistant_transcript": "Conflicting reply"},
+        {"started_at": datetime(2026, 8, 15, 20, 0, 1, tzinfo=timezone.utc)},
+        {"completed_at": datetime(2026, 8, 15, 20, 0, 3, tzinfo=timezone.utc)},
+    ],
+)
+def test_v2v_turn_replay_fails_closed_on_payload_or_timestamp_collision(monkeypatch, overrides):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    asyncio.run(chat.persist_v2v_voice_turn(_request(session_id="session-jti-1"), authenticated_uid="uid-a"))
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            chat.persist_v2v_voice_turn(
+                _request(session_id="session-jti-2", **overrides),
+                authenticated_uid="uid-a",
+            )
+        )
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "canonical_voice_turn_collision"
+    assert len(store._events) == 2
+
+
+def test_v2v_turn_replay_fails_closed_on_canonical_role_collision(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    monkeypatch.setattr(chat, "_canonical_event_store", store)
+    asyncio.run(chat.persist_v2v_voice_turn(_request(session_id="session-jti-1"), authenticated_uid="uid-a"))
+    user_key = ("turn-000001:user", "ios_voice:uid-a:turn-000001")
+    store._events[user_key]["role"] = "assistant"
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(chat.persist_v2v_voice_turn(_request(session_id="session-jti-2"), authenticated_uid="uid-a"))
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "canonical_voice_turn_collision"
     assert len(store._events) == 2
 
 
@@ -218,7 +288,7 @@ def test_v2v_turn_readback_uses_leading_event_id_index_with_exact_owner_binding(
     result = asyncio.run(
         store.events_by_event_ids(
             uid="uid-a",
-            source_identity="ios_voice:uid-a:session-1:turn-1",
+            source_identity="ios_voice:uid-a:turn-1",
             event_ids=event_ids,
         )
     )
@@ -230,7 +300,7 @@ def test_v2v_turn_readback_uses_leading_event_id_index_with_exact_owner_binding(
     assert "source_identity = $2" in query
     assert "uid = $3" in query
     assert "lower(uid)" not in query
-    assert args == (event_ids, "ios_voice:uid-a:session-1:turn-1", "uid-a")
+    assert args == (event_ids, "ios_voice:uid-a:turn-1", "uid-a")
 
 
 @pytest.mark.parametrize(
@@ -414,29 +484,7 @@ def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe(monke
     async def exercise_postgres():
         pool = await canonical_events.asyncpg.create_pool(min_size=1, max_size=2, **canonical_postgres)
         try:
-            await pool.execute("""
-                CREATE TABLE canonical_events (
-                    id BIGSERIAL PRIMARY KEY,
-                    uid TEXT NOT NULL,
-                    canonical_identity TEXT NOT NULL,
-                    event_id TEXT NOT NULL,
-                    source_identity TEXT NOT NULL,
-                    session_id TEXT,
-                    channel TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    started_at TIMESTAMPTZ NOT NULL,
-                    ended_at TIMESTAMPTZ,
-                    privacy_scope TEXT NOT NULL,
-                    scan_policy TEXT NOT NULL,
-                    source_ref JSONB NOT NULL,
-                    metadata JSONB NOT NULL,
-                    raw_event JSONB NOT NULL,
-                    inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    UNIQUE (event_id, source_identity)
-                )
-                """)
+            await _ensure_canonical_events_table(pool)
 
             async def get_pool():
                 return pool
@@ -608,6 +656,90 @@ def test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe(monke
                 "legacy-limit-c",
             ]
         finally:
+            await pool.close()
+
+    asyncio.run(exercise_postgres())
+
+
+def test_real_postgres_composes_canonical_success_ack_loss_restart_and_new_session_proxy_replay(
+    monkeypatch, canonical_postgres
+):
+    async def exercise_postgres():
+        pool = await canonical_events.asyncpg.create_pool(min_size=1, max_size=2, **canonical_postgres)
+        uid = "uid-postgres-rebound-replay"
+        turn_id = "v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        source_identity = f"ios_voice:{uid}:{turn_id}"
+
+        def request(session_id: str, **overrides):
+            return _request(
+                uid=uid,
+                session_id=session_id,
+                turn_id=turn_id,
+                user_event_id=f"{turn_id}:user",
+                assistant_event_id=f"{turn_id}:assistant",
+                **overrides,
+            )
+
+        try:
+            await _ensure_canonical_events_table(pool)
+            await pool.execute("DELETE FROM canonical_events WHERE uid = $1", uid)
+
+            async def get_pool():
+                return pool
+
+            monkeypatch.setattr(canonical_events, "_get_pool", get_pool)
+            monkeypatch.setattr(chat, "_canonical_event_store", canonical_events.PostgresCanonicalEventStore())
+
+            canonical_success_with_lost_ack = await chat.persist_v2v_voice_turn(
+                request("session-jti-1"), authenticated_uid=uid
+            )
+            assert canonical_success_with_lost_ack["idempotent_replay"] is False
+
+            # Both app and proxy may restart after canonical success but before the ACK arrives.
+            monkeypatch.setattr(chat, "_canonical_event_store", canonical_events.PostgresCanonicalEventStore())
+            replay_ack = await chat.persist_v2v_voice_turn(request("session-jti-2"), authenticated_uid=uid)
+
+            assert replay_ack["ok"] is True
+            assert replay_ack["session_id"] == "session-jti-2"
+            assert replay_ack["turn_id"] == turn_id
+            assert replay_ack["idempotent_replay"] is True
+            assert {(message["id"], message["sender"]) for message in replay_ack["messages"]} == {
+                (f"{turn_id}:user", "human"),
+                (f"{turn_id}:assistant", "ai"),
+            }
+            assert (
+                await pool.fetchval(
+                    "SELECT count(*) FROM canonical_events WHERE uid = $1 AND source_identity = $2",
+                    uid,
+                    source_identity,
+                )
+                == 2
+            )
+
+            for collision in (
+                request("session-jti-2", user_transcript="payload collision"),
+                request(
+                    "session-jti-2",
+                    completed_at=datetime(2026, 8, 15, 20, 0, 3, tzinfo=timezone.utc),
+                ),
+            ):
+                with pytest.raises(HTTPException) as raised:
+                    await chat.persist_v2v_voice_turn(collision, authenticated_uid=uid)
+                assert raised.value.status_code == 409
+                assert raised.value.detail == "canonical_voice_turn_collision"
+
+            await pool.execute(
+                "UPDATE canonical_events SET role = 'assistant' WHERE uid = $1 AND event_id = $2",
+                uid,
+                f"{turn_id}:user",
+            )
+            with pytest.raises(HTTPException) as raised:
+                await chat.persist_v2v_voice_turn(request("session-jti-2"), authenticated_uid=uid)
+            assert raised.value.status_code == 409
+            assert raised.value.detail == "canonical_voice_turn_collision"
+            assert await pool.fetchval("SELECT count(*) FROM canonical_events WHERE uid = $1", uid) == 2
+        finally:
+            await pool.execute("DELETE FROM canonical_events WHERE uid = $1", uid)
             await pool.close()
 
     asyncio.run(exercise_postgres())

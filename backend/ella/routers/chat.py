@@ -269,7 +269,7 @@ def _ios_voice_event(
     ended_at: datetime,
     turn_ordinal: int | None,
 ) -> CanonicalEventIn:
-    source_identity = f"ios_voice:{uid}:{session_id}:{turn_id}"
+    source_identity = f"ios_voice:{uid}:{turn_id}"
     return CanonicalEventIn(
         uid=uid,
         canonical_identity=uid,
@@ -297,6 +297,36 @@ def _ios_voice_event(
             **({"turn_ordinal": turn_ordinal} if turn_ordinal is not None else {}),
         },
     )
+
+
+def _voice_event_timestamp(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _reject_voice_turn_collisions(stored: list[dict], expected: list[CanonicalEventIn]) -> None:
+    expected_by_id = {event.event_id: event.normalized() for event in expected}
+    for event in stored:
+        candidate = expected_by_id.get(event.get("event_id"))
+        if candidate is None:
+            continue
+        if (
+            event.get("uid") != candidate["uid"]
+            or event.get("canonical_identity") != candidate["canonical_identity"]
+            or event.get("source_identity") != candidate["source_identity"]
+            or event.get("channel") != candidate["channel"]
+            or event.get("provider") != candidate["provider"]
+            or event.get("role") != candidate["role"]
+            or event.get("text") != candidate["text"]
+            or _voice_event_timestamp(event.get("started_at")) != candidate["started_at"]
+            or _voice_event_timestamp(event.get("ended_at")) != candidate["ended_at"]
+        ):
+            raise HTTPException(status_code=409, detail="canonical_voice_turn_collision")
 
 
 async def _write_ios_chat_canonical_event(event: CanonicalEventIn) -> None:
@@ -328,7 +358,7 @@ async def persist_v2v_voice_turn(
     """Idempotently persist one complete V2V turn for canonical Chat hydration."""
     uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Voice chat")
     user_text, assistant_text = _validated_voice_turn(request)
-    source_identity = f"ios_voice:{uid}:{request.session_id}:{request.turn_id}"
+    source_identity = f"ios_voice:{uid}:{request.turn_id}"
     events = [
         _ios_voice_event(
             uid=uid,
@@ -354,6 +384,12 @@ async def persist_v2v_voice_turn(
         ),
     ]
 
+    existing = await _canonical_event_store.events_by_event_ids(
+        uid=uid,
+        source_identity=source_identity,
+        event_ids=sorted(event.event_id for event in events),
+    )
+    _reject_voice_turn_collisions(existing, events)
     write_result = await _canonical_event_store.write_batch(events)
     expected_ids = {event.event_id for event in events}
     stored = await _canonical_event_store.events_by_event_ids(
@@ -365,10 +401,10 @@ async def persist_v2v_voice_turn(
         event
         for event in stored
         if event.get("event_id") in expected_ids
-        and event.get("session_id") == request.session_id
         and event.get("channel") == "ios_voice"
         and event.get("role") in {"user", "assistant"}
     ]
+    _reject_voice_turn_collisions(canonical, events)
     if len(canonical) != 2 or {event.get("role") for event in canonical} != {"user", "assistant"}:
         raise HTTPException(status_code=503, detail="canonical_voice_turn_unavailable")
 

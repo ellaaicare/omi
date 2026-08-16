@@ -740,7 +740,7 @@ void main() {
       expect(writes, isEmpty);
     });
 
-    test('disconnect before durable handoff emits no ACK and a new client safely ACKs replay', () async {
+    test('canonical success with lost ACK survives restart and new-session proxy replay exactly once', () async {
       grantCurrentConsent();
       const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
           '"session_id":"session-jti-1","turn_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",'
@@ -751,14 +751,45 @@ void main() {
       final persistenceStarted = Completer<void>();
       final releasePersistence = Completer<void>();
       var appOwnsTurnDurably = false;
+      final canonicalRows = <String, Map<String, dynamic>>{};
+      Future<bool> persistCanonical(V2VTerminalTranscriptTurn turn) async {
+        final sourceIdentity = 'ios_voice:uid-a:${turn.turnId}';
+        final rows = [
+          {
+            'source_identity': sourceIdentity,
+            'event_id': turn.userEventId,
+            'role': 'user',
+            'text': turn.userTranscript,
+            'started_at': turn.startedAt.toUtc().toIso8601String(),
+            'ended_at': turn.completedAt.toUtc().toIso8601String(),
+          },
+          {
+            'source_identity': sourceIdentity,
+            'event_id': turn.assistantEventId,
+            'role': 'assistant',
+            'text': turn.assistantTranscript,
+            'started_at': turn.completedAt.toUtc().toIso8601String(),
+            'ended_at': turn.completedAt.toUtc().toIso8601String(),
+          },
+        ];
+        for (final row in rows) {
+          final existing = canonicalRows[row['event_id']];
+          if (existing != null && jsonEncode(existing) != jsonEncode(row)) return false;
+        }
+        for (final row in rows) {
+          canonicalRows.putIfAbsent(row['event_id'] as String, () => row);
+        }
+        return true;
+      }
+
       final firstSentFrames = <String>[];
       final firstSocket = StreamController<dynamic>(sync: true);
       final firstClient = V2VClient(
-        onTerminalTurnDurable: (_) async {
+        onTerminalTurnDurable: (turn) async {
+          appOwnsTurnDurably = await persistCanonical(turn);
           persistenceStarted.complete();
           await releasePersistence.future;
-          appOwnsTurnDurably = true;
-          return true;
+          return appOwnsTurnDurably;
         },
         providerRegistryValidator: (_) async => null,
         sessionCreator: (_, provider, __) async => {
@@ -794,7 +825,7 @@ void main() {
       final replaySentFrames = <String>[];
       final replaySocket = StreamController<dynamic>(sync: true);
       final replayClient = V2VClient(
-        onTerminalTurnDurable: (_) async => appOwnsTurnDurably,
+        onTerminalTurnDurable: persistCanonical,
         providerRegistryValidator: (_) async => null,
         sessionCreator: (_, provider, __) async => {
           'session_token': 'opaque-test-token',
@@ -828,6 +859,20 @@ void main() {
         'session_id': 'session-jti-2',
         'turn_id': 'v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
       });
+      expect(canonicalRows, hasLength(2));
+      expect(canonicalRows.values.map((row) => row['source_identity']).toSet(), {
+        'ios_voice:uid-a:v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      });
+
+      for (final collision in [
+        Map<String, dynamic>.from(reboundReplay)..['assistant_text'] = 'Conflicting answer',
+        Map<String, dynamic>.from(reboundReplay)..['started_at'] = '2026-08-15T20:10:01Z',
+      ]) {
+        replaySocket.add(jsonEncode(collision));
+        await replayClient.settleTerminalTurnsForTesting();
+      }
+      expect(replaySentFrames, hasLength(1), reason: 'payload/timestamp collisions must not be ACKed');
+      expect(canonicalRows, hasLength(2));
       await replayClient.disconnect();
     });
 
