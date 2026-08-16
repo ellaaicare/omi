@@ -16,14 +16,84 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from utils.ella.canonical_context import (
+    MAX_CANONICAL_EVENT_SEQUENCE,
+    MAX_CANONICAL_TURN_ORDINAL,
+    parse_canonical_ordering_integer,
+)
 from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
 
 DEFAULT_TIMELINE_LIMIT = 100
 MAX_TIMELINE_LIMIT = 500
+_TURN_ORDINAL_SQL_IS_VALID = """(
+    metadata->>'turn_ordinal' ~ '^(0|[1-9][0-9]{0,18})$'
+    AND (
+        length(metadata->>'turn_ordinal') < 19
+        OR metadata->>'turn_ordinal' <= '9223372036854775807'
+    )
+)"""
+_EVENT_SEQUENCE_SQL_IS_VALID = """(
+    metadata->>'event_sequence' ~ '^(0|[1-9][0-9]{0,9})$'
+    AND (
+        length(metadata->>'event_sequence') < 10
+        OR metadata->>'event_sequence' <= '2147483647'
+    )
+)"""
+_TURN_IDENTITY_SQL = """COALESCE(
+    NULLIF(metadata->>'turn_id', ''),
+    NULLIF(source_ref->>'client_message_id', ''),
+    NULLIF(source_ref->>'turn_id', ''),
+    regexp_replace(event_id, ':(user|assistant)$', '')
+)"""
 
 _pool: Optional[asyncpg.Pool] = None
+
+
+def _turn_identity(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    explicit = metadata.get("turn_id") or source_ref.get("client_message_id") or source_ref.get("turn_id")
+    if explicit:
+        return str(explicit)
+    event_id = str(item.get("event_id") or "")
+    for suffix in (":user", ":assistant"):
+        if event_id.endswith(suffix):
+            return event_id[: -len(suffix)]
+    return event_id
+
+
+def _event_sequence(item: dict[str, Any]) -> int:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    sequence = metadata.get("event_sequence")
+    parsed = parse_canonical_ordering_integer(sequence, maximum=MAX_CANONICAL_EVENT_SEQUENCE)
+    if parsed is not None:
+        return parsed
+    if item.get("role") == "user":
+        return 0
+    if item.get("role") == "assistant":
+        return 1
+    return 2
+
+
+def _turn_ordinal(item: dict[str, Any]) -> Optional[int]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    ordinal = metadata.get("turn_ordinal")
+    return parse_canonical_ordering_integer(ordinal, maximum=MAX_CANONICAL_TURN_ORDINAL)
+
+
+def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, int, int, str, int, str]:
+    turn_ordinal = _turn_ordinal(item)
+    return (
+        item["started_at"],
+        str(item.get("session_id") or ""),
+        0 if turn_ordinal is not None else 1,
+        turn_ordinal or 0,
+        _turn_identity(item),
+        _event_sequence(item),
+        str(item.get("event_id") or ""),
+    )
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -70,6 +140,26 @@ def _model_dump(model: BaseModel) -> dict[str, Any]:
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value or {}, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _normalize_ordering_integer(raw: Any, *, field_name: str, maximum: int) -> int:
+    value = parse_canonical_ordering_integer(raw, maximum=maximum)
+    if value is None:
+        raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
+    return value
+
+
+def _normalize_ordering_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metadata)
+    if "turn_ordinal" in normalized:
+        normalized["turn_ordinal"] = _normalize_ordering_integer(
+            normalized["turn_ordinal"], field_name="turn_ordinal", maximum=MAX_CANONICAL_TURN_ORDINAL
+        )
+    if "event_sequence" in normalized:
+        normalized["event_sequence"] = _normalize_ordering_integer(
+            normalized["event_sequence"], field_name="event_sequence", maximum=MAX_CANONICAL_EVENT_SEQUENCE
+        )
+    return normalized
 
 
 def _should_replace_existing_event(item: dict[str, Any]) -> bool:
@@ -138,6 +228,8 @@ class CanonicalEventIn(BaseModel):
         ended_at = _parse_datetime(self.ended_at, "ended_at")
         assert started_at is not None
         raw_event = _model_dump(self)
+        metadata = _normalize_ordering_metadata(self.metadata)
+        raw_event["metadata"] = metadata
         source_identity = _derive_source_identity(
             uid=self.uid,
             channel=self.channel,
@@ -149,6 +241,7 @@ class CanonicalEventIn(BaseModel):
             **raw_event,
             "started_at": started_at,
             "ended_at": ended_at,
+            "metadata": metadata,
             "source_identity": source_identity,
             "raw_event": raw_event,
         }
@@ -169,6 +262,7 @@ class SessionCompleteIn(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def normalized(self, session_id: str) -> dict[str, Any]:
+        metadata = _normalize_ordering_metadata(self.metadata)
         source_identity = _derive_source_identity(
             uid=self.uid or "",
             channel=self.channel or "unknown",
@@ -177,6 +271,7 @@ class SessionCompleteIn(BaseModel):
             source_ref=self.source_ref,
         )
         raw_completion = _model_dump(self)
+        raw_completion["metadata"] = metadata
         return {
             "session_id": session_id,
             "uid": self.uid,
@@ -186,7 +281,7 @@ class SessionCompleteIn(BaseModel):
             "started_at": _parse_datetime(self.started_at, "started_at"),
             "completed_at": _parse_datetime(self.ended_at, "ended_at") or _utc_now(),
             "source_ref": self.source_ref,
-            "metadata": self.metadata,
+            "metadata": metadata,
             "source_identity": source_identity,
             "raw_completion": raw_completion,
         }
@@ -209,18 +304,24 @@ class CanonicalEventStore:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Read back exact owner-bound event ids after an idempotent write."""
+        raise NotImplementedError
+
 
 class PostgresCanonicalEventStore(CanonicalEventStore):
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         if not events:
             return {"ok": True, "inserted": 0, "duplicates": 0, "events": []}
 
+        normalized_events = [event.normalized() for event in events]
         pool = await _get_pool()
         statuses: list[dict[str, Any]] = []
         async with pool.acquire() as conn:
             async with conn.transaction():
-                for event in events:
-                    item = event.normalized()
+                for item in normalized_events:
                     conflict_clause = (
                         """
                         DO UPDATE SET
@@ -339,7 +440,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         channels: Optional[list[str]],
     ) -> list[dict[str, Any]]:
         params: list[Any] = [uid]
-        filters = ["lower(uid) = lower($1)"]
+        filters = ["uid = $1"]
         if since:
             params.append(since)
             filters.append(f"started_at >= ${len(params)}")
@@ -363,18 +464,71 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                 WHERE {where_clause}
                 ORDER BY
                     started_at DESC,
-                    CASE role WHEN 'assistant' THEN 1 WHEN 'user' THEN 0 ELSE 2 END DESC,
-                    inserted_at DESC,
+                    COALESCE(session_id, '') DESC,
+                    CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END DESC,
+                    CASE
+                        WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                        ELSE 0
+                    END DESC,
+                    {_TURN_IDENTITY_SQL} DESC,
+                    CASE
+                        WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                        WHEN role = 'assistant' THEN 1 WHEN role = 'user' THEN 0 ELSE 2
+                    END DESC,
                     event_id DESC
                 LIMIT {limit_placeholder}
             ) recent_events
             ORDER BY
                 started_at ASC,
-                CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
-                inserted_at ASC,
+                COALESCE(session_id, '') ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
+                {_TURN_IDENTITY_SQL} ASC,
+                CASE
+                    WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
                 event_id ASC
             """,
             *params,
+        )
+        return [_row_to_event(row) for row in rows]
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        pool = await _get_pool()
+        rows = await pool.fetch(
+            f"""
+            SELECT uid, canonical_identity, event_id, source_identity,
+                   session_id, channel, provider, role, text,
+                   started_at, ended_at, privacy_scope, scan_policy,
+                   source_ref, metadata, raw_event, inserted_at
+            FROM canonical_events
+            WHERE event_id = ANY($1::text[])
+              AND source_identity = $2
+              AND uid = $3
+            ORDER BY
+                started_at ASC,
+                COALESCE(session_id, '') ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
+                {_TURN_IDENTITY_SQL} ASC,
+                CASE
+                    WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
+                event_id ASC
+            """,
+            event_ids,
+            source_identity,
+            uid,
         )
         return [_row_to_event(row) for row in rows]
 
@@ -385,9 +539,9 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         self._sessions: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
+        normalized_events = [event.normalized() for event in events]
         statuses = []
-        for event in events:
-            item = event.normalized()
+        for item in normalized_events:
             item["inserted_at"] = _utc_now()
             key = (item["event_id"], item["source_identity"])
             inserted = key not in self._events
@@ -434,7 +588,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         channel_set = set(channels or [])
         events = []
         for event in self._events.values():
-            if event["uid"].lower() != uid.lower():
+            if event["uid"] != uid:
                 continue
             if since and event["started_at"] < since:
                 continue
@@ -442,15 +596,20 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
                 continue
             events.append(event)
 
-        def role_order(item: dict[str, Any]) -> int:
-            if item["role"] == "user":
-                return 0
-            if item["role"] == "assistant":
-                return 1
-            return 2
-
-        events.sort(key=lambda item: (item["started_at"], role_order(item), item["inserted_at"], item["event_id"]))
+        events.sort(key=_canonical_event_order)
         return [_row_to_event(event) for event in events[-limit:]]
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        expected_ids = set(event_ids)
+        events = [
+            event
+            for event in self._events.values()
+            if event["event_id"] in expected_ids and event["uid"] == uid and event["source_identity"] == source_identity
+        ]
+        events.sort(key=_canonical_event_order)
+        return [_row_to_event(event) for event in events]
 
 
 def _row_to_event(row: Any) -> dict[str, Any]:

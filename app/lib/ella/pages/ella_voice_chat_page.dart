@@ -29,6 +29,7 @@ import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/standard_voice_turn.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 import 'package:omi/ella/services/voice_session_startup_guard.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
@@ -44,6 +45,30 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
+
+Future<bool> armEllaVoiceTranscriptSessionBeforeTransport({
+  required V2VTurnReconciler reconciler,
+  required String authenticatedUid,
+  required String sessionId,
+  required bool persistTranscriptTurns,
+  required bool Function() isStartupCurrent,
+  @visibleForTesting ActiveWalAuthority? Function(String authenticatedUid)? authorityCapture,
+}) async {
+  if (sessionId.isEmpty || !isStartupCurrent()) return false;
+  if (!persistTranscriptTurns) return true;
+  final activeAuthority =
+      authorityCapture?.call(authenticatedUid) ?? WalOwnerAuthority.active(authenticatedUid: authenticatedUid);
+  if (activeAuthority == null) return false;
+  final armed = await reconciler.beginSession(
+    uid: activeAuthority.uid,
+    ownerNamespace: activeAuthority.owner.storageNamespace,
+    authorityFingerprint: activeAuthority.owner.authorityFingerprint,
+    sessionId: sessionId,
+    isAuthorityCurrent: activeAuthority.isCurrent,
+    authorityGenerationAtCapture: activeAuthority.owner.authorityGenerationAtCapture,
+  );
+  return armed && activeAuthority.isCurrent() && isStartupCurrent();
+}
 
 @visibleForTesting
 class VoicePhoneCaptureTakeoverCoordinator {
@@ -210,8 +235,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   String _activeV2VProvider = '';
   bool _usingElevenLabsFallback = false;
 
-  /// Track whether we've injected chat messages for the current V2V turn
-  bool _v2vTurnInjected = false;
+  late final V2VTurnReconciler _v2vTurnReconciler;
   late V2VSessionScope? _sessionScope;
   String _activeSessionId = '';
   bool _consentPromptActive = false;
@@ -259,6 +283,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void initState() {
     super.initState();
+    _v2vTurnReconciler = V2VTurnReconciler(
+      writer: _persistV2VTranscriptTurn,
+      durableStore: FileV2VTurnDurableStore(),
+      onWriteFailure: () {
+        if (!mounted) return;
+        setState(() => _statusText = context.l10n.ellaVoiceTechnicalFailure);
+      },
+    );
     _sessionScope = widget.sessionScope;
     _policyReason = widget.demoState?.policyReason;
     // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
@@ -372,6 +404,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void dispose() {
     _notifyMemorySessionEnded(_activeSessionId);
+    _v2vTurnReconciler.endSession(_activeSessionId);
     _voiceStartupGuard.dispose();
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
@@ -758,6 +791,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     late final V2VClient client;
     client = V2VClient(
+      onTerminalTurnDurable: (terminalTurn) async {
+        if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return false;
+        return _v2vTurnReconciler.persistTerminalTurnForAck(_activeSessionId, terminalTurn);
+      },
       onEvent: (event) {
         if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return;
         _onV2VEvent(event);
@@ -776,6 +813,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             _voiceModeActive = false;
           });
           _notifyMemorySessionEnded(endedSessionId);
+          _v2vTurnReconciler.endSession(endedSessionId);
           _activeSessionId = '';
         }
       },
@@ -786,17 +824,39 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
     _v2vClient = client;
 
+    var armedSessionId = '';
     final receipt = await client.connect(
       provider: provider,
       sessionScope: _sessionScope,
       shouldContinue: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
+      beforeTransportActivation: (sessionId) async {
+        final transcriptSessionReady = await armEllaVoiceTranscriptSessionBeforeTransport(
+          reconciler: _v2vTurnReconciler,
+          authenticatedUid: authority!.uid,
+          sessionId: sessionId,
+          persistTranscriptTurns: true,
+          isStartupCurrent: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
+        );
+        if (!transcriptSessionReady || !hasCurrentStartupAuthority() || !identical(_v2vClient, client)) {
+          if (transcriptSessionReady) _v2vTurnReconciler.endSession(sessionId);
+          return false;
+        }
+        armedSessionId = sessionId;
+        _activeSessionId = sessionId;
+        _v2vTurnReconciler.retryAuthorizedPending();
+        return true;
+      },
     );
     if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
+      if (armedSessionId.isNotEmpty) _v2vTurnReconciler.endSession(armedSessionId);
+      if (_activeSessionId == armedSessionId) _activeSessionId = '';
       await client.disconnect();
       return;
     }
 
     if (!receipt.connected) {
+      if (armedSessionId.isNotEmpty) _v2vTurnReconciler.endSession(armedSessionId);
+      if (_activeSessionId == armedSessionId) _activeSessionId = '';
       debugPrint('[VoiceChat] V2V connect failed: ${receipt.toDebugFields()}');
       _v2vClient = null;
       await client.disconnect();
@@ -815,9 +875,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _isV2VMode = false;
         _voiceModeActive = false;
         _orbState = VoiceOrbState.idle;
-        _statusText = _sessionScope != null && receipt.errorCode == 'voice_session_scope_unavailable'
-            ? context.l10n.memoryTalkUnavailable
-            : receipt.safeDetail;
+        _statusText = receipt.errorCode == 'session_activation_failed'
+            ? context.l10n.ellaVoiceTechnicalFailure
+            : _sessionScope != null && receipt.errorCode == 'voice_session_scope_unavailable'
+                ? context.l10n.memoryTalkUnavailable
+                : receipt.safeDetail;
         _audioLevel = 0.0;
       });
 
@@ -851,8 +913,21 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       return;
     }
 
+    if (receipt.sessionId.isEmpty || receipt.sessionId != armedSessionId || _activeSessionId != armedSessionId) {
+      _v2vClient = null;
+      if (armedSessionId.isNotEmpty) _v2vTurnReconciler.endSession(armedSessionId);
+      if (_activeSessionId == armedSessionId) _activeSessionId = '';
+      await client.disconnect();
+      if (!mounted) return;
+      setState(() {
+        _isV2VMode = false;
+        _voiceModeActive = false;
+        _orbState = VoiceOrbState.idle;
+        _statusText = context.l10n.ellaVoiceTechnicalFailure;
+      });
+      return;
+    }
     _voiceStartupGuard.complete(startupGeneration);
-    _activeSessionId = receipt.sessionId;
     _memorySessionNotificationKey = null;
     _memoryReinterpretationEvent = null;
     _memoryReceiptPollTimer?.cancel();
@@ -904,6 +979,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<void> _cancelFailedVoiceAttempt() async {
     _voiceStartupGuard.cancel();
+    final endedSessionId = _activeSessionId;
     final client = _v2vClient;
     _v2vClient = null;
     _voiceModeActive = false;
@@ -911,6 +987,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _usingElevenLabsFallback = false;
     _activeV2VProvider = '';
     _activeSessionId = '';
+    _v2vTurnReconciler.endSession(endedSessionId);
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = null;
     _quotaClock?.cancel();
@@ -948,6 +1025,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _isV2VMode = false;
     if (client != null) await client.disconnect();
     _notifyMemorySessionEnded(endedSessionId);
+    _v2vTurnReconciler.endSession(endedSessionId);
     _activeSessionId = '';
     _activeV2VProvider = '';
     _voiceSessionStartedAt = null;
@@ -1000,16 +1078,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     switch (event.type) {
       case 'user_transcript':
-        _v2vTurnInjected = false; // new turn started
-        _lastEllaText = ''; // reset accumulator for next response
         setState(() {
           _lastUserText = event.text ?? '';
-          _ellaDisplayText = '';
         });
         _scrollToBottom();
         break;
       case 'transcript':
-        // Proxy sends streaming deltas — accumulate them
         final delta = event.text ?? '';
         _lastEllaText += delta;
         setState(() {
@@ -1019,21 +1093,24 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         });
         _scrollToBottom();
         break;
+      case 'transcript_turn':
+        final terminalTurn = event.terminalTurn;
+        if (terminalTurn == null) break;
+        setState(() {
+          _lastUserText = terminalTurn.userTranscript;
+          _lastEllaText = terminalTurn.assistantTranscript;
+          _ellaDisplayText = terminalTurn.assistantTranscript;
+        });
+        _scrollToBottom();
+        break;
       case 'audio_done':
-        // Inject into chat history once per turn (using final transcript)
-        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) &&
-            !_v2vTurnInjected &&
-            _lastUserText.isNotEmpty &&
-            _lastEllaText.isNotEmpty) {
-          _injectVoiceMessages(_lastUserText, _lastEllaText);
-          _v2vTurnInjected = true;
-        }
         // Audio is now being played via just_audio — wait for playback_complete
         setState(() {
           _statusText = context.l10n.voiceEllaSpeaking;
         });
         break;
       case 'playback_complete':
+        _v2vTurnReconciler.retryAuthorizedPending();
         // WAV file finished playing — transition back to listening
         if (_isV2VMode) {
           setState(() {
@@ -1043,8 +1120,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         break;
       case 'speech_started':
-        // User started talking — interrupt playback, reset turn tracking
-        _v2vTurnInjected = false;
         _lastEllaText = '';
         setState(() {
           _orbState = VoiceOrbState.listening;
@@ -1093,7 +1168,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _showPolicyStop(event.policyReason!, resetsAt: event.resetsAt);
           break;
         }
-        debugPrint('[VoiceChat] V2V error: ${event.text}');
+        debugPrint('[VoiceChat] V2V error event');
         setState(() {
           _statusText = context.l10n.ellaVoiceTechnicalFailure;
         });
@@ -1107,6 +1182,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _activeSessionId = '';
         _activeV2VProvider = '';
         _notifyMemorySessionEnded(endedSessionId);
+        _v2vTurnReconciler.endSession(endedSessionId);
         setState(() {
           _orbState = VoiceOrbState.idle;
           _statusText = context.l10n.aiConsentActiveAudioStopped;
@@ -1114,7 +1190,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         });
         break;
       case 'session_end':
-        debugPrint('[VoiceChat] V2V session ended: ${event.text}');
+        debugPrint('[VoiceChat] V2V session ended');
         if (event.policyReason != null) {
           _showPolicyStop(event.policyReason!, resetsAt: event.resetsAt);
         } else if (_isV2VMode) {
@@ -1127,11 +1203,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _showPolicyStop(EllaVoicePolicyReason reason, {DateTime? resetsAt}) {
     _endingForPolicy = true;
     _voiceStartupGuard.cancel();
+    final endedSessionId = _activeSessionId;
     final client = _v2vClient;
     _v2vClient = null;
     _voiceModeActive = false;
     _isV2VMode = false;
     _activeSessionId = '';
+    _v2vTurnReconciler.endSession(endedSessionId);
     _activeV2VProvider = '';
     _voiceSessionStartedAt = null;
     _authoritativeSoftWarning = false;
@@ -1244,76 +1322,73 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (!mounted) return;
     final messageProvider = Provider.of<MessageProvider>(context, listen: false);
     try {
-      await messageProvider.runProtectedOperationAtEntry(
-        (operation) async {
+      await messageProvider.runProtectedOperationAtEntry((operation) async {
+        if (!mounted || !operation.isCurrent) return;
+        setState(() {
+          _orbState = VoiceOrbState.processing;
+          _statusText = 'Ella is thinking...';
+          _audioLevel = 0.0;
+          _lastUserText = transcript;
+        });
+
+        if (_speech.isListening) {
+          debugPrint('[VoiceChat] Stopping speech recognizer before response playback');
+          await _speech.stop();
           if (!mounted || !operation.isCurrent) return;
-          setState(() {
-            _orbState = VoiceOrbState.processing;
-            _statusText = 'Ella is thinking...';
-            _audioLevel = 0.0;
-            _lastUserText = transcript;
-          });
+          await Future.delayed(const Duration(milliseconds: 150));
+          if (!mounted || !operation.isCurrent) return;
+        }
 
-          if (_speech.isListening) {
-            debugPrint('[VoiceChat] Stopping speech recognizer before response playback');
-            await _speech.stop();
+        debugPrint('[VoiceChat] Sending to Ella chat for authority uid=${operation.uid}');
+        final result = await _standardVoiceTurn.run(
+          transcript: transcript,
+          authority: operation.exactAuthority,
+          prepareTtsText: _stripEmojis,
+          commitMessages: (userText, ellaReply) =>
+              !EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) ||
+              _injectStandardVoiceMessages(userText, ellaReply, messageProvider, operation),
+          onReplyReady: (fullReply) {
             if (!mounted || !operation.isCurrent) return;
-            await Future.delayed(const Duration(milliseconds: 150));
-            if (!mounted || !operation.isCurrent) return;
-          }
-
-          debugPrint('[VoiceChat] Sending to Ella chat for authority uid=${operation.uid}');
-          final result = await _standardVoiceTurn.run(
-            transcript: transcript,
-            authority: operation.exactAuthority,
-            prepareTtsText: _stripEmojis,
-            commitMessages: (userText, ellaReply) =>
-                !EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) ||
-                _injectStandardVoiceMessages(userText, ellaReply, messageProvider, operation),
-            onReplyReady: (fullReply) {
-              if (!mounted || !operation.isCurrent) return;
-              debugPrint(
-                '[VoiceChat] Ella reply (${fullReply.length} chars): '
-                '"${fullReply.substring(0, math.min(100, fullReply.length))}"',
-              );
-              _lastEllaText = fullReply;
-              _startTypewriter(fullReply);
-              setState(() {
-                _statusText = 'Ella is speaking...';
-                _orbState = VoiceOrbState.speaking;
-              });
-            },
-            preparePlayback: () async {
-              if (!mounted || !operation.isCurrent) {
-                throw ExactAccountAuthorityChangedException('Exact account authority changed before playback');
-              }
-              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) {
-                throw const StandardVoicePlaybackUnavailable();
-              }
-            },
-            speakOnDevice: (ttsText) => ElevenLabsTts.speakOnDevice(ttsText, exactAuthority: operation.exactAuthority),
-            playFile: (audioPath) async {
-              if (!mounted || !operation.isCurrent) return;
-              debugPrint('[VoiceChat] Playing authority-bound audio: $audioPath');
-              await _audioPlayer.setVolume(1.0);
-              if (!mounted || !operation.isCurrent) return;
-              await _audioPlayer.setFilePath(audioPath);
-              if (!mounted || !operation.isCurrent) return;
-              await _audioPlayer.play();
-            },
-          );
-
-          if (!mounted || !operation.isCurrent || result.discarded) return;
-          if (EllaVoiceChatPage.shouldResumeAfterStandardTurn(result)) {
-            if (_voiceModeActive) {
-              await _startListening();
-            } else {
-              _returnToIdle();
+            debugPrint(
+              '[VoiceChat] Ella reply (${fullReply.length} chars): '
+              '"${fullReply.substring(0, math.min(100, fullReply.length))}"',
+            );
+            _lastEllaText = fullReply;
+            _startTypewriter(fullReply);
+            setState(() {
+              _statusText = 'Ella is speaking...';
+              _orbState = VoiceOrbState.speaking;
+            });
+          },
+          preparePlayback: () async {
+            if (!mounted || !operation.isCurrent) {
+              throw ExactAccountAuthorityChangedException('Exact account authority changed before playback');
             }
+            if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) {
+              throw const StandardVoicePlaybackUnavailable();
+            }
+          },
+          speakOnDevice: (ttsText) => ElevenLabsTts.speakOnDevice(ttsText, exactAuthority: operation.exactAuthority),
+          playFile: (audioPath) async {
+            if (!mounted || !operation.isCurrent) return;
+            debugPrint('[VoiceChat] Playing authority-bound audio: $audioPath');
+            await _audioPlayer.setVolume(1.0);
+            if (!mounted || !operation.isCurrent) return;
+            await _audioPlayer.setFilePath(audioPath);
+            if (!mounted || !operation.isCurrent) return;
+            await _audioPlayer.play();
+          },
+        );
+
+        if (!mounted || !operation.isCurrent || result.discarded) return;
+        if (EllaVoiceChatPage.shouldResumeAfterStandardTurn(result)) {
+          if (_voiceModeActive) {
+            await _startListening();
+          } else {
+            _returnToIdle();
           }
-        },
-        onInvalidated: _cancelStandardVoiceEffects,
-      );
+        }
+      }, onInvalidated: _cancelStandardVoiceEffects);
     } catch (e, st) {
       debugPrint('[VoiceChat] Error in voice flow: $e\n$st');
       if (mounted) {
@@ -1422,43 +1497,22 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
   }
 
-  void _injectVoiceMessages(String userText, String ellaReply) {
-    try {
-      final msgProvider = Provider.of<MessageProvider>(context, listen: false);
-      final now = DateTime.now();
-      msgProvider.addMessage(
-        ServerMessage(
-          const Uuid().v4(),
-          now,
-          userText,
-          MessageSender.human,
-          MessageType.text,
-          null,
-          false,
-          [],
-          [],
-          [],
-          fromVoice: true,
-        ),
-      );
-      msgProvider.addMessage(
-        ServerMessage(
-          const Uuid().v4(),
-          now.add(const Duration(milliseconds: 100)),
-          ellaReply,
-          MessageSender.ai,
-          MessageType.text,
-          null,
-          false,
-          [],
-          [],
-          [],
-          fromVoice: true,
-        ),
-      );
-    } catch (e) {
-      debugPrint('[VoiceChat] Failed to inject V2V messages: $e');
-    }
+  Future<bool> _persistV2VTranscriptTurn(V2VTranscriptTurn turn) async {
+    if (!mounted) return false;
+    final messageProvider = Provider.of<MessageProvider>(context, listen: false);
+    return messageProvider.persistV2VTurn(
+      expectedUid: turn.uid,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+      userEventId: turn.userEventId,
+      assistantEventId: turn.assistantEventId,
+      userTranscript: turn.userTranscript,
+      assistantTranscript: turn.assistantTranscript,
+      startedAt: turn.startedAt,
+      completedAt: turn.completedAt,
+      turnOrdinal: turn.turnOrdinal,
+      injectIntoChat: EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope),
+    );
   }
 
   /// Progressively reveals text with a typewriter effect.

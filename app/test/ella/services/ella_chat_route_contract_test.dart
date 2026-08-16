@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -104,9 +105,7 @@ void main() {
 
     await expectLater(
       sendEllaMessageStream('hello').toList(),
-      throwsA(
-        isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable),
-      ),
+      throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable)),
     );
   });
 
@@ -145,12 +144,7 @@ void main() {
                 'text': 'Persisted question',
                 'created_at': '2026-08-09T02:59:00Z',
               },
-              {
-                'id': 'canonical-1',
-                'sender': 'ai',
-                'text': 'Persisted answer',
-                'created_at': '2026-08-09T03:00:00Z',
-              },
+              {'id': 'canonical-1', 'sender': 'ai', 'text': 'Persisted answer', 'created_at': '2026-08-09T03:00:00Z'},
             ],
           }),
           200,
@@ -167,6 +161,45 @@ void main() {
     expect(result.value![1].sender, MessageSender.ai);
     expect(result.value![1].text, 'Persisted answer');
     expect(result.value![1].createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
+  });
+
+  test('history preserves equal-time turn pairs instead of grouping by role', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        Map<String, dynamic> message(String turnId, String sender, int sequence) => {
+              'id': '$turnId:${sender == 'human' ? 'user' : 'assistant'}',
+              'sender': sender,
+              'text': '$sender $turnId',
+              'created_at': '2026-08-15T20:00:00Z',
+              'metadata': {
+                'conversation_id': 'session-1',
+                'turn_id': turnId,
+                'event_sequence': sequence,
+              },
+            };
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              message('turn-000002', 'ai', 1),
+              message('turn-000001', 'ai', 1),
+              message('turn-000002', 'human', 0),
+              message('turn-000001', 'human', 0),
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.value?.map((message) => message.id), [
+      'turn-000001:user',
+      'turn-000001:assistant',
+      'turn-000002:user',
+      'turn-000002:assistant',
+    ]);
   });
 
   test('history rejects a nonempty unsupported message shape so cache can be preserved', () async {
@@ -190,12 +223,300 @@ void main() {
     expect(result.failure?.kind, ClientApiFailureKind.invalidResponse);
   });
 
+  test('V2V turn uses authenticated first-party canonical writeback and returns canonical messages', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await persistEllaV2VTurn(
+      uid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: DateTime.utc(2026, 8, 15, 20),
+      completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
+      exactAuthority: authority,
+      transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(Uri.parse(url).path, '/v1/ella/chat/voice-turns');
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        final request = jsonDecode(body) as Map<String, dynamic>;
+        expect(request['uid'], 'uid-a');
+        expect(request['session_id'], 'session-1');
+        expect(request['turn_id'], 'turn-000001');
+        expect(request['user_event_id'], 'turn-000001:user');
+        expect(request['assistant_event_id'], 'turn-000001:assistant');
+        expect(request['turn_ordinal'], 0);
+        expect(request['user_terminal'], isTrue);
+        expect(request['assistant_terminal'], isTrue);
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'session_id': 'session-1',
+            'turn_id': 'turn-000001',
+            'messages': [
+              {'id': 'turn-000001:user', 'sender': 'human', 'text': 'Question', 'created_at': '2026-08-15T20:00:00Z'},
+              {
+                'id': 'turn-000001:assistant',
+                'sender': 'ai',
+                'text': 'Answer',
+                'created_at': '2026-08-15T20:00:02Z',
+              },
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
+    expect(result.value?.every((message) => message.fromVoice), isTrue);
+  });
+
+  test('equal-timestamp V2V hydration deterministically restores user before assistant by event identity', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final timestamp = DateTime.utc(2026, 8, 15, 20);
+    final result = await persistEllaV2VTurn(
+      uid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: timestamp,
+      completedAt: timestamp,
+      turnOrdinal: 0,
+      exactAuthority: authority,
+      transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'session_id': 'session-1',
+            'turn_id': 'turn-000001',
+            'messages': [
+              {
+                'id': 'turn-000001:assistant',
+                'sender': 'ai',
+                'text': 'Answer',
+                'created_at': timestamp.toIso8601String(),
+              },
+              {
+                'id': 'turn-000001:user',
+                'sender': 'human',
+                'text': 'Question',
+                'created_at': timestamp.toIso8601String(),
+              },
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.map((message) => message.id), ['turn-000001:user', 'turn-000001:assistant']);
+    expect(result.value?.map((message) => message.sender), [MessageSender.human, MessageSender.ai]);
+    expect(result.value?.map((message) => message.createdAt.toUtc()), [timestamp, timestamp]);
+  });
+
+  test('history and cache preserve equal-time reverse-lexical V2V turn chronology', () async {
+    const authority = _CurrentAuthority('uid-a');
+    const firstTurn = 'v2v-turn-ffffffffffffffffffffffffffffffff';
+    const secondTurn = 'v2v-turn-00000000000000000000000000000000';
+    Map<String, dynamic> message(String turnId, String sender, int eventSequence, int turnOrdinal) => {
+          'id': '$turnId:${sender == 'human' ? 'user' : 'assistant'}',
+          'sender': sender,
+          'text': '$sender $turnId',
+          'created_at': '2026-08-15T20:00:00Z',
+          'metadata': {
+            'conversation_id': 'session-1',
+            'turn_id': turnId,
+            'turn_ordinal': turnOrdinal,
+            'event_sequence': eventSequence,
+          },
+        };
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+        jsonEncode({
+          'messages': [
+            message(secondTurn, 'ai', 1, 1),
+            message(firstTurn, 'ai', 1, 0),
+            message(secondTurn, 'human', 0, 1),
+            message(firstTurn, 'human', 0, 0),
+          ],
+        }),
+        200,
+      ),
+    );
+    final cacheRoundTrip = result.value!.map((message) => ServerMessage.fromJson(message.toJson())).toList()
+      ..sort(compareServerMessagesChronologically);
+
+    expect(cacheRoundTrip.map((message) => message.id), [
+      '$firstTurn:user',
+      '$firstTurn:assistant',
+      '$secondTurn:user',
+      '$secondTurn:assistant',
+    ]);
+    expect(cacheRoundTrip.map((message) => message.canonicalTurnOrdinal), [0, 0, 1, 1]);
+  });
+
+  test('iOS canonical numeric-string grammar matches the backend total key for a reversed pair', () async {
+    final fixture = jsonDecode(
+      await File('test/fixtures/canonical_ordering_mixed_legacy.json').readAsString(),
+    ) as Map<String, dynamic>;
+    final timestamp = fixture['timestamp'] as String;
+    final records = (fixture['records'] as List<dynamic>).cast<Map<String, dynamic>>();
+    final messagesById = {
+      for (final record in records)
+        record['event_id'] as String: ServerMessage.fromJson({
+          'id': record['event_id'],
+          'created_at': timestamp,
+          'text': record['event_id'],
+          'sender': record['role'] == 'user' ? 'human' : 'ai',
+          'type': 'text',
+          'metadata': {
+            if (record.containsKey('session_id')) 'conversation_id': record['session_id'],
+            'turn_id': record['turn_id'],
+            if (record.containsKey('turn_ordinal')) 'turn_ordinal': record['turn_ordinal'],
+            'event_sequence': record['event_sequence'],
+          },
+        }),
+    };
+    final pair = (fixture['pair_input'] as List<dynamic>).map((id) => messagesById[id]!).toList()
+      ..sort(compareServerMessagesChronologically);
+
+    expect(pair.map((message) => message.id).toList(), fixture['pair_expected']);
+    expect(pair.first.canonicalTurnOrdinal, 0);
+    expect(pair.first.canonicalEventSequence, 0);
+    expect(compareServerMessagesChronologically(pair.first, pair.last), lessThan(0));
+    expect(compareServerMessagesChronologically(pair.last, pair.first), greaterThan(0));
+  });
+
+  test('iOS numeric-string ordering matches backend permutations, transitivity, and the limit tail', () async {
+    final fixture = jsonDecode(
+      await File('test/fixtures/canonical_ordering_mixed_legacy.json').readAsString(),
+    ) as Map<String, dynamic>;
+    final timestamp = fixture['timestamp'] as String;
+    final messages = (fixture['records'] as List<dynamic>).cast<Map<String, dynamic>>().map((record) {
+      return ServerMessage.fromJson({
+        'id': record['event_id'],
+        'created_at': timestamp,
+        'text': record['event_id'],
+        'sender': record['role'] == 'user' ? 'human' : 'ai',
+        'type': 'text',
+        'metadata': {
+          if (record.containsKey('session_id')) 'conversation_id': record['session_id'],
+          'turn_id': record['turn_id'],
+          if (record.containsKey('turn_ordinal')) 'turn_ordinal': record['turn_ordinal'],
+          'event_sequence': record['event_sequence'],
+        },
+      });
+    }).toList();
+    final expectedOrder = (fixture['expected_order'] as List<dynamic>).cast<String>();
+
+    for (final first in messages) {
+      for (final second in messages) {
+        for (final third in messages) {
+          if (first.id == second.id || first.id == third.id || second.id == third.id) continue;
+          final permutation = [first, second, third]..sort(compareServerMessagesChronologically);
+          expect(permutation.map((message) => message.id).toList(), expectedOrder);
+          expect(permutation.last.id, expectedOrder.last);
+        }
+      }
+    }
+
+    for (final first in messages) {
+      for (final second in messages) {
+        for (final third in messages) {
+          final firstBeforeSecond = compareServerMessagesChronologically(first, second) <= 0;
+          final secondBeforeThird = compareServerMessagesChronologically(second, third) <= 0;
+          if (firstBeforeSecond && secondBeforeThird) {
+            expect(compareServerMessagesChronologically(first, third), lessThanOrEqualTo(0));
+          }
+        }
+      }
+    }
+  });
+
+  test('iOS canonical ordering grammar fails closed for ambiguous or out-of-range legacy strings', () {
+    ServerMessage message(String id, Object? ordinal, Object? sequence, MessageSender sender) =>
+        ServerMessage.fromJson({
+          'id': id,
+          'created_at': '2026-08-15T20:00:00Z',
+          'text': id,
+          'sender': sender == MessageSender.human ? 'human' : 'ai',
+          'type': 'text',
+          'metadata': {
+            'conversation_id': 'session-1',
+            'turn_id': 'turn-1',
+            'turn_ordinal': ordinal,
+            'event_sequence': sequence,
+          },
+        });
+
+    final valid = message('valid:user', '9223372036854775807', '2147483647', MessageSender.human);
+    expect(valid.durableTurnOrdinal, maxCanonicalTurnOrdinal);
+    expect(valid.durableEventSequence, maxCanonicalEventSequence);
+
+    for (final invalid in ['00', '+1', ' 1', '1 ', '9223372036854775808']) {
+      final parsed = message('invalid-$invalid:user', invalid, invalid, MessageSender.human);
+      expect(parsed.durableTurnOrdinal, isNull);
+      expect(parsed.durableEventSequence, 0, reason: 'invalid sequence must use the role fallback');
+    }
+  });
+
+  test('iOS canonical ordering preserves one microsecond at a high datetime range', () {
+    ServerMessage message(String id, String createdAt) => ServerMessage.fromJson({
+          'id': id,
+          'created_at': createdAt,
+          'text': id,
+          'sender': 'human',
+          'type': 'text',
+          'metadata': {'conversation_id': 'session-high-range', 'turn_id': id, 'event_sequence': 0},
+        });
+
+    final messages = [
+      message('a-newer:user', '2500-01-01T00:00:00.000001Z'),
+      message('z-older:user', '2500-01-01T00:00:00.000000Z'),
+    ]..sort(compareServerMessagesChronologically);
+
+    expect(messages.map((message) => message.id), ['z-older:user', 'a-newer:user']);
+    expect(messages.last.createdAt.difference(messages.first.createdAt), const Duration(microseconds: 1));
+  });
+
+  test('V2V backend error body is neither accepted nor surfaced as content', () async {
+    const authority = _CurrentAuthority('uid-a');
+    const privateErrorBody = '{"detail":"private transcript must never be logged"}';
+    final result = await persistEllaV2VTurn(
+      uid: 'uid-a',
+      sessionId: 'session-1',
+      turnId: 'turn-000001',
+      userEventId: 'turn-000001:user',
+      assistantEventId: 'turn-000001:assistant',
+      userTranscript: 'Question',
+      assistantTranscript: 'Answer',
+      startedAt: DateTime.utc(2026, 8, 15, 20),
+      completedAt: DateTime.utc(2026, 8, 15, 20, 0, 2),
+      turnOrdinal: 0,
+      exactAuthority: authority,
+      transport: ({required url, required body, required expectedAuthenticatedUid, required exactAuthority}) async =>
+          http.Response(privateErrorBody, 503),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.value, isNull);
+    expect(result.failure?.backendCode, isNull);
+    expect(result.failure.toString(), isNot(contains('private transcript')));
+  });
+
   test('Ella chat inactivity timeout cancels an otherwise silent stream', () async {
     final source = StreamController<ServerMessageChunk>();
-    final result = withEllaChatInactivityTimeout(
-      source.stream,
-      timeout: const Duration(milliseconds: 10),
-    ).toList();
+    final result = withEllaChatInactivityTimeout(source.stream, timeout: const Duration(milliseconds: 10)).toList();
 
     await expectLater(
       result,

@@ -71,6 +71,14 @@ class SharedPreferencesUtil {
 
   static ValueListenable<int> get aiConsentAuthorityChanges => _aiConsentAuthorityChanges;
 
+  @visibleForTesting
+  static void resetProcessLocalAuthorityStateForTesting() {
+    _aiConsentAuthorityGeneration = 0;
+    _aiConsentAuthorityChanges.value = 0;
+    clearAiConsentServerVerification();
+    _clearEllaProvisioningServerVerification();
+  }
+
   //-------------------------------- Device ----------------------------------//
 
   bool? get hasOmiDevice => _preferences?.getBool('hasOmiDevice');
