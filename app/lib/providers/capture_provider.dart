@@ -378,24 +378,35 @@ Future<CreateConversationResponse?> _processInProgressConversation({
   required String conversationId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
-}) =>
-    processInProgressConversation(
-      conversationId: conversationId,
-      expectedAuthenticatedUid: expectedAuthenticatedUid,
-      exactAuthority: exactAuthority,
-    );
+}) {
+  final captureAuthority =
+      exactAuthority is CaptureFinalizationOperation ? exactAuthority.captureProtocolAuthority : null;
+  if (captureAuthority == null || captureAuthority.conversationId != conversationId) {
+    return Future<CreateConversationResponse?>.value();
+  }
+  return processInProgressConversation(
+    conversationId: conversationId,
+    protocolVersion: captureAuthority.protocolVersion,
+    generation: captureAuthority.generation,
+    ownerToken: captureAuthority.ownerToken,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+}
 
 @visibleForTesting
 class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
   CaptureFinalizationOperation({
     required EllaAccountCommitLease accountLease,
     required this.captureGeneration,
+    required this.captureProtocolAuthority,
     required int Function() currentCaptureGeneration,
   })  : _accountLease = accountLease,
         _currentCaptureGeneration = currentCaptureGeneration;
 
   final EllaAccountCommitLease _accountLease;
   final int captureGeneration;
+  final CaptureProtocolAuthority? captureProtocolAuthority;
   final int Function() _currentCaptureGeneration;
 
   bool get isCurrent => _accountLease.isExactCurrent() && captureGeneration == _currentCaptureGeneration();
@@ -3286,6 +3297,7 @@ class CaptureProvider extends ChangeNotifier
     return CaptureFinalizationOperation(
       accountLease: accountLease,
       captureGeneration: _captureGeneration,
+      captureProtocolAuthority: _socket?.captureAuthority,
       currentCaptureGeneration: () => _captureGeneration,
     );
   }

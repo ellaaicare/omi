@@ -278,7 +278,13 @@ void main() {
     await service.send([1, 2, 3]);
     expect(pure.sent, isEmpty);
 
-    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready'}));
+    const authorityTuple = {
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    };
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}));
     await start;
     expect(service.state, SocketServiceState.connected);
     await service.send([1, 2, 3]);
@@ -288,10 +294,10 @@ void main() {
     await pumpEventQueue();
     expect(
       jsonDecode(pure.sent.last as String),
-      {'type': 'capture_drain', 'protocol': 2},
+      {'type': 'capture_drain', ...authorityTuple},
     );
     expect(pure.stops, 0, reason: 'transport close must wait for the server-side Redis fence');
-    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained'}));
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authorityTuple}));
     await stop;
     expect(pure.stops, 1);
   });
@@ -313,6 +319,56 @@ void main() {
     expect(service.state, SocketServiceState.disconnected);
     expect(pure.sent, isEmpty);
     expect(pure.stops, 1);
+  });
+
+  test('capture socket rejects missing ready fields and a stale drained authority tuple', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final missingPure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final missingService = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      missingPure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    final missingStart = missingService.start();
+    await pumpEventQueue();
+    missingPure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready'}));
+    await missingStart;
+    expect(missingService.state, SocketServiceState.disconnected);
+
+    final stalePure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final staleService = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      stalePure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    final staleStart = staleService.start();
+    await pumpEventQueue();
+    stalePure.onMessage(jsonEncode({
+      'type': 'service_status',
+      'status': 'capture_protocol_ready',
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    }));
+    await staleStart;
+    final staleStop = staleService.stop();
+    await pumpEventQueue();
+    stalePure.onMessage(jsonEncode({
+      'type': 'service_status',
+      'status': 'capture_protocol_drained',
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-b',
+      'owner_token': 'owner-a',
+    }));
+    await expectLater(staleStop, throwsA(isA<StateError>()));
   });
 
   test('production phone path waits for native capture and a physical frame, not websocket delivery', () async {

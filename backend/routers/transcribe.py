@@ -71,13 +71,17 @@ from utils.conversations.process_conversation import (
     process_conversation,
     retrieve_in_progress_conversation,
 )
-from utils.conversations.capture_authority import CaptureStreamAuthority
+from utils.conversations.capture_authority import (
+    CaptureStreamAuthority,
+    capture_protocol_v2_rollout_enabled,
+    flush_capture_before_drained,
+    valid_capture_drain_body,
+)
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
-from utils.other.task import safe_create_task
 from utils.pusher import connect_to_trigger_pusher
 from utils.speaker_identification import detect_speaker_from_text
 from utils.stt.streaming import (
@@ -116,6 +120,8 @@ STT_LATENCY_CLIENT_EVENT_LIMIT = int(os.getenv('ELLA_STT_LATENCY_CLIENT_EVENT_LI
 # Server-side STT override: when set, all sessions use this provider regardless of client request.
 # Useful when a provider hallucinates on ambient noise (e.g. soniox/grok for wearable use).
 STT_FORCE_SERVICE = os.getenv('STT_FORCE_SERVICE', '').strip().lower() or None
+CAPTURE_PROTOCOL_VERSION = 2
+
 
 # Freemium: Send notification when credits threshold is reached
 FREEMIUM_THRESHOLD_SECONDS = 180  # 3 minutes remaining - notify user
@@ -176,6 +182,11 @@ async def _stream_handler(
     This function is called by both _listen (for app clients) and web_listen_handler (for web clients).
     """
     session_id = str(uuid.uuid4())
+    generation_id = str(uuid.uuid4())
+    owner_token = session_id
+    if capture_protocol == CAPTURE_PROTOCOL_VERSION and not capture_protocol_v2_rollout_enabled():
+        await websocket.close(code=1013, reason='Capture protocol v2 rollout drain is not complete')
+        return
     session_started_at = time.time()
     socket_accepted_at = socket_accepted_at or session_started_at
     if STT_FORCE_SERVICE:
@@ -406,12 +417,16 @@ async def _stream_handler(
             translation_language = language
 
     websocket_active = True
+    accepting_capture = True
     websocket_close_code = 1001  # Going Away, don't close with good from backend
     authority_loss_close_task = None
 
     # Initialize segment buffers early (before onboarding handler needs them)
     realtime_segment_buffers = []
     realtime_photo_buffers: list[ConversationPhoto] = []
+    capture_buffers_drained = asyncio.Event()
+    capture_buffers_drained.set()
+    capture_background_tasks: Set[asyncio.Task] = set()
 
     def _on_capture_authority_lost(checkpoint: str, conversation_id: str) -> None:
         nonlocal websocket_active, websocket_close_code, authority_loss_close_task
@@ -427,7 +442,12 @@ async def _stream_handler(
                 websocket.close(code=websocket_close_code, reason="Capture authority lost")
             )
 
-    capture_authority = CaptureStreamAuthority(uid, session_id, _on_capture_authority_lost)
+    capture_authority = CaptureStreamAuthority(
+        uid,
+        generation_id,
+        owner_token,
+        _on_capture_authority_lost,
+    )
 
     # === Speaker Identification State ===
     RING_BUFFER_DURATION = 60.0  # seconds
@@ -655,7 +675,47 @@ async def _stream_handler(
         if capture_authority.lost:
             return
         conversation = Conversation(**conversation_data)
-        if conversation.status != ConversationStatus.processing:
+        capture_finalization = None
+        claim_token = ''
+        lease_task = None
+        if conversation.capture_protocol_version == CAPTURE_PROTOCOL_VERSION:
+            claim_token = str(uuid.uuid4())
+            claim = conversations_db.claim_capture_finalization(
+                uid,
+                conversation.id,
+                CAPTURE_PROTOCOL_VERSION,
+                capture_authority.generation_id,
+                capture_authority.owner_token,
+                claim_token,
+            )
+            if claim.get('outcome') != 'claimed':
+                return
+            capture_finalization = (
+                capture_authority.generation_id,
+                capture_authority.owner_token,
+                claim_token,
+            )
+
+            async def renew_finalization_lease():
+                interval = max(1.0, conversations_db.capture_finalization_lease_seconds / 3)
+                while True:
+                    await asyncio.sleep(interval)
+                    renewed = await asyncio.to_thread(
+                        conversations_db.renew_capture_finalization,
+                        uid,
+                        conversation.id,
+                        claim_token,
+                    )
+                    if not renewed:
+                        return
+
+            lease_task = asyncio.create_task(renew_finalization_lease())
+            refreshed = conversations_db.get_conversation(uid, conversation.id)
+            if not refreshed:
+                lease_task.cancel()
+                return
+            conversation = Conversation(**refreshed)
+        elif conversation.status != ConversationStatus.processing:
             _send_message_event(ConversationEvent(event_type="memory_processing_started", memory=conversation))
             conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
             conversation.status = ConversationStatus.processing
@@ -667,17 +727,43 @@ async def _stream_handler(
                 geolocation = Geolocation(**geolocation)
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-            conversation = process_conversation(uid, language, conversation)
+            conversation = await asyncio.to_thread(
+                process_conversation,
+                uid,
+                language,
+                conversation,
+                capture_finalization=capture_finalization,
+            )
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
-            mark_unexpected_conversation_processing_failed(uid, conversation)
+            try:
+                await asyncio.to_thread(
+                    mark_unexpected_conversation_processing_failed,
+                    uid,
+                    conversation,
+                    capture_finalization,
+                )
+            except RuntimeError:
+                pass
             messages = []
         else:
+            if capture_finalization and not conversations_db.complete_capture_finalization(
+                uid,
+                conversation.id,
+                capture_authority.generation_id,
+                capture_authority.owner_token,
+                claim_token,
+            ):
+                return
             try:
                 messages = trigger_external_integrations(uid, conversation)
             except Exception as e:
                 print(f"External integrations failed after conversation processing: {e}", uid, session_id)
                 messages = []
+        finally:
+            if lease_task:
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
 
         _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=messages))
 
@@ -746,25 +832,17 @@ async def _stream_handler(
             source=conversation_source,
             private_cloud_sync_enabled=private_cloud_sync_enabled,
         )
-        install_stub = lambda: conversations_db.upsert_conversation(
-            uid,
-            conversation_data=stub_conversation.dict(),
-        )
-        uninstall_stub = lambda: conversations_db.delete_conversation(uid, new_conversation_id)
+        stub_data = stub_conversation.dict()
         if expected_conversation_id is None:
             installed = capture_authority.acquire(
-                new_conversation_id,
-                install_stub,
+                stub_data,
                 'initial_acquisition',
-                uninstall=uninstall_stub,
             )
         else:
             installed = capture_authority.rotate(
                 expected_conversation_id,
-                new_conversation_id,
-                install_stub,
+                stub_data,
                 'conversation_rotation',
-                uninstall=uninstall_stub,
             )
         if not installed:
             return False
@@ -838,21 +916,6 @@ async def _stream_handler(
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
 
-        installation_id = redis_db.get_capture_stream_installation_id(uid)
-        if installation_id:
-            installing_conversation = conversations_db.get_conversation(uid, installation_id)
-            if (
-                installing_conversation
-                and installing_conversation.get('status') == ConversationStatus.in_progress.value
-            ):
-                current_conversation_id = installation_id
-                if not capture_authority.adopt(current_conversation_id, 'recover_installation'):
-                    return None
-                return None
-            if not redis_db.rollback_capture_stream_installation_if_matches(uid, installation_id):
-                capture_authority.lose('rollback_abandoned_installation', installation_id)
-                return None
-
         if existing_conversation := retrieve_in_progress_conversation(uid):
             current_conversation_id = existing_conversation['id']
             if not capture_authority.adopt(current_conversation_id, 'resume'):
@@ -891,10 +954,7 @@ async def _stream_handler(
         if authority_loss_close_task:
             await asyncio.gather(authority_loss_close_task, return_exceptions=True)
         return
-    if capture_protocol == 2:
-        if not await _asend_message_event(MessageServiceStatusEvent(status="capture_protocol_ready")):
-            return
-    elif capture_protocol != 0:
+    if capture_protocol not in {0, CAPTURE_PROTOCOL_VERSION}:
         capture_authority.lose('unsupported_capture_protocol', current_conversation_id or '')
         return
 
@@ -905,46 +965,33 @@ async def _stream_handler(
         finished_at: datetime,
         started_at: Optional[datetime] = None,
     ):
-        def persist_update():
-            updated_segments: List[TranscriptSegment] = []
-            removed_ids: List[str] = []
-            update_data = {'finished_at': finished_at}
+        update_data = {'finished_at': finished_at}
+        if segments:
+            process_speaker_assigned_segments(
+                segments,
+                segment_person_assignment_map,
+                speaker_to_person_map,
+            )
+        if started_at is not None:
+            update_data['started_at'] = started_at
+        if photos and conversation.source != ConversationSource.openglass:
+            update_data['source'] = ConversationSource.openglass
 
-            if segments:
-                conversation.transcript_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
-                    conversation.transcript_segments, segments
-                )
-                process_speaker_assigned_segments(
-                    updated_segments,
-                    segment_person_assignment_map,
-                    speaker_to_person_map,
-                )
-                update_data['transcript_segments'] = [segment.dict() for segment in conversation.transcript_segments]
-
-            if started_at is not None:
-                update_data['started_at'] = started_at
-
-            if photos:
-                if conversation.source != ConversationSource.openglass:
-                    update_data['source'] = ConversationSource.openglass
-
-            if not conversations_db.update_in_progress_conversation_capture(
-                uid,
-                conversation.id,
-                update_data,
-                photos,
-            ):
-                capture_authority.lose('firestore_capture_status', conversation.id)
-                return None
-            if photos and conversation.source != ConversationSource.openglass:
-                conversation.source = ConversationSource.openglass
-            return conversation, updated_segments, removed_ids
-
-        return capture_authority.run_if_owned(
+        result = conversations_db.update_in_progress_conversation_capture(
+            uid,
             conversation.id,
-            'segment_photo_update',
-            persist_update,
+            capture_authority.generation_id,
+            capture_authority.owner_token,
+            update_data,
+            segments,
+            photos,
         )
+        if not result:
+            capture_authority.lose('firestore_capture_authority', conversation.id)
+            return None
+        durable_conversation = Conversation(**result['conversation'])
+        updated_segments = [TranscriptSegment(**segment) for segment in result['updated_segments']]
+        return durable_conversation, updated_segments, result['removed_ids']
 
     # STT
     # Validate websocket_active before initiating STT
@@ -987,7 +1034,9 @@ async def _stream_handler(
         for segment in segments or []:
             if isinstance(segment, dict):
                 segment.setdefault("stt_provider", _stt_service_value(stt_service))
-        realtime_segment_buffers.extend(segments)
+        if segments:
+            capture_buffers_drained.clear()
+            realtime_segment_buffers.extend(segments)
 
     async def _process_stt():
         nonlocal websocket_close_code
@@ -1279,7 +1328,20 @@ async def _stream_handler(
                 pending_request_event.set()  # Signal the receiver
                 data = bytearray()
                 data.extend(struct.pack("I", 104))
-                data.extend(bytes(json.dumps({"conversation_id": conversation_id, "language": language}), "utf-8"))
+                data.extend(
+                    bytes(
+                        json.dumps(
+                            {
+                                "conversation_id": conversation_id,
+                                "language": language,
+                                "protocol_version": capture_protocol,
+                                "generation": capture_authority.generation_id,
+                                "owner_token": capture_authority.owner_token,
+                            }
+                        ),
+                        "utf-8",
+                    )
+                )
                 await pusher_ws.send(data)
                 print(f"Sent process_conversation request to pusher: {conversation_id}", uid, session_id)
                 return True
@@ -1609,9 +1671,12 @@ async def _stream_handler(
                     if not conversations_db.update_in_progress_conversation_capture(
                         uid,
                         conversation_id,
-                        {'transcript_segments': conversation['transcript_segments']},
+                        capture_authority.generation_id,
+                        capture_authority.owner_token,
+                        {},
+                        translated_segments,
                     ):
-                        capture_authority.lose('translation_firestore_status', conversation_id)
+                        capture_authority.lose('translation_firestore_authority', conversation_id)
                         return
 
             if websocket_active:
@@ -1628,6 +1693,9 @@ async def _stream_handler(
 
         while websocket_active:
             await asyncio.sleep(5)
+
+            if not accepting_capture:
+                continue
 
             if not current_conversation_id:
                 print(f"WARN: the current conversation is not valid", uid, session_id)
@@ -1868,6 +1936,8 @@ async def _stream_handler(
             await asyncio.sleep(0.6)
 
             if not realtime_segment_buffers and not realtime_photo_buffers:
+                if not capture_background_tasks:
+                    capture_buffers_drained.set()
                 continue
 
             segments_to_process = realtime_segment_buffers.copy()
@@ -2136,6 +2206,7 @@ async def _stream_handler(
             return
 
         final_photo = ConversationPhoto(id=photo_id, base64=image_b64, description=description, discarded=discarded)
+        capture_buffers_drained.clear()
         photo_buffer.append(final_photo)
         await send_event_func(PhotoDescribedEvent(photo_id=photo_id, description=description, discarded=discarded))
 
@@ -2164,7 +2235,10 @@ async def _stream_handler(
         if all(chunk is not None for chunk in image_chunks_cache[temp_id]):
             b64_image_data = "".join(image_chunks_cache[temp_id])
             del image_chunks_cache[temp_id]
-            safe_create_task(process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer))
+            capture_buffers_drained.clear()
+            task = asyncio.create_task(process_photo(uid, b64_image_data, temp_id, send_event_func, photo_buffer))
+            capture_background_tasks.add(task)
+            task.add_done_callback(capture_background_tasks.discard)
 
     # Initialize decoders based on codec
     opus_decoder = None
@@ -2185,6 +2259,7 @@ async def _stream_handler(
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
         nonlocal first_audio_frame_at
+        nonlocal accepting_capture
 
         timer_start = time.time()
         last_audio_received_time = timer_start
@@ -2294,6 +2369,22 @@ async def _stream_handler(
             if speechmatics_sock is not None:
                 await speechmatics_sock.send(chunk)
 
+        async def finish_stt_inputs_for_drain() -> None:
+            """Flush accepted audio and await provider shutdown/final-result callbacks."""
+            await flush_stt_buffer(force=True)
+            if dg_socket:
+                dg_socket.finish()
+            if dg_profile_socket:
+                dg_profile_socket.finish()
+            if soniox_sock:
+                await soniox_sock.close()
+            if soniox_profile_sock:
+                await soniox_profile_sock.close()
+            if grok_sock:
+                await grok_sock.close()
+            if speechmatics_sock:
+                await speechmatics_sock.close()
+
         try:
             while websocket_active:
                 message = await websocket.receive()
@@ -2312,6 +2403,9 @@ async def _stream_handler(
                     break
 
                 if message.get("bytes") is not None:
+
+                    if not accepting_capture:
+                        continue
 
                     data = message.get("bytes")
                     if len(data) <= 2:  # Ping/keepalive, 0x8a 0x00
@@ -2382,23 +2476,47 @@ async def _stream_handler(
                         json_data = json.loads(message.get("text"))
                         if json_data.get('type') in {'client_latency_event', 'latency_event', 'timing_event'}:
                             _remember_client_latency_event(json_data)
-                        elif json_data.get('type') == 'image_chunk':
+                        elif json_data.get('type') == 'image_chunk' and accepting_capture:
                             await handle_image_chunk(
                                 uid, json_data, image_chunks, _asend_message_event, realtime_photo_buffers
                             )
                         elif json_data.get('type') == 'skip_question':
                             if onboarding_handler and not onboarding_handler.completed:
                                 await onboarding_handler.skip_current_question()
-                        elif json_data.get('type') == 'capture_drain' and capture_protocol == 2:
-                            if not current_conversation_id or not capture_authority.drain(
-                                current_conversation_id,
-                                'client_drain',
-                            ):
+                        elif json_data.get('type') == 'capture_drain' and capture_protocol == CAPTURE_PROTOCOL_VERSION:
+                            valid_drain = valid_capture_drain_body(
+                                json_data,
+                                CAPTURE_PROTOCOL_VERSION,
+                                current_conversation_id or '',
+                                capture_authority.generation_id,
+                                capture_authority.owner_token,
+                            )
+                            if not valid_drain or not current_conversation_id:
+                                capture_authority.lose('invalid_client_drain_tuple', current_conversation_id or '')
                                 break
-                            await _asend_message_event(MessageServiceStatusEvent(status="capture_protocol_drained"))
+                            accepting_capture = False
+                            flushed = await flush_capture_before_drained(
+                                finish_stt_inputs_for_drain,
+                                capture_background_tasks,
+                                capture_buffers_drained,
+                            )
+                            if not flushed:
+                                capture_authority.lose('capture_drain_persistence_timeout', current_conversation_id)
+                                break
+                            if not capture_authority.drain(current_conversation_id, 'client_drain'):
+                                break
+                            await _asend_message_event(
+                                MessageServiceStatusEvent(
+                                    status="capture_protocol_drained",
+                                    protocol_version=CAPTURE_PROTOCOL_VERSION,
+                                    conversation_id=current_conversation_id,
+                                    generation=capture_authority.generation_id,
+                                    owner_token=capture_authority.owner_token,
+                                )
+                            )
                             websocket_active = False
                             break
-                        elif json_data.get('type') == 'suggested_transcript':
+                        elif json_data.get('type') == 'suggested_transcript' and accepting_capture:
                             if use_custom_stt:
                                 suggested_segments = json_data.get('segments', [])
                                 stt_provider = json_data.get('stt_provider')
@@ -2533,6 +2651,18 @@ async def _stream_handler(
         pending_conversations_task = asyncio.create_task(process_pending_conversations(timed_out_conversation_id))
         speaker_id_task = asyncio.create_task(speaker_identification_task())
 
+        if capture_protocol == CAPTURE_PROTOCOL_VERSION:
+            ready_sent = await _asend_message_event(
+                MessageServiceStatusEvent(
+                    status="capture_protocol_ready",
+                    protocol_version=CAPTURE_PROTOCOL_VERSION,
+                    conversation_id=current_conversation_id,
+                    generation=capture_authority.generation_id,
+                    owner_token=capture_authority.owner_token,
+                )
+            )
+            if not ready_sent:
+                return
         _send_message_event(MessageServiceStatusEvent(status="ready"))
 
         tasks = [

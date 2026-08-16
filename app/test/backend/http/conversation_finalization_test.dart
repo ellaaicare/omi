@@ -119,7 +119,12 @@ void main() {
         expect(retryOnUnauthorized, isFalse);
         if (method == 'POST') {
           postCalls++;
-          expect(jsonDecode(body), {'conversation_id': conversationId});
+          expect(jsonDecode(body), {
+            'conversation_id': conversationId,
+            'protocol_version': 2,
+            'generation': 'test-generation',
+            'owner_token': 'test-owner-token',
+          });
           return http.Response('capture owner active', 409);
         }
 
@@ -134,7 +139,7 @@ void main() {
 
     expect(result?.conversation?.id, conversationId);
     expect(result?.conversation?.status.name, 'completed');
-    expect(postCalls, 1);
+    expect(postCalls, 9, reason: 'processing receipts retry the leased, idempotent claim');
     expect(getCalls, 23);
     expect(elapsed, const Duration(seconds: 23));
     expect(elapsed, greaterThan(const Duration(seconds: 10)));
@@ -309,7 +314,12 @@ void main() {
       MockClient((request) async {
         if (request.method == 'POST') {
           postCalls++;
-          expect(jsonDecode(request.body), {'conversation_id': encodedConversationId});
+          expect(jsonDecode(request.body), {
+            'conversation_id': encodedConversationId,
+            'protocol_version': 2,
+            'generation': 'test-generation',
+            'owner_token': 'test-owner-token',
+          });
           return http.Response('ambiguous server failure', 503);
         }
         getCalls++;
@@ -581,7 +591,7 @@ void main() {
     );
 
     expect(result, isNull);
-    expect(postCalls, 1);
+    expect(postCalls, 4, reason: 'each processing receipt may reclaim an expired durable lease');
     expect(getCalls, 3);
   });
 }

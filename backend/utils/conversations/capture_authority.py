@@ -1,21 +1,72 @@
-from typing import Callable, Optional, TypeVar
+import asyncio
+import os
+from typing import Awaitable, Callable, Optional, Set
 
+from database import conversations as conversations_db
 from database import redis_db
 
-T = TypeVar('T')
+
+def capture_protocol_v2_rollout_enabled() -> bool:
+    """V2 stays fail-closed until the documented legacy drain is attested."""
+    return os.getenv('CAPTURE_PROTOCOL_V2_ROLLOUT_STATE', '').strip() == 'legacy_workers_drained'
+
+
+def valid_capture_drain_body(
+    body: dict,
+    protocol_version: int,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+) -> bool:
+    return bool(
+        body.get('type') == 'capture_drain'
+        and body.get('protocol_version') == protocol_version
+        and body.get('conversation_id') == conversation_id
+        and body.get('generation') == generation
+        and body.get('owner_token') == owner_token
+    )
+
+
+async def flush_capture_before_drained(
+    finish_stt_inputs: Callable[[], Optional[Awaitable[None]]],
+    persistence_tasks: Set[asyncio.Task],
+    buffers_drained: asyncio.Event,
+    *,
+    timeout: float = 10.0,
+) -> bool:
+    """Stop STT input, await accepted background work, then await durable buffers."""
+    # Discard an earlier idle indication before provider shutdown can schedule
+    # its final transcript callback onto the persistence loop.
+    buffers_drained.clear()
+    result = finish_stt_inputs()
+    if result is not None:
+        await result
+    if persistence_tasks:
+        await asyncio.gather(*tuple(persistence_tasks), return_exceptions=True)
+    try:
+        await asyncio.wait_for(buffers_drained.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return False
+    return True
 
 
 class CaptureStreamAuthority:
-    """Fail-closed ownership guard for one live transcript stream."""
+    """Durable Firestore authority for one protocol-v2 transcript stream.
+
+    Redis is only a compatibility projection. Every durable mutation checks the
+    generation and owner token in the same Firestore transaction as its data.
+    """
 
     def __init__(
         self,
         uid: str,
         generation_id: str,
+        owner_token: str,
         on_loss: Optional[Callable[[str, str], None]] = None,
     ):
         self.uid = uid
         self.generation_id = generation_id
+        self.owner_token = owner_token
         self.lost = False
         self._on_loss = on_loss
 
@@ -27,139 +78,89 @@ class CaptureStreamAuthority:
         return False
 
     def lose(self, checkpoint: str, conversation_id: str) -> bool:
-        """Fail this stream closed after a durable ownership check rejects a write."""
         return self._lose(checkpoint, conversation_id)
+
+    def _project(self, conversation_id: str, state: str = 'active') -> None:
+        try:
+            redis_db.project_capture_stream_authority(
+                self.uid,
+                self.generation_id,
+                self.owner_token,
+                conversation_id,
+                state,
+            )
+        except Exception as error:
+            # Firestore is authoritative. A Redis outage cannot revoke a
+            # transactionally installed owner or reopen a stale write window.
+            print('Capture authority Redis projection failed', self.uid, conversation_id, error)
 
     def refresh(self, conversation_id: str, checkpoint: str) -> bool:
         if self.lost:
             return False
-        result = redis_db.refresh_in_progress_conversation_id(
+        if not conversations_db.renew_capture_authority(
             self.uid,
-            self.generation_id,
             conversation_id,
-        )
-        if result not in {'refreshed', 'restored'}:
+            self.generation_id,
+            self.owner_token,
+        ):
             return self._lose(checkpoint, conversation_id)
+        self._project(conversation_id)
         return True
 
     def adopt(self, conversation_id: str, checkpoint: str) -> bool:
-        """Take over one exact resumable conversation for this newly connected stream."""
         if self.lost:
             return False
-        result = redis_db.adopt_capture_stream_authority(
+        result = conversations_db.adopt_capture_conversation(
             self.uid,
-            self.generation_id,
             conversation_id,
+            self.generation_id,
+            self.owner_token,
         )
         if result != 'adopted':
-            return self._lose(checkpoint, conversation_id)
+            return self._lose(f'{checkpoint}_{result}', conversation_id)
+        self._project(conversation_id)
         return True
 
-    def run_if_owned(self, conversation_id: str, checkpoint: str, operation: Callable[[], T]) -> Optional[T]:
-        """Run one synchronous durable update only while the exact pointer is owned."""
-        if not self.refresh(conversation_id, checkpoint):
-            return None
-        return operation()
+    def acquire(self, conversation_data: dict, checkpoint: str) -> bool:
+        if self.lost:
+            return False
+        conversation_id = conversation_data['id']
+        result = conversations_db.install_capture_conversation(
+            self.uid,
+            conversation_data,
+            self.generation_id,
+            self.owner_token,
+        )
+        if result != 'installed':
+            return self._lose(f'{checkpoint}_{result}', conversation_id)
+        self._project(conversation_id)
+        return True
+
+    def rotate(self, current_conversation_id: str, conversation_data: dict, checkpoint: str) -> bool:
+        if self.lost:
+            return False
+        new_conversation_id = conversation_data['id']
+        result = conversations_db.install_capture_conversation(
+            self.uid,
+            conversation_data,
+            self.generation_id,
+            self.owner_token,
+            expected_conversation_id=current_conversation_id,
+        )
+        if result != 'installed':
+            return self._lose(f'{checkpoint}_{result}', current_conversation_id)
+        self._project(new_conversation_id)
+        return True
 
     def drain(self, conversation_id: str, checkpoint: str) -> bool:
-        """Fence this exact generation before acknowledging a client-requested drain."""
         if self.lost:
             return False
-        result = redis_db.drain_capture_stream_authority(
+        if not conversations_db.mark_capture_drained(
             self.uid,
-            self.generation_id,
             conversation_id,
-        )
-        if result not in {'drained', 'already_drained'}:
-            return self._lose(checkpoint, conversation_id)
-        return True
-
-    def acquire(
-        self,
-        conversation_id: str,
-        install: Callable[[], None],
-        checkpoint: str,
-        uninstall: Optional[Callable[[], None]] = None,
-    ) -> bool:
-        """Acquire a missing pointer before installing the initial durable stub."""
-        if self.lost:
-            return False
-        result = redis_db.acquire_capture_stream_authority(
-            self.uid,
             self.generation_id,
-            conversation_id,
-        )
-        if result != 'acquired':
+            self.owner_token,
+        ):
             return self._lose(checkpoint, conversation_id)
-        try:
-            install()
-            confirmed = redis_db.confirm_capture_stream_authority(
-                self.uid,
-                self.generation_id,
-                conversation_id,
-            )
-        except Exception:
-            released = redis_db.release_capture_stream_authority_if_matches(
-                self.uid,
-                self.generation_id,
-                conversation_id,
-            )
-            if released and uninstall:
-                uninstall()
-            raise
-        if not confirmed:
-            released = redis_db.release_capture_stream_authority_if_matches(
-                self.uid,
-                self.generation_id,
-                conversation_id,
-            )
-            if released and uninstall:
-                uninstall()
-            return self._lose(f'{checkpoint}_confirmation', conversation_id)
-        return True
-
-    def rotate(
-        self,
-        current_conversation_id: str,
-        new_conversation_id: str,
-        install: Callable[[], None],
-        checkpoint: str,
-        uninstall: Optional[Callable[[], None]] = None,
-    ) -> bool:
-        """Reserve, install, then publish a same-stream successor stub."""
-        if self.lost:
-            return False
-        result = redis_db.rotate_in_progress_conversation_id(
-            self.uid,
-            self.generation_id,
-            current_conversation_id,
-            new_conversation_id,
-        )
-        if result != 'rotated':
-            return self._lose(checkpoint, current_conversation_id)
-        try:
-            install()
-            confirmed = redis_db.confirm_capture_stream_authority(
-                self.uid,
-                self.generation_id,
-                new_conversation_id,
-            )
-        except Exception:
-            released = redis_db.release_capture_stream_authority_if_matches(
-                self.uid,
-                self.generation_id,
-                new_conversation_id,
-            )
-            if released and uninstall:
-                uninstall()
-            raise
-        if not confirmed:
-            released = redis_db.release_capture_stream_authority_if_matches(
-                self.uid,
-                self.generation_id,
-                new_conversation_id,
-            )
-            if released and uninstall:
-                uninstall()
-            return self._lose(f'{checkpoint}_confirmation', new_conversation_id)
+        self._project(conversation_id, state='drained')
         return True

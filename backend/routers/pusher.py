@@ -2,6 +2,7 @@ import struct
 import asyncio
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import List
 
@@ -56,7 +57,15 @@ TRANSCRIPT_QUEUE_WARN_SIZE = 50
 AUDIO_BYTES_QUEUE_WARN_SIZE = 20
 
 
-async def _process_conversation_task(uid: str, conversation_id: str, language: str, websocket: WebSocket):
+async def _process_conversation_task(
+    uid: str,
+    conversation_id: str,
+    language: str,
+    websocket: WebSocket,
+    protocol_version: int = 0,
+    generation: str = '',
+    owner_token: str = '',
+):
     """Process a conversation and send result back to _listen via websocket."""
     try:
         conversation_data = conversations_db.get_conversation(uid, conversation_id)
@@ -70,8 +79,52 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
             return
 
         conversation = Conversation(**conversation_data)
+        capture_finalization = None
+        claim_token = ''
+        lease_task = None
+        if conversation.capture_protocol_version == conversations_db.capture_protocol_version:
+            claim_token = str(uuid.uuid4())
+            claim = conversations_db.claim_capture_finalization(
+                uid,
+                conversation_id,
+                protocol_version,
+                generation,
+                owner_token,
+                claim_token,
+            )
+            if claim.get('outcome') == 'settled':
+                response = {"conversation_id": conversation_id, "success": True}
+                data = bytearray(struct.pack("I", 201))
+                data.extend(bytes(json.dumps(response), "utf-8"))
+                await websocket.send_bytes(data)
+                return
+            if claim.get('outcome') != 'claimed':
+                response = {"conversation_id": conversation_id, "error": f"capture_{claim.get('outcome')}"}
+                data = bytearray(struct.pack("I", 201))
+                data.extend(bytes(json.dumps(response), "utf-8"))
+                await websocket.send_bytes(data)
+                return
+            capture_finalization = (generation, owner_token, claim_token)
 
-        if conversation.status != ConversationStatus.processing:
+            async def renew_finalization_lease():
+                interval = max(1.0, conversations_db.capture_finalization_lease_seconds / 3)
+                while True:
+                    await asyncio.sleep(interval)
+                    renewed = await asyncio.to_thread(
+                        conversations_db.renew_capture_finalization,
+                        uid,
+                        conversation_id,
+                        claim_token,
+                    )
+                    if not renewed:
+                        return
+
+            lease_task = asyncio.create_task(renew_finalization_lease())
+            conversation_data = conversations_db.get_conversation(uid, conversation_id)
+            if not conversation_data:
+                return
+            conversation = Conversation(**conversation_data)
+        elif conversation.status != ConversationStatus.processing:
             conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
             conversation.status = ConversationStatus.processing
 
@@ -83,17 +136,43 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             # Run blocking operations in thread pool to avoid blocking event loop
-            conversation = await asyncio.to_thread(process_conversation, uid, language, conversation)
+            conversation = await asyncio.to_thread(
+                process_conversation,
+                uid,
+                language,
+                conversation,
+                capture_finalization=capture_finalization,
+            )
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, conversation_id)
-            await asyncio.to_thread(mark_unexpected_conversation_processing_failed, uid, conversation)
+            try:
+                await asyncio.to_thread(
+                    mark_unexpected_conversation_processing_failed,
+                    uid,
+                    conversation,
+                    capture_finalization,
+                )
+            except RuntimeError:
+                pass
             messages = []
         else:
+            if capture_finalization and not conversations_db.complete_capture_finalization(
+                uid,
+                conversation_id,
+                generation,
+                owner_token,
+                claim_token,
+            ):
+                return
             try:
                 messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
             except Exception as e:
                 print(f"External integrations failed after conversation processing: {e}", uid, conversation_id)
                 messages = []
+        finally:
+            if lease_task:
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
 
         # Send success response back (minimal - transcribe will fetch from DB)
         response = {"conversation_id": conversation_id, "success": True}
@@ -353,9 +432,22 @@ async def _websocket_util_trigger(
                     res = json.loads(bytes(data[4:]).decode("utf-8"))
                     conversation_id = res.get('conversation_id')
                     language = res.get('language', 'en')
+                    protocol_version = res.get('protocol_version', 0)
+                    generation = res.get('generation', '')
+                    owner_token = res.get('owner_token', '')
                     if conversation_id:
                         print(f"Pusher received process_conversation request: {conversation_id}", uid)
-                        safe_create_task(_process_conversation_task(uid, conversation_id, language, websocket))
+                        safe_create_task(
+                            _process_conversation_task(
+                                uid,
+                                conversation_id,
+                                language,
+                                websocket,
+                                protocol_version,
+                                generation,
+                                owner_token,
+                            )
+                        )
                     continue
 
                 # Speaker sample extraction request - queue for background processing

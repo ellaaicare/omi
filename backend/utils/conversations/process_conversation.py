@@ -235,15 +235,36 @@ def mark_conversation_processing_failed(
     uid: str,
     conversation: Conversation,
     error_code: str = "conversation_summary_failed",
+    capture_finalization: Optional[Tuple[str, str, str]] = None,
 ):
     apply_conversation_processing_failed(conversation, error_code=error_code)
-    conversations_db.upsert_conversation(uid, conversation.dict())
+    if capture_finalization:
+        generation, owner_token, claim_token = capture_finalization
+        if not conversations_db.upsert_conversation_if_capture_finalizer(
+            uid,
+            conversation.dict(),
+            generation,
+            owner_token,
+            claim_token,
+        ):
+            raise RuntimeError('Capture finalization lease was lost before failure persistence')
+    else:
+        conversations_db.upsert_conversation(uid, conversation.dict())
 
 
-def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conversation) -> bool:
+def mark_unexpected_conversation_processing_failed(
+    uid: str,
+    conversation: Conversation,
+    capture_finalization: Optional[Tuple[str, str, str]] = None,
+) -> bool:
     if conversation.status == ConversationStatus.failed and conversation.processing_error:
         return False
-    mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+    mark_conversation_processing_failed(
+        uid,
+        conversation,
+        error_code=CONVERSATION_PROCESSING_FAILED,
+        capture_finalization=capture_finalization,
+    )
     return True
 
 
@@ -560,6 +581,7 @@ def process_conversation(
     force_process: bool = False,
     is_reprocess: bool = False,
     app_id: Optional[str] = None,
+    capture_finalization: Optional[Tuple[str, str, str]] = None,
 ) -> Conversation:
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
     if hasattr(conversation, 'id') and conversation.id:
@@ -586,7 +608,11 @@ def process_conversation(
         structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
     except Exception:
         if isinstance(conversation, Conversation):
-            mark_conversation_processing_failed(uid, conversation)
+            mark_conversation_processing_failed(
+                uid,
+                conversation,
+                capture_finalization=capture_finalization,
+            )
         raise
 
     conversation = _get_conversation_obj(uid, structured, conversation, discarded)
@@ -669,16 +695,28 @@ def process_conversation(
             audio_files = conversations_db.create_audio_files_from_chunks(uid, conversation.id)
             if audio_files:
                 conversation.audio_files = audio_files
-                conversations_db.update_conversation(
-                    uid, conversation.id, {'audio_files': [af.dict() for af in audio_files]}
-                )
+                if not capture_finalization:
+                    conversations_db.update_conversation(
+                        uid, conversation.id, {'audio_files': [af.dict() for af in audio_files]}
+                    )
                 # Pre-cache audio files in background
                 precache_conversation_audio(uid, conversation.id, [af.dict() for af in audio_files])
         except Exception as e:
             print(f"Error creating audio files: {e}")
 
     conversation.status = ConversationStatus.completed
-    conversations_db.upsert_conversation(uid, conversation.dict())
+    if capture_finalization:
+        generation, owner_token, claim_token = capture_finalization
+        if not conversations_db.upsert_conversation_if_capture_finalizer(
+            uid,
+            conversation.dict(),
+            generation,
+            owner_token,
+            claim_token,
+        ):
+            raise RuntimeError('Capture finalization lease was lost before result persistence')
+    else:
+        conversations_db.upsert_conversation(uid, conversation.dict())
 
     # Update folder conversation count after conversation is saved
     if assigned_folder_id:

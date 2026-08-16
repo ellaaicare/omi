@@ -59,6 +59,34 @@ enum SocketServiceState {
   disconnected,
 }
 
+class CaptureProtocolAuthority {
+  const CaptureProtocolAuthority({
+    required this.protocolVersion,
+    required this.conversationId,
+    required this.generation,
+    required this.ownerToken,
+  });
+
+  final int protocolVersion;
+  final String conversationId;
+  final String generation;
+  final String ownerToken;
+
+  Map<String, dynamic> toDrainJson() => {
+        'type': 'capture_drain',
+        'protocol_version': protocolVersion,
+        'conversation_id': conversationId,
+        'generation': generation,
+        'owner_token': ownerToken,
+      };
+
+  bool matches(MessageServiceStatusEvent event) =>
+      event.protocolVersion == protocolVersion &&
+      event.conversationId == conversationId &&
+      event.generation == generation &&
+      event.ownerToken == ownerToken;
+}
+
 class TranscriptSegmentSocketService implements IPureSocketListener {
   static const _captureProtocolVersion = 2;
   static const _defaultCaptureProtocolTimeout = Duration(seconds: 8);
@@ -71,6 +99,10 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
   bool _captureProtocolReady = false;
   Completer<bool>? _captureProtocolReadyCompleter;
   Completer<bool>? _captureDrainCompleter;
+  CaptureProtocolAuthority? _captureAuthority;
+  CaptureProtocolAuthority? _pendingDrainAuthority;
+
+  CaptureProtocolAuthority? get captureAuthority => _captureAuthority;
 
   /// Access to the underlying socket (for composite service creation)
   IPureSocket get socket => _socket;
@@ -159,6 +191,8 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (_requiresCaptureProtocol) {
       _captureProtocolReady = false;
+      _captureAuthority = null;
+      _pendingDrainAuthority = null;
       _captureProtocolReadyCompleter = Completer<bool>();
     }
     bool ok = await _socket.connect();
@@ -203,8 +237,11 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     Object? drainError;
     if (_requiresCaptureProtocol && _captureProtocolReady && _socket.status == PureSocketStatus.connected) {
       try {
+        final authority = _captureAuthority;
+        if (authority == null) throw StateError('Capture websocket authority tuple is missing');
+        _pendingDrainAuthority = authority;
         _captureDrainCompleter = Completer<bool>();
-        _socket.send(jsonEncode({'type': 'capture_drain', 'protocol': _captureProtocolVersion}));
+        _socket.send(jsonEncode(authority.toDrainJson()));
         final drained = await _captureDrainCompleter!.future.timeout(
           _captureProtocolTimeout,
           onTimeout: () => false,
@@ -217,6 +254,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
       }
     }
     _captureProtocolReady = false;
+    _pendingDrainAuthority = null;
     await _socket.stop();
     _listeners.clear();
 
@@ -301,12 +339,31 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
       var event = MessageEvent.fromJson(jsonEvent);
       if (event is MessageServiceStatusEvent) {
         if (event.status == 'capture_protocol_ready') {
-          final wasReady = _captureProtocolReady;
-          _captureProtocolReady = true;
-          if (!(_captureProtocolReadyCompleter?.isCompleted ?? true)) _captureProtocolReadyCompleter!.complete(true);
-          if (!wasReady) _notifyConnected();
+          final conversationId = (event.conversationId ?? '').trim();
+          final generation = (event.generation ?? '').trim();
+          final ownerToken = (event.ownerToken ?? '').trim();
+          final valid = event.protocolVersion == _captureProtocolVersion &&
+              conversationId.isNotEmpty &&
+              generation.isNotEmpty &&
+              ownerToken.isNotEmpty;
+          if (valid) {
+            final wasReady = _captureProtocolReady;
+            _captureAuthority = CaptureProtocolAuthority(
+              protocolVersion: event.protocolVersion!,
+              conversationId: conversationId,
+              generation: generation,
+              ownerToken: ownerToken,
+            );
+            _captureProtocolReady = true;
+            if (!(_captureProtocolReadyCompleter?.isCompleted ?? true)) _captureProtocolReadyCompleter!.complete(true);
+            if (!wasReady) _notifyConnected();
+          } else if (!(_captureProtocolReadyCompleter?.isCompleted ?? true)) {
+            _captureProtocolReadyCompleter!.complete(false);
+          }
         } else if (event.status == 'capture_protocol_drained') {
-          if (!(_captureDrainCompleter?.isCompleted ?? true)) _captureDrainCompleter!.complete(true);
+          final expected = _pendingDrainAuthority;
+          final matches = expected != null && expected.matches(event);
+          if (!(_captureDrainCompleter?.isCompleted ?? true)) _captureDrainCompleter!.complete(matches);
         }
       }
       _listeners.forEach((k, v) {

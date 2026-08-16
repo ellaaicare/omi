@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from typing import Optional, List
 from datetime import datetime, timezone
+import threading
+import uuid
 
 import database.conversations as conversations_db
 import database.action_items as action_items_db
@@ -54,7 +56,76 @@ def _get_valid_conversation_by_id(uid: str, conversation_id: str) -> dict:
 
 class ProcessConversationRequest(BaseModel):
     conversation_id: str
+    protocol_version: Optional[int] = None
+    generation: Optional[str] = None
+    owner_token: Optional[str] = None
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
+
+
+def _process_legacy_in_progress_conversation(
+    request: ProcessConversationRequest,
+    uid: str,
+    conversation: dict,
+) -> CreateConversationResponse:
+    """Compatibility path for documents created before protocol v2 is enabled."""
+    conversation_id = request.conversation_id
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status in {
+        ConversationStatus.processing.value,
+        ConversationStatus.merging.value,
+        ConversationStatus.completed.value,
+        ConversationStatus.failed.value,
+    }:
+        redis_db.terminalize_in_progress_conversation_id(uid, conversation_id)
+        return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
+    if status != ConversationStatus.in_progress.value:
+        raise HTTPException(status_code=409, detail="Conversation cannot be processed from its current state")
+    pointer_claim = redis_db.claim_in_progress_conversation_id(uid, conversation_id)
+    if pointer_claim == 'mismatch':
+        raise HTTPException(status_code=409, detail="Conversation is no longer the active capture")
+
+    durable_claim_succeeded = False
+    try:
+        calendar_context = request.calendar_meeting_context.dict() if request.calendar_meeting_context else None
+        resolved_geolocation = None
+        geolocation = redis_db.get_cached_user_geolocation(uid)
+        if geolocation:
+            geolocation = Geolocation(**geolocation)
+            resolved_geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
+
+        claimed = conversations_db.claim_in_progress_conversation(uid, conversation_id)
+        durable_claim_succeeded = claimed
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+        if not conversation or conversation.get('id') != conversation_id:
+            raise HTTPException(status_code=409, detail="Conversation identity mismatch")
+        status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+        if not claimed:
+            if status in {
+                ConversationStatus.processing.value,
+                ConversationStatus.merging.value,
+                ConversationStatus.completed.value,
+                ConversationStatus.failed.value,
+            }:
+                durable_claim_succeeded = True
+                return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
+            raise HTTPException(status_code=409, detail="Conversation processing claim was not acquired")
+
+        conversation = Conversation(**conversation)
+        if calendar_context:
+            conversation.external_data = conversation.external_data or {}
+            conversation.external_data['calendar_meeting_context'] = calendar_context
+        if resolved_geolocation:
+            conversation.geolocation = resolved_geolocation
+        conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
+        return CreateConversationResponse(
+            conversation=conversation,
+            messages=trigger_external_integrations(uid, conversation),
+        )
+    finally:
+        if durable_claim_succeeded:
+            redis_db.terminalize_in_progress_conversation_id(uid, conversation_id)
+        elif pointer_claim == 'claimed':
+            redis_db.restore_in_progress_conversation_id_if_matches(uid, conversation_id)
 
 
 @router.post("/v1/conversations", response_model=CreateConversationResponse, tags=['conversations'])
@@ -68,27 +139,69 @@ def process_in_progress_conversation(
     if conversation.get('id') != conversation_id:
         raise HTTPException(status_code=409, detail="Conversation identity mismatch")
 
+    if conversation.get('capture_protocol_version') != conversations_db.capture_protocol_version:
+        return _process_legacy_in_progress_conversation(request, uid, conversation)
+
+    if (
+        request.protocol_version != conversations_db.capture_protocol_version
+        or not (request.generation or '').strip()
+        or not (request.owner_token or '').strip()
+    ):
+        raise HTTPException(status_code=409, detail="Capture finalization protocol tuple is invalid")
+
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
     settled_statuses = {
-        ConversationStatus.processing.value,
         ConversationStatus.merging.value,
         ConversationStatus.completed.value,
         ConversationStatus.failed.value,
     }
     if status in settled_statuses:
-        redis_db.terminalize_in_progress_conversation_id(uid, conversation_id)
+        prior_claim_token = conversation.get('capture_finalization_claim_token')
+        if prior_claim_token:
+            conversations_db.complete_capture_finalization(
+                uid,
+                conversation_id,
+                request.generation or '',
+                request.owner_token or '',
+                prior_claim_token,
+            )
         return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
-    if status != ConversationStatus.in_progress.value:
+    if status not in {ConversationStatus.in_progress.value, ConversationStatus.processing.value}:
         raise HTTPException(status_code=409, detail="Conversation cannot be processed from its current state")
 
-    pointer_claim = redis_db.claim_in_progress_conversation_id(uid, conversation_id)
-    if pointer_claim == 'mismatch':
-        raise HTTPException(status_code=409, detail="Conversation is no longer the active capture")
+    claim_token = str(uuid.uuid4())
+    claim = conversations_db.claim_capture_finalization(
+        uid,
+        conversation_id,
+        request.protocol_version,
+        request.generation or '',
+        request.owner_token or '',
+        claim_token,
+    )
+    outcome = claim['outcome']
+    if outcome == 'not_found':
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if outcome == 'settled':
+        settled = conversations_db.get_conversation(uid, conversation_id)
+        return CreateConversationResponse(conversation=Conversation(**settled), messages=[])
+    if outcome in {'mismatch', 'not_drained'}:
+        raise HTTPException(status_code=409, detail="Conversation capture authority does not match a drained owner")
+    if outcome == 'busy':
+        raise HTTPException(status_code=409, detail="Conversation finalization lease is active")
+    if outcome != 'claimed':
+        raise HTTPException(status_code=409, detail="Conversation finalization claim was not acquired")
 
-    durable_claim_succeeded = False
+    heartbeat_stop = threading.Event()
+
+    def renew_finalization_lease():
+        interval = max(1.0, conversations_db.capture_finalization_lease_seconds / 3)
+        while not heartbeat_stop.wait(interval):
+            if not conversations_db.renew_capture_finalization(uid, conversation_id, claim_token):
+                return
+
+    heartbeat = threading.Thread(target=renew_finalization_lease, daemon=True)
+    heartbeat.start()
     try:
-        # Resolve optional context before the durable processing claim so an enrichment failure cannot strand the
-        # conversation in processing.
         calendar_context = request.calendar_meeting_context.dict() if request.calendar_meeting_context else None
         resolved_geolocation = None
         geolocation = redis_db.get_cached_user_geolocation(uid)
@@ -96,19 +209,11 @@ def process_in_progress_conversation(
             geolocation = Geolocation(**geolocation)
             resolved_geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-        claimed = conversations_db.claim_in_progress_conversation(uid, conversation_id)
-        durable_claim_succeeded = claimed
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
         if conversation.get('id') != conversation_id:
             raise HTTPException(status_code=409, detail="Conversation identity mismatch")
-        status = getattr(conversation.get('status'), 'value', conversation.get('status'))
-        if not claimed:
-            if status in settled_statuses:
-                durable_claim_succeeded = True
-                return CreateConversationResponse(conversation=Conversation(**conversation), messages=[])
-            raise HTTPException(status_code=409, detail="Conversation processing claim was not acquired")
 
         conversation = Conversation(**conversation)
         if calendar_context:
@@ -118,14 +223,48 @@ def process_in_progress_conversation(
         if resolved_geolocation:
             conversation.geolocation = resolved_geolocation
 
-        conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
+        conversation = process_conversation(
+            uid,
+            conversation.language,
+            conversation,
+            force_process=True,
+            capture_finalization=(request.generation or '', request.owner_token or '', claim_token),
+        )
+        if not conversations_db.complete_capture_finalization(
+            uid,
+            conversation_id,
+            request.generation,
+            request.owner_token or '',
+            claim_token,
+        ):
+            raise HTTPException(status_code=409, detail="Conversation finalization completion lost its lease")
+        try:
+            redis_db.project_capture_stream_authority(
+                uid,
+                request.generation,
+                request.owner_token or '',
+                conversation_id,
+                'terminal',
+            )
+        except Exception as error:
+            print('Capture finalization Redis projection failed', uid, conversation_id, error)
         messages = trigger_external_integrations(uid, conversation)
         return CreateConversationResponse(conversation=conversation, messages=messages)
+    except Exception:
+        failed = conversations_db.get_conversation(uid, conversation_id)
+        failed_status = getattr((failed or {}).get('status'), 'value', (failed or {}).get('status'))
+        if failed_status == ConversationStatus.failed.value:
+            conversations_db.complete_capture_finalization(
+                uid,
+                conversation_id,
+                request.generation or '',
+                request.owner_token or '',
+                claim_token,
+            )
+        raise
     finally:
-        if durable_claim_succeeded:
-            redis_db.terminalize_in_progress_conversation_id(uid, conversation_id)
-        elif pointer_claim == 'claimed':
-            redis_db.restore_in_progress_conversation_id_if_matches(uid, conversation_id)
+        heartbeat_stop.set()
+        heartbeat.join(timeout=1.0)
 
 
 @router.post('/v1/conversations/{conversation_id}/reprocess', response_model=Conversation, tags=['conversations'])

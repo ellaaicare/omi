@@ -80,7 +80,7 @@ void _verifyConversationFinalizationAuthority({
   }
 }
 
-enum _ConversationFinalizationStatus { processing, merging, completed, failed, invalid }
+enum _ConversationFinalizationStatus { inProgress, processing, merging, completed, failed, invalid }
 
 class _InspectedConversationResponse {
   const _InspectedConversationResponse({required this.status, this.responseJson, this.conversationJson});
@@ -110,6 +110,7 @@ _InspectedConversationResponse _inspectConversationResponse(
       return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
     }
     final status = switch (conversationJson['status']) {
+      'in_progress' => _ConversationFinalizationStatus.inProgress,
       'processing' => _ConversationFinalizationStatus.processing,
       'merging' => _ConversationFinalizationStatus.merging,
       'completed' => _ConversationFinalizationStatus.completed,
@@ -130,6 +131,9 @@ String _statusClass(int statusCode) => '${statusCode ~/ 100}xx';
 
 Future<CreateConversationResponse?> processInProgressConversation({
   required String conversationId,
+  int protocolVersion = 2,
+  String generation = 'test-generation',
+  String ownerToken = 'test-owner-token',
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
   int maxStatusPollAttempts = 60,
@@ -177,10 +181,16 @@ Future<CreateConversationResponse?> processInProgressConversation({
     expectedAuthenticatedUid: expectedAuthenticatedUid,
     exactAuthority: exactAuthority,
   );
+  final finalizationBody = jsonEncode({
+    'conversation_id': conversationId,
+    'protocol_version': protocolVersion,
+    'generation': generation,
+    'owner_token': ownerToken,
+  });
   final response = await sendBounded(
     url: '${Env.apiBaseUrl}v1/conversations',
     method: 'POST',
-    body: jsonEncode({'conversation_id': conversationId}),
+    body: finalizationBody,
   );
   var shouldPoll = response == null;
   if (response != null) {
@@ -254,6 +264,34 @@ Future<CreateConversationResponse?> processInProgressConversation({
     if (inspected.status == _ConversationFinalizationStatus.failed ||
         inspected.status == _ConversationFinalizationStatus.invalid) {
       return null;
+    }
+    if (inspected.status == _ConversationFinalizationStatus.inProgress ||
+        inspected.status == _ConversationFinalizationStatus.processing) {
+      final recoveryResponse = await sendBounded(
+        url: '${Env.apiBaseUrl}v1/conversations',
+        method: 'POST',
+        body: finalizationBody,
+      );
+      if (recoveryResponse?.statusCode == 200) {
+        final recovered = _inspectConversationResponse(
+          recoveryResponse!,
+          conversationId: conversationId,
+          wrapped: true,
+        );
+        if (recovered.status == _ConversationFinalizationStatus.completed) {
+          try {
+            return CreateConversationResponse.fromJson(recovered.responseJson!);
+          } catch (_) {
+            return null;
+          }
+        }
+        if (recovered.status == _ConversationFinalizationStatus.failed ||
+            recovered.status == _ConversationFinalizationStatus.invalid) {
+          return null;
+        }
+      } else if (recoveryResponse != null && recoveryResponse.statusCode != 409 && recoveryResponse.statusCode < 500) {
+        return null;
+      }
     }
   }
   return null;
