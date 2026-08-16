@@ -258,6 +258,63 @@ ServerConversation _conversation(
 }
 
 void main() {
+  test('capture socket sends no frames until exact-authority protocol readiness is acknowledged', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+
+    var started = false;
+    final start = service.start().whenComplete(() => started = true);
+    await pumpEventQueue();
+    expect(started, isFalse);
+    expect(service.state, SocketServiceState.disconnected);
+    await service.send([1, 2, 3]);
+    expect(pure.sent, isEmpty);
+
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready'}));
+    await start;
+    expect(service.state, SocketServiceState.connected);
+    await service.send([1, 2, 3]);
+    expect(pure.sent.single, [1, 2, 3]);
+
+    final stop = service.stop();
+    await pumpEventQueue();
+    expect(
+      jsonDecode(pure.sent.last as String),
+      {'type': 'capture_drain', 'protocol': 2},
+    );
+    expect(pure.stops, 0, reason: 'transport close must wait for the server-side Redis fence');
+    pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained'}));
+    await stop;
+    expect(pure.stops, 1);
+  });
+
+  test('capture socket fails closed when a legacy worker never acknowledges protocol authority', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final service = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 10),
+    );
+
+    await service.start();
+
+    expect(service.state, SocketServiceState.disconnected);
+    expect(pure.sent, isEmpty);
+    expect(pure.stops, 1);
+  });
+
   test('production phone path waits for native capture and a physical frame, not websocket delivery', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();

@@ -168,6 +168,7 @@ async def _stream_handler(
     custom_stt_mode: CustomSttMode = CustomSttMode.disabled,
     onboarding_mode: bool = False,
     speaker_auto_assign_enabled: bool = False,
+    capture_protocol: int = 0,
     socket_accepted_at: Optional[float] = None,
 ):
     """
@@ -749,14 +750,21 @@ async def _stream_handler(
             uid,
             conversation_data=stub_conversation.dict(),
         )
+        uninstall_stub = lambda: conversations_db.delete_conversation(uid, new_conversation_id)
         if expected_conversation_id is None:
-            installed = capture_authority.acquire(new_conversation_id, install_stub, 'initial_acquisition')
+            installed = capture_authority.acquire(
+                new_conversation_id,
+                install_stub,
+                'initial_acquisition',
+                uninstall=uninstall_stub,
+            )
         else:
             installed = capture_authority.rotate(
                 expected_conversation_id,
                 new_conversation_id,
                 install_stub,
                 'conversation_rotation',
+                uninstall=uninstall_stub,
             )
         if not installed:
             return False
@@ -830,6 +838,21 @@ async def _stream_handler(
     async def _prepare_in_progess_conversations():
         nonlocal current_conversation_id
 
+        installation_id = redis_db.get_capture_stream_installation_id(uid)
+        if installation_id:
+            installing_conversation = conversations_db.get_conversation(uid, installation_id)
+            if (
+                installing_conversation
+                and installing_conversation.get('status') == ConversationStatus.in_progress.value
+            ):
+                current_conversation_id = installation_id
+                if not capture_authority.adopt(current_conversation_id, 'recover_installation'):
+                    return None
+                return None
+            if not redis_db.rollback_capture_stream_installation_if_matches(uid, installation_id):
+                capture_authority.lose('rollback_abandoned_installation', installation_id)
+                return None
+
         if existing_conversation := retrieve_in_progress_conversation(uid):
             current_conversation_id = existing_conversation['id']
             if not capture_authority.adopt(current_conversation_id, 'resume'):
@@ -855,7 +878,6 @@ async def _stream_handler(
             )
             return None
 
-        # else
         await _create_new_in_progress_conversation()
         return None
 
@@ -869,16 +891,24 @@ async def _stream_handler(
         if authority_loss_close_task:
             await asyncio.gather(authority_loss_close_task, return_exceptions=True)
         return
+    if capture_protocol == 2:
+        if not await _asend_message_event(MessageServiceStatusEvent(status="capture_protocol_ready")):
+            return
+    elif capture_protocol != 0:
+        capture_authority.lose('unsupported_capture_protocol', current_conversation_id or '')
+        return
 
     def _update_in_progress_conversation(
         conversation: Conversation,
         segments: List[TranscriptSegment],
         photos: List[ConversationPhoto],
         finished_at: datetime,
+        started_at: Optional[datetime] = None,
     ):
         def persist_update():
             updated_segments: List[TranscriptSegment] = []
             removed_ids: List[str] = []
+            update_data = {'finished_at': finished_at}
 
             if segments:
                 conversation.transcript_segments, updated_segments, removed_ids = TranscriptSegment.combine_segments(
@@ -889,18 +919,25 @@ async def _stream_handler(
                     segment_person_assignment_map,
                     speaker_to_person_map,
                 )
-                conversations_db.update_conversation_segments(
-                    uid, conversation.id, [segment.dict() for segment in conversation.transcript_segments]
-                )
+                update_data['transcript_segments'] = [segment.dict() for segment in conversation.transcript_segments]
+
+            if started_at is not None:
+                update_data['started_at'] = started_at
 
             if photos:
-                conversations_db.store_conversation_photos(uid, conversation.id, photos)
-                # Update source if we now have photos
                 if conversation.source != ConversationSource.openglass:
-                    conversations_db.update_conversation(uid, conversation.id, {'source': ConversationSource.openglass})
-                    conversation.source = ConversationSource.openglass
+                    update_data['source'] = ConversationSource.openglass
 
-            conversations_db.update_conversation_finished_at(uid, conversation.id, finished_at)
+            if not conversations_db.update_in_progress_conversation_capture(
+                uid,
+                conversation.id,
+                update_data,
+                photos,
+            ):
+                capture_authority.lose('firestore_capture_status', conversation.id)
+                return None
+            if photos and conversation.source != ConversationSource.openglass:
+                conversation.source = ConversationSource.openglass
             return conversation, updated_segments, removed_ids
 
         return capture_authority.run_if_owned(
@@ -1569,9 +1606,13 @@ async def _stream_handler(
                             should_update = True
                             break
                 if should_update and not capture_authority.lost:
-                    conversations_db.update_conversation_segments(
-                        uid, conversation_id, conversation['transcript_segments']
-                    )
+                    if not conversations_db.update_in_progress_conversation_capture(
+                        uid,
+                        conversation_id,
+                        {'transcript_segments': conversation['transcript_segments']},
+                    ):
+                        capture_authority.lose('translation_firestore_status', conversation_id)
+                        return
 
             if websocket_active:
                 _send_message_event(TranslationEvent(segments=[s.dict() for s in translated_segments]))
@@ -1880,6 +1921,7 @@ async def _stream_handler(
                 continue
 
             transcript_segments = []
+            capture_started_at = None
             if segments_to_process:
                 last_transcript_time = time.time()
 
@@ -1887,8 +1929,8 @@ async def _stream_handler(
                 if not conversation_data.get('transcript_segments'):
                     first_speech_timestamp = first_audio_byte_timestamp + segments_to_process[0]["start"]
                     new_started_at = datetime.fromtimestamp(first_speech_timestamp, tz=timezone.utc)
-                    conversations_db.update_conversation(uid, current_conversation_id, {'started_at': new_started_at})
                     conversation_data['started_at'] = new_started_at
+                    capture_started_at = new_started_at
 
                 # Calculate unified time offset: audio stream start relative to conversation start
                 conversation_started_at = conversation_data['started_at']
@@ -1919,7 +1961,13 @@ async def _stream_handler(
 
             # Update transcript segments
             conversation = Conversation(**conversation_data)
-            result = _update_in_progress_conversation(conversation, transcript_segments, photos_to_process, finished_at)
+            result = _update_in_progress_conversation(
+                conversation,
+                transcript_segments,
+                photos_to_process,
+                finished_at,
+                started_at=capture_started_at,
+            )
             if not result or not result[0]:
                 continue
             conversation, updated_segments, removed_ids = result
@@ -2341,6 +2389,15 @@ async def _stream_handler(
                         elif json_data.get('type') == 'skip_question':
                             if onboarding_handler and not onboarding_handler.completed:
                                 await onboarding_handler.skip_current_question()
+                        elif json_data.get('type') == 'capture_drain' and capture_protocol == 2:
+                            if not current_conversation_id or not capture_authority.drain(
+                                current_conversation_id,
+                                'client_drain',
+                            ):
+                                break
+                            await _asend_message_event(MessageServiceStatusEvent(status="capture_protocol_drained"))
+                            websocket_active = False
+                            break
                         elif json_data.get('type') == 'suggested_transcript':
                             if use_custom_stt:
                                 suggested_segments = json_data.get('segments', [])
@@ -2571,6 +2628,7 @@ async def _listen(
     custom_stt_mode: CustomSttMode = CustomSttMode.disabled,
     onboarding_mode: bool = False,
     speaker_auto_assign_enabled: bool = False,
+    capture_protocol: int = 0,
 ):
     """
     WebSocket handler for app clients. Accepts the websocket connection and delegates to _stream_handler.
@@ -2602,6 +2660,7 @@ async def _listen(
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
         speaker_auto_assign_enabled=speaker_auto_assign_enabled,
+        capture_protocol=capture_protocol,
         socket_accepted_at=socket_accepted_at,
     )
     print("_listen ended", uid)
@@ -2622,6 +2681,7 @@ async def listen_handler(
     custom_stt: str = 'disabled',
     onboarding: str = 'disabled',
     speaker_auto_assign: str = 'disabled',
+    capture_protocol: int = 0,
 ):
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
@@ -2661,6 +2721,7 @@ async def listen_handler(
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
         speaker_auto_assign_enabled=speaker_auto_assign_enabled,
+        capture_protocol=capture_protocol,
     )
 
 

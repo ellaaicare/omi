@@ -26,6 +26,10 @@ class CaptureStreamAuthority:
                 self._on_loss(checkpoint, conversation_id)
         return False
 
+    def lose(self, checkpoint: str, conversation_id: str) -> bool:
+        """Fail this stream closed after a durable ownership check rejects a write."""
+        return self._lose(checkpoint, conversation_id)
+
     def refresh(self, conversation_id: str, checkpoint: str) -> bool:
         if self.lost:
             return False
@@ -57,7 +61,26 @@ class CaptureStreamAuthority:
             return None
         return operation()
 
-    def acquire(self, conversation_id: str, install: Callable[[], None], checkpoint: str) -> bool:
+    def drain(self, conversation_id: str, checkpoint: str) -> bool:
+        """Fence this exact generation before acknowledging a client-requested drain."""
+        if self.lost:
+            return False
+        result = redis_db.drain_capture_stream_authority(
+            self.uid,
+            self.generation_id,
+            conversation_id,
+        )
+        if result not in {'drained', 'already_drained'}:
+            return self._lose(checkpoint, conversation_id)
+        return True
+
+    def acquire(
+        self,
+        conversation_id: str,
+        install: Callable[[], None],
+        checkpoint: str,
+        uninstall: Optional[Callable[[], None]] = None,
+    ) -> bool:
         """Acquire a missing pointer before installing the initial durable stub."""
         if self.lost:
             return False
@@ -70,18 +93,28 @@ class CaptureStreamAuthority:
             return self._lose(checkpoint, conversation_id)
         try:
             install()
-        except Exception:
-            redis_db.release_capture_stream_authority_if_matches(
+            confirmed = redis_db.confirm_capture_stream_authority(
                 self.uid,
                 self.generation_id,
                 conversation_id,
             )
+        except Exception:
+            released = redis_db.release_capture_stream_authority_if_matches(
+                self.uid,
+                self.generation_id,
+                conversation_id,
+            )
+            if released and uninstall:
+                uninstall()
             raise
-        if not redis_db.confirm_capture_stream_authority(
-            self.uid,
-            self.generation_id,
-            conversation_id,
-        ):
+        if not confirmed:
+            released = redis_db.release_capture_stream_authority_if_matches(
+                self.uid,
+                self.generation_id,
+                conversation_id,
+            )
+            if released and uninstall:
+                uninstall()
             return self._lose(f'{checkpoint}_confirmation', conversation_id)
         return True
 
@@ -91,8 +124,9 @@ class CaptureStreamAuthority:
         new_conversation_id: str,
         install: Callable[[], None],
         checkpoint: str,
+        uninstall: Optional[Callable[[], None]] = None,
     ) -> bool:
-        """CAS the owned pointer before installing a same-stream successor stub."""
+        """Reserve, install, then publish a same-stream successor stub."""
         if self.lost:
             return False
         result = redis_db.rotate_in_progress_conversation_id(
@@ -105,12 +139,27 @@ class CaptureStreamAuthority:
             return self._lose(checkpoint, current_conversation_id)
         try:
             install()
-        except Exception:
-            redis_db.rotate_in_progress_conversation_id(
+            confirmed = redis_db.confirm_capture_stream_authority(
                 self.uid,
                 self.generation_id,
                 new_conversation_id,
-                current_conversation_id,
             )
+        except Exception:
+            released = redis_db.release_capture_stream_authority_if_matches(
+                self.uid,
+                self.generation_id,
+                new_conversation_id,
+            )
+            if released and uninstall:
+                uninstall()
             raise
+        if not confirmed:
+            released = redis_db.release_capture_stream_authority_if_matches(
+                self.uid,
+                self.generation_id,
+                new_conversation_id,
+            )
+            if released and uninstall:
+                uninstall()
+            return self._lose(f'{checkpoint}_confirmation', new_conversation_id)
         return True

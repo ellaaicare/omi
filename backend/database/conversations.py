@@ -562,6 +562,71 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+def _update_in_progress_conversation_capture_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_data: dict,
+    photos: List[ConversationPhoto],
+) -> bool:
+    """Apply capture output only while finalization has not claimed the parent document."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if status != ConversationStatus.in_progress.value:
+        return False
+
+    level = conversation.get('data_protection_level', 'standard')
+    if update_data:
+        transaction.update(conversation_ref, _prepare_conversation_for_write(update_data, uid, level))
+    photos_ref = conversation_ref.collection('photos')
+    for photo in photos:
+        photo_id = photo.id or str(uuid.uuid4())
+        photo_data = photo.dict()
+        photo_data['id'] = photo_id
+        transaction.set(photos_ref.document(photo_id), _prepare_photo_for_write(photo_data, uid, level))
+    return True
+
+
+@transactional
+def _update_in_progress_conversation_capture(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_data: dict,
+    photos: List[ConversationPhoto],
+) -> bool:
+    return _update_in_progress_conversation_capture_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        update_data,
+        photos,
+    )
+
+
+def update_in_progress_conversation_capture(
+    uid: str,
+    conversation_id: str,
+    update_data: dict,
+    photos: Optional[List[ConversationPhoto]] = None,
+) -> bool:
+    """Serialize capture writes with the in-progress-to-processing finalization claim."""
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_in_progress_conversation_capture(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        update_data,
+        photos or [],
+    )
+
+
 def _update_conversation_if_active_summary_version_transaction(
     transaction,
     conversation_ref,
