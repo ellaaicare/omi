@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -82,12 +83,19 @@ def _disable_external_observer_side_effects(monkeypatch):
         )
         return "recorded"
 
+    def finish_canonical(**kwargs):
+        corrections._persist_correction_audit(
+            kwargs["uid"], kwargs["conversation_id"], kwargs["correction_id"], kwargs["audit_update"]
+        )
+        return "finished"
+
     monkeypatch.setattr(corrections, "_emit_canonical_correction_event", noop_emit)
     monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", noop_propagate)
     monkeypatch.setattr(corrections, "summary_provider_config_for_uid", passthrough_provider_config)
     monkeypatch.setattr(corrections, "require_current_ai_consent", lambda uid: uid)
     monkeypatch.setattr(corrections, "_claim_initial_correction_submission", claim_initial)
     monkeypatch.setattr(corrections, "_record_failed_correction_attempt", record_failed)
+    monkeypatch.setattr(corrections, "_finish_canonical_reconciliation", finish_canonical)
     monkeypatch.setattr(corrections, "_start_correction_retry_attempt", lambda **kwargs: "started")
     monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: False)
 
@@ -1081,6 +1089,8 @@ def test_apply_corrected_summary_uses_shared_direct_writeback_service(monkeypatc
         "correction_id": "corr-123",
         "require_based_on_match": True,
         "require_canonical": True,
+        "correction_attempt_token": None,
+        "correction_source_compare_and_set": None,
     }
 
 
@@ -3798,6 +3808,35 @@ def test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_
         retry_attempt_token="repair-2",
         audit_update={"status": "applied"},
     )
+    assert stale_finish == "stale_attempt"
+    assert audit_ref.value["retry_lease_expires_at"] == "2026-08-16T00:04:30+00:00"
+
+    stale_failure = corrections._record_failed_correction_attempt_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        retry_attempt_token="repair-2",
+        audit_update={"status": "direct_apply_failed", "retry_lease_expires_at": None},
+        correction_state={"correction_id": correction_id, "status": "direct_apply_failed"},
+    )
+    stale_revocation = corrections._finalize_revoked_correction_in_transaction(
+        transaction,
+        conversation_ref,
+        audit_ref,
+        uid="owner-1",
+        conversation_id="conv-1",
+        correction_id=correction_id,
+        expected_retry_attempt_token="repair-2",
+        finalized_at="2026-08-16T00:03:00+00:00",
+    )
+    assert stale_failure == "stale_attempt"
+    assert stale_revocation["outcome"] == "stale_attempt"
+    assert audit_ref.value["status"] == "canonical_pending"
+    assert audit_ref.value["retry_lease_expires_at"] == "2026-08-16T00:04:30+00:00"
+
     current_finish = corrections._finish_canonical_reconciliation_in_transaction(
         transaction,
         conversation_ref,
@@ -3809,7 +3848,6 @@ def test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_
         retry_attempt_token="repair-1",
         audit_update={"status": "applied", "retry_lease_expires_at": None},
     )
-    assert stale_finish == "stale_attempt"
     assert current_finish == "finished"
     assert audit_ref.value["status"] == "applied"
     assert len(transaction.writes) == 2
@@ -3997,7 +4035,8 @@ def test_correction_terminal_sla_caps_provider_and_matches_client_budget_with_ma
     assert "conversationCorrectionBackendTerminalBound = Duration(seconds: 150)" in client_source
     assert "conversationCorrectionClientPollMargin = Duration(seconds: 30)" in client_source
     assert "conversationCorrectionClientPollBudget = Duration(seconds: 330)" in client_source
-    assert "conversationCorrectionDefaultPollAttempts = 331" in client_source
+    assert "final stopwatch = Stopwatch()..start()" in client_source
+    assert "requestTimeout: requestTimeout" in client_source
 
 
 def test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_without_second_provider_or_source_write(
@@ -4022,6 +4061,7 @@ def test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_
             "summary_context": {},
             "current_summary": _conversation()["structured"],
             "active_summary_version_id": "base-v1",
+            "retry_attempt_token": "attempt-1",
             "created_at": "2026-08-16T00:00:00+00:00",
             "events": [],
         }
@@ -4126,6 +4166,7 @@ def test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_
             segment_count=1,
             submitted_at="2026-08-16T00:00:00+00:00",
             active_summary_version_id="base-v1",
+            retry_attempt_token="attempt-1",
         )
     )
     assert pending.status == "canonical_pending"
@@ -4449,6 +4490,7 @@ def test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_w
         "trace_id": trace_id,
         "status": "processing",
         "active_summary_version_id": "base-v1",
+        "retry_attempt_token": "deadline-attempt",
     }
     monkeypatch.setattr(corrections, "CORRECTION_END_TO_END_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, cid: conversation)
@@ -4471,6 +4513,7 @@ def test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_w
             segment_count=1,
             submitted_at="2026-08-16T00:00:00+00:00",
             active_summary_version_id="base-v1",
+            retry_attempt_token="deadline-attempt",
         )
     )
     assert runtime_timeout.status == "direct_apply_failed"
@@ -4510,8 +4553,19 @@ def test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_w
             segment_count=1,
             submitted_at="2026-08-16T00:00:00+00:00",
             active_summary_version_id="base-v1",
+            retry_attempt_token="deadline-attempt",
         )
     )
     assert canonical_timeout.status == "canonical_pending"
     assert canonical_timeout.status != "direct_apply_failed"
     assert [version["id"] for version in conversation["summary_versions"]].count("corrected-v2") == 1
+
+    async def assert_blocking_deadline_returns_without_waiting_for_worker():
+        blocking_started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await corrections._CorrectionDeadline(budget_seconds=0.01).run_blocking(
+                lambda: time.sleep(0.05),
+            )
+        assert time.monotonic() - blocking_started < 0.04
+
+    asyncio.run(assert_blocking_deadline_returns_without_waiting_for_worker())

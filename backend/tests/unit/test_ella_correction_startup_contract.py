@@ -1,3 +1,4 @@
+import ast
 import os
 import subprocess
 import sys
@@ -9,6 +10,8 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 def _run_clean_backend_probe(source: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(BACKEND_ROOT)
+    env.setdefault("GOOGLE_CLOUD_PROJECT", "ella-startup-probe")
+    env.setdefault("FIRESTORE_EMULATOR_HOST", "127.0.0.1:1")
     return subprocess.run(
         [sys.executable, "-c", source],
         cwd=BACKEND_ROOT,
@@ -20,6 +23,21 @@ def _run_clean_backend_probe(source: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_runtime_resolver_imports_real_in_tree_dependency_closure():
+    guarded_paths = (
+        BACKEND_ROOT / "ella" / "services" / "provisioning.py",
+        BACKEND_ROOT / "ella" / "routers" / "corrections.py",
+    )
+    violations = []
+    for path in guarded_paths:
+        module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for function in (
+            node for node in ast.walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ):
+            for node in ast.walk(function):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    violations.append(f"{path.relative_to(BACKEND_ROOT)}:{node.lineno}")
+    assert violations == []
+
     probe = _run_clean_backend_probe(
         "from ella.services.runtime_resolver import "
         "_self_hosted_target_mode, cloud_runtime_authority_identity, revalidate_cloud_runtime_authority; "

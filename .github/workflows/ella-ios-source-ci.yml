@@ -216,25 +216,32 @@ jobs:
           correction_ids="$(sed '/^$/d' /tmp/correction-terminal-receipt-collection.log)"
           required_correction_ids=(
             "tests/unit/test_ella_correction_startup_contract.py::test_runtime_resolver_imports_real_in_tree_dependency_closure"
-            "tests/unit/test_ella_correction_startup_contract.py::test_main_wires_consent_firestore_and_router_while_disabled_extensions_stay_fail_closed"
+            "tests/unit/test_ella_correction_startup_contract.py::test_ella_enabled_main_startup_registers_correction_routes_and_keeps_consent_fail_closed"
             "tests/unit/test_ella_correction_runtime_resolver.py::test_self_hosted_correction_transcript_mode_maps_to_hermes_chat"
             "tests/unit/test_ella_conversation_corrections.py::test_generate_corrected_summary_binds_two_owners_to_two_current_runtimes_with_zero_legacy_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_provider_egress_revalidates_consent_after_slow_runtime_authority_resolution"
             "tests/unit/test_ella_conversation_corrections.py::test_correction_routes_use_deployed_exact_auth_and_current_consent_dependencies"
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_effects"
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_rejects_changed_active_version_before_any_write"
             "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_live_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_fenced"
             "tests/unit/test_ella_conversation_corrections.py::test_initial_queued_correction_reclaims_expired_lost_background_task_but_not_live_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_after_source_commit_is_terminal_applied_and_never_reverts_to_pending"
             "tests/unit/test_ella_conversation_corrections.py::test_exact_receipt_poll_reclaims_stale_initial_queue_but_not_live_lease"
             "tests/unit/test_ella_conversation_corrections.py::test_correction_terminal_sla_caps_provider_and_matches_client_budget_with_margin"
             "tests/unit/test_ella_conversation_corrections.py::test_correction_writeback_never_publishes_applied_before_canonical_durability"
+            "tests/unit/test_ella_conversation_corrections.py::test_canonical_success_survives_confirmation_marker_failure_and_replays_without_second_source_cas"
             "tests/unit/test_ella_conversation_corrections.py::test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_without_second_provider_or_source_write"
             "tests/unit/test_ella_conversation_corrections.py::test_receipt_reconciles_stale_failure_to_applied_only_after_canonical_confirmation"
             "tests/unit/test_ella_conversation_corrections.py::test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced"
+            "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_terminalizes_background_retry_and_receipt_recovery_without_provider_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_initial_submission_transaction_is_stable_across_crash_and_response_loss"
+            "tests/unit/test_ella_conversation_corrections.py::test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_writer"
           )
           for required_id in "${required_correction_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 73
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 80
           python -m pytest \
             tests/unit/test_ella_correction_startup_contract.py \
             tests/unit/test_ella_correction_runtime_resolver.py \

@@ -52,8 +52,10 @@ async def write_conversation_summary(
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
     canonical_egress_guard: Optional[Callable[[], None]] = None,
+    correction_attempt_token: Optional[str] = None,
+    correction_source_compare_and_set: Optional[Callable[[dict[str, Any]], str]] = None,
 ) -> dict[str, Any]:
-    conversation = conversations_db.get_conversation(uid, conversation_id)
+    conversation = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
     if conversation is None:
         raise ConversationSummaryNotFoundError(conversation_id)
 
@@ -118,7 +120,8 @@ async def write_conversation_summary(
                 'active_summary_version_id': conversation.get('active_summary_version_id'),
             }
         try:
-            conversations_db.update_conversation(uid, conversation_id, confirmed_update)
+            if correction_source_compare_and_set is None:
+                await asyncio.to_thread(conversations_db.update_conversation, uid, conversation_id, confirmed_update)
         except Exception:
             # The canonical writer already returned durable success. A source
             # confirmation marker is repairable and must not turn that commit
@@ -217,19 +220,25 @@ async def write_conversation_summary(
             'submitted_at': existing_state.get('submitted_at'),
             'updated_at': state_updated_at,
             'active_summary_version_id': version_update['active_summary_version_id'],
+            'retry_attempt_token': correction_attempt_token,
         }
 
     if require_based_on_match:
-        updated = conversations_db.update_conversation_if_active_summary_version(
-            uid,
-            conversation_id,
-            based_on_version_id,
-            update_data,
-        )
+        if correction_source_compare_and_set is not None:
+            update_outcome = await asyncio.to_thread(correction_source_compare_and_set, update_data)
+            updated = update_outcome == 'updated'
+        else:
+            updated = await asyncio.to_thread(
+                conversations_db.update_conversation_if_active_summary_version,
+                uid,
+                conversation_id,
+                based_on_version_id,
+                update_data,
+            )
         if not updated:
             raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
     else:
-        conversations_db.update_conversation(uid, conversation_id, update_data)
+        await asyncio.to_thread(conversations_db.update_conversation, uid, conversation_id, update_data)
     canonical_base = dict(conversation)
     canonical_conversation = {
         **canonical_base,
@@ -288,13 +297,20 @@ async def write_conversation_summary(
                 'error': 'canonical_write_unconfirmed',
                 'updated_at': datetime.now(timezone.utc),
             }
-            conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': failed_state})
+            if correction_source_compare_and_set is None:
+                await asyncio.to_thread(
+                    conversations_db.update_conversation,
+                    uid,
+                    conversation_id,
+                    {'enrichment_state': failed_state},
+                )
             raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from canonical_error
         confirmed_update = {'enrichment_state': confirmed_state}
         if confirmed_correction_state is not None:
             confirmed_update['correction_state'] = confirmed_correction_state
         try:
-            conversations_db.update_conversation(uid, conversation_id, confirmed_update)
+            if correction_source_compare_and_set is None:
+                await asyncio.to_thread(conversations_db.update_conversation, uid, conversation_id, confirmed_update)
         except Exception:
             logger.exception(
                 'Canonical summary durable before source marker confirmation',

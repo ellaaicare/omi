@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import inspect
 import logging
 import os
 import re
@@ -301,7 +302,7 @@ async def generate_summary_from_prompt(
     required_tags: tuple[str, ...],
     config: SummaryProviderConfig,
     async_client_factory: Any = httpx.AsyncClient,
-    egress_guard: Optional[Callable[[], None]] = None,
+    egress_guard: Optional[Callable[[], Any]] = None,
 ) -> dict[str, Any]:
     if config.provider == 'hermes-api':
         if config.cloud_authority is None and not config.hermes_api_key:
@@ -322,7 +323,9 @@ async def generate_summary_from_prompt(
         if config.provider == 'hermes-api' and config.cloud_authority is not None:
             url, model, api_key = await resolve_summary_provider_send(config)
         if egress_guard is not None:
-            egress_guard()
+            guard_result = egress_guard()
+            if inspect.isawaitable(guard_result):
+                await guard_result
         headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
         if config.provider == 'hermes-api':
             headers.update(
@@ -362,6 +365,8 @@ async def apply_summary_update(
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
     canonical_egress_guard: Optional[Callable[[], None]] = None,
+    correction_attempt_token: Optional[str] = None,
+    correction_source_compare_and_set: Optional[Callable[[dict[str, Any]], str]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -382,6 +387,8 @@ async def apply_summary_update(
         require_based_on_match=require_based_on_match,
         preserve_generated_results=preserve_generated_results,
         canonical_egress_guard=canonical_egress_guard,
+        correction_attempt_token=correction_attempt_token,
+        correction_source_compare_and_set=correction_source_compare_and_set,
     )
 
 

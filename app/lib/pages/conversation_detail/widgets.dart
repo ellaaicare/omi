@@ -9,7 +9,6 @@ import 'package:gradient_borders/box_borders/gradient_box_border.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:tuple/tuple.dart';
-import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/webhooks.dart';
@@ -1003,6 +1002,7 @@ class CorrectSummarySheet extends StatefulWidget {
   final String appSummary;
   final CorrectionSubmitter submitter;
   final CorrectionReceiptPoller receiptPoller;
+  final PendingConversationCorrectionIdentityStore correctionIdentityStore;
   final ExactAccountAuthorityVerifier? Function() authorityProvider;
   final Future<void> Function()? onApplied;
 
@@ -1011,6 +1011,7 @@ class CorrectSummarySheet extends StatefulWidget {
     required this.appSummary,
     this.submitter = submitConversationCorrection,
     this.receiptPoller = pollConversationCorrectionReceipt,
+    this.correctionIdentityStore = const PendingConversationCorrectionIdentityStore(),
     this.authorityProvider = WalOwnerAuthority.operationEntry,
     this.onApplied,
     super.key,
@@ -1023,8 +1024,6 @@ class CorrectSummarySheet extends StatefulWidget {
 class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
-  String? _pendingCorrectionId;
-  String? _pendingCorrectionText;
 
   @override
   void dispose() {
@@ -1035,19 +1034,24 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   Future<void> _submit() async {
     final correctionText = _controller.text.trim();
     if (correctionText.isEmpty || _isSubmitting) return;
-    if (_pendingCorrectionText != correctionText || _pendingCorrectionId == null) {
-      _pendingCorrectionText = correctionText;
-      _pendingCorrectionId = const Uuid().v4();
-    }
 
     setState(() => _isSubmitting = true);
     final authority = widget.authorityProvider();
     ConversationCorrectionReceipt? terminalReceipt;
     try {
       if (authority != null && authority.uid.isNotEmpty && authority.isExactCurrent()) {
+        final correctionId = await widget.correctionIdentityStore.acquire(
+          uid: authority.uid,
+          conversationId: widget.conversation.id,
+          correctionText: correctionText,
+          summaryTitle: widget.conversation.structured.title,
+          summaryOverview: widget.conversation.structured.overview,
+          appSummary: widget.appSummary,
+        );
+        if (!authority.isExactCurrent()) throw StateError('Exact account authority changed before correction submit');
         final submission = await widget.submitter(
           conversationId: widget.conversation.id,
-          correctionId: _pendingCorrectionId!,
+          correctionId: correctionId,
           correctionText: correctionText,
           summaryTitle: widget.conversation.structured.title,
           summaryOverview: widget.conversation.structured.overview,
@@ -1062,6 +1066,13 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
             expectedAuthenticatedUid: authority.uid,
             exactAuthority: authority,
           );
+          if (terminalReceipt != null && !terminalReceipt.isPending) {
+            await widget.correctionIdentityStore.clearIfTerminal(
+              uid: authority.uid,
+              conversationId: widget.conversation.id,
+              correctionId: correctionId,
+            );
+          }
         }
       }
     } catch (_) {

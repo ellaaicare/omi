@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from database import app_settings as app_settings_db
 from database import voice_canary as voice_canary_db
 from database.honcho_attestation import (
     ATTESTATION_TTL_SECONDS,
@@ -413,8 +414,6 @@ def _ensure_self_hosted_grok_voice_mode(
     if not uid or not fresh_entitlement_created:
         return
     try:
-        from database import app_settings as app_settings_db
-
         current = app_settings_db.get_voice_settings(uid) or {}
         if str((current.get("voice_mode") or "").strip()):
             return  # preserve existing choice; do not clobber

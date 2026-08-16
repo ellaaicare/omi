@@ -12,7 +12,9 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -120,6 +122,44 @@ CORRECTION_OBSERVER_WORK_INLINE_WITHOUT_BACKGROUND = os.getenv(
     "no",
 }
 _canonical_event_store = PostgresCanonicalEventStore()
+
+
+class _CorrectionDeadline:
+    def __init__(self, *, started_at: Optional[float] = None, budget_seconds: Optional[float] = None):
+        self.started_at = time.monotonic() if started_at is None else started_at
+        self.budget_seconds = (
+            CORRECTION_END_TO_END_DEADLINE_SECONDS if budget_seconds is None else max(0.0, budget_seconds)
+        )
+
+    def remaining(self) -> float:
+        return max(0.0, self.budget_seconds - (time.monotonic() - self.started_at))
+
+    def require_remaining(self) -> float:
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise TimeoutError("correction_deadline_exceeded")
+        return remaining
+
+    async def run_async(self, operation):
+        return await asyncio.wait_for(operation(), timeout=self.require_remaining())
+
+    async def run_blocking(self, operation, *args, **kwargs):
+        return await asyncio.wait_for(
+            asyncio.to_thread(operation, *args, **kwargs),
+            timeout=self.require_remaining(),
+        )
+
+    async def run_cleanup_blocking(self, operation, *args, **kwargs):
+        terminal_remaining = max(
+            0.0,
+            CORRECTION_TERMINAL_BOUND_SECONDS - (time.monotonic() - self.started_at),
+        )
+        if terminal_remaining <= 0:
+            raise TimeoutError("correction_terminal_cleanup_deadline_exceeded")
+        return await asyncio.wait_for(
+            asyncio.to_thread(operation, *args, **kwargs),
+            timeout=min(5.0, terminal_remaining),
+        )
 
 
 class SummaryContext(BaseModel):
@@ -420,7 +460,9 @@ async def _generate_corrected_summary(
     structured: dict[str, Any],
     transcript: str,
     segment_count: int,
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> dict[str, Any]:
+    deadline = deadline or _CorrectionDeadline()
     prompt = _build_direct_correction_prompt(
         request=request,
         structured=structured,
@@ -428,33 +470,125 @@ async def _generate_corrected_summary(
         segment_count=segment_count,
     )
     # Runtime resolution can itself cross a managed-provider boundary.
-    require_current_ai_consent(uid)
-    config = await summary_provider_config_for_uid(
-        uid,
-        SummaryProviderConfig(
-            provider=CORRECTION_PROVIDER,
-            hermes_url=HERMES_CORRECTION_API_URL,
-            hermes_model=HERMES_CORRECTION_MODEL,
-            hermes_api_key=_hermes_correction_api_key(),
-            legacy_url=DIRECT_CORRECTION_API_URL,
-            legacy_model=DIRECT_CORRECTION_MODEL,
-            legacy_api_key=_legacy_correction_api_key(),
-            timeout_seconds=DIRECT_CORRECTION_TIMEOUT_SECONDS,
-        ),
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    config = await deadline.run_async(
+        lambda: summary_provider_config_for_uid(
+            uid,
+            SummaryProviderConfig(
+                provider=CORRECTION_PROVIDER,
+                hermes_url=HERMES_CORRECTION_API_URL,
+                hermes_model=HERMES_CORRECTION_MODEL,
+                hermes_api_key=_hermes_correction_api_key(),
+                legacy_url=DIRECT_CORRECTION_API_URL,
+                legacy_model=DIRECT_CORRECTION_MODEL,
+                legacy_api_key=_legacy_correction_api_key(),
+                timeout_seconds=min(DIRECT_CORRECTION_TIMEOUT_SECONDS, deadline.require_remaining()),
+            ),
+        )
     )
     # Consent can be revoked while runtime authority is resolving. Revalidate
     # again at the last possible point before retained transcript egress.
-    require_current_ai_consent(uid)
-    return await generate_summary_from_prompt(
-        prompt=prompt,
-        fallback=structured,
-        session_id=_correction_session_id(uid, conversation_id, correction_id),
-        session_key=_correction_session_key(uid),
-        trace_id=trace_id,
-        required_tags=("omi", "correction"),
-        config=config,
-        async_client_factory=httpx.AsyncClient,
-        egress_guard=lambda: require_current_ai_consent(uid),
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    config = replace(config, timeout_seconds=min(config.timeout_seconds, deadline.require_remaining()))
+
+    async def require_consent_before_provider_egress() -> None:
+        await deadline.run_blocking(require_current_ai_consent, uid)
+
+    return await deadline.run_async(
+        lambda: generate_summary_from_prompt(
+            prompt=prompt,
+            fallback=structured,
+            session_id=_correction_session_id(uid, conversation_id, correction_id),
+            session_key=_correction_session_key(uid),
+            trace_id=trace_id,
+            required_tags=("omi", "correction"),
+            config=config,
+            async_client_factory=httpx.AsyncClient,
+            egress_guard=require_consent_before_provider_egress,
+        )
+    )
+
+
+def _apply_correction_source_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_active_summary_version_id: Optional[str],
+    retry_attempt_token: str,
+    update_data: dict[str, Any],
+    transitioned_at: str,
+) -> str:
+    """Commit source CAS and canonical-pending ownership in one transaction."""
+
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not getattr(conversation_snapshot, "exists", False) or not getattr(audit_snapshot, "exists", False):
+        return "missing"
+    conversation = conversation_snapshot.to_dict() or {}
+    audit = audit_snapshot.to_dict() or {}
+    if (
+        str(audit.get("uid") or "") != uid
+        or str(audit.get("conversation_id") or "") != conversation_id
+        or str(audit.get("correction_id") or "") != correction_id
+        or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
+        or str(audit.get("status") or "") not in {"queued", "retry_queued", "processing", "canonical_pending"}
+    ):
+        return "stale_attempt"
+    if str(conversation.get("active_summary_version_id") or "") != str(expected_active_summary_version_id or ""):
+        return "version_drift"
+    lease_expires_at = _parse_correction_timestamp(audit.get("retry_lease_expires_at"))
+    if lease_expires_at is not None and lease_expires_at <= datetime.now(timezone.utc):
+        return "lease_expired"
+    state = conversation.get("correction_state") or {}
+    if state and str(state.get("correction_id") or "") != correction_id:
+        return "stale_attempt"
+    doc_level = conversation.get("data_protection_level", "standard")
+    prepared_data = conversations_db._prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    transaction.set(
+        audit_ref,
+        {
+            "status": "canonical_pending",
+            "pending": True,
+            "updated_at": transitioned_at,
+            "failure_code": "canonical_write_unconfirmed",
+            "retry_attempt_token": retry_attempt_token,
+        },
+        merge=True,
+    )
+    return "updated"
+
+
+@transactional
+def _apply_correction_source_transaction(transaction, conversation_ref, audit_ref, **kwargs) -> str:
+    return _apply_correction_source_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _apply_correction_source_compare_and_set(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_active_summary_version_id: Optional[str],
+    retry_attempt_token: str,
+    update_data: dict[str, Any],
+) -> str:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _apply_correction_source_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        expected_active_summary_version_id=expected_active_summary_version_id,
+        retry_attempt_token=retry_attempt_token,
+        update_data=update_data,
+        transitioned_at=_now_iso(),
     )
 
 
@@ -466,6 +600,7 @@ async def _apply_corrected_summary(
     trace_id: str,
     active_summary_version_id: Optional[str],
     corrected: dict[str, Any],
+    retry_attempt_token: Optional[str] = None,
 ) -> dict[str, Any]:
     return await apply_summary_update(
         uid=uid,
@@ -478,6 +613,21 @@ async def _apply_corrected_summary(
         require_based_on_match=True,
         require_canonical=True,
         canonical_egress_guard=lambda: require_current_ai_consent(uid),
+        correction_attempt_token=retry_attempt_token,
+        correction_source_compare_and_set=(
+            (
+                lambda update_data: _apply_correction_source_compare_and_set(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    expected_active_summary_version_id=active_summary_version_id,
+                    retry_attempt_token=retry_attempt_token,
+                    update_data=update_data,
+                )
+            )
+            if retry_attempt_token
+            else None
+        ),
     )
 
 
@@ -1567,9 +1717,12 @@ async def _run_direct_correction_apply(
     source_conversation: Optional[dict[str, Any]] = None,
     retry_attempt_token: Optional[str] = None,
     retry_deadline_at: Optional[str] = None,
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> ConversationCorrectionResponse:
+    deadline = deadline or _CorrectionDeadline()
     if retry_attempt_token:
-        attempt_status = _start_correction_retry_attempt(
+        attempt_status = await deadline.run_blocking(
+            _start_correction_retry_attempt,
             uid=uid,
             conversation_id=conversation_id,
             correction_id=correction_id,
@@ -1580,9 +1733,10 @@ async def _run_direct_correction_apply(
             return _correction_response_from_audit(
                 conversation_id=conversation_id,
                 correction_id=correction_id,
-                audit=_read_correction_audit(uid, conversation_id, correction_id),
+                audit=await deadline.run_blocking(_read_correction_audit, uid, conversation_id, correction_id),
             )
-    consent_terminal = _require_correction_consent_or_terminal_response(
+    consent_terminal = await deadline.run_blocking(
+        _require_correction_consent_or_terminal_response,
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
@@ -1590,16 +1744,16 @@ async def _run_direct_correction_apply(
     )
     if consent_terminal is not None:
         return consent_terminal
-    deadline_seconds = CORRECTION_END_TO_END_DEADLINE_SECONDS
     parsed_retry_deadline = _parse_correction_timestamp(retry_deadline_at)
     if parsed_retry_deadline is not None:
-        deadline_seconds = min(
-            deadline_seconds,
-            max(0.0, (parsed_retry_deadline - datetime.now(timezone.utc)).total_seconds()),
+        deadline.budget_seconds = min(
+            deadline.budget_seconds,
+            max(0.0, (parsed_retry_deadline - datetime.now(timezone.utc)).total_seconds())
+            + (time.monotonic() - deadline.started_at),
         )
     try:
-        async with asyncio.timeout(deadline_seconds):
-            corrected_summary = await _generate_corrected_summary(
+        corrected_summary = await deadline.run_async(
+            lambda: _generate_corrected_summary(
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
@@ -1608,62 +1762,70 @@ async def _run_direct_correction_apply(
                 structured=structured,
                 transcript=transcript,
                 segment_count=segment_count,
+                deadline=deadline,
             )
-            consent_terminal = _require_correction_consent_or_terminal_response(
+        )
+        consent_terminal = await deadline.run_blocking(
+            _require_correction_consent_or_terminal_response,
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            expected_retry_attempt_token=retry_attempt_token,
+        )
+        if consent_terminal is not None:
+            return consent_terminal
+        if retry_attempt_token:
+            attempt_status = await deadline.run_blocking(
+                _start_correction_retry_attempt,
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
-                expected_retry_attempt_token=retry_attempt_token,
+                recorded_base_version_id=str(active_summary_version_id or ""),
+                retry_attempt_token=retry_attempt_token,
             )
-            if consent_terminal is not None:
-                return consent_terminal
-            if retry_attempt_token:
-                attempt_status = _start_correction_retry_attempt(
-                    uid=uid,
+            if attempt_status != "started":
+                return _correction_response_from_audit(
                     conversation_id=conversation_id,
                     correction_id=correction_id,
-                    recorded_base_version_id=str(active_summary_version_id or ""),
-                    retry_attempt_token=retry_attempt_token,
+                    audit=await deadline.run_blocking(_read_correction_audit, uid, conversation_id, correction_id),
                 )
-                if attempt_status != "started":
-                    return _correction_response_from_audit(
-                        conversation_id=conversation_id,
-                        correction_id=correction_id,
-                        audit=_read_correction_audit(uid, conversation_id, correction_id),
-                    )
-            apply_result = await _apply_corrected_summary(
+        apply_result = await deadline.run_async(
+            lambda: _apply_corrected_summary(
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
                 trace_id=trace_id,
                 active_summary_version_id=active_summary_version_id,
                 corrected=corrected_summary,
+                retry_attempt_token=retry_attempt_token,
             )
-            if apply_result.get("canonical_confirmed") is not True:
-                raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
+        )
+        if apply_result.get("canonical_confirmed") is not True:
+            raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
         applied_at = _now_iso()
-        try:
-            _persist_correction_audit(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    "status": "applied",
-                    "applied_at": applied_at,
-                    "updated_at": applied_at,
-                    "direct_apply_result": apply_result,
-                    "direct_apply_summary": corrected_summary,
-                    "failure_code": None,
-                    "retry_attempt_token": retry_attempt_token,
-                    "retry_lease_expires_at": None,
-                },
-            )
-        except Exception:
-            # The exact receipt reconciles a canonical-confirmed active version
-            # to applied, so an audit transport failure cannot flip it to failed.
-            logger.exception(
-                "Canonical correction applied before audit confirmation",
-                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        finish_status = await deadline.run_blocking(
+            _finish_canonical_reconciliation,
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            recorded_base_version_id=str(active_summary_version_id or ""),
+            retry_attempt_token=str(retry_attempt_token or ""),
+            audit_update={
+                "status": "applied",
+                "pending": False,
+                "applied_at": applied_at,
+                "updated_at": applied_at,
+                "direct_apply_result": apply_result,
+                "direct_apply_summary": corrected_summary,
+                "failure_code": None,
+                "retry_lease_expires_at": None,
+            },
+        )
+        if finish_status != "finished":
+            return _correction_response_from_audit(
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                audit=await deadline.run_blocking(_read_correction_audit, uid, conversation_id, correction_id),
             )
         try:
             _append_correction_event(
@@ -1684,20 +1846,26 @@ async def _run_direct_correction_apply(
                 extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
             )
         try:
-            require_current_ai_consent(uid)
-            latest_source = conversations_db.get_conversation(uid, conversation_id) or source_conversation or {}
-            proposal_id = await _run_post_source_correction_side_effects(
-                uid=uid,
-                conversation_id=conversation_id,
-                correction_id=correction_id,
-                trace_id=trace_id,
-                request=request,
-                source_conversation=latest_source,
-                structured=structured,
-                transcript=transcript,
-                segment_count=segment_count,
-                submitted_at=submitted_at,
-                active_summary_version_id=active_summary_version_id,
+            await deadline.run_blocking(require_current_ai_consent, uid)
+            latest_source = (
+                await deadline.run_blocking(conversations_db.get_conversation, uid, conversation_id)
+                or source_conversation
+                or {}
+            )
+            proposal_id = await deadline.run_async(
+                lambda: _run_post_source_correction_side_effects(
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    trace_id=trace_id,
+                    request=request,
+                    source_conversation=latest_source,
+                    structured=structured,
+                    transcript=transcript,
+                    segment_count=segment_count,
+                    submitted_at=submitted_at,
+                    active_summary_version_id=active_summary_version_id,
+                )
             )
         except Exception:
             logger.exception(
@@ -1716,7 +1884,8 @@ async def _run_direct_correction_apply(
         if isinstance(exc, HTTPException):
             detail = exc.detail if isinstance(exc.detail, dict) else {}
             if exc.status_code == 403 and detail.get("code") == "ai_consent_required":
-                terminal = _require_correction_consent_or_terminal_response(
+                terminal = await deadline.run_cleanup_blocking(
+                    _require_correction_consent_or_terminal_response,
                     uid=uid,
                     conversation_id=conversation_id,
                     correction_id=correction_id,
@@ -1724,18 +1893,21 @@ async def _run_direct_correction_apply(
                 )
                 if terminal is not None:
                     return terminal
-        reconciled = _reconcile_committed_correction(
+        reconciled = await deadline.run_cleanup_blocking(
+            _reconcile_committed_correction,
             uid=uid,
             conversation_id=conversation_id,
             correction_id=correction_id,
             trace_id=trace_id,
             active_summary_version_id=active_summary_version_id,
             proposal_id=proposal_id,
+            expected_retry_attempt_token=retry_attempt_token,
         )
         if reconciled is not None:
             return reconciled
         if retry_attempt_token:
-            attempt_status = _start_correction_retry_attempt(
+            attempt_status = await deadline.run_cleanup_blocking(
+                _start_correction_retry_attempt,
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
@@ -1746,21 +1918,37 @@ async def _run_direct_correction_apply(
                 return _correction_response_from_audit(
                     conversation_id=conversation_id,
                     correction_id=correction_id,
-                    audit=_read_correction_audit(uid, conversation_id, correction_id),
+                    audit=await deadline.run_cleanup_blocking(
+                        _read_correction_audit, uid, conversation_id, correction_id
+                    ),
                 )
         if isinstance(exc, CanonicalSummaryWriteUnconfirmedError):
             pending_at = _now_iso()
-            pending_payload = {
-                "status": "canonical_pending",
-                "updated_at": pending_at,
-                "failure_code": "canonical_write_unconfirmed",
-                "source": request.source,
-                "active_summary_version_id": active_summary_version_id,
-                "retry_attempt_token": retry_attempt_token,
-                "retry_lease_expires_at": None,
-            }
             try:
-                _persist_correction_audit(uid, conversation_id, correction_id, pending_payload)
+                finish_status = await deadline.run_cleanup_blocking(
+                    _finish_canonical_reconciliation,
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    correction_id=correction_id,
+                    recorded_base_version_id=str(active_summary_version_id or ""),
+                    retry_attempt_token=str(retry_attempt_token or ""),
+                    audit_update={
+                        "status": "canonical_pending",
+                        "pending": True,
+                        "updated_at": pending_at,
+                        "failure_code": "canonical_write_unconfirmed",
+                        "source": request.source,
+                        "retry_lease_expires_at": None,
+                    },
+                )
+                if finish_status != "finished":
+                    return _correction_response_from_audit(
+                        conversation_id=conversation_id,
+                        correction_id=correction_id,
+                        audit=await deadline.run_cleanup_blocking(
+                            _read_correction_audit, uid, conversation_id, correction_id
+                        ),
+                    )
                 _append_correction_event(
                     uid,
                     conversation_id,
@@ -1771,23 +1959,6 @@ async def _run_direct_correction_apply(
                         "at": pending_at,
                         "trace_id": trace_id,
                         "failure_code": "canonical_write_unconfirmed",
-                    },
-                )
-                _update_conversation_correction_state(
-                    uid,
-                    conversation_id,
-                    {
-                        "correction_state": {
-                            "status": "canonical_pending",
-                            "pending": True,
-                            "correction_id": correction_id,
-                            "trace_id": trace_id,
-                            "submitted_at": submitted_at,
-                            "updated_at": pending_at,
-                            "source": request.source,
-                            "active_summary_version_id": active_summary_version_id,
-                            "failure_code": "canonical_write_unconfirmed",
-                        }
                     },
                 )
             except Exception:
@@ -1830,7 +2001,8 @@ async def _run_direct_correction_apply(
                 "active_summary_version_id": active_summary_version_id,
                 "failure_code": failure_code,
             }
-            failure_outcome = _record_failed_correction_attempt(
+            failure_outcome = await deadline.run_cleanup_blocking(
+                _record_failed_correction_attempt,
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
@@ -1839,13 +2011,15 @@ async def _run_direct_correction_apply(
                 correction_state=failed_state,
             )
             if failure_outcome == "irreversible_success":
-                reconciled = _reconcile_committed_correction(
+                reconciled = await deadline.run_cleanup_blocking(
+                    _reconcile_committed_correction,
                     uid=uid,
                     conversation_id=conversation_id,
                     correction_id=correction_id,
                     trace_id=trace_id,
                     active_summary_version_id=active_summary_version_id,
                     proposal_id=proposal_id,
+                    expected_retry_attempt_token=retry_attempt_token,
                 )
                 if reconciled is not None:
                     return reconciled
@@ -1853,7 +2027,9 @@ async def _run_direct_correction_apply(
                 return _correction_response_from_audit(
                     conversation_id=conversation_id,
                     correction_id=correction_id,
-                    audit=_read_correction_audit(uid, conversation_id, correction_id),
+                    audit=await deadline.run_cleanup_blocking(
+                        _read_correction_audit, uid, conversation_id, correction_id
+                    ),
                 )
             _append_correction_event(
                 uid,
@@ -1885,7 +2061,9 @@ async def _submit_conversation_correction(
     background_tasks: Optional[BackgroundTasks] = None,
     uid: str = Depends(get_exact_firebase_uid),
 ) -> ConversationCorrectionResponse:
-    conversation = conversations_db.get_conversation(uid, conversation_id)
+    deadline = _CorrectionDeadline()
+    await deadline.run_blocking(require_current_ai_consent, uid)
+    conversation = await deadline.run_blocking(conversations_db.get_conversation, uid, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conversation.get("is_locked", False):
@@ -1923,6 +2101,8 @@ async def _submit_conversation_correction(
         "submitted_at": submitted_at,
         "updated_at": submitted_at,
         "active_summary_version_id": expected_active_summary_version_id,
+        "retry_attempt_token": initial_attempt_token,
+        "retry_lease_expires_at": initial_lease_expires_at,
     }
 
     audit_payload = {
@@ -1947,7 +2127,8 @@ async def _submit_conversation_correction(
         "updated_at": submitted_at,
         "events": [{"stage": "queued", "status": "ok", "at": submitted_at, "trace_id": trace_id}],
     }
-    initial_claim = _claim_initial_correction_submission(
+    initial_claim = await deadline.run_blocking(
+        _claim_initial_correction_submission,
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
@@ -1988,6 +2169,7 @@ async def _submit_conversation_correction(
             "source_conversation": conversation,
             "retry_attempt_token": initial_attempt_token,
             "retry_deadline_at": initial_lease_expires_at,
+            "deadline": deadline,
         }
         if DIRECT_CORRECTION_BACKGROUND_ENABLED and background_tasks is not None:
             background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)
@@ -2548,6 +2730,8 @@ def _finish_canonical_reconciliation_in_transaction(
         or str(audit.get("retry_attempt_token") or "") != retry_attempt_token
     ):
         return "stale_attempt"
+    if str(audit.get("status") or "") in {"applied", "undone", "consent_revoked"}:
+        return "already_terminal"
     _, corrected = _correction_summary_versions(conversation, correction_id)
     corrected_id = str(corrected.get("id") or "") if corrected else ""
     if (
@@ -2557,6 +2741,30 @@ def _finish_canonical_reconciliation_in_transaction(
     ):
         return "version_drift"
     transaction.set(audit_ref, audit_update, merge=True)
+    state = conversation.get("correction_state") or {}
+    if str(state.get("correction_id") or "") == correction_id:
+        status_value = str(audit_update.get("status") or state.get("status") or "canonical_pending")
+        state_update = {
+            **state,
+            "status": status_value,
+            "pending": bool(audit_update.get("pending", status_value != "applied")),
+            "updated_at": audit_update.get("updated_at"),
+            "failure_code": audit_update.get("failure_code"),
+            "active_summary_version_id": corrected_id,
+            "retry_attempt_token": retry_attempt_token,
+        }
+        conversation_update: dict[str, Any] = {"correction_state": state_update}
+        if status_value == "applied":
+            enrichment = conversation.get("enrichment_state") or {}
+            conversation_update["enrichment_state"] = {
+                **enrichment,
+                "status": "writeback_applied",
+                "pending": False,
+                "canonical_status": "completed",
+                "error": None,
+                "updated_at": audit_update.get("updated_at"),
+            }
+        transaction.set(conversation_ref, conversation_update, merge=True)
     return "finished"
 
 
@@ -2665,6 +2873,7 @@ def _reconcile_committed_correction(
     trace_id: str,
     active_summary_version_id: Optional[str],
     proposal_id: Optional[str],
+    expected_retry_attempt_token: Optional[str],
 ) -> Optional[ConversationCorrectionResponse]:
     """Derive a non-failure receipt from source/canonical durable evidence."""
 
@@ -2682,6 +2891,8 @@ def _reconcile_committed_correction(
     ):
         return None
     audit = _read_correction_audit(uid, conversation_id, correction_id)
+    if not expected_retry_attempt_token or str(audit.get("retry_attempt_token") or "") != expected_retry_attempt_token:
+        return None
     enrichment = conversation.get("enrichment_state") or {}
     audit_apply_result = audit.get("direct_apply_result") or {}
     canonical_confirmed = bool(
@@ -2694,11 +2905,13 @@ def _reconcile_committed_correction(
     )
     reconciled_at = _now_iso()
     try:
-        _persist_correction_audit(
-            uid,
-            conversation_id,
-            correction_id,
-            {
+        finish_status = _finish_canonical_reconciliation(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            recorded_base_version_id=str(active_summary_version_id or ""),
+            retry_attempt_token=expected_retry_attempt_token,
+            audit_update={
                 "status": status_value,
                 "pending": status_value != "applied",
                 "updated_at": reconciled_at,
@@ -2707,11 +2920,14 @@ def _reconcile_committed_correction(
                 "retry_lease_expires_at": None,
             },
         )
+        if finish_status != "finished":
+            return None
     except Exception:
         logger.exception(
             "Failed to persist reconciled correction receipt",
             extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
         )
+        return None
     return ConversationCorrectionResponse(
         correction_id=correction_id,
         conversation_id=conversation_id,
@@ -2728,8 +2944,11 @@ async def _retry_failed_conversation_correction(
     conversation_id: str,
     correction_id: str,
     background_tasks: Optional[BackgroundTasks],
+    deadline: Optional[_CorrectionDeadline] = None,
 ) -> ConversationCorrectionResponse:
-    conversation, audit, recorded_base_version_id = _exact_correction_retry_context(
+    deadline = deadline or _CorrectionDeadline()
+    conversation, audit, recorded_base_version_id = await deadline.run_blocking(
+        _exact_correction_retry_context,
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
@@ -2745,7 +2964,8 @@ async def _retry_failed_conversation_correction(
     elif str(conversation.get("active_summary_version_id") or "") != recorded_base_version_id:
         raise HTTPException(status_code=409, detail="Conversation summary changed after correction")
 
-    consent_terminal = _require_correction_consent_or_terminal_response(
+    consent_terminal = await deadline.run_blocking(
+        _require_correction_consent_or_terminal_response,
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
@@ -2777,7 +2997,8 @@ async def _retry_failed_conversation_correction(
             )
         reconciliation_now = datetime.now(timezone.utc)
         reconciliation_attempt_token = _new_correction_attempt_token()
-        claim_status = _claim_canonical_reconciliation(
+        claim_status = await deadline.run_blocking(
+            _claim_canonical_reconciliation,
             uid=uid,
             conversation_id=conversation_id,
             correction_id=correction_id,
@@ -2814,16 +3035,18 @@ async def _retry_failed_conversation_correction(
             apply_result["canonical_confirmed"] = True
         else:
             try:
-                require_current_ai_consent(uid)
-                async with asyncio.timeout(CORRECTION_END_TO_END_DEADLINE_SECONDS):
-                    apply_result = await _apply_corrected_summary(
+                await deadline.run_blocking(require_current_ai_consent, uid)
+                apply_result = await deadline.run_async(
+                    lambda: _apply_corrected_summary(
                         uid=uid,
                         conversation_id=conversation_id,
                         correction_id=correction_id,
                         trace_id=trace_id,
                         active_summary_version_id=recorded_base_version_id,
                         corrected=corrected,
+                        retry_attempt_token=reconciliation_attempt_token,
                     )
+                )
                 if apply_result.get("canonical_confirmed") is not True:
                     raise CanonicalSummaryWriteUnconfirmedError("canonical_write_unconfirmed")
             except HTTPException as error:
@@ -2842,7 +3065,8 @@ async def _retry_failed_conversation_correction(
             except (CanonicalSummaryWriteUnconfirmedError, TimeoutError):
                 pending_at = _now_iso()
                 try:
-                    finish_status = _finish_canonical_reconciliation(
+                    finish_status = await deadline.run_blocking(
+                        _finish_canonical_reconciliation,
                         uid=uid,
                         conversation_id=conversation_id,
                         correction_id=correction_id,
@@ -2863,13 +3087,15 @@ async def _retry_failed_conversation_correction(
                         extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
                     )
                 if finish_status != "finished":
-                    reconciled = _reconcile_committed_correction(
+                    reconciled = await deadline.run_cleanup_blocking(
+                        _reconcile_committed_correction,
                         uid=uid,
                         conversation_id=conversation_id,
                         correction_id=correction_id,
                         trace_id=trace_id,
                         active_summary_version_id=recorded_base_version_id,
                         proposal_id=str(audit.get("proposal_id") or "") or None,
+                        expected_retry_attempt_token=reconciliation_attempt_token,
                     )
                     if reconciled is not None:
                         return reconciled
@@ -2891,7 +3117,8 @@ async def _retry_failed_conversation_correction(
                 )
         applied_at = _now_iso()
         try:
-            finish_status = _finish_canonical_reconciliation(
+            finish_status = await deadline.run_blocking(
+                _finish_canonical_reconciliation,
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
@@ -2914,13 +3141,15 @@ async def _retry_failed_conversation_correction(
                 extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
             )
         if finish_status != "finished":
-            reconciled = _reconcile_committed_correction(
+            reconciled = await deadline.run_cleanup_blocking(
+                _reconcile_committed_correction,
                 uid=uid,
                 conversation_id=conversation_id,
                 correction_id=correction_id,
                 trace_id=trace_id,
                 active_summary_version_id=recorded_base_version_id,
                 proposal_id=str(audit.get("proposal_id") or "") or None,
+                expected_retry_attempt_token=reconciliation_attempt_token,
             )
             if reconciled is not None and reconciled.status == "applied":
                 return reconciled
@@ -2992,7 +3221,8 @@ async def _retry_failed_conversation_correction(
     retry_queued_at = retry_now.isoformat()
     retry_lease_expires_at = _correction_retry_lease_expiry(retry_now)
     retry_attempt_token = _new_correction_attempt_token()
-    claim_status = _claim_failed_correction_retry(
+    claim_status = await deadline.run_blocking(
+        _claim_failed_correction_retry,
         uid=uid,
         conversation_id=conversation_id,
         correction_id=correction_id,
@@ -3034,6 +3264,7 @@ async def _retry_failed_conversation_correction(
         "source_conversation": conversation,
         "retry_attempt_token": retry_attempt_token,
         "retry_deadline_at": retry_lease_expires_at,
+        "deadline": deadline,
     }
     if background_tasks is not None:
         background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)

@@ -115,6 +115,7 @@ void main() {
           required body,
           required expectedAuthenticatedUid,
           required exactAuthority,
+          required timeout,
         }) async {
           expect(method, 'POST');
           expect(expectedAuthenticatedUid, 'owner-1');
@@ -154,6 +155,7 @@ void main() {
           required correctionId,
           required expectedAuthenticatedUid,
           required exactAuthority,
+          required requestTimeout,
         }) {
           receiptCalls += 1;
           return getConversationCorrectionReceipt(
@@ -168,6 +170,7 @@ void main() {
               required body,
               required expectedAuthenticatedUid,
               required exactAuthority,
+              required timeout,
             }) async {
               expect(method, 'GET');
               expect(body, isEmpty);
@@ -226,7 +229,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
     await tester.pumpAndSettle();
     expect(submittedCorrectionIds, hasLength(2));
-    expect(submittedCorrectionIds.toSet(), hasLength(1));
+    expect(submittedCorrectionIds.toSet(), hasLength(2));
     expect(receiptCalls, 3);
     expect(find.textContaining('self_hosted_runtime_target_mode_required'), findsNothing);
     expect(find.byType(CorrectSummarySheet), findsOneWidget);
@@ -247,7 +250,6 @@ void main() {
     tester,
   ) async {
     const conversationId = 'conversation-es';
-    const correctionId = 'correction-es';
     const correctionText = 'contenido privado que no debe registrarse';
     final authority = _ExactAuthority('owner-1');
     final logs = <String>[];
@@ -337,6 +339,7 @@ void main() {
         required body,
         required expectedAuthenticatedUid,
         required exactAuthority,
+        required timeout,
       }) async {
         submissionCalls += 1;
         return http.Response(
@@ -363,6 +366,7 @@ void main() {
         required correctionId,
         required expectedAuthenticatedUid,
         required exactAuthority,
+        required requestTimeout,
       }) async {
         receiptCalls += 1;
         return ConversationCorrectionReceipt(
@@ -379,5 +383,155 @@ void main() {
     expect(receiptCalls, 152);
     expect(waited, const Duration(seconds: 151));
     expect(receipt?.isApplied, isTrue);
+  });
+
+  test('pending correction identity survives restart and is atomically reused by concurrent workers', () async {
+    const store = PendingConversationCorrectionIdentityStore();
+    const arguments = (
+      uid: 'owner-1',
+      conversationId: 'conversation-durable',
+      correctionText: 'Correct the retained attribution.',
+      summaryTitle: 'Before',
+      summaryOverview: '[Ella] Before.',
+      appSummary: '[Ella] Before.',
+    );
+
+    final concurrentIds = await Future.wait([
+      store.acquire(
+        uid: arguments.uid,
+        conversationId: arguments.conversationId,
+        correctionText: arguments.correctionText,
+        summaryTitle: arguments.summaryTitle,
+        summaryOverview: arguments.summaryOverview,
+        appSummary: arguments.appSummary,
+      ),
+      const PendingConversationCorrectionIdentityStore().acquire(
+        uid: arguments.uid,
+        conversationId: arguments.conversationId,
+        correctionText: arguments.correctionText,
+        summaryTitle: arguments.summaryTitle,
+        summaryOverview: arguments.summaryOverview,
+        appSummary: arguments.appSummary,
+      ),
+    ]);
+    final afterRestart = await const PendingConversationCorrectionIdentityStore().acquire(
+      uid: arguments.uid,
+      conversationId: arguments.conversationId,
+      correctionText: arguments.correctionText,
+      summaryTitle: arguments.summaryTitle,
+      summaryOverview: arguments.summaryOverview,
+      appSummary: arguments.appSummary,
+    );
+
+    expect(concurrentIds.toSet(), hasLength(1));
+    expect(afterRestart, concurrentIds.first);
+  });
+
+  test('changed correction payload gets a new identity and stale terminal cleanup cannot clear it', () async {
+    const store = PendingConversationCorrectionIdentityStore();
+    final original = await store.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionText: 'Original correction.',
+      summaryTitle: 'Before',
+    );
+    final changed = await store.acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionText: 'Changed correction.',
+      summaryTitle: 'Before',
+    );
+    await store.clearIfTerminal(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionId: original,
+    );
+    final changedReplay = await const PendingConversationCorrectionIdentityStore().acquire(
+      uid: 'owner-1',
+      conversationId: 'conversation-changed',
+      correctionText: 'Changed correction.',
+      summaryTitle: 'Before',
+    );
+
+    expect(changed, isNot(original));
+    expect(changedReplay, changed);
+  });
+
+  test('submission fails closed when response correction id differs from submitted id', () async {
+    final authority = _ExactAuthority('owner-1');
+    final submission = await submitConversationCorrection(
+      conversationId: 'conversation-id-mismatch',
+      correctionId: 'submitted-correction-id',
+      correctionText: 'Correct this.',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      debugLog: (_) {},
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        required timeout,
+      }) async {
+        return http.Response(
+          jsonEncode({
+            'correction_id': 'different-correction-id',
+            'conversation_id': 'conversation-id-mismatch',
+            'trace_id': 'correction:conversation-id-mismatch:different-correction-id',
+            'status': 'queued',
+            'queued': true,
+          }),
+          202,
+        );
+      },
+    );
+
+    expect(submission, isNull);
+  });
+
+  test('receipt polling uses elapsed budget and bounds each request by remaining time', () async {
+    final authority = _ExactAuthority('owner-1');
+    var elapsed = Duration.zero;
+    final requestTimeouts = <Duration>[];
+    final waits = <Duration>[];
+    var receiptCalls = 0;
+
+    final receipt = await pollConversationCorrectionReceipt(
+      conversationId: 'conversation-elapsed-budget',
+      correctionId: 'correction-elapsed-budget',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      pollBudget: const Duration(milliseconds: 2500),
+      elapsed: () => elapsed,
+      wait: (duration) async {
+        waits.add(duration);
+        elapsed += duration;
+      },
+      fetchReceipt: ({
+        required conversationId,
+        required correctionId,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        required requestTimeout,
+      }) async {
+        receiptCalls += 1;
+        requestTimeouts.add(requestTimeout);
+        elapsed += const Duration(milliseconds: 400);
+        return ConversationCorrectionReceipt(
+          correctionId: correctionId,
+          conversationId: conversationId,
+          status: 'canonical_pending',
+          before: const ConversationCorrectionSummary(),
+          after: const ConversationCorrectionSummary(),
+        );
+      },
+    );
+
+    expect(receipt, isNull);
+    expect(receiptCalls, 2);
+    expect(requestTimeouts, const [Duration(milliseconds: 2500), Duration(milliseconds: 1100)]);
+    expect(waits, const [Duration(seconds: 1), Duration(milliseconds: 700)]);
+    expect(elapsed, const Duration(milliseconds: 2500));
   });
 }

@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -23,6 +26,7 @@ typedef ConversationCorrectionTransport = Future<http.Response?> Function({
   required String body,
   required String? expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier? exactAuthority,
+  required Duration? timeout,
 });
 
 typedef ConversationCorrectionReceiptFetcher = Future<ConversationCorrectionReceipt?> Function({
@@ -30,6 +34,7 @@ typedef ConversationCorrectionReceiptFetcher = Future<ConversationCorrectionRece
   required String correctionId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
+  required Duration requestTimeout,
 });
 
 Future<http.Response?> _defaultConversationCorrectionTransport({
@@ -38,6 +43,7 @@ Future<http.Response?> _defaultConversationCorrectionTransport({
   required String body,
   required String? expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier? exactAuthority,
+  required Duration? timeout,
 }) =>
     makeApiCall(
       url: url,
@@ -46,6 +52,7 @@ Future<http.Response?> _defaultConversationCorrectionTransport({
       body: body,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
+      timeout: timeout,
     );
 
 Future<http.Response?> _defaultConversationDeleteTransport({
@@ -319,6 +326,125 @@ class ConversationCorrectionSubmission {
   }
 }
 
+class PendingConversationCorrectionIdentityStore {
+  const PendingConversationCorrectionIdentityStore();
+
+  static const _storagePrefix = 'pending_conversation_correction_v1_';
+  static final Map<String, Future<void>> _inFlightByStorageKey = {};
+
+  Future<T> _serialized<T>(String storageKey, Future<T> Function() operation) async {
+    while (true) {
+      final preceding = _inFlightByStorageKey[storageKey];
+      if (preceding == null) break;
+      await preceding;
+    }
+
+    final completion = Completer<void>();
+    final completionFuture = completion.future;
+    _inFlightByStorageKey[storageKey] = completionFuture;
+    try {
+      return await operation();
+    } finally {
+      if (identical(_inFlightByStorageKey[storageKey], completionFuture)) {
+        _inFlightByStorageKey.remove(storageKey);
+      }
+      completion.complete();
+    }
+  }
+
+  String _storageKey({required String uid, required String conversationId}) {
+    final ownerConversationHash = sha256.convert(utf8.encode('$uid\u0000$conversationId')).toString();
+    return '$_storagePrefix$ownerConversationHash';
+  }
+
+  String _payloadFingerprint({
+    required String correctionText,
+    String? summaryTitle,
+    String? summaryOverview,
+    String? appSummary,
+  }) {
+    final payload = jsonEncode({
+      'correction_text': correctionText,
+      'source': 'ios',
+      'summary_context': {
+        if (summaryTitle != null) 'title': summaryTitle,
+        if (summaryOverview != null) 'overview': summaryOverview,
+        if (appSummary != null) 'app_summary': appSummary,
+      },
+    });
+    return sha256.convert(utf8.encode(payload)).toString();
+  }
+
+  Future<String> acquire({
+    required String uid,
+    required String conversationId,
+    required String correctionText,
+    String? summaryTitle,
+    String? summaryOverview,
+    String? appSummary,
+  }) {
+    final storageKey = _storageKey(uid: uid, conversationId: conversationId);
+    return _serialized(storageKey, () async {
+      final preferences = SharedPreferencesUtil();
+      final fingerprint = _payloadFingerprint(
+        correctionText: correctionText,
+        summaryTitle: summaryTitle,
+        summaryOverview: summaryOverview,
+        appSummary: appSummary,
+      );
+      final persisted = preferences.getString(storageKey);
+      if (persisted.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(persisted);
+          if (decoded is Map &&
+              decoded['uid'] == uid &&
+              decoded['conversation_id'] == conversationId &&
+              decoded['payload_fingerprint'] == fingerprint) {
+            final correctionId = decoded['correction_id']?.toString().trim() ?? '';
+            if (correctionId.isNotEmpty) return correctionId;
+          }
+        } on FormatException {
+          // Replace corrupt local state with a new durable identity.
+        }
+      }
+
+      final correctionId = const Uuid().v4();
+      final saved = await preferences.saveString(
+        storageKey,
+        jsonEncode({
+          'uid': uid,
+          'conversation_id': conversationId,
+          'payload_fingerprint': fingerprint,
+          'correction_id': correctionId,
+        }),
+      );
+      if (!saved) throw StateError('Unable to persist correction identity');
+      return correctionId;
+    });
+  }
+
+  Future<void> clearIfTerminal({
+    required String uid,
+    required String conversationId,
+    required String correctionId,
+  }) {
+    final storageKey = _storageKey(uid: uid, conversationId: conversationId);
+    return _serialized(storageKey, () async {
+      final preferences = SharedPreferencesUtil();
+      final persisted = preferences.getString(storageKey);
+      if (persisted.isEmpty) return;
+      try {
+        final decoded = jsonDecode(persisted);
+        if (decoded is Map && decoded['correction_id'] == correctionId) {
+          await preferences.remove(storageKey);
+        }
+      } on FormatException {
+        await preferences.remove(storageKey);
+      }
+    });
+  }
+}
+
 Future<ConversationCorrectionSubmission?> submitConversationCorrection({
   required String conversationId,
   required String correctionId,
@@ -351,13 +477,16 @@ Future<ConversationCorrectionSubmission?> submitConversationCorrection({
     }),
     expectedAuthenticatedUid: expectedUid,
     exactAuthority: authority,
+    timeout: null,
   );
   if (response == null) return null;
   debugLog('submitConversationCorrection: status=${response.statusCode}');
   if (response.statusCode != 200 && response.statusCode != 201 && response.statusCode != 202) return null;
   try {
     final submission = ConversationCorrectionSubmission.tryParse(jsonDecode(response.body));
-    if (submission == null || submission.conversationId != conversationId) return null;
+    if (submission == null || submission.conversationId != conversationId || submission.correctionId != correctionId) {
+      return null;
+    }
     return submission;
   } on FormatException {
     return null;
@@ -538,6 +667,7 @@ Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
   required String correctionId,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  Duration? requestTimeout,
   ConversationCorrectionTransport transport = _defaultConversationCorrectionTransport,
   void Function(String message) debugLog = Logger.debug,
 }) async {
@@ -552,6 +682,7 @@ Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
     body: '',
     expectedAuthenticatedUid: expectedUid,
     exactAuthority: authority,
+    timeout: requestTimeout,
   );
   if (response == null) return null;
   debugLog('getConversationCorrectionReceipt: status=${response.statusCode}');
@@ -573,7 +704,6 @@ Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
 const conversationCorrectionBackendTerminalBound = Duration(seconds: 150);
 const conversationCorrectionClientPollMargin = Duration(seconds: 30);
 const conversationCorrectionClientPollBudget = Duration(seconds: 330);
-const conversationCorrectionDefaultPollAttempts = 331;
 
 Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
   required String conversationId,
@@ -583,22 +713,39 @@ Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
   ConversationCorrectionReceiptFetcher fetchReceipt = getConversationCorrectionReceipt,
   Future<void> Function(Duration duration) wait = Future<void>.delayed,
   Duration pollInterval = const Duration(seconds: 1),
-  int maxAttempts = conversationCorrectionDefaultPollAttempts,
+  Duration pollBudget = conversationCorrectionClientPollBudget,
+  int? maxAttempts,
+  Duration Function()? elapsed,
 }) async {
-  if (maxAttempts < 1) return null;
-  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+  if (pollBudget <= Duration.zero || (maxAttempts != null && maxAttempts < 1)) return null;
+  final stopwatch = Stopwatch()..start();
+  final elapsedTime = elapsed ?? (() => stopwatch.elapsed);
+  var attempts = 0;
+  while (true) {
+    final remainingBeforeRequest = pollBudget - elapsedTime();
+    if (remainingBeforeRequest <= Duration.zero || (maxAttempts != null && attempts >= maxAttempts)) return null;
     if (!exactAuthority.isExactCurrent()) return null;
-    final receipt = await fetchReceipt(
-      conversationId: conversationId,
-      correctionId: correctionId,
-      expectedAuthenticatedUid: expectedAuthenticatedUid,
-      exactAuthority: exactAuthority,
-    );
+    attempts += 1;
+    final requestTimeout =
+        remainingBeforeRequest < ApiClient.requestTimeoutRead ? remainingBeforeRequest : ApiClient.requestTimeoutRead;
+    ConversationCorrectionReceipt? receipt;
+    try {
+      receipt = await fetchReceipt(
+        conversationId: conversationId,
+        correctionId: correctionId,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+        requestTimeout: requestTimeout,
+      ).timeout(remainingBeforeRequest);
+    } on TimeoutException {
+      return null;
+    }
     if (!exactAuthority.isExactCurrent()) return null;
     if (receipt != null && !receipt.isPending) return receipt;
-    if (attempt + 1 < maxAttempts) await wait(pollInterval);
+    final remainingBeforeWait = pollBudget - elapsedTime();
+    if (remainingBeforeWait <= Duration.zero || (maxAttempts != null && attempts >= maxAttempts)) return null;
+    await wait(pollInterval < remainingBeforeWait ? pollInterval : remainingBeforeWait);
   }
-  return null;
 }
 
 Future<ConversationCorrectionReceipt?> undoConversationCorrection({
