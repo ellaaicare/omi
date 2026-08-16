@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -32,6 +33,17 @@ def _postgres_binary(name: str) -> str:
 
 @pytest.fixture(scope="module")
 def canonical_postgres(tmp_path_factory):
+    service_host = os.environ.get("ELLA_TEST_POSTGRES_HOST")
+    if service_host:
+        yield {
+            "host": service_host,
+            "port": int(os.environ.get("ELLA_TEST_POSTGRES_PORT", "5432")),
+            "user": os.environ.get("ELLA_TEST_POSTGRES_USER", "postgres"),
+            "password": os.environ.get("ELLA_TEST_POSTGRES_PASSWORD", "postgres"),
+            "database": os.environ.get("ELLA_TEST_POSTGRES_DATABASE", "postgres"),
+        }
+        return
+
     initdb = _postgres_binary("initdb")
     pg_ctl = _postgres_binary("pg_ctl")
     root = tmp_path_factory.mktemp("canonical-postgres")
