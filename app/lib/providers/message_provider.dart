@@ -15,6 +15,7 @@ import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
+import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
@@ -58,6 +59,19 @@ typedef AskAiStreamSender = Stream<ServerMessageChunk> Function(
 );
 typedef AskAiResponseSink = FutureOr<void> Function(Map<String, dynamic> chunk);
 typedef AiConsentEnsurer = Future<bool> Function();
+typedef V2VTurnPersister = Future<EllaServiceResult<List<ServerMessage>>> Function({
+  required String uid,
+  required String sessionId,
+  required String turnId,
+  required String userEventId,
+  required String assistantEventId,
+  required String userTranscript,
+  required String assistantTranscript,
+  required DateTime startedAt,
+  required DateTime completedAt,
+  required int? turnOrdinal,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
 
 class MessageProtectedOperation {
   MessageProtectedOperation._(this._lease, this.generation, this._currentCheck);
@@ -85,6 +99,7 @@ class MessageProvider extends ChangeNotifier {
     AskAiStreamSender? askAiStreamSender,
     AskAiResponseSink? askAiResponseSink,
     AiConsentEnsurer? aiConsentEnsurer,
+    V2VTurnPersister? v2vTurnPersister,
   })  : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps,
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.operationEntry,
         _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
@@ -97,7 +112,8 @@ class MessageProvider extends ChangeNotifier {
             ((message, fileIds, authority) =>
                 sendMessageStreamServer(message, filesId: fileIds, exactAuthority: authority)),
         _askAiResponseSink = askAiResponseSink,
-        _aiConsentEnsurer = aiConsentEnsurer {
+        _aiConsentEnsurer = aiConsentEnsurer,
+        _v2vTurnPersister = v2vTurnPersister ?? persistEllaV2VTurn {
     if (PlatformService.isDesktop) {
       _askAIChannel = const MethodChannel('com.omi/ask_ai');
       _askAIChannel.setMethodCallHandler(_handleAskAIMethodCall);
@@ -114,6 +130,7 @@ class MessageProvider extends ChangeNotifier {
   final AskAiStreamSender _askAiStreamSender;
   final AskAiResponseSink? _askAiResponseSink;
   final AiConsentEnsurer? _aiConsentEnsurer;
+  final V2VTurnPersister _v2vTurnPersister;
   int _operationGeneration = 0;
 
   static Future<List<App>> _retrieveInstalledChatApps() async {
@@ -663,7 +680,7 @@ class MessageProvider extends ChangeNotifier {
           SharedPreferencesUtil().cachedMessages = messages;
           setHasCachedMessages(messages.isNotEmpty);
         }
-        messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        messages.sort(compareServerMessagesChronologically);
         setLoadingMessages(false);
         notifyListeners();
         return;
@@ -686,7 +703,7 @@ class MessageProvider extends ChangeNotifier {
         SharedPreferencesUtil().cachedMessages = messages;
         setHasCachedMessages(true);
       }
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
       setLoadingMessages(false);
       notifyListeners();
     } finally {
@@ -698,7 +715,7 @@ class MessageProvider extends ChangeNotifier {
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
       messages = SharedPreferencesUtil().cachedMessages;
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
     }
     notifyListeners();
   }
@@ -721,7 +738,7 @@ class MessageProvider extends ChangeNotifier {
         notifyListeners();
       }
       messages = mes;
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
       setLoadingMessages(false);
       notifyListeners();
       return messages;
@@ -755,7 +772,7 @@ class MessageProvider extends ChangeNotifier {
       var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
       if (!_canCommit(lease, generation)) return;
       messages = mes;
-      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages.sort(compareServerMessagesChronologically);
       setClearingChat(false);
       notifyListeners();
     } finally {
@@ -821,6 +838,88 @@ class MessageProvider extends ChangeNotifier {
     return true;
   }
 
+  Future<bool> persistV2VTurn({
+    required String expectedUid,
+    required String sessionId,
+    required String turnId,
+    required String userEventId,
+    required String assistantEventId,
+    required String userTranscript,
+    required String assistantTranscript,
+    required DateTime startedAt,
+    required DateTime completedAt,
+    required int? turnOrdinal,
+    bool injectIntoChat = true,
+  }) async {
+    final lease = _beginAccountCommit();
+    if (lease == null || lease.uid != expectedUid) {
+      lease?.close();
+      return false;
+    }
+    final generation = _operationGeneration;
+    try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return false;
+      final result = await _v2vTurnPersister(
+        uid: expectedUid,
+        sessionId: sessionId,
+        turnId: turnId,
+        userEventId: userEventId,
+        assistantEventId: assistantEventId,
+        userTranscript: userTranscript,
+        assistantTranscript: assistantTranscript,
+        startedAt: startedAt,
+        completedAt: completedAt,
+        turnOrdinal: turnOrdinal,
+        exactAuthority: lease,
+      );
+      if (!_canCommit(lease, generation)) return false;
+      if (result.isFailure) {
+        _setStreamFailure(result.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
+        return false;
+      }
+
+      final canonicalMessages = result.value ?? const <ServerMessage>[];
+      if (canonicalMessages.length != 2) {
+        _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
+        return false;
+      }
+      final canonicalIds = canonicalMessages.map((message) => message.id).toSet();
+      final canonicalSenders = canonicalMessages.map((message) => message.sender).toSet();
+      if (canonicalIds.length != 2 ||
+          canonicalSenders.length != 2 ||
+          !canonicalSenders.containsAll({MessageSender.human, MessageSender.ai}) ||
+          canonicalMessages.any((message) => !message.fromVoice)) {
+        _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
+        return false;
+      }
+
+      if (!injectIntoChat) {
+        _lastStreamFailure = null;
+        return true;
+      }
+
+      final updated = List<ServerMessage>.from(messages);
+      for (final canonicalMessage in canonicalMessages) {
+        final index = updated.indexWhere((message) => message.id == canonicalMessage.id);
+        if (index < 0) {
+          updated.add(canonicalMessage);
+        } else {
+          updated[index] = canonicalMessage;
+        }
+      }
+      updated.sort(compareServerMessagesChronologically);
+      if (!_canCommit(lease, generation)) return false;
+      messages = updated;
+      _lastStreamFailure = null;
+      SharedPreferencesUtil().cachedMessages = messages;
+      setHasCachedMessages(true);
+      notifyListeners();
+      return true;
+    } finally {
+      lease.close();
+    }
+  }
+
   Future sendVoiceMessageStreamToServer(
     List<List<int>> audioBytes, {
     Function? onFirstChunkRecived,
@@ -861,11 +960,7 @@ class MessageProvider extends ChangeNotifier {
         bool firstChunkRecieved = false;
         _lastStreamFailure = null;
         final chunks = await collectTerminalMessageChunks(
-          _voiceChatStreamSender(
-            [file],
-            expectedAuthenticatedUid: lease.uid,
-            exactAuthority: lease,
-          ),
+          _voiceChatStreamSender([file], expectedAuthenticatedUid: lease.uid, exactAuthority: lease),
         );
         if (!_canCommit(lease, operationGeneration)) return;
         for (final chunk in chunks) {

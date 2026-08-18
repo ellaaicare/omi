@@ -3,23 +3,87 @@ name: Ella iOS Source CI
 on:
   pull_request:
     branches:
+      - codex/815-device-rejection-successor
       - feature/phase-a-testflight
       - main
     paths:
       - app/**
+      - backend/main.py
+      - backend/database/authority_advisory_lock.py
+      - backend/database/ella_provisioning.py
+      - backend/database/honcho_attestation.py
+      - backend/database/managed_cloud_consent.py
+      - backend/database/runtime_targets.py
+      - backend/database/voice_canary.py
+      - backend/ella/routers/ai_consent.py
       - backend/ella/routers/guardian.py
+      - backend/database/action_items.py
+      - backend/database/chat.py
+      - backend/database/conversations.py
+      - backend/database/folders.py
+      - backend/database/redis_db.py
+      - backend/database/task_sync.py
+      - backend/database/user_usage.py
+      - backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md
+      - backend/models/conversation.py
+      - backend/models/message_event.py
+      - backend/routers/conversations.py
+      - backend/routers/pusher.py
+      - backend/routers/task_integrations.py
+      - backend/routers/transcribe.py
+      - backend/utils/conversations/capture_authority.py
+      - backend/utils/conversations/process_conversation.py
+      - backend/utils/analytics.py
+      - backend/utils/app_integrations.py
+      - backend/utils/stt/streaming.py
+      - backend/utils/webhooks.py
+      - backend/utils/ella/postprocess.py
+      - backend/utils/llm/knowledge_graph.py
       - backend/ella/routers/resolve.py
       - backend/ella/routers/escalations.py
       - backend/ella/routers/chat.py
+      - backend/ella/routers/canonical_events.py
+      - backend/ella/routers/corrections.py
       - backend/ella/routers/voice.py
+      - backend/ella/services/correction_honcho_contract.py
+      - backend/ella/services/hermes_session.py
       - backend/ella/routers/callbacks.py
+      - backend/ella/services/runtime_resolver.py
+      - backend/ella/services/ai_consent.py
+      - backend/ella/services/consent_authority.py
+      - backend/ella/services/correction_propagation.py
+      - backend/ella/services/hermes_cloud.py
+      - backend/ella/services/hermes_cloud_policy.py
+      - backend/ella/services/hermes_cloud_staged_attestation.py
+      - backend/ella/services/provisioning.py
+      - backend/ella/services/runtime_errors.py
+      - backend/ella/services/summary_recovery.py
+      - backend/ella/services/canonical_summary_source.py
+      - backend/ella/services/summary_writeback.py
+      - backend/ella/docs/SUMMARY_CAS_ROLLOUT.md
+      - backend/ella/utils/provision_authority.py
+      - backend/tests/unit/test_ella_correction_startup_contract.py
+      - backend/tests/unit/test_ella_conversation_corrections.py
+      - backend/tests/unit/test_ella_correction_runtime_resolver.py
       - backend/tests/unit/test_ella_guardian_delivery.py
       - backend/tests/unit/test_ella_canonical_context.py
+      - backend/tests/unit/test_ella_canonical_event_version_fence.py
+      - backend/tests/unit/test_ella_canonical_omi.py
       - backend/tests/unit/test_ella_user_route_auth.py
+      - backend/tests/unit/test_ella_v2v_turn_persistence.py
+      - backend/tests/unit/test_conversation_summary_cas.py
+      - backend/tests/unit/test_ella_callbacks_summary_update.py
+      - backend/tests/fixtures/ella_canonical_source_v1.json
+      - backend/tests/unit/test_ella_chat_temporal_context.py
+      - backend/tests/unit/test_ella_correction_honcho_contract.py
       - backend/utils/ella/exact_firebase_auth.py
+      - backend/utils/ella/canonical_omi.py
       - backend/utils/ella/scanner.py
       - backend/utils/notifications.py
+      - backend/utils/task_sync.py
       - backend/tests/unit/test_guardian_notification_delivery.py
+      - backend/tests/unit/test_capture_task_sync_idempotency.py
+      - backend/tests/unit/test_conversation_processing_failures.py
       - .github/workflows/ella-ios-source-ci.yml
   workflow_dispatch:
     inputs:
@@ -42,6 +106,7 @@ jobs:
     timeout-minutes: 60
     env:
       ELLA_CI_FLUTTER_VERSION: 3.41.1
+      ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       ELLA_CI_NETWORK_SANDBOX: >-
         (version 1) (allow default) (deny network*)
         (allow network-inbound (local ip "localhost:*"))
@@ -55,8 +120,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify exact checked-out head
+        working-directory: .
+        env:
+          ELLA_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          [[ "$ELLA_EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character head SHA." >&2
+            exit 1
+          }
+          actual_head_sha="$(git rev-parse HEAD)"
+          [[ "$actual_head_sha" == "$ELLA_EXPECTED_HEAD_SHA" ]] || {
+            echo "Expected exact head $ELLA_EXPECTED_HEAD_SHA, checked out $actual_head_sha." >&2
+            exit 1
+          }
+          echo "Verified exact source head: $actual_head_sha"
+
+      - name: Verify immutable checked-out head
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          expected_head="${ELLA_EXPECTED_HEAD_SHA}"
+          [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source CI requires an exact 40-character immutable head SHA." >&2
+            exit 1
+          }
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$checked_out_head" == "$expected_head" ]] || {
+            echo "Checked-out HEAD $checked_out_head does not match expected immutable head $expected_head." >&2
+            exit 1
+          }
+          printf 'Exact-head gate receipt: event=%s expected_head=%s checked_out_HEAD=%s\n' \
+            "${GITHUB_EVENT_NAME}" "$expected_head" "$checked_out_head"
+          {
+            echo '### Exact-head gate receipt'
+            printf -- '- Event: `%s`\n' "${GITHUB_EVENT_NAME}"
+            printf -- '- Expected immutable SHA: `%s`\n' "$expected_head"
+            printf -- '- Checked-out HEAD: `%s`\n' "$checked_out_head"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$expected_head" > /tmp/ella-ios-source-ci-head-sha.txt
+          echo "ELLA_SOURCE_HEAD_SHA=$checked_out_head" >> "$GITHUB_ENV"
+          {
+            echo "### Ella iOS Source CI receipt"
+            echo
+            echo "Immutable source head: \`$checked_out_head\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify credential-free source CI scope
         working-directory: .
@@ -100,7 +215,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/main.py|backend/database/action_items.py|backend/database/authority_advisory_lock.py|backend/database/chat.py|backend/database/conversations.py|backend/database/ella_provisioning.py|backend/database/folders.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/redis_db.py|backend/database/runtime_targets.py|backend/database/task_sync.py|backend/database/user_usage.py|backend/database/voice_canary.py|backend/ella/docs/SUMMARY_CAS_ROLLOUT.md|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/canonical_summary_source.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_honcho_contract.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/hermes_session.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/task_integrations.py|backend/routers/transcribe.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/canonical_context.py|backend/utils/ella/canonical_omi.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/task_sync.py|backend/utils/webhooks.py|backend/tests/fixtures/ella_canonical_source_v1.json|backend/tests/unit/test_capture_task_sync_idempotency.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_conversation_summary_cas.py|backend/tests/unit/test_ella_callbacks_summary_update.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_canonical_event_version_fence.py|backend/tests/unit/test_ella_canonical_omi.py|backend/tests/unit/test_ella_chat_temporal_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_honcho_contract.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_ella_v2v_turn_persistence.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -139,21 +254,244 @@ jobs:
             -o "$RUNNER_TEMP/guardian-native-policy-tests"
           "$RUNNER_TEMP/guardian-native-policy-tests"
 
+      - name: Run Apple Reminders replay-idempotency production boundary
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc -warnings-as-errors \
+            app/ios/Runner/AppleRemindersSyncIdempotency.swift \
+            app/ios/Runner/AppleRemindersSyncService.swift \
+            app/ios/Tests/AppleRemindersSyncIdempotencyTests.swift \
+            -o "$RUNNER_TEMP/apple-reminders-sync-idempotency-tests"
+          "$RUNNER_TEMP/apple-reminders-sync-idempotency-tests"
+
+      - name: Run Ella voice route native policy and static gates
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          swiftc -warnings-as-errors \
+            app/ios/Runner/EllaVoiceAudioRoutePolicy.swift \
+            app/ios/Tests/EllaVoiceAudioRoutePolicyTests.swift \
+            -o "$RUNNER_TEMP/ella-voice-audio-route-policy-tests"
+          "$RUNNER_TEMP/ella-voice-audio-route-policy-tests"
+
+          iphoneos_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun swiftc -typecheck -warnings-as-errors \
+            -sdk "$iphoneos_sdk" \
+            -target arm64-apple-ios15.0 \
+            app/ios/Runner/EllaVoiceAudioRoutePolicy.swift
+          xcrun swiftc -frontend -parse app/ios/Runner/AppDelegate.swift
+
+          swift format lint --strict \
+             app/ios/Runner/EllaVoiceAudioRoutePolicy.swift \
+             app/ios/Tests/EllaVoiceAudioRoutePolicyTests.swift
+          plutil -lint app/ios/Runner.xcodeproj/project.pbxproj
+
       - name: Run Guardian data-only production boundary tests
         working-directory: .
         run: |
           python3 -m venv "$RUNNER_TEMP/guardian-python"
           source "$RUNNER_TEMP/guardian-python/bin/activate"
-          python -m pip install --disable-pip-version-check \
+          python3 -m pip install --disable-pip-version-check \
             pytest==8.4.2 \
             fastapi==0.112.0 \
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
-            python-multipart==0.0.9
-          python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
-          python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
+            Jinja2==3.1.4 \
+            asyncpg==0.31.0 \
+            python-multipart==0.0.9 \
+            websockets==15.0.1
+          python3 -m unittest backend/tests/unit/test_guardian_notification_delivery.py
+          python3 -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
             -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
-          python -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          python3 -m pytest backend/tests/unit/test_ella_user_route_auth.py
+          task_sync_tests=(
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_receipt_reclaim_and_completion_are_exact_claim_cas'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[asana]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[google_tasks]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[clickup]'
+            'backend/tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[apple_reminders]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_action_items_auto_sync_threads_stable_effect_operation_to_real_batch_caller'
+          )
+          expected_task_sync_tests="${#task_sync_tests[@]}"
+          echo "Running exact task-sync replay inventory: ${expected_task_sync_tests} required tests"
+          set +e
+          python -m pytest -q -rs "${task_sync_tests[@]}" | tee "$RUNNER_TEMP/task-sync-replay-pytest.txt"
+          task_sync_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$task_sync_status" -ne 0 ]]; then
+            exit "$task_sync_status"
+          fi
+          if grep -Eq '[0-9]+ skipped|[0-9]+ deselected' "$RUNNER_TEMP/task-sync-replay-pytest.txt"; then
+            echo 'Task-sync replay inventory may not skip or deselect required tests.' >&2
+            exit 1
+          fi
+          if ! grep -Eq "${expected_task_sync_tests} passed" "$RUNNER_TEMP/task-sync-replay-pytest.txt"; then
+            echo "Task-sync replay inventory did not execute exactly ${expected_task_sync_tests} tests." >&2
+            exit 1
+          fi
+          capture_tests=(
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_requires_exact_id_and_rejects_non_owner_before_mutation'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_successor_mismatch_fails_before_any_conversation_mutation'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_cross_id_document_fails_before_pointer_claim'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_v2_rejects_missing_and_stale_protocol_authority_tuple'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_lost_ack_and_repeats_converge_without_duplicate_side_effects'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_compare_delete_cannot_clear_successor_race'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_processing_replay_does_not_touch_successor_or_side_effects'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_pointer_acquisition_failure_preserves_exact_pointer'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_failure_restores_exact_pointer_for_safe_replay[enrichment]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_failure_restores_exact_pointer_for_safe_replay[firestore_claim]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_failure_retains_an_existing_processing_fence'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_preclaim_restore_cannot_overwrite_successor_or_finalize_wrong_capture'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_firestore_claim_is_atomic_and_exact'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_writer_rechecks_firestore_status_inside_transaction_after_finalization_wins'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_v2_fails_closed_until_actual_legacy_writer_drain'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_stale_pause_then_successor_adopt_rejects_write_and_stale_arrays'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_process_kill_boundary_reclaims_expired_durable_lease'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_stale_finalizer_cannot_persist_after_expired_lease_is_reclaimed'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_successor_installation_is_one_atomic_transaction_without_rollback_delete'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_successor_install_publishes_each_exact_ready_tuple'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_waits_for_final_segment_persistence_scheduling_race'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_redis_keys_share_real_cluster_slot'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_body_rejects_missing_wrong_and_stale_authority_fields'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_pre_v2_clients_are_rejected_before_creation_and_leave_zero_active_state'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_rechecks_idle_after_provider_returns_with_late_tail'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_drain_barrier_waits_for_copied_final_provider_tail_before_finalization_claim'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_expired_lease_cannot_be_renewed_or_persisted'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_reclaimed_finalizer_fences_all_late_side_effect_classes'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_effect_claim_after_successful_guard_rejects_expired_predecessor'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_resumes_after_result_persistence_at_every_terminal_boundary'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_effect_paths_reject_wrong_owner_generation_and_claim_token'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_effect_reclaim_reuses_stable_idempotency_token'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_effect_successful_claim_then_expiry_reclaim_deduplicates_resumed_predecessor'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent[action_items]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent[usage]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_a_pause_b_reclaim_a_resume_is_idempotent[audio]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_usage_sink_receipt_and_increment_commit_atomically_once'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_completed_result_is_fetchable_before_webhooks_and_lost_ack_recovery_is_idempotent'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[completed]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_finalization_route_reclaims_durable_result_and_finishes_missing_effects[failed]'
+            'backend/tests/unit/test_conversation_processing_failures.py::test_capture_raw_head_ci_inventory_matches_intentional_sources_and_required_nodes'
+          )
+          expected_capture_tests="${#capture_tests[@]}"
+          echo "Running exact capture-finalization inventory: ${expected_capture_tests} required tests"
+          set +e
+          python -m pytest -q -rs "${capture_tests[@]}" | tee "$RUNNER_TEMP/capture-finalization-pytest.txt"
+          capture_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$capture_status" -ne 0 ]]; then
+            exit "$capture_status"
+          fi
+          if grep -Eq '[0-9]+ skipped|[0-9]+ deselected' "$RUNNER_TEMP/capture-finalization-pytest.txt"; then
+            echo 'Capture-finalization inventory may not skip or deselect required tests.' >&2
+            exit 1
+          fi
+          if ! grep -Eq "${expected_capture_tests} passed" "$RUNNER_TEMP/capture-finalization-pytest.txt"; then
+            echo "Expected ${expected_capture_tests} passing capture tests." >&2
+            exit 1
+          fi
+
+          python3 -m pytest backend/tests/unit/test_ella_chat_temporal_context.py \
+            backend/tests/unit/test_ella_conversation_corrections.py \
+            backend/tests/unit/test_ella_correction_honcho_contract.py
+          python3 -m pytest backend/tests/unit/test_ella_v2v_turn_persistence.py \
+            -k 'not test_real_postgres'
+
+      - name: Run exact correction terminal-receipt contracts
+        working-directory: .
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/guardian-python/bin/activate"
+          python -m py_compile \
+            backend/main.py \
+            backend/database/authority_advisory_lock.py \
+            backend/database/ella_provisioning.py \
+            backend/database/honcho_attestation.py \
+            backend/database/managed_cloud_consent.py \
+            backend/database/runtime_targets.py \
+            backend/database/voice_canary.py \
+            backend/ella/routers/ai_consent.py \
+            backend/ella/routers/canonical_events.py \
+            backend/ella/routers/corrections.py \
+            backend/ella/services/ai_consent.py \
+            backend/ella/services/consent_authority.py \
+            backend/ella/services/correction_propagation.py \
+            backend/ella/services/hermes_cloud.py \
+            backend/ella/services/hermes_cloud_policy.py \
+            backend/ella/services/hermes_cloud_staged_attestation.py \
+            backend/ella/services/provisioning.py \
+            backend/ella/services/runtime_errors.py \
+            backend/ella/services/runtime_resolver.py \
+            backend/ella/services/summary_recovery.py \
+            backend/ella/services/summary_writeback.py \
+            backend/ella/utils/provision_authority.py \
+            backend/utils/ella/canonical_omi.py \
+            backend/utils/ella/exact_firebase_auth.py
+          cd backend
+          python -m pytest --collect-only -q \
+            tests/unit/test_ella_correction_startup_contract.py \
+            tests/unit/test_ella_correction_runtime_resolver.py \
+            tests/unit/test_ella_conversation_corrections.py \
+            tests/unit/test_ella_canonical_omi.py \
+            tests/unit/test_ella_canonical_event_version_fence.py |
+            tee /tmp/correction-terminal-receipt-collection.log
+          correction_ids="$(sed '/^$/d' /tmp/correction-terminal-receipt-collection.log)"
+          required_correction_ids=(
+            "tests/unit/test_ella_correction_startup_contract.py::test_runtime_resolver_imports_real_in_tree_dependency_closure"
+            "tests/unit/test_ella_correction_startup_contract.py::test_ella_enabled_main_startup_registers_correction_routes_and_keeps_consent_fail_closed"
+            "tests/unit/test_ella_correction_runtime_resolver.py::test_self_hosted_correction_transcript_mode_maps_to_hermes_chat"
+            "tests/unit/test_ella_conversation_corrections.py::test_generate_corrected_summary_binds_two_owners_to_two_current_runtimes_with_zero_legacy_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_provider_egress_revalidates_consent_after_slow_runtime_authority_resolution"
+            "tests/unit/test_ella_conversation_corrections.py::test_correction_routes_use_deployed_exact_auth_and_current_consent_dependencies"
+            "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reuses_existing_id_and_fences_completed_side_effects"
+            "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_rejects_changed_active_version_before_any_write"
+            "tests/unit/test_ella_conversation_corrections.py::test_retry_failed_correction_reclaims_stale_lost_task_without_reclaiming_live_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_canonical_pending_reconciliation_is_serialized_and_stale_completion_is_fenced"
+            "tests/unit/test_ella_conversation_corrections.py::test_initial_queued_correction_reclaims_expired_lost_background_task_but_not_live_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_after_source_commit_is_terminal_failed_until_required_receipts_exist"
+            "tests/unit/test_ella_conversation_corrections.py::test_exact_receipt_poll_reclaims_stale_initial_queue_but_not_live_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_correction_terminal_sla_caps_provider_and_matches_client_budget_with_margin"
+            "tests/unit/test_ella_conversation_corrections.py::test_correction_writeback_never_publishes_applied_before_canonical_durability"
+            "tests/unit/test_ella_conversation_corrections.py::test_canonical_success_survives_confirmation_marker_failure_and_replays_without_second_source_cas"
+            "tests/unit/test_ella_conversation_corrections.py::test_canonical_failure_after_source_cas_stays_pending_then_retry_reconciles_without_second_provider_or_source_write"
+            "tests/unit/test_ella_conversation_corrections.py::test_receipt_reconciles_stale_failure_to_applied_only_after_all_durable_receipts"
+            "tests/unit/test_ella_conversation_corrections.py::test_source_correction_precedes_downstream_side_effects_and_duplicate_replay_is_fenced"
+            "tests/unit/test_ella_conversation_corrections.py::test_revoked_consent_terminalizes_background_retry_and_receipt_recovery_without_provider_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_initial_submission_transaction_is_stable_across_crash_and_response_loss"
+            "tests/unit/test_ella_conversation_corrections.py::test_end_to_end_deadline_covers_slow_runtime_resolution_and_slow_canonical_writer"
+            "tests/unit/test_ella_conversation_corrections.py::test_expired_publication_lease_recovers_ack_loss_with_exact_idempotent_replay"
+            "tests/unit/test_ella_conversation_corrections.py::test_crash_after_publication_claim_before_remote_write_reclaims_after_bounded_lease"
+            "tests/unit/test_ella_conversation_corrections.py::test_undo_cannot_overtake_canonical_pending_or_publication_inflight"
+            "tests/unit/test_ella_conversation_corrections.py::test_terminal_applied_is_fenced_after_source_cas_before_each_downstream_receipt[proposal]"
+            "tests/unit/test_ella_conversation_corrections.py::test_terminal_applied_is_fenced_after_source_cas_before_each_downstream_receipt[canonical_event]"
+            "tests/unit/test_ella_conversation_corrections.py::test_terminal_applied_is_fenced_after_source_cas_before_each_downstream_receipt[propagation]"
+            "tests/unit/test_ella_conversation_corrections.py::test_multiple_lost_reclaimers_exhaust_one_persisted_attempt_budget"
+            "tests/unit/test_ella_canonical_event_version_fence.py::test_stale_corrected_publisher_cannot_overwrite_newer_undo"
+            "tests/unit/test_ella_canonical_event_version_fence.py::test_ack_loss_replay_of_exact_canonical_version_is_a_confirmed_duplicate"
+            "tests/unit/test_ella_canonical_event_version_fence.py::test_same_version_generation_fences_reclaimed_worker_before_and_after_undo"
+            "tests/unit/test_ella_conversation_corrections.py::test_propagation_sink_transaction_rejects_expired_reclaimed_and_post_undo_publishers"
+            "tests/unit/test_ella_conversation_corrections.py::test_undo_terminal_transaction_is_atomic_and_exact_retry_repairs_legacy_pair"
+            "tests/unit/test_ella_conversation_corrections.py::test_repeated_undo_repairs_mismatched_terminal_pair_without_appending_version"
+            "tests/unit/test_ella_conversation_corrections.py::test_revocation_at_final_canonical_and_downstream_boundaries_prevents_all_egress"
+            "tests/unit/test_ella_conversation_corrections.py::test_propagation_revalidates_before_related_transcript_read_and_proposal_write"
+            "tests/unit/test_ella_conversation_corrections.py::test_receipt_audit_identity_or_status_mismatch_fails_closed_without_echo"
+            "tests/unit/test_ella_conversation_corrections.py::test_n8n_submission_is_bounded_by_the_existing_monotonic_deadline"
+            "tests/unit/test_ella_conversation_corrections.py::test_hosted_source_ci_checks_out_and_receipts_exact_pull_request_head_with_scans_preserved"
+          )
+          for required_id in "${required_correction_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$correction_ids"
+          done
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 100
+          python -m pytest \
+            tests/unit/test_ella_correction_startup_contract.py \
+            tests/unit/test_ella_correction_runtime_resolver.py \
+            tests/unit/test_ella_conversation_corrections.py \
+            tests/unit/test_ella_canonical_omi.py \
+            tests/unit/test_ella_canonical_event_version_fence.py \
+            -v | tee /tmp/correction-terminal-receipt-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/correction-terminal-receipt-pytest.log
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -179,6 +517,9 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Run app/test.sh setup and smoke tests
+        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
+
       - name: Enforce pinned Dart formatting for changed source
         run: |
           set -euo pipefail
@@ -197,6 +538,35 @@ jobs:
 
           dart format --output=none --set-exit-if-changed --line-length 120 "${changed_dart_files[@]}"
 
+      - name: Run exact voice route, V2V, and adapter contracts with zero skips
+        run: |
+          set -euo pipefail
+
+          voice_tests=(
+            test/ella/services/ella_voice_audio_route_test.dart
+            test/ella/services/v2v_client_test.dart
+            test/ella/account_isolation_test.dart
+          )
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            flutter test --no-pub --reporter=json "${voice_tests[@]}" \
+            | tee /tmp/ella-voice-route-tests.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          completed = []
+          for line in Path('/tmp/ella-voice-route-tests.jsonl').read_text().splitlines():
+              event = json.loads(line)
+              if event.get('type') == 'testDone' and not event.get('hidden', False):
+                  completed.append(event)
+
+          skipped = [event for event in completed if event.get('skipped', False)]
+          failed = [event for event in completed if event.get('result') != 'success']
+          print(f'Ella voice route/V2V/adapter tests: {len(completed)} passed, {len(skipped)} skipped')
+          if not completed or skipped or failed:
+              raise SystemExit('Voice route/V2V/adapter test gate did not pass with zero skips.')
+          PY
+
       - name: Verify protected test network sandbox
         run: |
           set -euo pipefail
@@ -207,14 +577,11 @@ jobs:
             exit 1
           fi
 
-      - name: Run app/test.sh setup and smoke tests
-        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
-
       - name: Enforce focused test collection counts
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=45
+          expected_issue_test_count=47
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -222,7 +589,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=72
+          expected_app_test_count=75
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -256,6 +623,7 @@ jobs:
 
           focused_tests=(
             test/backend/audio_consent_guard_test.dart
+            test/backend/http/conversation_finalization_test.dart
             test/backend/preferences_public_mode_test.dart
             test/pages/onboarding/ella/ella_onboarding_consent_test.dart
             test/pages/onboarding/ella/ella_onboarding_pilot_locale_test.dart
@@ -278,11 +646,13 @@ jobs:
             test/ella/services/guardian_mode_api_test.dart
             test/ella/pages/ella_voice_quota_states_test.dart
             test/ella/services/v2v_client_test.dart
+            test/ella/services/v2v_turn_reconciler_test.dart
             test/ella/services/voice_session_startup_guard_test.dart
             test/ella/widgets/v2v_fallback_dialog_test.dart
+            test/pages/conversation_detail/type_correction_terminal_receipt_test.dart
           )
 
-          expected_focused_test_count=25
+          expected_focused_test_count=28
           if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
             echo "Focused source test manifest count drifted." >&2
             exit 1
@@ -326,3 +696,226 @@ jobs:
 
       - name: Run full Flutter tests
         run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub
+
+      - name: Print exact-head gate receipt
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          head_sha="$(cat /tmp/ella-ios-source-ci-head-sha.txt)"
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$checked_out_head" == "$head_sha" ]] || {
+            echo "Source CI checkout changed during gate: headSha=$head_sha checkedOutHead=$checked_out_head" >&2
+            exit 1
+          }
+          printf 'Ella source gate receipt: headSha=%s checkedOutHead=%s baseSha=%s\n' \
+            "$head_sha" "$checked_out_head" "$(cat /tmp/ella-ios-source-ci-base-ref.txt)"
+
+  postgres-ordering-contract:
+    name: PostgreSQL 16 ordering and range contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      ELLA_TEST_POSTGRES_DATABASE: postgres
+      ELLA_TEST_POSTGRES_HOST: 127.0.0.1
+      ELLA_TEST_POSTGRES_PASSWORD: postgres
+      ELLA_TEST_POSTGRES_PORT: "5432"
+      ELLA_TEST_POSTGRES_USER: postgres
+
+    steps:
+      - name: Checkout immutable source head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable checked-out head
+        run: |
+          set -euo pipefail
+
+          expected_sha="$ELLA_EXPECTED_HEAD_SHA"
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "PostgreSQL contract requires an exact 40-character immutable head SHA." >&2
+            exit 1
+          }
+          [[ "$actual_sha" == "$expected_sha" ]] || {
+            echo "PostgreSQL contract checkout mismatch: expectedSha=$expected_sha actualSha=$actual_sha" >&2
+            exit 1
+          }
+          printf 'PostgreSQL contract head receipt: expectedSha=%s actualSha=%s\n' "$expected_sha" "$actual_sha"
+
+      - name: Run exact real PostgreSQL regression
+        working-directory: backend
+        run: |
+          set -euo pipefail
+
+          python3 -m venv "$RUNNER_TEMP/postgres-contract-python"
+          source "$RUNNER_TEMP/postgres-contract-python/bin/activate"
+          python3 -m pip install --disable-pip-version-check \
+            pytest==8.4.2 \
+            fastapi==0.112.0 \
+            firebase-admin==6.5.0 \
+            httpx==0.28.0 \
+            asyncpg==0.31.0 \
+            python-multipart==0.0.9 \
+            websockets==15.0.1
+
+          expected_test_count=4
+          expected_test_ids=(
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_case_distinct_owner_isolation_and_numeric_string_limit_order'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_bounds_and_legacy_oversized_metadata_are_range_safe_for_composed_rebound_replay'
+            'tests/unit/test_ella_v2v_turn_persistence.py::test_real_postgres_mounted_voice_route_and_context_helper_keep_case_distinct_owners_private'
+          )
+          collection_output="$(python3 -m pytest --collect-only -q "${expected_test_ids[@]}")"
+          printf '%s\n' "$collection_output"
+          actual_test_ids="$(printf '%s\n' "$collection_output" | grep '::' || true)"
+          actual_test_count="$(printf '%s\n' "$actual_test_ids" | grep -c '::' || true)"
+          [[ "$actual_test_count" -eq "$expected_test_count" ]] || {
+            echo "PostgreSQL regression collection mismatch: expectedCount=$expected_test_count actualCount=$actual_test_count" >&2
+            exit 1
+          }
+          for expected_test_id in "${expected_test_ids[@]}"; do
+            [[ "$(printf '%s\n' "$actual_test_ids" | grep -Fxc "$expected_test_id" || true)" -eq 1 ]] || {
+              echo "PostgreSQL regression missing or duplicated exact test ID: $expected_test_id" >&2
+              exit 1
+            }
+          done
+          printf 'PostgreSQL regression collection receipt: expectedCount=%s actualCount=%s testIds=%s\n' \
+            "$expected_test_count" "$actual_test_count" "${expected_test_ids[*]}"
+
+          execution_output="$(python3 -m pytest -q -rA "${expected_test_ids[@]}")"
+          printf '%s\n' "$execution_output"
+          actual_pass_count="$(printf '%s\n' "$execution_output" | grep -c '^PASSED .*::' || true)"
+          [[ "$actual_pass_count" -eq "$expected_test_count" ]] || {
+            echo "PostgreSQL regression execution mismatch: expectedCount=$expected_test_count actualCount=$actual_pass_count" >&2
+            exit 1
+          }
+          if printf '%s\n' "$execution_output" | grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)'; then
+            echo "PostgreSQL regression gate requires zero skips and zero deselections." >&2
+            exit 1
+          fi
+          for expected_test_id in "${expected_test_ids[@]}"; do
+            [[ "$(printf '%s\n' "$execution_output" | grep -Fxc "PASSED $expected_test_id" || true)" -eq 1 ]] || {
+              echo "PostgreSQL regression did not pass exact test ID once: $expected_test_id" >&2
+              exit 1
+            }
+          done
+          printf 'PostgreSQL regression execution receipt: expectedCount=%s actualCount=%s skipped=0 deselected=0 testIds=%s\n' \
+            "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
+
+          expected_sha="$ELLA_EXPECTED_HEAD_SHA"
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$expected_sha" ]] || {
+            echo "PostgreSQL contract checkout changed during test: expectedSha=$expected_sha actualSha=$actual_sha" >&2
+            exit 1
+          }
+          printf 'PostgreSQL contract final receipt: expectedSha=%s actualSha=%s expectedCount=%s actualCount=%s skipped=0 deselected=0 testIds=%s\n' \
+            "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
+
+  callback-summary-cas-contract:
+    name: Callback 80 and Firestore CAS 5 contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELLA_EXPECTED_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+    steps:
+      - name: Checkout immutable source head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable checked-out head
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$ELLA_EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$actual_sha" == "$ELLA_EXPECTED_HEAD_SHA" ]]
+          printf 'Callback/CAS contract head receipt: expectedSha=%s actualSha=%s\n' \
+            "$ELLA_EXPECTED_HEAD_SHA" "$actual_sha"
+
+      - name: Run exact callback summary inventory
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/callback-cas-python"
+          source "$RUNNER_TEMP/callback-cas-python/bin/activate"
+          python -m pip install --disable-pip-version-check \
+            pytest==8.4.2 \
+            fastapi==0.112.0 \
+            firebase-admin==6.5.0 \
+            httpx==0.28.0 \
+            asyncpg==0.31.0 \
+            python-multipart==0.0.9
+
+          callback_ids="$(python -m pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | sed '/^$/d')"
+          callback_count="$(grep -c '::' <<<"$callback_ids")"
+          [[ "$callback_count" -eq 80 ]] || {
+            echo "Callback collection mismatch: expectedCount=80 actualCount=$callback_count" >&2
+            exit 1
+          }
+          python -m pytest -q -rA tests/unit/test_ella_callbacks_summary_update.py \
+            | tee /tmp/callback-summary-pytest.log
+          grep -Eq '80 passed' /tmp/callback-summary-pytest.log
+          ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/callback-summary-pytest.log
+          printf 'Callback summary execution receipt: expectedCount=80 actualCount=80 skipped=0 deselected=0\n'
+
+      - name: Run real Firestore summary CAS contention inventory
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/callback-cas-python/bin/activate"
+          cas_ids="$(python -m pytest --collect-only -q tests/unit/test_conversation_summary_cas.py | sed '/^$/d')"
+          cas_count="$(grep -c '::' <<<"$cas_ids")"
+          [[ "$cas_count" -eq 5 ]] || {
+            echo "Firestore CAS collection mismatch: expectedCount=5 actualCount=$cas_count" >&2
+            exit 1
+          }
+
+          emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --rm -d \
+            --name "$emulator_name" \
+            -p 127.0.0.1::8080 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:cda01b8c880e9161992c3fd61d7d0e153b4dd073aa4a9d62ad79243907cf8dd4 \
+            gcloud beta emulators firestore start --host-port=0.0.0.0:8080 --quiet
+          cleanup_emulator() {
+            docker rm -f "$emulator_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup_emulator EXIT
+          emulator_port="$(docker port "$emulator_name" 8080/tcp | awk -F: 'END {print $NF}')"
+          [[ -n "$emulator_port" ]]
+          export FIRESTORE_EMULATOR_HOST="127.0.0.1:${emulator_port}"
+          for attempt in {1..30}; do
+            if curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null
+          ELLA_FIRESTORE_EMULATOR_TESTS=true \
+            python -m pytest -q -rA tests/unit/test_conversation_summary_cas.py \
+            | tee /tmp/firestore-summary-cas-pytest.log
+          grep -Eq '5 passed' /tmp/firestore-summary-cas-pytest.log
+          ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' \
+            /tmp/firestore-summary-cas-pytest.log
+          printf 'Firestore CAS execution receipt: expectedCount=5 actualCount=5 skipped=0 deselected=0\n'

@@ -16,14 +16,87 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from utils.ella.canonical_context import (
+    MAX_CANONICAL_EVENT_SEQUENCE,
+    MAX_CANONICAL_TURN_ORDINAL,
+    parse_canonical_ordering_integer,
+)
 from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
 
 DEFAULT_TIMELINE_LIMIT = 100
 MAX_TIMELINE_LIMIT = 500
+_TURN_ORDINAL_SQL_IS_VALID = """(
+    metadata->>'turn_ordinal' ~ '^(0|[1-9][0-9]{0,18})$'
+    AND (
+        length(metadata->>'turn_ordinal') < 19
+        OR metadata->>'turn_ordinal' <= '9223372036854775807'
+    )
+)"""
+_EVENT_SEQUENCE_SQL_IS_VALID = """(
+    metadata->>'event_sequence' ~ '^(0|[1-9][0-9]{0,9})$'
+    AND (
+        length(metadata->>'event_sequence') < 10
+        OR metadata->>'event_sequence' <= '2147483647'
+    )
+)"""
+_TURN_IDENTITY_SQL = """COALESCE(
+    NULLIF(metadata->>'turn_id', ''),
+    NULLIF(source_ref->>'client_message_id', ''),
+    NULLIF(source_ref->>'turn_id', ''),
+    regexp_replace(event_id, ':(user|assistant)$', '')
+)"""
+CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD = "canonical_summary_publication_sequence"
+CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD = "canonical_summary_publication_sha256"
+MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE = (1 << 63) - 1
 
 _pool: Optional[asyncpg.Pool] = None
+
+
+def _turn_identity(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    explicit = metadata.get("turn_id") or source_ref.get("client_message_id") or source_ref.get("turn_id")
+    if explicit:
+        return str(explicit)
+    event_id = str(item.get("event_id") or "")
+    for suffix in (":user", ":assistant"):
+        if event_id.endswith(suffix):
+            return event_id[: -len(suffix)]
+    return event_id
+
+
+def _event_sequence(item: dict[str, Any]) -> int:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    sequence = metadata.get("event_sequence")
+    parsed = parse_canonical_ordering_integer(sequence, maximum=MAX_CANONICAL_EVENT_SEQUENCE)
+    if parsed is not None:
+        return parsed
+    if item.get("role") == "user":
+        return 0
+    if item.get("role") == "assistant":
+        return 1
+    return 2
+
+
+def _turn_ordinal(item: dict[str, Any]) -> Optional[int]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    ordinal = metadata.get("turn_ordinal")
+    return parse_canonical_ordering_integer(ordinal, maximum=MAX_CANONICAL_TURN_ORDINAL)
+
+
+def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, int, int, str, int, str]:
+    turn_ordinal = _turn_ordinal(item)
+    return (
+        item["started_at"],
+        str(item.get("session_id") or ""),
+        0 if turn_ordinal is not None else 1,
+        turn_ordinal or 0,
+        _turn_identity(item),
+        _event_sequence(item),
+        str(item.get("event_id") or ""),
+    )
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -72,6 +145,26 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value or {}, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _normalize_ordering_integer(raw: Any, *, field_name: str, maximum: int) -> int:
+    value = parse_canonical_ordering_integer(raw, maximum=maximum)
+    if value is None:
+        raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
+    return value
+
+
+def _normalize_ordering_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metadata)
+    if "turn_ordinal" in normalized:
+        normalized["turn_ordinal"] = _normalize_ordering_integer(
+            normalized["turn_ordinal"], field_name="turn_ordinal", maximum=MAX_CANONICAL_TURN_ORDINAL
+        )
+    if "event_sequence" in normalized:
+        normalized["event_sequence"] = _normalize_ordering_integer(
+            normalized["event_sequence"], field_name="event_sequence", maximum=MAX_CANONICAL_EVENT_SEQUENCE
+        )
+    return normalized
+
+
 def _should_replace_existing_event(item: dict[str, Any]) -> bool:
     """Allow derived OMI summary rows to refresh while preserving raw source data.
 
@@ -83,6 +176,41 @@ def _should_replace_existing_event(item: dict[str, Any]) -> bool:
     return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
 
 
+def _canonical_summary_publication_fence(item: dict[str, Any]) -> Optional[tuple[int, str]]:
+    if not _should_replace_existing_event(item):
+        return None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    raw_sequence = metadata.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)
+    raw_sha256 = metadata.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD)
+    if raw_sequence is None and raw_sha256 is None:
+        return None
+    try:
+        sequence = int(raw_sequence)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid canonical summary publication sequence") from error
+    sha256 = str(raw_sha256 or "")
+    if (
+        sequence < 1
+        or sequence > MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise ValueError("invalid canonical summary publication fence")
+    return sequence, sha256
+
+
+def _should_accept_canonical_summary_replacement(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    incoming_fence = _canonical_summary_publication_fence(incoming)
+    existing_fence = _canonical_summary_publication_fence(existing)
+    if existing_fence is None:
+        return True
+    if incoming_fence is None:
+        return False
+    existing_sequence, existing_sha256 = existing_fence
+    incoming_sequence, incoming_sha256 = incoming_fence
+    return incoming_sequence > existing_sequence or (
+        incoming_sequence == existing_sequence and incoming_sha256 == existing_sha256
+    )
 def _derive_source_identity(
     *,
     uid: str,
@@ -138,6 +266,8 @@ class CanonicalEventIn(BaseModel):
         ended_at = _parse_datetime(self.ended_at, "ended_at")
         assert started_at is not None
         raw_event = _model_dump(self)
+        metadata = _normalize_ordering_metadata(self.metadata)
+        raw_event["metadata"] = metadata
         source_identity = _derive_source_identity(
             uid=self.uid,
             channel=self.channel,
@@ -145,17 +275,29 @@ class CanonicalEventIn(BaseModel):
             session_id=self.session_id,
             source_ref=self.source_ref,
         )
-        return {
+        normalized = {
             **raw_event,
             "started_at": started_at,
             "ended_at": ended_at,
+            "metadata": metadata,
             "source_identity": source_identity,
             "raw_event": raw_event,
         }
+        try:
+            _canonical_summary_publication_fence(normalized)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return normalized
 
 
 class CanonicalEventsBatch(BaseModel):
     events: list[CanonicalEventIn] = Field(default_factory=list)
+
+
+class CanonicalPublicationFenceReservationIn(BaseModel):
+    scope: str = Field(min_length=1, strict=True)
+    attempt_token: str = Field(min_length=1, strict=True)
+    generation: int = Field(ge=1, le=999_999_999_999_999_999, strict=True)
 
 
 class SessionCompleteIn(BaseModel):
@@ -169,6 +311,7 @@ class SessionCompleteIn(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def normalized(self, session_id: str) -> dict[str, Any]:
+        metadata = _normalize_ordering_metadata(self.metadata)
         source_identity = _derive_source_identity(
             uid=self.uid or "",
             channel=self.channel or "unknown",
@@ -177,6 +320,7 @@ class SessionCompleteIn(BaseModel):
             source_ref=self.source_ref,
         )
         raw_completion = _model_dump(self)
+        raw_completion["metadata"] = metadata
         return {
             "session_id": session_id,
             "uid": self.uid,
@@ -186,7 +330,7 @@ class SessionCompleteIn(BaseModel):
             "started_at": _parse_datetime(self.started_at, "started_at"),
             "completed_at": _parse_datetime(self.ended_at, "ended_at") or _utc_now(),
             "source_ref": self.source_ref,
-            "metadata": self.metadata,
+            "metadata": metadata,
             "source_identity": source_identity,
             "raw_completion": raw_completion,
         }
@@ -199,6 +343,9 @@ class CanonicalEventStore:
     async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
         raise NotImplementedError
 
+    async def reserve_publication_fence(self, reservation: CanonicalPublicationFenceReservationIn) -> dict[str, Any]:
+        raise NotImplementedError
+
     async def timeline(
         self,
         *,
@@ -209,20 +356,141 @@ class CanonicalEventStore:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Read back exact owner-bound event ids after an idempotent write."""
+        raise NotImplementedError
+
 
 class PostgresCanonicalEventStore(CanonicalEventStore):
+    @staticmethod
+    async def _ensure_publication_fence_table(conn) -> None:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS canonical_publication_fences (
+                scope TEXT PRIMARY KEY,
+                generation BIGINT NOT NULL CHECK (generation > 0),
+                attempt_token TEXT NOT NULL,
+                reserved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """)
+
+    async def reserve_publication_fence(self, reservation: CanonicalPublicationFenceReservationIn) -> dict[str, Any]:
+        """Advance the authoritative sink generation before reclaimed work is released."""
+
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await self._ensure_publication_fence_table(conn)
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO canonical_publication_fences (
+                        scope, generation, attempt_token, reserved_at
+                    )
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (scope) DO UPDATE SET
+                        generation = EXCLUDED.generation,
+                        attempt_token = EXCLUDED.attempt_token,
+                        reserved_at = EXCLUDED.reserved_at
+                    WHERE
+                        canonical_publication_fences.generation < EXCLUDED.generation
+                        OR (
+                            canonical_publication_fences.generation = EXCLUDED.generation
+                            AND canonical_publication_fences.attempt_token = EXCLUDED.attempt_token
+                        )
+                    RETURNING generation, attempt_token
+                    """,
+                    reservation.scope,
+                    reservation.generation,
+                    reservation.attempt_token,
+                )
+                if row is None:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT generation, attempt_token
+                        FROM canonical_publication_fences
+                        WHERE scope = $1
+                        FOR UPDATE
+                        """,
+                        reservation.scope,
+                    )
+                authoritative_generation = int(row["generation"]) if row is not None else 0
+                authoritative_token = str(row["attempt_token"]) if row is not None else ""
+                confirmed = (
+                    authoritative_generation == reservation.generation
+                    and authoritative_token == reservation.attempt_token
+                )
+                return {
+                    "ok": confirmed,
+                    "scope": reservation.scope,
+                    "generation": authoritative_generation,
+                    "attempt_token": authoritative_token,
+                }
+
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         if not events:
             return {"ok": True, "inserted": 0, "duplicates": 0, "events": []}
 
+        normalized_events = [event.normalized() for event in events]
         pool = await _get_pool()
         statuses: list[dict[str, Any]] = []
         async with pool.acquire() as conn:
             async with conn.transaction():
-                for event in events:
-                    item = event.normalized()
+                if any((event.metadata or {}).get("publication_fence") is not None for event in events):
+                    await self._ensure_publication_fence_table(conn)
+                for item in normalized_events:
+                    publication_fence = item.get("metadata", {}).get("publication_fence")
+                    if publication_fence is not None:
+                        scope = publication_fence.get("scope") if isinstance(publication_fence, dict) else None
+                        attempt_token = (
+                            publication_fence.get("attempt_token") if isinstance(publication_fence, dict) else None
+                        )
+                        generation = (
+                            publication_fence.get("generation") if isinstance(publication_fence, dict) else None
+                        )
+                        valid_fence = bool(
+                            isinstance(scope, str)
+                            and scope
+                            and isinstance(attempt_token, str)
+                            and attempt_token
+                            and isinstance(generation, int)
+                            and not isinstance(generation, bool)
+                            and 0 < generation <= 999_999_999_999_999_999
+                        )
+                        authority = None
+                        if valid_fence:
+                            authority = await conn.fetchrow(
+                                """
+                                SELECT generation, attempt_token
+                                FROM canonical_publication_fences
+                                WHERE scope = $1
+                                FOR UPDATE
+                                """,
+                                scope,
+                            )
+                        if (
+                            authority is None
+                            or int(authority["generation"]) != generation
+                            or str(authority["attempt_token"]) != attempt_token
+                        ):
+                            statuses.append(
+                                {
+                                    "event_id": item["event_id"],
+                                    "source_identity": item["source_identity"],
+                                    "active_summary_version_id": item.get("metadata", {}).get(
+                                        "active_summary_version_id"
+                                    ),
+                                    "existing_active_summary_version_id": None,
+                                    "inserted": False,
+                                    "updated": False,
+                                    "duplicate": False,
+                                    "stale": True,
+                                    "reason": "publication_fence_stale",
+                                }
+                            )
+                            continue
                     conflict_clause = (
-                        """
+                        f"""
                         DO UPDATE SET
                             uid = EXCLUDED.uid,
                             canonical_identity = EXCLUDED.canonical_identity,
@@ -238,6 +506,73 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             source_ref = EXCLUDED.source_ref,
                             metadata = EXCLUDED.metadata,
                             raw_event = EXCLUDED.raw_event
+                        WHERE
+                            (
+                                (canonical_events.metadata->>'active_summary_version_id') IS NULL
+                                OR (
+                                    (EXCLUDED.metadata->>'active_summary_version_id') IS NOT NULL
+                                    AND (canonical_events.metadata->>'active_summary_version_id')
+                                        <> (EXCLUDED.metadata->>'active_summary_version_id')
+                                    AND (EXCLUDED.metadata->'summary_version_ancestor_ids')
+                                        ? (canonical_events.metadata->>'active_summary_version_id')
+                                )
+                                OR (
+                                    (canonical_events.metadata->>'active_summary_version_id')
+                                        = (EXCLUDED.metadata->>'active_summary_version_id')
+                                    AND (EXCLUDED.metadata->'publication_fence'->>'scope') IS NOT NULL
+                                    AND (
+                                        (canonical_events.metadata->'publication_fence'->>'scope') IS NULL
+                                        OR (canonical_events.metadata->'publication_fence'->>'scope')
+                                            = (EXCLUDED.metadata->'publication_fence'->>'scope')
+                                    )
+                                    AND COALESCE(
+                                        CASE
+                                            WHEN (EXCLUDED.metadata->'publication_fence'->>'generation')
+                                                ~ '^[0-9]{1,18}$'
+                                            THEN (EXCLUDED.metadata->'publication_fence'->>'generation')::bigint
+                                        END,
+                                        0
+                                    ) > COALESCE(
+                                        CASE
+                                            WHEN (canonical_events.metadata->'publication_fence'->>'generation')
+                                                ~ '^[0-9]{1,18}$'
+                                            THEN (canonical_events.metadata->'publication_fence'->>'generation')::bigint
+                                        END,
+                                        0
+                                    )
+                                )
+                            )
+                            AND (
+                                NOT (canonical_events.metadata ? '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}')
+                                OR NOT (
+                                    canonical_events.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                    ~ '^[0-9]+$'
+                                )
+                                OR (
+                                    EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                    ~ '^[0-9]+$'
+                                    AND (
+                                        (
+                                            canonical_events.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                        )::bigint < (
+                                            EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                        )::bigint
+                                        OR (
+                                            (
+                                                canonical_events.metadata
+                                                ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                            )::bigint = (
+                                                EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                            )::bigint
+                                            AND canonical_events.metadata
+                                                ->> '{CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD}'
+                                                = EXCLUDED.metadata
+                                                ->> '{CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD}'
+                                        )
+                                    )
+                                )
+                            )
                         """
                         if _should_replace_existing_event(item)
                         else "DO NOTHING"
@@ -274,22 +609,59 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         _stable_json(item["metadata"]),
                         _stable_json(item["raw_event"]),
                     )
+                    existing_active_version_id = None
+                    stale = False
+                    duplicate = row is None and not _should_replace_existing_event(item)
+                    if row is None and _should_replace_existing_event(item):
+                        existing_active_version_id = await conn.fetchval(
+                            """
+                            SELECT metadata->>'active_summary_version_id'
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                        )
+                        exact_replay = await conn.fetchval(
+                            """
+                            SELECT raw_event = $3::jsonb
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                            _stable_json(item["raw_event"]),
+                        )
+                        incoming_active_version_id = str(
+                            item.get("metadata", {}).get("active_summary_version_id") or ""
+                        )
+                        duplicate = bool(
+                            incoming_active_version_id
+                            and incoming_active_version_id == str(existing_active_version_id or "")
+                            and exact_replay is True
+                        )
+                        stale = not duplicate
                     statuses.append(
                         {
                             "event_id": item["event_id"],
                             "source_identity": item["source_identity"],
+                            "active_summary_version_id": item.get("metadata", {}).get("active_summary_version_id"),
+                            "existing_active_summary_version_id": existing_active_version_id,
                             "inserted": bool(row and row["inserted"]),
                             "updated": bool(row and not row["inserted"]),
+                            "duplicate": duplicate,
+                            "stale": stale,
                         }
                     )
 
         inserted_count = sum(1 for status in statuses if status["inserted"])
         updated_count = sum(1 for status in statuses if status.get("updated"))
         return {
-            "ok": True,
+            "ok": not any(status.get("stale") for status in statuses),
             "inserted": inserted_count,
             "updated": updated_count,
-            "duplicates": len(statuses) - inserted_count - updated_count,
+            "duplicates": sum(1 for status in statuses if status.get("duplicate")),
+            "stale": sum(1 for status in statuses if status.get("stale")),
             "events": statuses,
         }
 
@@ -339,7 +711,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         channels: Optional[list[str]],
     ) -> list[dict[str, Any]]:
         params: list[Any] = [uid]
-        filters = ["lower(uid) = lower($1)"]
+        filters = ["uid = $1"]
         if since:
             params.append(since)
             filters.append(f"started_at >= ${len(params)}")
@@ -363,18 +735,71 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                 WHERE {where_clause}
                 ORDER BY
                     started_at DESC,
-                    CASE role WHEN 'assistant' THEN 1 WHEN 'user' THEN 0 ELSE 2 END DESC,
-                    inserted_at DESC,
+                    COALESCE(session_id, '') DESC,
+                    CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END DESC,
+                    CASE
+                        WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                        ELSE 0
+                    END DESC,
+                    {_TURN_IDENTITY_SQL} DESC,
+                    CASE
+                        WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                        WHEN role = 'assistant' THEN 1 WHEN role = 'user' THEN 0 ELSE 2
+                    END DESC,
                     event_id DESC
                 LIMIT {limit_placeholder}
             ) recent_events
             ORDER BY
                 started_at ASC,
-                CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
-                inserted_at ASC,
+                COALESCE(session_id, '') ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
+                {_TURN_IDENTITY_SQL} ASC,
+                CASE
+                    WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
                 event_id ASC
             """,
             *params,
+        )
+        return [_row_to_event(row) for row in rows]
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        pool = await _get_pool()
+        rows = await pool.fetch(
+            f"""
+            SELECT uid, canonical_identity, event_id, source_identity,
+                   session_id, channel, provider, role, text,
+                   started_at, ended_at, privacy_scope, scan_policy,
+                   source_ref, metadata, raw_event, inserted_at
+            FROM canonical_events
+            WHERE event_id = ANY($1::text[])
+              AND source_identity = $2
+              AND uid = $3
+            ORDER BY
+                started_at ASC,
+                COALESCE(session_id, '') ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
+                {_TURN_IDENTITY_SQL} ASC,
+                CASE
+                    WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
+                event_id ASC
+            """,
+            event_ids,
+            source_identity,
+            uid,
         )
         return [_row_to_event(row) for row in rows]
 
@@ -385,26 +810,35 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         self._sessions: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
+        normalized_events = [event.normalized() for event in events]
         statuses = []
-        for event in events:
-            item = event.normalized()
+        for item in normalized_events:
             item["inserted_at"] = _utc_now()
             key = (item["event_id"], item["source_identity"])
-            inserted = key not in self._events
+            existing = self._events.get(key)
+            inserted = existing is None
+            updated = False
             if inserted:
                 self._events[key] = item
+            elif _should_replace_existing_event(item) and _should_accept_canonical_summary_replacement(existing, item):
+                item["inserted_at"] = existing["inserted_at"]
+                self._events[key] = item
+                updated = True
             statuses.append(
                 {
                     "event_id": item["event_id"],
                     "source_identity": item["source_identity"],
                     "inserted": inserted,
+                    "updated": updated,
                 }
             )
         inserted_count = sum(1 for status in statuses if status["inserted"])
+        updated_count = sum(1 for status in statuses if status["updated"])
         return {
             "ok": True,
             "inserted": inserted_count,
-            "duplicates": len(statuses) - inserted_count,
+            "updated": updated_count,
+            "duplicates": len(statuses) - inserted_count - updated_count,
             "events": statuses,
         }
 
@@ -434,7 +868,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         channel_set = set(channels or [])
         events = []
         for event in self._events.values():
-            if event["uid"].lower() != uid.lower():
+            if event["uid"] != uid:
                 continue
             if since and event["started_at"] < since:
                 continue
@@ -442,15 +876,20 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
                 continue
             events.append(event)
 
-        def role_order(item: dict[str, Any]) -> int:
-            if item["role"] == "user":
-                return 0
-            if item["role"] == "assistant":
-                return 1
-            return 2
-
-        events.sort(key=lambda item: (item["started_at"], role_order(item), item["inserted_at"], item["event_id"]))
+        events.sort(key=_canonical_event_order)
         return [_row_to_event(event) for event in events[-limit:]]
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        expected_ids = set(event_ids)
+        events = [
+            event
+            for event in self._events.values()
+            if event["event_id"] in expected_ids and event["uid"] == uid and event["source_identity"] == source_identity
+        ]
+        events.sort(key=_canonical_event_order)
+        return [_row_to_event(event) for event in events]
 
 
 def _row_to_event(row: Any) -> dict[str, Any]:
@@ -526,6 +965,11 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         corrections, retries, or downstream enrichment.
         """
         return await default_store.write_batch(batch.events)
+
+    @router.post("/v1/ella/publication-fences/reserve")
+    async def reserve_publication_fence(reservation: CanonicalPublicationFenceReservationIn):
+        """Reserve the only correction generation currently allowed to publish."""
+        return await default_store.reserve_publication_fence(reservation)
 
     @router.post("/v1/ella/sessions/{session_id}/complete")
     async def complete_session(session_id: str, completion: SessionCompleteIn):

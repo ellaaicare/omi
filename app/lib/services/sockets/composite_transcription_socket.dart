@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
-
 import 'package:omi/services/custom_stt_log_service.dart';
 import 'package:omi/services/sockets/pure_socket.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -20,6 +18,9 @@ class CompositeTranscriptionSocket implements IPureSocket {
 
   late final _PrimarySocketListener _primaryListener;
   late final _SecondarySocketListener _secondaryListener;
+  bool _primaryStoppedForDrain = false;
+  bool _stoppingPrimaryForDrain = false;
+  bool _stoppingComposite = false;
 
   CompositeTranscriptionSocket({
     required this.primarySocket,
@@ -110,16 +111,49 @@ class CompositeTranscriptionSocket implements IPureSocket {
     CustomSttLogService.instance.info('Composite', 'Stopping...');
     DebugLogManager.logEvent('composite_socket_stopping', {});
 
-    await Future.wait([
-      primarySocket.stop(),
-      secondarySocket.stop(),
-    ]);
+    _stoppingComposite = true;
+    try {
+      Object? stopError;
+      StackTrace? stopTrace;
+      try {
+        // Providers such as Deepgram/Gemini emit their last final segment only
+        // after close. Keep the Omi backend socket open until that tail has been
+        // forwarded, then let the secondary perform its exact v2 drain.
+        await stopPrimaryForDrain();
+      } catch (error, trace) {
+        stopError = error;
+        stopTrace = trace;
+      }
+      try {
+        await secondarySocket.stop();
+      } catch (error, trace) {
+        stopError ??= error;
+        stopTrace ??= trace;
+      }
 
-    _status = PureSocketStatus.disconnected;
+      _status = PureSocketStatus.disconnected;
+      if (stopError != null) Error.throwWithStackTrace(stopError, stopTrace!);
+    } finally {
+      _stoppingComposite = false;
+    }
+  }
+
+  /// Stops the STT provider without closing the backend transport. Any final
+  /// provider message is still forwarded by the primary listener.
+  Future<void> stopPrimaryForDrain() async {
+    if (_primaryStoppedForDrain) return;
+    _stoppingPrimaryForDrain = true;
+    try {
+      await primarySocket.stop();
+      _primaryStoppedForDrain = true;
+    } finally {
+      _stoppingPrimaryForDrain = false;
+    }
   }
 
   /// Called when either socket closes unexpectedly
   void _onSocketClosed(String name, int? closeCode) {
+    if (_stoppingComposite || (name == 'Primary' && _stoppingPrimaryForDrain)) return;
     if (_status != PureSocketStatus.connected) {
       return; // Already handling disconnection
     }

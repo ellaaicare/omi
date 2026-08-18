@@ -1,4 +1,8 @@
 {
+  "memoryCorrectionFailed": "Ella no pudo actualizar este recuerdo",
+  "memoryCorrectionRuntimeUnavailable": "Ella no puede acceder a tu servicio de correcciones en este momento",
+  "memoryCorrectionMemoryChanged": "Este recuerdo cambió antes de que Ella pudiera aplicar tu corrección",
+  "memoryCorrectionServiceUnavailable": "El servicio de correcciones de Ella no está disponible temporalmente",
   "@@locale": "es",
   "appTitle": "Omi",
   "conversationTab": "Conversación",

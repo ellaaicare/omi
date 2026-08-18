@@ -10209,6 +10209,18 @@
   "@memoryCorrectionFailed": {
     "description": "Failed memory reinterpretation receipt status"
   },
+  "memoryCorrectionRuntimeUnavailable": "Ella can't reach your correction service right now",
+  "@memoryCorrectionRuntimeUnavailable": {
+    "description": "Correction failure shown for an unavailable or changed owner-bound AI runtime"
+  },
+  "memoryCorrectionMemoryChanged": "This memory changed before Ella could apply your correction",
+  "@memoryCorrectionMemoryChanged": {
+    "description": "Correction failure shown when the active memory version changed"
+  },
+  "memoryCorrectionServiceUnavailable": "Ella's correction service is temporarily unavailable",
+  "@memoryCorrectionServiceUnavailable": {
+    "description": "Correction failure shown when correction processing could not be started"
+  },
   "memoryCorrectionReview": "Review",
   "@memoryCorrectionReview": {
     "description": "Action that opens a correction receipt"

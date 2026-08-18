@@ -378,24 +378,35 @@ Future<CreateConversationResponse?> _processInProgressConversation({
   required String conversationId,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
-}) =>
-    processInProgressConversation(
-      conversationId: conversationId,
-      expectedAuthenticatedUid: expectedAuthenticatedUid,
-      exactAuthority: exactAuthority,
-    );
+}) {
+  final captureAuthority =
+      exactAuthority is CaptureFinalizationOperation ? exactAuthority.captureProtocolAuthority : null;
+  if (captureAuthority == null || captureAuthority.conversationId != conversationId) {
+    return Future<CreateConversationResponse?>.value();
+  }
+  return processInProgressConversation(
+    conversationId: conversationId,
+    protocolVersion: captureAuthority.protocolVersion,
+    generation: captureAuthority.generation,
+    ownerToken: captureAuthority.ownerToken,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+}
 
 @visibleForTesting
 class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
   CaptureFinalizationOperation({
     required EllaAccountCommitLease accountLease,
     required this.captureGeneration,
+    required this.captureProtocolAuthority,
     required int Function() currentCaptureGeneration,
   })  : _accountLease = accountLease,
         _currentCaptureGeneration = currentCaptureGeneration;
 
   final EllaAccountCommitLease _accountLease;
   final int captureGeneration;
+  final CaptureProtocolAuthority? captureProtocolAuthority;
   final int Function() _currentCaptureGeneration;
 
   bool get isCurrent => _accountLease.isExactCurrent() && captureGeneration == _currentCaptureGeneration();
@@ -1639,7 +1650,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _replaceDeviceCaptureSocket(
     _DeviceCaptureSession session, {
     required String reason,
-    Future<void> Function()? afterOldSocketStopped,
+    Future<bool> Function()? afterOldSocketStopped,
   }) async {
     if (!_isDeviceCaptureCurrent(session)) return false;
     final device = _recordingDevice;
@@ -1658,7 +1669,11 @@ class CaptureProvider extends ChangeNotifier
     try {
       oldSocket.unsubscribe(this);
       await oldSocket.stop(reason: reason);
-      await afterOldSocketStopped?.call();
+      final mayConnectReplacement = await afterOldSocketStopped?.call() ?? true;
+      if (!mayConnectReplacement) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription replacement authority is ambiguous');
+        return false;
+      }
       if (!_isDeviceCaptureCurrent(session)) return false;
       final replacement = await _ensureDeviceSocketConnection(device, force: true);
       if (!_isDeviceCaptureCurrent(session)) {
@@ -2685,22 +2700,31 @@ class CaptureProvider extends ChangeNotifier
         return false;
       }
 
-      String? conversationId;
+      var finalized = false;
       _replacingTranscriptionSocket = true;
       try {
         final replaced = await _replaceDeviceCaptureSocket(
           session,
           reason: 'continuous necklace moment boundary',
           afterOldSocketStopped: () async {
-            conversationId = await _awaitInProgressConversationId(
+            final conversationId = await _awaitInProgressConversationId(
               operation,
               maxAttempts: 12,
               retryDelay: const Duration(milliseconds: 500),
             );
+            final exactConversationId = (conversationId ?? '').trim();
+            if (exactConversationId.isEmpty || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
+
+            // The replacement must not connect (and therefore cannot adopt or
+            // send to this conversation) until its terminal result is known.
+            // BLE frames remain inside the bounded replacement buffer while
+            // the exact-authority POST and polling complete.
+            finalized = await _forceProcessingConversationId(exactConversationId, operation);
             final boundaryBuffer = session.socketReplacementBuffer;
-            if (!_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return;
+            if (!finalized || !_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return false;
             await _resetStateVariables();
             _beginNextContinuousDeviceMoment(boundaryBuffer);
+            return true;
           },
         );
         if (!replaced || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
@@ -2708,9 +2732,6 @@ class CaptureProvider extends ChangeNotifier
         _replacingTranscriptionSocket = false;
       }
 
-      final exactConversationId = (conversationId ?? '').trim();
-      if (exactConversationId.isEmpty) return false;
-      final finalized = await _forceProcessingConversationId(exactConversationId, operation);
       if (finalized && _isDeviceCaptureCurrent(session)) {
         _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
       }
@@ -3276,6 +3297,7 @@ class CaptureProvider extends ChangeNotifier
     return CaptureFinalizationOperation(
       accountLease: accountLease,
       captureGeneration: _captureGeneration,
+      captureProtocolAuthority: _socket?.captureAuthority,
       currentCaptureGeneration: () => _captureGeneration,
     );
   }
@@ -3480,6 +3502,14 @@ class CaptureProvider extends ChangeNotifier
       return false;
     }
     try {
+      if (closeTranscriptTransportBeforeProcessing) {
+        // Closing the provider is what causes some STT transports to emit
+        // their final tail. Preserve the operation's exact v2 tuple, drain the
+        // provider/backend transport, and only then decide whether the durable
+        // conversation has capturable content.
+        await _socket?.stop(reason: 'capture transport drained before final transcript read');
+        if (!operation.isCurrent) return false;
+      }
       final hasContent = await _awaitFinalCapturableContent(
         operation,
         maxAttempts: maxTranscriptAttempts,
@@ -3490,10 +3520,6 @@ class CaptureProvider extends ChangeNotifier
           _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
         }
         return false;
-      }
-      if (closeTranscriptTransportBeforeProcessing) {
-        await _socket?.stop(reason: 'capture transport drained before exact processing');
-        if (!operation.isCurrent) return false;
       }
       final finalized = await forceProcessingCurrentConversation(operation: operation);
       if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
