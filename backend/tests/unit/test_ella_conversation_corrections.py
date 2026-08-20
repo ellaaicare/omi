@@ -5573,9 +5573,12 @@ def test_undo_terminal_transaction_is_atomic_and_exact_retry_repairs_legacy_pair
 
 def test_hosted_source_ci_checks_out_and_receipts_exact_pull_request_head_with_scans_preserved():
     workflow = (_backend_path.parent / ".github" / "workflows" / "ella-ios-source-ci.yml").read_text(encoding="utf-8")
-    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
+    assert (
+        "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+        in workflow
+    )
     assert "ELLA_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
-    assert '[[ "$actual_head" == "$ELLA_EXPECTED_HEAD_SHA" ]]' in workflow
+    assert '[[ "$actual_head_sha" == "$ELLA_EXPECTED_HEAD_SHA" ]]' in workflow
     assert "Immutable source head:" in workflow
     assert "GITHUB_STEP_SUMMARY" in workflow
     assert "refs/remotes/pull/" not in workflow

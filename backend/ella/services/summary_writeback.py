@@ -989,8 +989,6 @@ async def write_conversation_summary(
     receipt = conversation.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
     if receipt.get('status') == SUMMARY_WRITEBACK_PENDING:
         raise CanonicalSummaryReconciliationPendingError('canonical_summary_reconciliation_pending')
-    if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
-        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     enrichment_state = conversation.get('enrichment_state') or {}
     same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
@@ -1025,6 +1023,10 @@ async def write_conversation_summary(
             'id': conversation_id,
             'enrichment_state': confirmed_state,
         }
+        publication_sequence = _next_publication_sequence(conversation, receipt)
+        publication_sha256 = _publication_post_image_sha256(canonical_conversation)
+        canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+        canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
         try:
             canonical_result = await asyncio.to_thread(
                 _publish_canonical_summary,
