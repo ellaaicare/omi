@@ -109,6 +109,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Python
         uses: actions/setup-python@v5

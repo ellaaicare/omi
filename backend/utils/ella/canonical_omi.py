@@ -19,6 +19,9 @@ from utils.ella.canonical_auth import canonical_event_service_headers
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
+CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD = "canonical_summary_publication_sequence"
+CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD = "canonical_summary_publication_sha256"
+MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE = (1 << 63) - 1
 TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
 TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_grounding_verifier"
 TODAY_CARD_PARALLEL_GROUNDING_ATTESTER = "hermes_parallel_grounding_verifier"
@@ -60,6 +63,13 @@ def today_card_grounding_identity_is_valid(receipt: dict[str, Any], summary_sour
     if any(not value for value in values):
         return False
     return len(set(values)) == len(values)
+
+
+def require_omi_canonical_write_ready(uid: str) -> None:
+    """Fail before source-store mutation when canonical writes are locally unavailable."""
+    if not CANONICAL_OMI_WRITE_ENABLED:
+        raise RuntimeError("canonical_omi_write_disabled")
+    canonical_event_service_headers(uid)
 
 
 def _enum_value(value: Any) -> Any:
@@ -250,6 +260,19 @@ def build_omi_canonical_event(
         structured=structured,
         source_version_id=active_summary_version_id,
     )
+    raw_publication_sequence = _object_get(conversation, CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)
+    publication_sequence = None
+    publication_sha256 = None
+    if raw_publication_sequence is not None:
+        publication_sequence = int(raw_publication_sequence)
+        publication_sha256 = str(_object_get(conversation, CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD) or "")
+        if (
+            publication_sequence < 1
+            or publication_sequence > MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE
+            or len(publication_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in publication_sha256)
+        ):
+            raise ValueError("invalid canonical summary publication fence")
 
     event = {
         "uid": uid,
@@ -289,6 +312,11 @@ def build_omi_canonical_event(
             "status": _enum_value(_object_get(conversation, "status")),
         },
     }
+    if publication_sequence is not None:
+        event["source_ref"][CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+        event["source_ref"][CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
+        event["metadata"][CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
+        event["metadata"][CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
     return _json_safe(event)
 
 

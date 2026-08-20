@@ -3194,8 +3194,8 @@ def test_strict_summary_writeback_fresh_trace_supersedes_legacy_pending_and_conf
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, version_id, update: updates.append(update) or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
@@ -3390,8 +3390,8 @@ def test_strict_summary_writeback_keeps_retryable_state_when_canonical_fails(mon
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: updates.append(update) or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
@@ -4409,8 +4409,8 @@ def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_e
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: updates.append(update) or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,

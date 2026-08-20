@@ -47,6 +47,16 @@ ROUTE_GROUPS = (
     ),
     _group(
         "callbacks",
+        "public_capability_metadata",
+        "public",
+        (
+            "GET",
+            "/v1/ella/conversation/summary/capabilities",
+            "conversation_summary_capabilities",
+        ),
+    ),
+    _group(
+        "callbacks",
         "firebase_exact_owner",
         "staged_public",
         ("POST", "/v1/ella/emergency", "ella_emergency"),

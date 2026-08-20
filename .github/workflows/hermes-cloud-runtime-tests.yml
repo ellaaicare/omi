@@ -75,6 +75,8 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/canonical_summary_source.py"
+      - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/today_card.py"
@@ -108,9 +110,11 @@ on:
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/SUMMARY_CAS_ROLLOUT.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
+      - "backend/tests/fixtures/ella_canonical_source_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -234,6 +238,8 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/canonical_summary_source.py"
+      - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/today_card.py"
@@ -267,9 +273,11 @@ on:
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/SUMMARY_CAS_ROLLOUT.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
+      - "backend/tests/fixtures/ella_canonical_source_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -349,6 +357,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -779,6 +797,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
+          echo "observed Hermes Cloud runtime collection count: $collected"
           required_ids=(
             "tests/unit/test_hermes_binding_envelope_contract.py::test_hermes_binding_envelope_v1_identity_and_content_free_shape"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
@@ -1055,10 +1074,18 @@ jobs:
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 30
+          callback_contract_selector='not (parallel_canonical_confirmation_repairs_latest_summary_after_race or parallel_enrichment_binds_independent_grounding_to_canonical_version or parallel_grounding_evidence_fails_closed or parallel_grounding_evidence_rejects_unknown_fields_at_schema_boundary or parallel_grounding_transcript_compare_and_set_loses_race_without_publication or parallel_pending_canonical_replay_rejects_transcript_drift_without_publication or parallel_prebuilt_grounding_receipt_cannot_bypass_quote_binding or parallel_summary_source_match_rejects_stale_version_before_write or parallel_summary_source_match_replay_is_idempotent or parallel_summary_source_match_uses_transcript_and_version_cas or pending_canonical_replay_rejects_result_version_drift or summary_route_forwards_required_active_version_match)'
+          test "$(
+            pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py \
+              -k "$callback_contract_selector" |
+              grep -c '::'
+          )" -eq 80
+          pytest tests/unit/test_ella_callbacks_summary_update.py -k "$callback_contract_selector" -v
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
+          baseline_summary_cas_selector='not (conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source)'
           conversation_summary_cas_ids="$(
-            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py |
+            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
+              -k "$baseline_summary_cas_selector" |
               sed '/^$/d'
           )"
           required_conversation_summary_cas_ids=(
@@ -1085,7 +1112,7 @@ jobs:
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
           test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 48
-          pytest tests/unit/test_conversation_summary_cas.py -v
+          pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
@@ -1137,11 +1164,55 @@ jobs:
           test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 8
           pytest tests/unit/test_ella_scanner_batching.py -v
 
+      - name: Run real Firestore summary CAS contention gate
+        run: |
+          set -euo pipefail
+          summary_cas_contract_selector='active_summary_version_compare_and_set_is_atomic_and_fail_closed or conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source'
+          test "$(
+            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
+              -k "$summary_cas_contract_selector" |
+              grep -c '::'
+          )" -eq 5
+          emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --rm -d \
+            --name "${emulator_name}" \
+            -p 127.0.0.1::8080 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:cda01b8c880e9161992c3fd61d7d0e153b4dd073aa4a9d62ad79243907cf8dd4 \
+            gcloud beta emulators firestore start --host-port=0.0.0.0:8080 --quiet
+          cleanup_emulator() {
+            docker rm -f "${emulator_name}" >/dev/null 2>&1 || true
+          }
+          trap cleanup_emulator EXIT
+          emulator_port="$(docker port "${emulator_name}" 8080/tcp | awk -F: 'END {print $NF}')"
+          test -n "${emulator_port}"
+          export FIRESTORE_EMULATOR_HOST="127.0.0.1:${emulator_port}"
+          echo "isolated Firestore emulator: ${FIRESTORE_EMULATOR_HOST}"
+          for attempt in {1..30}; do
+            if curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null
+          ELLA_FIRESTORE_EMULATOR_TESTS=true \
+            python -m pytest tests/unit/test_conversation_summary_cas.py \
+              -k "$summary_cas_contract_selector" -v
+
   guardian-app-contracts:
     runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
