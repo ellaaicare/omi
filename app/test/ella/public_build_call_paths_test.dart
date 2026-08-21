@@ -377,12 +377,14 @@ void main() {
     var catalogCalls = 0;
     var todayCardCalls = 0;
     var guardianModeWrites = 0;
+    var guardianModeReads = 0;
     var guardianNativeStarts = 0;
     var guardianNativeStops = 0;
     var guardianServerEnabled = false;
     var guardianModeWriteSucceeds = true;
     var guardianReadbackSucceeds = true;
     var guardianNativeStartSucceeds = true;
+    var guardianAvailable = false;
     guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
@@ -467,18 +469,20 @@ void main() {
                   todayCardCache: _MemoryTodayCardCache(),
                   todayCardAuthoritySnapshotProvider: () => authoritySnapshot,
                   todayCardAuthorityChanges: authorityChanges,
-                  guardianAvailability: () =>
-                      (SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured,
-                  guardianModeLoader: () async => guardianReadbackSucceeds
-                      ? guardian_model.GuardianModeInfo(
-                          currentMode: guardianServerEnabled
-                              ? guardian_model.GuardianModeKey.activeSupport
-                              : guardian_model.GuardianModeKey.off,
-                          twoTierState: guardianServerEnabled
-                              ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
-                              : const guardian_model.GuardianModeState(),
-                        )
-                      : null,
+                  guardianAvailability: () => guardianAvailable,
+                  guardianModeLoader: () async {
+                    guardianModeReads++;
+                    return guardianReadbackSucceeds
+                        ? guardian_model.GuardianModeInfo(
+                            currentMode: guardianServerEnabled
+                                ? guardian_model.GuardianModeKey.activeSupport
+                                : guardian_model.GuardianModeKey.off,
+                            twoTierState: guardianServerEnabled
+                                ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
+                                : const guardian_model.GuardianModeState(),
+                          )
+                        : null;
+                  },
                   guardianModeSetter: (state) async {
                     guardianModeWrites++;
                     writtenGuardianState = state;
@@ -537,6 +541,12 @@ void main() {
     expect(find.byKey(const Key('today-card-semantics')), findsOneWidget);
     expect(find.text(previewEnabled ? 'Preview daily memo' : 'Runtime daily memo'), findsOneWidget);
     if ((SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled) && isEllaGuardianConfigured) {
+      expect(guardianModeReads, 0);
+      guardianAvailable = true;
+      authorityChanges.value++;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(guardianModeReads, 1);
       expect(find.byKey(const Key('today-whispers-card')), findsOneWidget);
       expect(find.text('Whispers'), findsOneWidget);
       expect(find.text('See whispers'), findsOneWidget);
