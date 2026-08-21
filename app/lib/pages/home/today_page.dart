@@ -140,6 +140,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
   bool _whispersVerified = false;
+  bool _whisperStateLoading = false;
+  bool _whisperStateReloadPending = false;
   bool _updatingWhispers = false;
   final Set<String> _deletingMemoryIds = <String>{};
 
@@ -209,7 +211,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     );
   }
 
-  void _onProvisioningChanged() => unawaited(_syncTodayCardAuthority());
+  void _onProvisioningChanged() {
+    unawaited(_syncTodayCardAuthority());
+    if (_guardianAvailable && !_whispersVerified) unawaited(_loadWhisperState());
+  }
 
   void _onTodayCardAuthorityChanged() {
     // In-memory content disappears synchronously; the exact replacement
@@ -226,6 +231,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeCaptureSource = null;
       });
     }
+    if (mounted) {
+      setState(() {
+        // Never retain a previous account's mode while exact authority changes.
+        _whispersOn = false;
+        _whispersVerified = false;
+      });
+    }
+    if (_guardianAvailable) unawaited(_loadWhisperState());
     unawaited(_syncTodayCardAuthority(forceReload: true));
   }
 
@@ -235,7 +248,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(_syncTodayCardAuthority(forceReload: true));
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_syncTodayCardAuthority(forceReload: true));
+      if (_guardianAvailable) unawaited(_loadWhisperState());
+    }
   }
 
   @override
@@ -252,6 +268,22 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _loadWhisperState() async {
     if (!_guardianAvailable) return;
+    if (_whisperStateLoading) {
+      _whisperStateReloadPending = true;
+      return;
+    }
+    _whisperStateLoading = true;
+    try {
+      do {
+        _whisperStateReloadPending = false;
+        await _loadWhisperStateOnce();
+      } while (_whisperStateReloadPending && mounted && _guardianAvailable);
+    } finally {
+      _whisperStateLoading = false;
+    }
+  }
+
+  Future<void> _loadWhisperStateOnce() async {
     final info = await _readWhisperState();
     if (info == null) {
       try {
