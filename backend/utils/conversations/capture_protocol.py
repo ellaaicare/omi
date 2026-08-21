@@ -719,10 +719,13 @@ def _complete_finalization_transaction(
         return False
     if _status_value(conversation.get('status')) not in {'completed', 'failed'}:
         return False
-    integration_receipt = (conversation.get('capture_finalization_effects') or {}).get('integrations:external') or {}
+    effects = conversation.get('capture_finalization_effects') or {}
+    integration_receipt = effects.get('integrations:external') or {}
     if integration_receipt.get('state') != 'completed':
         return False
-    compact_effects = dict(conversation.get('capture_finalization_effects') or {})
+    if any(receipt.get('state') != 'completed' for receipt in effects.values()):
+        return False
+    compact_effects = dict(effects)
     for receipt in compact_effects.values():
         if receipt.get('state') == 'completed':
             receipt.pop('result', None)

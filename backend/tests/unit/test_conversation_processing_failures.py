@@ -1148,17 +1148,28 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         "capture_protocol_version": 2,
         "capture_generation": "generation-a",
         "capture_owner_token": "owner-a",
-        "capture_state": "finalizing",
-        "capture_finalization_claim_token": "claim-a",
+        "capture_state": "drained",
+        "capture_finalization_claim_token": None,
     }
     state = {
         "durable": durable,
-        "live_claim": "claim-a",
         "effects": {},
+        "claims": [],
+        "releases": [],
+        "terminal_attempts": [],
         "summary_commits": 0,
     }
-    attempts = {"created": [], "postprocess": []}
-    deliveries = {"created": set(), "postprocess": set()}
+    postprocess_attempts = []
+    postprocess_writes = set()
+    integration_writes = set()
+
+    def durable_snapshot():
+        return {
+            **state["durable"],
+            "capture_finalization_effects": {
+                effect_id: dict(receipt) for effect_id, receipt in state["effects"].items()
+            },
+        }
 
     monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda _uid: None)
     monkeypatch.setattr(conversation_processor, "HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS", frozenset())
@@ -1185,17 +1196,43 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         state["summary_commits"] += 1
         result = _committed_processing_result(payload)
         state["durable"] = {
+            **state["durable"],
             **result["conversation"],
-            "capture_protocol_version": 2,
-            "capture_generation": "generation-a",
-            "capture_owner_token": "owner-a",
-            "capture_state": "finalizing",
-            "capture_finalization_claim_token": state["live_claim"],
         }
-        return result
+        return {**result, "conversation": durable_snapshot()}
+
+    def claim_finalization(_uid, _conversation_id, generation, owner_token):
+        assert (generation, owner_token) == ("generation-a", "owner-a")
+        capture_state = state["durable"]["capture_state"]
+        if capture_state == "terminal":
+            return "terminal", None
+        if capture_state != "drained":
+            return "busy", None
+        claim_token = f"claim-{'ab'[len(state['claims'])]}"
+        state["claims"].append(claim_token)
+        state["durable"].update(
+            {
+                "capture_state": "finalizing",
+                "capture_finalization_claim_token": claim_token,
+            }
+        )
+        return "claimed", claim_token
+
+    def release_finalization(_uid, _conversation_id, generation, owner_token, claim_token):
+        assert (generation, owner_token) == ("generation-a", "owner-a")
+        if state["durable"].get("capture_finalization_claim_token") != claim_token:
+            return False
+        state["releases"].append(claim_token)
+        state["durable"].update(
+            {
+                "capture_state": "drained",
+                "capture_finalization_claim_token": None,
+            }
+        )
+        return True
 
     def claim_effect(_uid, conversation_id, generation, owner_token, claim_token, effect_id):
-        if claim_token != state["live_claim"]:
+        if claim_token != state["durable"].get("capture_finalization_claim_token"):
             return {"outcome": "lost"}
         receipt = state["effects"].get(effect_id, {})
         if receipt.get("state") == "completed":
@@ -1213,6 +1250,7 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
             "state": "claimed",
             "claim_token": claim_token,
             "operation_token": operation_token,
+            "attempt_count": int(receipt.get("attempt_count") or 0) + 1,
         }
         return {"outcome": "claimed", "operation_token": operation_token}
 
@@ -1227,26 +1265,52 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         result,
     ):
         receipt = state["effects"][effect_id]
-        if claim_token != state["live_claim"] or receipt["claim_token"] != claim_token:
+        if (
+            claim_token != state["durable"].get("capture_finalization_claim_token")
+            or receipt["claim_token"] != claim_token
+            or receipt["operation_token"] != operation_token
+        ):
             return False
         if effect_id == "post:ella_postprocess_webhook" and claim_token == "claim-a":
             return False
         receipt.update({"state": "completed", "result": result, "operation_token": operation_token})
         return True
 
-    def receive(kind, operation_token, webhook_conversation):
+    def receive_postprocess(_uid, webhook_conversation, idempotency_key=None, synchronous=False):
         assert state["durable"]["status"] == ConversationStatus.completed.value
         assert state["durable"]["structured"]["title"] == "Durable result"
         assert webhook_conversation.status == ConversationStatus.completed
-        attempts[kind].append(operation_token)
-        deliveries[kind].add(operation_token)
+        assert synchronous is True
+        postprocess_attempts.append(idempotency_key)
+        postprocess_writes.add(idempotency_key)
+
+    def complete_finalization(_uid, _conversation_id, generation, owner_token, claim_token):
+        assert (generation, owner_token) == ("generation-a", "owner-a")
+        receipts = {effect_id: dict(receipt) for effect_id, receipt in state["effects"].items()}
+        completed = (
+            claim_token == state["durable"].get("capture_finalization_claim_token")
+            and state["durable"].get("status") == ConversationStatus.completed.value
+            and receipts.get("integrations:external", {}).get("state") == "completed"
+            and all(receipt.get("state") == "completed" for receipt in receipts.values())
+        )
+        state["terminal_attempts"].append((completed, receipts))
+        if completed:
+            state["durable"].update(
+                {
+                    "capture_state": "terminal",
+                    "capture_finalization_claim_token": None,
+                }
+            )
+        return completed
 
     monkeypatch.setattr(conversation_processor.conversations_db, "claim_initial_conversation_processing", claim_initial)
+    monkeypatch.setattr(conversations_router.conversations_db, "claim_initial_conversation_processing", claim_initial)
     monkeypatch.setattr(
         conversation_processor.conversations_db,
         "get_conversation",
-        lambda _uid, _conversation_id: dict(state["durable"]),
+        lambda _uid, _conversation_id: durable_snapshot(),
     )
+    monkeypatch.setattr(conversations_router.conversations_db, "get_conversation", lambda *_args: durable_snapshot())
     monkeypatch.setattr(
         conversation_processor.conversations_db,
         "commit_stock_summary_processing_result",
@@ -1254,41 +1318,70 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
     )
     monkeypatch.setattr(conversation_processor, "claim_capture_finalization_effect", claim_effect)
     monkeypatch.setattr(conversation_processor, "complete_capture_finalization_effect", complete_effect)
+    monkeypatch.setattr(conversations_router, "claim_capture_finalization", claim_finalization)
+    monkeypatch.setattr(conversations_router, "claim_capture_finalization_effect", claim_effect)
+    monkeypatch.setattr(conversations_router, "complete_capture_finalization_effect", complete_effect)
+    monkeypatch.setattr(conversations_router, "complete_capture_finalization", complete_finalization)
+    monkeypatch.setattr(conversations_router, "release_capture_finalization", release_finalization)
+    monkeypatch.setattr(conversations_router, "renew_capture_finalization", lambda *_args: True)
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "acquire_in_progress_processing_fence",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(conversations_router.redis_db, "release_capture_commit_lease", lambda *_args: True)
+    monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
     monkeypatch.setattr(
         conversation_processor,
         "conversation_created_webhook",
-        lambda _uid, current, idempotency_key=None: receive("created", idempotency_key, current),
+        lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        conversation_processor,
-        "fire_postprocess_webhook",
-        lambda _uid, current, idempotency_key=None, synchronous=False: receive("postprocess", idempotency_key, current),
-    )
+    monkeypatch.setattr(conversation_processor, "fire_postprocess_webhook", receive_postprocess)
 
-    with pytest.raises(conversation_processor.CaptureFinalizationLeaseLost):
-        conversation_processor.process_conversation_with_outcome(
-            "uid-1",
-            "en",
-            conversation,
-            capture_finalization=("generation-a", "owner-a", "claim-a"),
-        )
+    def trigger_integrations(_uid, _conversation, idempotency_key=None):
+        integration_writes.add(idempotency_key)
+        return []
 
-    state["live_claim"] = "claim-b"
-    state["durable"]["capture_finalization_claim_token"] = "claim-b"
-    recovered = conversation_processor.process_conversation_with_outcome(
-        "uid-1",
-        "en",
-        Conversation(**state["durable"]),
-        capture_finalization=("generation-a", "owner-a", "claim-b"),
-    )
+    monkeypatch.setattr(conversations_router, "trigger_external_integrations", trigger_integrations)
 
-    assert recovered.status == "committed"
-    assert recovered.conversation.status == ConversationStatus.completed
+    app = FastAPI()
+    app.include_router(conversations_router.router)
+    app.dependency_overrides[conversations_router.auth.get_current_user_uid] = lambda: "uid-1"
+    app.dependency_overrides[conversations_router.require_current_ai_consent] = lambda: None
+    request_body = {
+        "conversation_id": "capture-a",
+        "protocol_version": 2,
+        "generation": "generation-a",
+        "owner_token": "owner-a",
+    }
+    with TestClient(app, raise_server_exceptions=False) as client:
+        failed = client.post("/v1/conversations", json=request_body)
+
+        assert failed.status_code == 500
+        assert state["durable"]["status"] == ConversationStatus.completed.value
+        assert state["durable"]["capture_state"] == "drained"
+        assert state["releases"] == ["claim-a"]
+        assert state["summary_commits"] == 1
+        assert state["effects"]["post:ella_postprocess_webhook"]["state"] == "claimed"
+        assert "integrations:external" not in state["effects"]
+        assert state["terminal_attempts"] == []
+
+        recovered = client.post("/v1/conversations", json=request_body)
+
+    assert recovered.status_code == 200
+    assert recovered.json()["conversation"]["capture_state"] == "terminal"
+    assert state["claims"] == ["claim-a", "claim-b"]
     assert state["summary_commits"] == 1
-    assert len(deliveries["created"]) == 1
-    assert len(deliveries["postprocess"]) == 1
-    assert len(attempts["created"]) == 1
-    assert attempts["postprocess"] == [attempts["postprocess"][0], attempts["postprocess"][0]]
+    assert len(state["durable"]["summary_versions"]) == 1
+    assert postprocess_attempts == [postprocess_attempts[0], postprocess_attempts[0]]
+    assert len(postprocess_writes) == 1
+    assert len(integration_writes) == 1
+    assert state["durable"]["capture_state"] == "terminal"
+    assert len(state["terminal_attempts"]) == 1
+    terminal_completed, terminal_receipts = state["terminal_attempts"][0]
+    assert terminal_completed is True
+    assert terminal_receipts["integrations:external"]["state"] == "completed"
+    assert all(receipt["state"] == "completed" for receipt in terminal_receipts.values())
 
 
 def test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_effects(monkeypatch):

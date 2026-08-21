@@ -279,31 +279,13 @@ def process_in_progress_conversation(
         return CreateConversationResponse(conversation=conversation, messages=messages)
     except Exception:
         if is_capture_v2 and capture_finalization_claimed:
-            durable = conversations_db.get_conversation(uid, conversation_id)
-            durable_status = getattr((durable or {}).get('status'), 'value', (durable or {}).get('status'))
-            if durable_status in {ConversationStatus.completed.value, ConversationStatus.failed.value}:
-                try:
-                    _complete_external_integration_effect(
-                        Conversation(**durable),
-                        False,
-                    )
-                except Exception:
-                    pass
-                complete_capture_finalization(
-                    uid,
-                    conversation_id,
-                    request.generation or '',
-                    request.owner_token or '',
-                    capture_claim_token or '',
-                )
-            else:
-                release_capture_finalization(
-                    uid,
-                    conversation_id,
-                    request.generation or '',
-                    request.owner_token or '',
-                    capture_claim_token or '',
-                )
+            release_capture_finalization(
+                uid,
+                conversation_id,
+                request.generation or '',
+                request.owner_token or '',
+                capture_claim_token or '',
+            )
         raise
     finally:
         finalization_heartbeat_stop.set()

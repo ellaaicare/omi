@@ -343,6 +343,54 @@ def test_drain_and_finalization_require_exact_tuple_and_reach_terminal(capture_p
     )
     conversation_ref.data = _updated(conversation_ref.data, effect_complete_transaction, conversation_ref)
 
+    incomplete_post_effect_transaction = _Transaction()
+    post_effect_claim = capture_protocol._claim_finalization_effect_transaction.to_wrap(
+        incomplete_post_effect_transaction,
+        authority_ref,
+        conversation_ref,
+        'capture-a',
+        'generation-a',
+        'owner-a',
+        'claim-a',
+        'post:ella_postprocess_webhook',
+        now,
+    )
+    assert post_effect_claim['outcome'] == 'claimed'
+    authority_ref.data = _updated(authority_ref.data, incomplete_post_effect_transaction, authority_ref)
+    conversation_ref.data = _updated(conversation_ref.data, incomplete_post_effect_transaction, conversation_ref)
+
+    incomplete_effect_completion_transaction = _Transaction()
+    assert (
+        capture_protocol._complete_finalization_transaction.to_wrap(
+            incomplete_effect_completion_transaction,
+            authority_ref,
+            conversation_ref,
+            'capture-a',
+            'generation-a',
+            'owner-a',
+            'claim-a',
+            now,
+        )
+        is False
+    )
+    assert incomplete_effect_completion_transaction.updates == []
+
+    post_effect_complete_transaction = _Transaction()
+    assert capture_protocol._complete_finalization_effect_transaction.to_wrap(
+        post_effect_complete_transaction,
+        authority_ref,
+        conversation_ref,
+        'capture-a',
+        'generation-a',
+        'owner-a',
+        'claim-a',
+        'post:ella_postprocess_webhook',
+        post_effect_claim['operation_token'],
+        None,
+        now,
+    )
+    conversation_ref.data = _updated(conversation_ref.data, post_effect_complete_transaction, conversation_ref)
+
     replay_transaction = _Transaction()
     replay = capture_protocol._claim_finalization_effect_transaction.to_wrap(
         replay_transaction,
