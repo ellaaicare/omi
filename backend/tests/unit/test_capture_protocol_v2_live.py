@@ -284,6 +284,44 @@ def test_live_predecessor_rejects_new_generation_reconnect(capture_protocol):
     assert transaction.sets == []
 
 
+def test_missing_or_malformed_lease_rejects_new_generation_reconnect(capture_protocol):
+    now = datetime.now(timezone.utc)
+    expired = now - timedelta(seconds=1)
+    lease_variants = [
+        ({}, {'capture_lease_expires_at': expired}),
+        ({'lease_expires_at': 'invalid'}, {'capture_lease_expires_at': expired}),
+        ({'lease_expires_at': expired}, {}),
+        ({'lease_expires_at': expired}, {'capture_lease_expires_at': 'invalid'}),
+    ]
+
+    for authority_lease, predecessor_lease in lease_variants:
+        authority = _authority(generation='generation-a', owner='owner-a')
+        authority.pop('lease_expires_at', None)
+        authority.update(authority_lease)
+        predecessor = _conversation(generation='generation-a', owner='owner-a')
+        predecessor['capture_owner_id'] = 'owner-b'
+        predecessor.pop('capture_lease_expires_at', None)
+        predecessor.update(predecessor_lease)
+        transaction = _Transaction()
+
+        installed = capture_protocol._install_authority_transaction.to_wrap(
+            transaction,
+            _Document(authority),
+            _Document({'id': 'capture-b', 'status': 'in_progress', 'capture_owner_id': 'owner-b'}),
+            'capture-b',
+            'generation-b',
+            'owner-b',
+            now,
+            'capture-a',
+            _Document(predecessor),
+            False,
+        )
+
+        assert installed is False
+        assert transaction.updates == []
+        assert transaction.sets == []
+
+
 def test_adoption_rejects_another_live_authority_without_writes(capture_protocol):
     transaction = _Transaction()
     installed = capture_protocol._install_authority_transaction.to_wrap(

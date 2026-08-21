@@ -251,10 +251,14 @@ def _install_authority_transaction(
             generation,
             owner_token,
         )
+        authority_lease_expires_at = authority.get('lease_expires_at')
+        predecessor_lease_expires_at = predecessor.get('capture_lease_expires_at')
         expired_predecessor_can_handoff = bool(
             predecessor_matches_authority
-            and _lease_expired(authority, now)
-            and _lease_expired(predecessor, now, field='capture_lease_expires_at')
+            and isinstance(authority_lease_expires_at, datetime)
+            and isinstance(predecessor_lease_expires_at, datetime)
+            and _aware(authority_lease_expires_at) <= now
+            and _aware(predecessor_lease_expires_at) <= now
         )
         if predecessor_status != 'in_progress':
             return False
