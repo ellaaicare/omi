@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import copy
+import hashlib
 import importlib.util
 import json
 import logging
@@ -1617,7 +1618,12 @@ def _load_emulator_modules(monkeypatch):
 
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "omi-ci")
     client = firestore.Client(project=project)
-    database_client = SimpleNamespace(db=client)
+
+    def document_id_from_seed(seed: str) -> str:
+        seed_hash = hashlib.sha256(seed.encode("utf-8")).digest()
+        return str(uuid.UUID(bytes=seed_hash[:16], version=4))
+
+    database_client = SimpleNamespace(db=client, document_id_from_seed=document_id_from_seed)
     monkeypatch.setitem(sys.modules, "database._client", database_client)
     monkeypatch.setitem(sys.modules, "database.users", MagicMock())
     monkeypatch.setitem(sys.modules, "database.redis_db", MagicMock())
