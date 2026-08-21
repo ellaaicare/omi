@@ -215,6 +215,75 @@ def test_rotation_rejects_stale_generation_without_writes(capture_protocol):
     assert transaction.sets == []
 
 
+def test_expired_predecessor_allows_new_generation_reconnect(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(generation='generation-a', owner='owner-a')
+    authority['lease_expires_at'] = now - timedelta(seconds=1)
+    predecessor = _conversation(generation='generation-a', owner='owner-a')
+    predecessor['capture_owner_id'] = 'owner-b'
+    predecessor['capture_lease_expires_at'] = now - timedelta(seconds=1)
+    authority_ref = _Document(authority)
+    predecessor_ref = _Document(predecessor)
+    successor_ref = _Document(
+        {
+            'id': 'capture-b',
+            'status': 'in_progress',
+            'capture_owner_id': 'owner-b',
+        }
+    )
+    transaction = _Transaction()
+
+    installed = capture_protocol._install_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        successor_ref,
+        'capture-b',
+        'generation-b',
+        'owner-b',
+        now,
+        'capture-a',
+        predecessor_ref,
+        False,
+    )
+
+    assert installed is True
+    assert _updated(predecessor, transaction, predecessor_ref)['capture_state'] == 'drained'
+    successor = _updated(successor_ref.data, transaction, successor_ref)
+    assert successor['capture_state'] == 'active'
+    assert successor['capture_generation'] == 'generation-b'
+    assert successor['capture_owner_token'] == 'owner-b'
+    current_authority = _updated(authority, transaction, authority_ref)
+    assert current_authority['conversation_id'] == 'capture-b'
+    assert current_authority['generation'] == 'generation-b'
+    assert current_authority['owner_token'] == 'owner-b'
+
+
+def test_live_predecessor_rejects_new_generation_reconnect(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(generation='generation-a', owner='owner-a')
+    predecessor = _conversation(generation='generation-a', owner='owner-a')
+    predecessor['capture_owner_id'] = 'owner-b'
+    predecessor['capture_lease_expires_at'] = now + timedelta(seconds=30)
+    transaction = _Transaction()
+
+    installed = capture_protocol._install_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        _Document({'id': 'capture-b', 'status': 'in_progress', 'capture_owner_id': 'owner-b'}),
+        'capture-b',
+        'generation-b',
+        'owner-b',
+        now,
+        'capture-a',
+        _Document(predecessor),
+        False,
+    )
+
+    assert installed is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
 def test_adoption_rejects_another_live_authority_without_writes(capture_protocol):
     transaction = _Transaction()
     installed = capture_protocol._install_authority_transaction.to_wrap(

@@ -222,12 +222,45 @@ def _install_authority_transaction(
         predecessor = predecessor_snapshot.to_dict() or {}
         predecessor_status = _status_value(predecessor.get('status'))
         predecessor_is_v2 = predecessor.get('capture_protocol_version') == CAPTURE_PROTOCOL_VERSION
+        authority_generation = str(authority.get('generation') or '')
+        authority_owner_token = str(authority.get('owner_token') or '')
+        predecessor_matches_authority = bool(
+            authority_generation
+            and authority_owner_token
+            and _authority_tuple_matches(
+                authority,
+                expected_conversation_id,
+                authority_generation,
+                authority_owner_token,
+            )
+            and _conversation_tuple_matches(
+                predecessor,
+                expected_conversation_id,
+                authority_generation,
+                authority_owner_token,
+            )
+        )
+        successor_reuses_predecessor_tuple = _authority_tuple_matches(
+            authority,
+            expected_conversation_id,
+            generation,
+            owner_token,
+        ) and _conversation_tuple_matches(
+            predecessor,
+            expected_conversation_id,
+            generation,
+            owner_token,
+        )
+        expired_predecessor_can_handoff = bool(
+            predecessor_matches_authority
+            and _lease_expired(authority, now)
+            and _lease_expired(predecessor, now, field='capture_lease_expires_at')
+        )
         if predecessor_status != 'in_progress':
             return False
         if predecessor_is_v2 and (
-            not _authority_tuple_matches(authority, expected_conversation_id, generation, owner_token)
-            or not _conversation_tuple_matches(predecessor, expected_conversation_id, generation, owner_token)
-            or authority.get('state') != 'active'
+            authority.get('state') != 'active'
+            or not (successor_reuses_predecessor_tuple or expired_predecessor_can_handoff)
         ):
             return False
         if not predecessor_is_v2 and authority:

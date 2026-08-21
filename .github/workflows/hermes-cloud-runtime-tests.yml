@@ -672,6 +672,8 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[opus_fs320]"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[pcm16]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_predecessor_allows_new_generation_reconnect"
+            "tests/unit/test_capture_protocol_v2_live.py::test_live_predecessor_rejects_new_generation_reconnect"
             "tests/unit/test_capture_protocol_v2_live.py::test_drain_and_finalization_require_exact_tuple_and_reach_terminal"
             "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
@@ -679,7 +681,7 @@ jobs:
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 51
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 53
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
