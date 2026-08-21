@@ -50,6 +50,8 @@ conversation_stock_summary_cas_lost = 'stock_summary_cas_lost'
 conversation_stock_summary_transcript_changed = 'stock_summary_transcript_changed'
 conversation_stock_summary_malformed = 'stock_summary_authority_malformed'
 conversation_stock_summary_deleted = 'stock_summary_conversation_deleted'
+capture_protocol_version = 2
+capture_finalization_lost = 'capture_finalization_lost'
 
 _STOCK_SUMMARY_RESULT_UPDATE_FIELDS = {
     'discarded',
@@ -717,6 +719,24 @@ def _processing_result_update_data(conversation_data: Dict[str, Any]) -> Dict[st
     }
 
 
+def _capture_finalization_claim_matches(
+    conversation: Dict[str, Any],
+    capture_finalization: tuple[str, str, str],
+    now: datetime,
+) -> bool:
+    generation, owner_token, claim_token = capture_finalization
+    lease_expires_at = conversation.get('capture_finalization_lease_expires_at')
+    return bool(
+        conversation.get('capture_protocol_version') == capture_protocol_version
+        and conversation.get('capture_generation') == generation
+        and conversation.get('capture_owner_token') == owner_token
+        and conversation.get('capture_state') == 'finalizing'
+        and conversation.get('capture_finalization_claim_token') == claim_token
+        and isinstance(lease_expires_at, datetime)
+        and _ensure_timezone_aware(lease_expires_at) > _ensure_timezone_aware(now)
+    )
+
+
 def _parent_conversation_write_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
     parent_data = copy.deepcopy(conversation_data)
     if 'audio_base64_url' in parent_data:
@@ -871,9 +891,12 @@ def _commit_stock_summary_processing_result_transaction(
     enqueue_hermes_cloud_enrichment: bool = False,
     enrichment_enqueued_at: Optional[datetime] = None,
     expected_transcript_hash: Optional[str] = None,
+    capture_finalization: Optional[tuple[str, str, str]] = None,
 ) -> Dict[str, Any]:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
+        if capture_finalization:
+            return {'status': capture_finalization_lost, 'dispatched': False}
         if not allow_create:
             return {
                 'status': conversation_stock_summary_deleted,
@@ -907,6 +930,16 @@ def _commit_stock_summary_processing_result_transaction(
         }
 
     durable_conversation = snapshot.to_dict() or {}
+    if capture_finalization and not _capture_finalization_claim_matches(
+        durable_conversation,
+        capture_finalization,
+        datetime.now(timezone.utc),
+    ):
+        return {
+            'status': capture_finalization_lost,
+            'conversation': durable_conversation,
+            'dispatched': False,
+        }
     if expected_transcript_hash is not None:
         readable_durable_conversation = _prepare_conversation_for_transcript_hash(durable_conversation, uid)
         if (
@@ -965,6 +998,7 @@ def _commit_stock_summary_processing_result(
     enqueue_hermes_cloud_enrichment: bool = False,
     enrichment_enqueued_at: Optional[datetime] = None,
     expected_transcript_hash: Optional[str] = None,
+    capture_finalization: Optional[tuple[str, str, str]] = None,
 ) -> Dict[str, Any]:
     return _commit_stock_summary_processing_result_transaction(
         transaction,
@@ -976,6 +1010,7 @@ def _commit_stock_summary_processing_result(
         enqueue_hermes_cloud_enrichment,
         enrichment_enqueued_at,
         expected_transcript_hash,
+        capture_finalization,
     )
 
 
@@ -988,6 +1023,7 @@ def commit_stock_summary_processing_result(
     allow_create: bool = False,
     enqueue_hermes_cloud_enrichment: bool = False,
     expected_transcript_hash: Optional[str] = None,
+    capture_finalization: Optional[tuple[str, str, str]] = None,
 ) -> Dict[str, Any]:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -995,6 +1031,8 @@ def commit_stock_summary_processing_result(
     commit_kwargs = {}
     if expected_transcript_hash is not None:
         commit_kwargs['expected_transcript_hash'] = expected_transcript_hash
+    if capture_finalization is not None:
+        commit_kwargs['capture_finalization'] = capture_finalization
     result = _commit_stock_summary_processing_result(
         db.transaction(),
         conversation_ref,
@@ -3058,6 +3096,7 @@ def persist_capture_persistence_batch(
     finished_at: datetime,
     capture_owner_id: str,
     photos: Optional[List[ConversationPhoto]] = None,
+    capture_generation: Optional[str] = None,
 ) -> str:
     segment_ids = [str(segment.get("id") or "").strip() for segment in segments]
     if any(not segment_id for segment_id in segment_ids):
@@ -3083,6 +3122,7 @@ def persist_capture_persistence_batch(
         "photos": prepared_photos,
         "finished_at": finished_at.astimezone(timezone.utc).isoformat(),
         "capture_owner_id": str(capture_owner_id or "").strip(),
+        "capture_generation": str(capture_generation or "").strip() or None,
     }
     if not payload["capture_owner_id"]:
         raise ValueError("capture_persistence_owner_id_required")
@@ -3385,6 +3425,7 @@ def _commit_capture_persistence_batch_transaction(
     uid: str,
     conversation_id: str,
     expected_owner_id: Optional[str] = None,
+    expected_generation: Optional[str] = None,
 ) -> dict:
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     batch_snapshot = batch_ref.get(transaction=transaction)
@@ -3404,6 +3445,15 @@ def _commit_capture_persistence_batch_transaction(
     durable_owner_id = str(conversation_data.get("capture_owner_id") or "").strip()
     if not capture_owner_id or durable_owner_id != capture_owner_id:
         return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+    if conversation_data.get('capture_protocol_version') == 2:
+        capture_generation = str(expected_generation or payload.get('capture_generation') or '').strip()
+        if (
+            not capture_generation
+            or str(conversation_data.get('capture_generation') or '').strip() != capture_generation
+            or str(conversation_data.get('capture_owner_token') or '').strip() != capture_owner_id
+            or conversation_data.get('capture_state') != 'active'
+        ):
+            return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
 
     conversation_data = _prepare_conversation_for_read(conversation_data, uid)
     if conversation_data is None:
@@ -3461,6 +3511,7 @@ def _commit_capture_persistence_batch(
     uid: str,
     conversation_id: str,
     expected_owner_id: str,
+    expected_generation: Optional[str] = None,
 ):
     return _commit_capture_persistence_batch_transaction(
         transaction,
@@ -3469,10 +3520,17 @@ def _commit_capture_persistence_batch(
         uid,
         conversation_id,
         expected_owner_id,
+        expected_generation,
     )
 
 
-def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: str, owner_id: str) -> dict:
+def commit_capture_persistence_batch(
+    uid: str,
+    conversation_id: str,
+    batch_id: str,
+    owner_id: str,
+    capture_generation: Optional[str] = None,
+) -> dict:
     exact_owner_id = str(owner_id or "").strip()
     if not exact_owner_id:
         raise ValueError("capture_persistence_owner_id_required")
@@ -3490,6 +3548,7 @@ def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: s
             uid,
             conversation_id,
             exact_owner_id,
+            capture_generation,
         )
     finally:
         redis_db.release_capture_commit_lease(uid, exact_owner_id)
@@ -3502,6 +3561,7 @@ def persist_and_commit_capture_persistence_batch(
     finished_at: datetime,
     capture_owner_id: str,
     photos: Optional[List[ConversationPhoto]] = None,
+    capture_generation: Optional[str] = None,
 ) -> dict:
     """Persist and commit a live capture while ownership transfer is fenced."""
     exact_owner_id = str(capture_owner_id or "").strip()
@@ -3518,6 +3578,7 @@ def persist_and_commit_capture_persistence_batch(
             finished_at,
             exact_owner_id,
             photos=photos,
+            capture_generation=capture_generation,
         )
         conversation_ref = (
             db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -3530,6 +3591,7 @@ def persist_and_commit_capture_persistence_batch(
             uid,
             conversation_id,
             exact_owner_id,
+            capture_generation,
         )
     finally:
         redis_db.release_capture_commit_lease(uid, exact_owner_id)

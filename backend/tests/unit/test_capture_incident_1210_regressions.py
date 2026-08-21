@@ -187,6 +187,7 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
         "routers/transcribe.py",
         "_process_conversation",
         {
+            "complete_rotated_capture": lambda *_args: True,
             "drain_capture_persistence_batches": lambda *_args: None,
             "conversations_db": SimpleNamespace(
                 get_conversation=lambda *_args: {
@@ -202,7 +203,9 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "_create_conversation_fallback": fallback,
             "_latency_log": lambda *_args, **_kwargs: None,
             "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "generation_id": "generation-a",
             "on_conversation_processing_started": lambda _conversation_id: None,
+            "owner_token": "socket-a",
             "request_conversation_processing": request_processing,
             "session_id": "socket-a",
             "uid": "uid-a",
@@ -231,6 +234,7 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
         "routers/transcribe.py",
         "_process_conversation",
         {
+            "complete_rotated_capture": lambda *_args: True,
             "drain_capture_persistence_batches": lambda *_args: None,
             "conversations_db": SimpleNamespace(
                 get_conversation=lambda *_args: {
@@ -246,7 +250,9 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "_create_conversation_fallback": fallback,
             "_latency_log": lambda *_args, **_kwargs: None,
             "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "generation_id": "generation-a",
             "on_conversation_processing_started": lambda _conversation_id: None,
+            "owner_token": "socket-a",
             "request_conversation_processing": terminal_request,
             "session_id": "socket-a",
             "uid": "uid-a",
@@ -417,7 +423,7 @@ def test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committ
 
     conversations_db = SimpleNamespace(
         list_capture_persistence_batches=lambda _uid, _conversation_id: list(pending_batch_ids),
-        commit_capture_persistence_batch=lambda _uid, _conversation_id, batch_id, _owner_id: (
+        commit_capture_persistence_batch=lambda _uid, _conversation_id, batch_id, _owner_id, _generation: (
             committed_batch_ids.append(batch_id) or {"status": "committed"}
         ),
     )
@@ -435,13 +441,13 @@ def test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committ
     )
 
     recovery_conversation_ids = {"conversation-a"}
-    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new")
+    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new", "generation-new")
     assert (recovered_count, still_owned) == (0, True)
     assert should_keep_polling("conversation-a", "conversation-a", True)
     assert recovery_conversation_ids == {"conversation-a"}
 
     pending_batch_ids.append("batch-from-old-socket")
-    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new")
+    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new", "generation-new")
     assert (recovered_count, still_owned) == (1, True)
     assert committed_batch_ids == ["batch-from-old-socket"]
 
@@ -552,6 +558,9 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
         def remove_conversation_meeting_id(self, _conversation_id):
             raise AssertionError("an adopted stub must retain its meeting association")
 
+    async def publish_capture_protocol_ready(*_args, **_kwargs):
+        return True
+
     create_stub = _nested_function(
         "routers/transcribe.py",
         "_create_new_in_progress_conversation",
@@ -575,12 +584,14 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
             "uuid": SimpleNamespace(uuid4=lambda: "stub-adopted"),
         },
         {
+            "_publish_capture_protocol_ready": publish_capture_protocol_ready,
             "current_conversation_id": "stale",
             "language": "en",
             "private_cloud_sync_enabled": False,
             "session_id": "socket-a",
             "source": None,
             "uid": "uid-a",
+            "websocket_active": True,
         },
     )
 

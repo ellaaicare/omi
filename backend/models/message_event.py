@@ -4,7 +4,6 @@ from pydantic import BaseModel
 
 from models.conversation import Conversation, Message, ConversationPhoto
 
-
 # Freemium action constants
 FREEMIUM_ACTION_SETUP_ON_DEVICE_STT = "setup_on_device_stt"
 FREEMIUM_ACTION_NONE = "none"
@@ -82,6 +81,10 @@ class MessageServiceStatusEvent(MessageEvent):
     event_type: str = "service_status"
     status: str
     status_text: Optional[str] = None
+    protocol_version: Optional[int] = None
+    conversation_id: Optional[str] = None
+    generation: Optional[str] = None
+    owner_token: Optional[str] = None
 
     def to_json(self):
         j = self.model_dump(mode="json")

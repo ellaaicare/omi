@@ -7,7 +7,7 @@ import logging
 import asyncio
 from dataclasses import dataclass
 from datetime import timezone, timedelta, datetime
-from typing import Union, Tuple, List, Optional
+from typing import Callable, Union, Tuple, List, Optional
 
 from fastapi import HTTPException
 
@@ -81,6 +81,7 @@ from utils.conversations.failure_state import (
     clear_conversation_processing_error,
 )
 from utils.conversations.vector import save_structured_vector
+from utils.conversations.capture_protocol import renew_capture_finalization
 
 
 @dataclass(frozen=True)
@@ -94,9 +95,17 @@ class ConversationProcessingOutcome:
 CONVERSATION_TRANSCRIPT_REDELIVERY_EXHAUSTED = 'transcript_redelivery_exhausted'
 
 
-def _run_post_commit_effect(name: str, effect):
+class CaptureFinalizationLeaseLost(RuntimeError):
+    pass
+
+
+def _run_post_commit_effect(name: str, effect, guard: Optional[Callable[[], None]] = None):
     try:
+        if guard:
+            guard()
         return effect()
+    except CaptureFinalizationLeaseLost:
+        raise
     except Exception as exc:
         print(f"Post-commit effect failed ({name}): {exc}", flush=True)
         return None
@@ -629,6 +638,7 @@ def process_conversation_with_outcome(
     _claim_already_held: bool = False,
     _initial_processing_claim_token: Optional[str] = None,
     _transcript_retry_count: int = 0,
+    capture_finalization: Optional[Tuple[str, str, str]] = None,
 ) -> ConversationProcessingOutcome:
     assert_current_ai_consent(uid)
     allow_create = not isinstance(conversation, Conversation)
@@ -671,6 +681,29 @@ def process_conversation_with_outcome(
         transcript_grounding_hash(conversation.transcript_segments) if isinstance(conversation, Conversation) else None
     )
 
+    def require_live_capture_finalizer() -> None:
+        if not capture_finalization:
+            return
+        generation, owner_token, claim_token = capture_finalization
+        if not renew_capture_finalization(
+            uid,
+            conversation.id,
+            generation,
+            owner_token,
+            claim_token,
+        ):
+            raise CaptureFinalizationLeaseLost('capture_finalization_lease_lost')
+
+    def run_post_commit(name: str, operation: Callable[[], object]):
+        if capture_finalization:
+            return _run_post_commit_effect(name, operation, require_live_capture_finalizer)
+        return _run_post_commit_effect(name, operation)
+
+    def run_post_commit_background(name: str, operation: Callable[..., object], args: tuple = ()):
+        if capture_finalization:
+            return _run_post_commit_effect(name, lambda: operation(*args), require_live_capture_finalizer)
+        return _run_post_commit_effect(name, lambda: threading.Thread(target=operation, args=args).start())
+
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
     if hasattr(conversation, 'id') and conversation.id:
         meeting_id = redis_db.get_conversation_meeting_id(conversation.id)
@@ -695,7 +728,7 @@ def process_conversation_with_outcome(
     try:
         structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
     except Exception:
-        if isinstance(conversation, Conversation):
+        if isinstance(conversation, Conversation) and not capture_finalization:
             mark_conversation_processing_failed_update(uid, conversation)
         raise
 
@@ -733,14 +766,19 @@ def process_conversation_with_outcome(
 
     folder_persisted_by_commit = bool(allow_create and assigned_folder_id)
     conversation.status = ConversationStatus.completed
+    commit_kwargs = {
+        'expected_active_summary_version_id': expected_active_summary_version_id,
+        'allow_create': allow_create,
+        'enqueue_hermes_cloud_enrichment': uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS,
+        'expected_transcript_hash': expected_transcript_hash,
+    }
+    if capture_finalization is not None:
+        commit_kwargs['capture_finalization'] = capture_finalization
     commit_result = conversations_db.commit_stock_summary_processing_result(
         uid,
         conversation.id,
         conversation.dict(),
-        expected_active_summary_version_id=expected_active_summary_version_id,
-        allow_create=allow_create,
-        enqueue_hermes_cloud_enrichment=uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS,
-        expected_transcript_hash=expected_transcript_hash,
+        **commit_kwargs,
     )
     commit_status = commit_result.get('status')
     if commit_status == conversations_db.conversation_stock_summary_transcript_changed:
@@ -762,6 +800,7 @@ def process_conversation_with_outcome(
                 _claim_already_held=initial_processing_claim_held,
                 _initial_processing_claim_token=initial_processing_claim_token,
                 _transcript_retry_count=_transcript_retry_count + 1,
+                capture_finalization=capture_finalization,
             )
         released_claim_token = None
         if initial_processing_claim_held:
@@ -778,6 +817,8 @@ def process_conversation_with_outcome(
             status=commit_status,
             released_claim_token=released_claim_token,
         )
+    if commit_status == conversations_db.capture_finalization_lost:
+        raise CaptureFinalizationLeaseLost('capture_finalization_lease_lost')
     if commit_status in {
         conversations_db.conversation_stock_summary_cas_lost,
         conversations_db.conversation_stock_summary_deleted,
@@ -793,7 +834,8 @@ def process_conversation_with_outcome(
             status=commit_status,
         )
     if commit_status != 'committed':
-        mark_conversation_processing_failed_update(uid, conversation, error_code=CONVERSATION_SUMMARY_FAILED)
+        if not capture_finalization:
+            mark_conversation_processing_failed_update(uid, conversation, error_code=CONVERSATION_SUMMARY_FAILED)
         raise RuntimeError(f"conversation summary authority unavailable: {commit_status}")
 
     conversation = Conversation(**(commit_result.get('conversation') or conversation.dict()))
@@ -845,29 +887,23 @@ def process_conversation_with_outcome(
                 },
             )
 
-        _run_post_commit_effect('usage', record_processing_usage)
-        _run_post_commit_effect('apps', trigger_and_persist_apps)
+        run_post_commit('usage', record_processing_usage)
+        run_post_commit('apps', trigger_and_persist_apps)
         if not is_reprocess:
-            _run_post_commit_effect(
+            run_post_commit_background(
                 'structured_vector',
-                lambda: threading.Thread(target=save_structured_vector, args=(uid, conversation)).start(),
+                save_structured_vector,
+                (uid, conversation),
             )
-        _run_post_commit_effect(
-            'memories', lambda: threading.Thread(target=_extract_memories, args=(uid, conversation)).start()
-        )
-        _run_post_commit_effect(
-            'trends', lambda: threading.Thread(target=_extract_trends, args=(uid, conversation)).start()
-        )
-        _run_post_commit_effect(
-            'action_items', lambda: threading.Thread(target=_save_action_items, args=(uid, conversation)).start()
-        )
-        _run_post_commit_effect(
-            'goals', lambda: threading.Thread(target=_update_goal_progress, args=(uid, conversation)).start()
-        )
+        run_post_commit_background('memories', _extract_memories, (uid, conversation))
+        run_post_commit_background('trends', _extract_trends, (uid, conversation))
+        run_post_commit_background('action_items', _save_action_items, (uid, conversation))
+        run_post_commit_background('goals', _update_goal_progress, (uid, conversation))
 
     # Create audio files from chunks if private cloud sync was enabled
     if not is_reprocess and conversation.private_cloud_sync_enabled:
         try:
+            require_live_capture_finalizer()
             audio_files = conversations_db.create_audio_files_from_chunks(uid, conversation.id)
             if audio_files:
                 conversation.audio_files = audio_files
@@ -881,24 +917,23 @@ def process_conversation_with_outcome(
 
     # Update folder conversation count after conversation is saved
     if assigned_folder_id and should_dispatch_processing_side_effects:
-        folder_assigned = folder_persisted_by_commit or _run_post_commit_effect(
+        folder_assigned = folder_persisted_by_commit or run_post_commit(
             'folder_assignment',
             lambda: conversations_db.assign_conversation_folder_if_unset(uid, conversation.id, assigned_folder_id),
         )
         if folder_assigned:
             conversation.folder_id = assigned_folder_id
-            _run_post_commit_effect(
+            run_post_commit(
                 'folder_count', lambda: folders_db.update_folder_conversation_count(uid, assigned_folder_id)
             )
 
     if not is_reprocess and should_dispatch_processing_side_effects:
-        _run_post_commit_effect(
+        run_post_commit_background(
             'conversation_created_webhook',
-            lambda: threading.Thread(target=conversation_created_webhook, args=(uid, conversation)).start(),
+            conversation_created_webhook,
+            (uid, conversation),
         )
-        _run_post_commit_effect(
-            'persona_update', lambda: threading.Thread(target=update_personas_async, args=(uid,)).start()
-        )
+        run_post_commit_background('persona_update', update_personas_async, (uid,))
 
         # Disable important conversation for now
         # Send important conversation notification for long conversations (>30 minutes)
@@ -913,9 +948,10 @@ def process_conversation_with_outcome(
         and should_dispatch_processing_side_effects
         and uid not in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS
     ):  # Cloud-selected conversations were queued atomically with the summary commit.
-        _run_post_commit_effect(
+        run_post_commit_background(
             'ella_postprocess_webhook',
-            lambda: threading.Thread(target=fire_postprocess_webhook, args=(uid, conversation)).start(),
+            fire_postprocess_webhook,
+            (uid, conversation),
         )
 
     print('process_conversation completed conversation.id=', conversation.id)

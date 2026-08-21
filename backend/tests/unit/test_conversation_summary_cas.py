@@ -10,7 +10,7 @@ import threading
 import uuid
 import zlib
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -573,6 +573,76 @@ def _stock_processing_payload(active_summary_version_id=None):
         "processing_error": None,
         "processing_error_at": None,
     }
+
+
+def test_capture_finalizer_summary_commit_requires_exact_unexpired_claim_in_same_transaction(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    now = datetime.now(timezone.utc)
+    durable = {
+        "id": "conversation-1",
+        "created_at": "2026-07-22T00:00:00+00:00",
+        "structured": {},
+        "summary_versions": [],
+        "active_summary_version_id": None,
+        "status": "processing",
+        "discarded": False,
+        "data_protection_level": "standard",
+        "capture_protocol_version": 2,
+        "capture_generation": "generation-a",
+        "capture_owner_token": "owner-a",
+        "capture_state": "finalizing",
+        "capture_finalization_claim_token": "claim-a",
+        "capture_finalization_lease_expires_at": now + timedelta(seconds=30),
+    }
+
+    exact_ref = _ConversationRef(copy.deepcopy(durable))
+    exact_transaction = _Transaction()
+    exact = conversations._commit_stock_summary_processing_result_transaction(
+        exact_transaction,
+        exact_ref,
+        "uid-1",
+        _stock_processing_payload(),
+        expected_active_summary_version_id=None,
+        capture_finalization=("generation-a", "owner-a", "claim-a"),
+    )
+    assert exact["status"] == "committed"
+    assert len(exact_transaction.updates) == 1
+
+    for stale_tuple in (
+        ("generation-b", "owner-a", "claim-a"),
+        ("generation-a", "owner-b", "claim-a"),
+        ("generation-a", "owner-a", "claim-b"),
+    ):
+        stale_ref = _ConversationRef(copy.deepcopy(durable))
+        stale_transaction = _Transaction()
+        stale = conversations._commit_stock_summary_processing_result_transaction(
+            stale_transaction,
+            stale_ref,
+            "uid-1",
+            _stock_processing_payload(),
+            expected_active_summary_version_id=None,
+            capture_finalization=stale_tuple,
+        )
+        assert stale["status"] == conversations.capture_finalization_lost
+        assert stale_transaction.updates == []
+
+    expired_ref = _ConversationRef(
+        {
+            **durable,
+            "capture_finalization_lease_expires_at": now - timedelta(seconds=1),
+        }
+    )
+    expired_transaction = _Transaction()
+    expired = conversations._commit_stock_summary_processing_result_transaction(
+        expired_transaction,
+        expired_ref,
+        "uid-1",
+        _stock_processing_payload(),
+        expected_active_summary_version_id=None,
+        capture_finalization=("generation-a", "owner-a", "claim-a"),
+    )
+    assert expired["status"] == conversations.capture_finalization_lost
+    assert expired_transaction.updates == []
 
 
 def test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_process_metadata(monkeypatch):

@@ -13,7 +13,6 @@ from utils.other.endpoints import timeit
 from ._client import db
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read
 
-
 # *********************************
 # ******* ENCRYPTION HELPERS ******
 # *********************************
@@ -63,16 +62,31 @@ def _prepare_message_for_read(message_data: Optional[Dict[str, Any]], uid: str) 
 
 @set_data_protection_level(data_arg_name='message_data')
 @prepare_for_write(data_arg_name='message_data', prepare_func=_prepare_data_for_write)
-def add_message(uid: str, message_data: dict):
+def add_message(uid: str, message_data: dict, message_document_id: Optional[str] = None):
     del message_data['memories']
     user_ref = db.collection('users').document(uid)
-    user_ref.collection('messages').add(message_data)
+    messages_ref = user_ref.collection('messages')
+    if message_document_id:
+        messages_ref.document(message_document_id).set(message_data)
+    else:
+        messages_ref.add(message_data)
     return message_data
 
 
-def add_app_message(text: str, app_id: str, uid: str, conversation_id: Optional[str] = None) -> Message:
+def add_app_message(
+    text: str,
+    app_id: str,
+    uid: str,
+    conversation_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+) -> Message:
+    message_id = (
+        str(uuid.uuid5(uuid.NAMESPACE_URL, f'omi:external-message:{uid}:{app_id}:{idempotency_key}'))
+        if idempotency_key
+        else str(uuid.uuid4())
+    )
     ai_message = Message(
-        id=str(uuid.uuid4()),
+        id=message_id,
         text=text,
         created_at=datetime.now(timezone.utc),
         sender='ai',
@@ -81,7 +95,7 @@ def add_app_message(text: str, app_id: str, uid: str, conversation_id: Optional[
         type='text',
         memories_id=[conversation_id] if conversation_id else [],
     )
-    add_message(uid, ai_message.dict())
+    add_message(uid, ai_message.dict(), message_document_id=message_id if idempotency_key else None)
     return ai_message
 
 
