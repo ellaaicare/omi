@@ -201,6 +201,15 @@ def _install_authority_transaction(
 
     authority_snapshot = authority_ref.get(transaction=transaction)
     authority = authority_snapshot.to_dict() if authority_snapshot.exists else {}
+    already_installed = bool(
+        authority.get('state') == 'active'
+        and conversation.get('capture_state') == 'active'
+        and _authority_tuple_matches(authority, conversation_id, generation, owner_token)
+        and _conversation_tuple_matches(conversation, conversation_id, generation, owner_token)
+    )
+    if already_installed:
+        return True
+
     predecessor = None
     if adopt:
         if str(conversation.get('id') or '') != conversation_id:
