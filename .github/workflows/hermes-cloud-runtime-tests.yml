@@ -899,6 +899,7 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
+              tests/unit/test_ella_postprocess_cloud_routing.py \
               tests/unit/test_ella_provisioning_service.py \
               tests/unit/test_ella_runtime_route_isolation.py \
               tests/unit/test_voice_proxy_auth.py \
@@ -911,7 +912,10 @@ jobs:
               sed '/^$/d'
           )"
           for required_id in "${required_ids[@]}"; do
-            grep -Fqx "$required_id" <<<"$collected_ids"
+            if ! grep -Fqx "$required_id" <<<"$collected_ids"; then
+              echo "::error::required Hermes Cloud test is not collected: $required_id"
+              exit 1
+            fi
           done
           test "$(
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
