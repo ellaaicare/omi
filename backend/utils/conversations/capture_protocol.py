@@ -260,12 +260,18 @@ def _install_authority_transaction(
             and _aware(authority_lease_expires_at) <= now
             and _aware(predecessor_lease_expires_at) <= now
         )
+        active_predecessor_can_handoff = bool(
+            authority.get('state') == 'active'
+            and (successor_reuses_predecessor_tuple or expired_predecessor_can_handoff)
+        )
+        drained_predecessor_can_handoff = bool(
+            authority.get('state') == 'drained'
+            and predecessor.get('capture_state') == 'drained'
+            and expired_predecessor_can_handoff
+        )
         if predecessor_status != 'in_progress':
             return False
-        if predecessor_is_v2 and (
-            authority.get('state') != 'active'
-            or not (successor_reuses_predecessor_tuple or expired_predecessor_can_handoff)
-        ):
+        if predecessor_is_v2 and not (active_predecessor_can_handoff or drained_predecessor_can_handoff):
             return False
         if not predecessor_is_v2 and authority:
             return False
