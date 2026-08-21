@@ -844,6 +844,8 @@ jobs:
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_prepare_requires_scope_bound_fresh_protected_off_receipt"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_cleanup_recovers_from_partial_cleanup_idempotently"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_show_and_cleanup_accept_expected_post_enrichment_state_only"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_capture_delivery_http_failure_is_not_acknowledged"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_legacy_delivery_preserves_best_effort_http_failure"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
             "tests/unit/test_ella_runtime_route_isolation.py::test_isolated_hermes_chat_has_a_bounded_provider_timeout"
             "tests/unit/test_ella_runtime_route_isolation.py::test_legacy_history_unexpected_failure_logs_fixed_content_free_classification"
@@ -915,7 +917,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 20
-          test "$collected" -eq 564
+          test "$collected" -eq 566
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
