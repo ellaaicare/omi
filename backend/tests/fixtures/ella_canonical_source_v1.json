@@ -1,0 +1,44 @@
+[
+  {
+    "name": "hermes-original-backend-payload",
+    "uid": "uid-a",
+    "conversation_id": "conversation-a",
+    "payload": {
+      "uid": "uid-a",
+      "conversation_id": "conversation-a",
+      "transcript": "private transcript",
+      "segment_count": 1,
+      "started_at": "2026-08-15T12:00:00Z",
+      "finished_at": "2026-08-15T12:01:00Z",
+      "structured": {
+        "title": "Original",
+        "overview": "Original overview",
+        "emoji": "🪽",
+        "category": "other"
+      }
+    },
+    "canonical_json": "{\"category\":\"other\",\"conversation_id\":\"conversation-a\",\"emoji\":\"🪽\",\"finished_at\":\"2026-08-15T12:01:00Z\",\"overview\":\"Original overview\",\"segment_count\":1,\"started_at\":\"2026-08-15T12:00:00Z\",\"title\":\"Original\",\"transcript\":\"private transcript\",\"type\":\"omi-conversation\",\"uid\":\"uid-a\"}",
+    "sha256": "03b6645e22b7ffc9fceffa286d41ffe6d0ebbe974f791d194d2fc7c1e0b37750"
+  },
+  {
+    "name": "hermes-defaults-whitespace-unicode",
+    "uid": "uid-unicode",
+    "conversation_id": "conversation-defaults",
+    "payload": {
+      "uid": "uid-unicode",
+      "conversation_id": "conversation-defaults",
+      "transcript": "  Speaker: naïve résumé  ",
+      "segment_count": 0,
+      "started_at": null,
+      "finished_at": null,
+      "structured": {
+        "title": null,
+        "overview": " Unicode\n café\t discussion ",
+        "emoji": null,
+        "category": null
+      }
+    },
+    "canonical_json": "{\"category\":\"other\",\"conversation_id\":\"conversation-defaults\",\"emoji\":\"🪽\",\"finished_at\":\"\",\"overview\":\"Unicode café discussion\",\"segment_count\":0,\"started_at\":\"\",\"title\":\"OMI conversation\",\"transcript\":\"Speaker: naïve résumé\",\"type\":\"omi-conversation\",\"uid\":\"uid-unicode\"}",
+    "sha256": "a2212564783d14d74c6dc178473b478f5ad4f5569cebfd706fa30881da62ecb0"
+  }
+]

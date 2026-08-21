@@ -1,5 +1,6 @@
 """Production-route authentication tests for Ella user and service boundaries."""
 
+import asyncio
 import sys
 import types
 
@@ -17,6 +18,7 @@ app_settings_module.save_voice_settings = lambda _uid, voice_settings: voice_set
 sys.modules.setdefault("database.app_settings", app_settings_module)
 
 from ella.routers import chat, guardian, resolve, voice
+from ella.services.hermes_session import canonical_omi_session_key
 from utils.ella import exact_firebase_auth
 
 
@@ -138,8 +140,14 @@ def test_chat_owner_token_supplies_subject_without_caller_uid(monkeypatch):
 
 def test_voice_owner_token_supplies_subject_without_caller_uid(monkeypatch):
     pool = _VoicePool()
+    token_claims = []
+
+    def create_token(**kwargs):
+        token_claims.append(kwargs)
+        return f"token-for-{kwargs['uid']}"
+
     monkeypatch.setattr(voice, "_pool", pool)
-    monkeypatch.setattr(voice, "create_session_token", lambda **kwargs: f"token-for-{kwargs['uid']}")
+    monkeypatch.setattr(voice, "create_session_token", create_token)
     monkeypatch.setitem(voice.V2V_PROVIDERS["grok-voice"], "key_check", lambda: True)
     client = _client(monkeypatch)
 
@@ -151,7 +159,58 @@ def test_voice_owner_token_supplies_subject_without_caller_uid(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["session_token"] == "token-for-uid-a"
+    assert response.json()["session_id"]
+    assert token_claims[0]["session_id"] == response.json()["session_id"]
     assert pool.fetchrow_calls[0][1] == ("uid-a",)
+
+
+def test_voice_session_token_matches_active_proxy_required_claims_and_returns_jti(monkeypatch):
+    pool = _VoicePool()
+    monkeypatch.setattr(voice, "_pool", pool)
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "proxy-contract-secret-32-bytes-minimum")
+    monkeypatch.setitem(voice.V2V_PROVIDERS["grok-voice"], "key_check", lambda: True)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/session",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"provider": "grok-voice"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    claims = voice.jwt.decode(
+        payload["session_token"],
+        "proxy-contract-secret-32-bytes-minimum",
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience="ella-voice-proxy",
+        options={
+            "require": [
+                "exp",
+                "iat",
+                "iss",
+                "aud",
+                "sub",
+                "uid",
+                "jti",
+                "voice_mode",
+                "provider",
+                "isolated_runtime",
+                "correlation_id",
+                "entitlement_revision",
+            ]
+        },
+    )
+    assert payload["session_id"] == claims["jti"]
+    assert claims["sub"] == claims["uid"] == "uid-a"
+    assert claims["aud"] == "ella-voice-proxy"
+    assert claims["voice_mode"] == "v4"
+    assert claims["provider"] == "grok-voice"
+    assert claims["isolated_runtime"] is False
+    assert claims["entitlement_revision"] == 1
+    assert isinstance(claims["correlation_id"], str) and claims["correlation_id"]
+    assert "session_id" not in claims
 
 
 def test_user_routes_reject_uid_mismatch_before_provider_or_context_work(monkeypatch):
@@ -296,6 +355,33 @@ def test_resolve_missing_workspace_fails_closed_without_retained_fallback_or_sec
         assert forbidden not in serialized
 
 
+def test_resolved_hermes_routing_uses_exact_v2_owner_key_without_legacy_fallback(monkeypatch):
+    class CaseResolvePool:
+        async def fetchrow(self, _query, *args):
+            assert args == ("CaseUID",)
+            return {
+                "id": "case-owner-row",
+                "name": "Case Owner",
+                "omi_uid": "CaseUID",
+                "status": "active",
+                "guardian_mode": "OFF",
+                "timezone": "America/Los_Angeles",
+                "conditions": [],
+                "medications": [],
+                "agents": {"userAgentId": "case-agent", "workspace": "/profiles/CaseUID/workspace"},
+                "cluster_status": "ready",
+            }
+
+    monkeypatch.setattr(resolve, "_pool", CaseResolvePool())
+    monkeypatch.setattr(resolve, "CHAT_PLATFORM", "hermes")
+
+    resolved = asyncio.run(resolve.resolve_user_routing("CaseUID"))
+
+    assert resolved["routing"]["sessionKey"] == canonical_omi_session_key("CaseUID")
+    assert resolved["routing"]["sessionKey"] != "ella:omi:caseuid:canonical"
+    assert "CaseUID" not in resolved["routing"]["sessionKey"]
+
+
 def test_voice_alternate_routes_reject_missing_and_wrong_subject_before_downstream_work(monkeypatch):
     pool = _VoicePool()
     monkeypatch.setattr(voice, "_pool", pool)
@@ -365,6 +451,51 @@ def test_voice_context_owner_response_never_contains_runtime_credentials(monkeyp
     assert payload["medications"] == ["owner-medication"]
     assert "gateway_token" not in payload
     assert "private-routing-value" not in str(payload)
+
+
+def test_unified_voice_search_success_logs_never_include_query_content(monkeypatch, caplog):
+    sentinel = "SENTINEL private transcript phrase success"
+
+    async def search_timeline(_uid, _query, _limit):
+        return [{"source": "timeline", "content": "safe result", "score": 1, "metadata": {}}]
+
+    monkeypatch.setattr(voice, "_pool", _VoicePool())
+    monkeypatch.setattr(voice, "_search_canonical_timeline", search_timeline)
+    caplog.set_level("INFO", logger=voice.__name__)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/search",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"query": sentinel, "sources": ["timeline"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_results"] == 1
+    assert sentinel not in caplog.text
+
+
+def test_unified_voice_search_failure_logs_never_include_query_or_exception_content(monkeypatch, caplog):
+    sentinel = "SENTINEL private transcript phrase failure"
+
+    async def failing_timeline(_uid, _query, _limit):
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(voice, "_pool", _VoicePool())
+    monkeypatch.setattr(voice, "_search_canonical_timeline", failing_timeline)
+    caplog.set_level("INFO", logger=voice.__name__)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/search",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"query": sentinel, "sources": ["timeline"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_results"] == 0
+    assert "error_class=RuntimeError" in caplog.text
+    assert sentinel not in caplog.text
 
 
 def test_guardian_alternate_routes_reject_missing_and_wrong_subject_without_side_effect(monkeypatch):

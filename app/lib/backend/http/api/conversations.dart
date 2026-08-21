@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -9,13 +12,61 @@ import 'package:omi/backend/schema/schema.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
-import 'package:omi/utils/platform/platform_manager.dart';
 
 typedef ConversationDeleteTransport = Future<http.Response?> Function({
   required String url,
   required String? expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier? exactAuthority,
 });
+
+typedef ConversationFinalizationTransport = Future<http.Response?> Function({
+  required String url,
+  required String method,
+  required String body,
+  required Duration timeout,
+  required int retries,
+  required bool retryOnUnauthorized,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+});
+
+typedef ConversationFinalizationDelay = Future<void> Function(Duration duration);
+
+typedef ConversationCorrectionTransport = Future<http.Response?> Function({
+  required String url,
+  required String method,
+  required String body,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+  required Duration? timeout,
+});
+
+typedef ConversationCorrectionReceiptFetcher = Future<ConversationCorrectionReceipt?> Function({
+  required String conversationId,
+  required String correctionId,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  required Duration requestTimeout,
+});
+
+Future<http.Response?> _defaultConversationCorrectionTransport({
+  required String url,
+  required String method,
+  required String body,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+  required Duration? timeout,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: const {},
+      method: method,
+      body: body,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+      timeout: timeout,
+      retries: 0,
+    );
 
 Future<http.Response?> _defaultConversationDeleteTransport({
   required String url,
@@ -31,33 +82,260 @@ Future<http.Response?> _defaultConversationDeleteTransport({
       exactAuthority: exactAuthority,
     );
 
-Future<CreateConversationResponse?> processInProgressConversation({
-  required String conversationId,
-  String? expectedAuthenticatedUid,
-  ExactAccountAuthorityVerifier? exactAuthority,
-}) async {
-  http.Response? response;
-  const maxCaptureDrainAttempts = 40;
-  for (var attempt = 0; attempt < maxCaptureDrainAttempts; attempt++) {
-    response = await makeApiCall(
-      url: '${Env.apiBaseUrl}v1/conversations',
-      headers: {},
-      method: 'POST',
-      body: jsonEncode({'conversation_id': conversationId}),
+Future<http.Response?> _defaultConversationFinalizationTransport({
+  required String url,
+  required String method,
+  required String body,
+  required Duration timeout,
+  required int retries,
+  required bool retryOnUnauthorized,
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: const {},
+      method: method,
+      body: body,
+      timeout: timeout,
+      retries: retries,
+      retryOnUnauthorized: retryOnUnauthorized,
+      enforceAbsoluteTimeout: true,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     );
-    if (response?.statusCode != 409 || attempt == maxCaptureDrainAttempts - 1) break;
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+
+Future<void> _defaultConversationFinalizationDelay(Duration duration) => Future<void>.delayed(duration);
+
+void _verifyConversationFinalizationAuthority({
+  required String? expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier? exactAuthority,
+}) {
+  if (exactAuthority == null) return;
+  if (!exactAuthority.isExactCurrent() ||
+      (expectedAuthenticatedUid != null && exactAuthority.uid != expectedAuthenticatedUid)) {
+    throw ExactAccountAuthorityChangedException('Capture finalization authority changed while polling');
   }
-  if (response == null) return null;
-  Logger.debug('createConversationServer: ${response.body}');
-  if (response.statusCode == 200) {
-    return CreateConversationResponse.fromJson(jsonDecode(response.body));
-  } else {
-    // TODO: Server returns 304 doesn't recover
-    PlatformManager.instance.crashReporter.reportCrash(Exception('Failed to create conversation'), StackTrace.current,
-        userAttributes: {'response': response.body});
+}
+
+enum _ConversationFinalizationStatus { inProgress, processing, merging, completed, failed, invalid }
+
+class _InspectedConversationResponse {
+  const _InspectedConversationResponse({required this.status, this.responseJson, this.conversationJson});
+
+  final _ConversationFinalizationStatus status;
+  final Map<String, dynamic>? responseJson;
+  final Map<String, dynamic>? conversationJson;
+}
+
+_InspectedConversationResponse _inspectConversationResponse(
+  http.Response response, {
+  required String conversationId,
+  required bool wrapped,
+}) {
+  try {
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map) {
+      return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+    }
+    final responseJson = Map<String, dynamic>.from(decoded);
+    final candidate = wrapped ? responseJson['conversation'] : responseJson;
+    if (candidate is! Map) {
+      return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+    }
+    final conversationJson = Map<String, dynamic>.from(candidate);
+    if (conversationJson['id'] is! String || conversationJson['id'] != conversationId) {
+      return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+    }
+    var status = switch (conversationJson['status']) {
+      'in_progress' => _ConversationFinalizationStatus.inProgress,
+      'processing' => _ConversationFinalizationStatus.processing,
+      'merging' => _ConversationFinalizationStatus.merging,
+      'completed' => _ConversationFinalizationStatus.completed,
+      'failed' => _ConversationFinalizationStatus.failed,
+      _ => _ConversationFinalizationStatus.invalid,
+    };
+    if ((status == _ConversationFinalizationStatus.completed || status == _ConversationFinalizationStatus.failed) &&
+        conversationJson['capture_protocol_version'] == 2 &&
+        conversationJson['capture_state'] != 'terminal') {
+      status = _ConversationFinalizationStatus.processing;
+    }
+    return _InspectedConversationResponse(
+      status: status,
+      responseJson: responseJson,
+      conversationJson: conversationJson,
+    );
+  } catch (_) {
+    return const _InspectedConversationResponse(status: _ConversationFinalizationStatus.invalid);
+  }
+}
+
+String _statusClass(int statusCode) => '${statusCode ~/ 100}xx';
+
+Future<CreateConversationResponse?> processInProgressConversation({
+  required String conversationId,
+  int protocolVersion = 2,
+  String generation = 'test-generation',
+  String ownerToken = 'test-owner-token',
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  int maxStatusPollAttempts = 60,
+  Duration statusPollInterval = const Duration(seconds: 1),
+  Duration statusPollTimeout = const Duration(seconds: 60),
+  ConversationFinalizationTransport transport = _defaultConversationFinalizationTransport,
+  ConversationFinalizationDelay delay = _defaultConversationFinalizationDelay,
+}) async {
+  final deadline = Stopwatch()..start();
+
+  Duration remainingTime() {
+    final remaining = statusPollTimeout - deadline.elapsed;
+    return remaining > Duration.zero ? remaining : Duration.zero;
+  }
+
+  Future<http.Response?> sendBounded({required String url, required String method, required String body}) async {
+    _verifyConversationFinalizationAuthority(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    final remaining = remainingTime();
+    if (remaining <= Duration.zero) return null;
+    try {
+      return await transport(
+        url: url,
+        method: method,
+        body: body,
+        timeout: remaining,
+        retries: 0,
+        retryOnUnauthorized: false,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      ).timeout(remaining);
+    } on TimeoutException {
+      return null;
+    } finally {
+      _verifyConversationFinalizationAuthority(
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      );
+    }
+  }
+
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  final finalizationBody = jsonEncode({
+    'conversation_id': conversationId,
+    'protocol_version': protocolVersion,
+    'generation': generation,
+    'owner_token': ownerToken,
+  });
+  final response = await sendBounded(
+    url: '${Env.apiBaseUrl}v1/conversations',
+    method: 'POST',
+    body: finalizationBody,
+  );
+  var shouldPoll = response == null;
+  if (response != null) {
+    Logger.debug('createConversationServer status_class=${_statusClass(response.statusCode)}');
+    if (response.statusCode == 200) {
+      final inspected = _inspectConversationResponse(response, conversationId: conversationId, wrapped: true);
+      if (inspected.status == _ConversationFinalizationStatus.completed) {
+        try {
+          final result = CreateConversationResponse.fromJson(inspected.responseJson!);
+          return result.conversation?.id == conversationId &&
+                  result.conversation?.status == ConversationStatus.completed
+              ? result
+              : null;
+        } catch (_) {
+          return null;
+        }
+      }
+      if (inspected.status == _ConversationFinalizationStatus.failed ||
+          inspected.status == _ConversationFinalizationStatus.invalid) {
+        return null;
+      }
+      shouldPoll = true;
+    } else if (response.statusCode == 409 || response.statusCode >= 500) {
+      shouldPoll = true;
+    } else {
+      shouldPoll = false;
+    }
+  }
+  if (!shouldPoll) {
+    return null;
+  }
+
+  final statusUrl = '${Env.apiBaseUrl}v1/conversations/${Uri.encodeComponent(conversationId)}';
+  for (var attempt = 0; attempt < maxStatusPollAttempts; attempt++) {
+    var remaining = remainingTime();
+    if (remaining <= Duration.zero) return null;
+    if (statusPollInterval > Duration.zero) {
+      final wait = statusPollInterval < remaining ? statusPollInterval : remaining;
+      try {
+        await delay(wait).timeout(remaining);
+      } on TimeoutException {
+        return null;
+      }
+    }
+    _verifyConversationFinalizationAuthority(
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    remaining = remainingTime();
+    if (remaining <= Duration.zero) return null;
+    final statusResponse = await sendBounded(url: statusUrl, method: 'GET', body: '');
+    if (statusResponse == null ||
+        statusResponse.statusCode == 404 ||
+        statusResponse.statusCode == 409 ||
+        statusResponse.statusCode >= 500) {
+      continue;
+    }
+    if (statusResponse.statusCode != 200) return null;
+
+    final inspected = _inspectConversationResponse(statusResponse, conversationId: conversationId, wrapped: false);
+    if (inspected.status == _ConversationFinalizationStatus.completed) {
+      try {
+        final conversation = ServerConversation.fromJson(inspected.conversationJson!);
+        return conversation.id == conversationId && conversation.status == ConversationStatus.completed
+            ? CreateConversationResponse(messages: const [], conversation: conversation)
+            : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    if (inspected.status == _ConversationFinalizationStatus.failed ||
+        inspected.status == _ConversationFinalizationStatus.invalid) {
+      return null;
+    }
+    if (inspected.status == _ConversationFinalizationStatus.inProgress ||
+        inspected.status == _ConversationFinalizationStatus.processing) {
+      final recoveryResponse = await sendBounded(
+        url: '${Env.apiBaseUrl}v1/conversations',
+        method: 'POST',
+        body: finalizationBody,
+      );
+      if (recoveryResponse?.statusCode == 200) {
+        final recovered = _inspectConversationResponse(
+          recoveryResponse!,
+          conversationId: conversationId,
+          wrapped: true,
+        );
+        if (recovered.status == _ConversationFinalizationStatus.completed) {
+          try {
+            return CreateConversationResponse.fromJson(recovered.responseJson!);
+          } catch (_) {
+            return null;
+          }
+        }
+        if (recovered.status == _ConversationFinalizationStatus.failed ||
+            recovered.status == _ConversationFinalizationStatus.invalid) {
+          return null;
+        }
+      } else if (recoveryResponse != null && recoveryResponse.statusCode != 409 && recoveryResponse.statusCode < 500) {
+        return null;
+      }
+    }
   }
   return null;
 }
@@ -250,19 +528,84 @@ Future<ServerConversation?> reProcessConversationServer(String conversationId, {
   return null;
 }
 
-Future<bool> submitConversationCorrection({
-  required String conversationId,
-  required String correctionText,
-  String? summaryTitle,
-  String? summaryOverview,
-  String? appSummary,
-}) async {
-  if (!SharedPreferencesUtil().aiConsentAccepted) return false;
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections',
-    headers: {},
-    method: 'POST',
-    body: jsonEncode({
+class ConversationCorrectionSubmission {
+  const ConversationCorrectionSubmission({
+    required this.correctionId,
+    required this.conversationId,
+    required this.traceId,
+    required this.status,
+    required this.queued,
+    this.proposalId,
+  });
+
+  final String correctionId;
+  final String conversationId;
+  final String traceId;
+  final String status;
+  final bool queued;
+  final String? proposalId;
+
+  static ConversationCorrectionSubmission? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final correctionId = value['correction_id']?.toString().trim() ?? '';
+    final conversationId = value['conversation_id']?.toString().trim() ?? '';
+    final traceId = value['trace_id']?.toString().trim() ?? '';
+    final status = value['status']?.toString().trim() ?? '';
+    if (correctionId.isEmpty || conversationId.isEmpty || traceId.isEmpty || status.isEmpty) return null;
+    return ConversationCorrectionSubmission(
+      correctionId: correctionId,
+      conversationId: conversationId,
+      traceId: traceId,
+      status: status,
+      queued: value['queued'] == true,
+      proposalId: value['proposal_id']?.toString(),
+    );
+  }
+}
+
+class PendingConversationCorrectionIdentityStore {
+  const PendingConversationCorrectionIdentityStore({
+    this.maxEntriesPerConversation = 8,
+    this.retention = const Duration(days: 7),
+  });
+
+  static const _storagePrefix = 'pending_conversation_correction_v1_';
+  static final Map<String, Future<void>> _inFlightByStorageKey = {};
+  final int maxEntriesPerConversation;
+  final Duration retention;
+
+  Future<T> _serialized<T>(String storageKey, Future<T> Function() operation) async {
+    while (true) {
+      final preceding = _inFlightByStorageKey[storageKey];
+      if (preceding == null) break;
+      await preceding;
+    }
+
+    final completion = Completer<void>();
+    final completionFuture = completion.future;
+    _inFlightByStorageKey[storageKey] = completionFuture;
+    try {
+      return await operation();
+    } finally {
+      if (identical(_inFlightByStorageKey[storageKey], completionFuture)) {
+        _inFlightByStorageKey.remove(storageKey);
+      }
+      completion.complete();
+    }
+  }
+
+  String _storageKey({required String uid, required String conversationId}) {
+    final ownerConversationHash = sha256.convert(utf8.encode('$uid\u0000$conversationId')).toString();
+    return '$_storagePrefix$ownerConversationHash';
+  }
+
+  String _payloadFingerprint({
+    required String correctionText,
+    String? summaryTitle,
+    String? summaryOverview,
+    String? appSummary,
+  }) {
+    final payload = jsonEncode({
       'correction_text': correctionText,
       'source': 'ios',
       'summary_context': {
@@ -270,11 +613,212 @@ Future<bool> submitConversationCorrection({
         if (summaryOverview != null) 'overview': summaryOverview,
         if (appSummary != null) 'app_summary': appSummary,
       },
-    }),
-  );
-  if (response == null) return false;
-  Logger.debug('submitConversationCorrection: ${response.statusCode} ${response.body}');
-  return response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202;
+    });
+    return sha256.convert(utf8.encode(payload)).toString();
+  }
+
+  Future<String> acquire({
+    required String uid,
+    required String conversationId,
+    required String correctionText,
+    String? summaryTitle,
+    String? summaryOverview,
+    String? appSummary,
+    DateTime? now,
+  }) {
+    final storageKey = _storageKey(uid: uid, conversationId: conversationId);
+    return _serialized(storageKey, () async {
+      final preferences = SharedPreferencesUtil();
+      final currentTime = (now ?? DateTime.now()).toUtc();
+      final fingerprint = _payloadFingerprint(
+        correctionText: correctionText,
+        summaryTitle: summaryTitle,
+        summaryOverview: summaryOverview,
+        appSummary: appSummary,
+      );
+      final persisted = preferences.getString(storageKey);
+      final identities = <Map<String, dynamic>>[];
+      if (persisted.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(persisted);
+          if (decoded is Map && decoded['uid'] == uid && decoded['conversation_id'] == conversationId) {
+            final rawIdentities = decoded['identities'];
+            if (rawIdentities is List) {
+              identities.addAll(rawIdentities.whereType<Map>().map((entry) => Map<String, dynamic>.from(entry)));
+            } else if (decoded['payload_fingerprint'] != null && decoded['correction_id'] != null) {
+              // Preserve the prior single-record format during the bounded v2 migration.
+              identities.add({
+                'payload_fingerprint': decoded['payload_fingerprint'],
+                'correction_id': decoded['correction_id'],
+                'created_at_ms': currentTime.millisecondsSinceEpoch,
+                'last_used_at_ms': currentTime.millisecondsSinceEpoch,
+              });
+            }
+          }
+        } on FormatException {
+          // Corrupt local state is replaced below without exposing its contents.
+        }
+      }
+
+      final cutoffMs = currentTime.subtract(retention).millisecondsSinceEpoch;
+      identities.removeWhere((entry) {
+        final correctionId = entry['correction_id']?.toString().trim() ?? '';
+        final entryFingerprint = entry['payload_fingerprint']?.toString().trim() ?? '';
+        final lastUsedAt = entry['last_used_at_ms'];
+        return correctionId.isEmpty || entryFingerprint.isEmpty || lastUsedAt is! int || lastUsedAt < cutoffMs;
+      });
+      for (final identity in identities) {
+        if (identity['payload_fingerprint'] == fingerprint) {
+          identity['last_used_at_ms'] = currentTime.millisecondsSinceEpoch;
+          await _saveIdentities(
+            preferences: preferences,
+            storageKey: storageKey,
+            uid: uid,
+            conversationId: conversationId,
+            identities: identities,
+          );
+          return identity['correction_id'].toString();
+        }
+      }
+
+      final correctionId = const Uuid().v4();
+      identities.add({
+        'payload_fingerprint': fingerprint,
+        'correction_id': correctionId,
+        'created_at_ms': currentTime.millisecondsSinceEpoch,
+        'last_used_at_ms': currentTime.millisecondsSinceEpoch,
+      });
+      identities.sort(
+        (left, right) => (right['last_used_at_ms'] as int).compareTo(left['last_used_at_ms'] as int),
+      );
+      final boundedMaxEntries = maxEntriesPerConversation.clamp(1, 64);
+      if (identities.length > boundedMaxEntries) {
+        identities.removeRange(boundedMaxEntries, identities.length);
+      }
+      await _saveIdentities(
+        preferences: preferences,
+        storageKey: storageKey,
+        uid: uid,
+        conversationId: conversationId,
+        identities: identities,
+      );
+      return correctionId;
+    });
+  }
+
+  Future<void> _saveIdentities({
+    required SharedPreferencesUtil preferences,
+    required String storageKey,
+    required String uid,
+    required String conversationId,
+    required List<Map<String, dynamic>> identities,
+  }) async {
+    final saved = await preferences.saveString(
+      storageKey,
+      jsonEncode({
+        'version': 2,
+        'uid': uid,
+        'conversation_id': conversationId,
+        'identities': identities,
+      }),
+    );
+    if (!saved) throw StateError('Unable to persist correction identity');
+  }
+
+  Future<void> clearIfTerminal({
+    required String uid,
+    required String conversationId,
+    required String correctionId,
+  }) {
+    final storageKey = _storageKey(uid: uid, conversationId: conversationId);
+    return _serialized(storageKey, () async {
+      final preferences = SharedPreferencesUtil();
+      final persisted = preferences.getString(storageKey);
+      if (persisted.isEmpty) return;
+      try {
+        final decoded = jsonDecode(persisted);
+        if (decoded is! Map || decoded['uid'] != uid || decoded['conversation_id'] != conversationId) {
+          await preferences.remove(storageKey);
+          return;
+        }
+        final rawIdentities = decoded['identities'];
+        if (rawIdentities is! List) {
+          if (decoded['correction_id'] == correctionId) await preferences.remove(storageKey);
+          return;
+        }
+        final identities = rawIdentities.whereType<Map>().map((entry) => Map<String, dynamic>.from(entry)).toList();
+        identities.removeWhere((entry) => entry['correction_id'] == correctionId);
+        if (identities.isEmpty) {
+          await preferences.remove(storageKey);
+        } else {
+          await _saveIdentities(
+            preferences: preferences,
+            storageKey: storageKey,
+            uid: uid,
+            conversationId: conversationId,
+            identities: identities,
+          );
+        }
+      } on FormatException {
+        await preferences.remove(storageKey);
+      }
+    });
+  }
+}
+
+Future<ConversationCorrectionSubmission?> submitConversationCorrection({
+  required String conversationId,
+  required String correctionId,
+  required String correctionText,
+  String? summaryTitle,
+  String? summaryOverview,
+  String? appSummary,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  Duration requestTimeout = conversationCorrectionSubmitBudget,
+  ConversationCorrectionTransport transport = _defaultConversationCorrectionTransport,
+  void Function(String message) debugLog = Logger.debug,
+}) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return null;
+  final authority = exactAuthority ?? WalOwnerAuthority.operationEntry();
+  final expectedUid = expectedAuthenticatedUid ?? authority?.uid;
+  if (authority == null || expectedUid == null || expectedUid.isEmpty || authority.uid != expectedUid) return null;
+  final encodedConversationId = Uri.encodeComponent(conversationId);
+  if (requestTimeout <= Duration.zero) return null;
+  http.Response? response;
+  try {
+    response = await transport(
+      url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/corrections',
+      method: 'POST',
+      body: jsonEncode({
+        'correction_id': correctionId,
+        'correction_text': correctionText,
+        'source': 'ios',
+        'summary_context': {
+          if (summaryTitle != null) 'title': summaryTitle,
+          if (summaryOverview != null) 'overview': summaryOverview,
+          if (appSummary != null) 'app_summary': appSummary,
+        },
+      }),
+      expectedAuthenticatedUid: expectedUid,
+      exactAuthority: authority,
+      timeout: requestTimeout,
+    ).timeout(requestTimeout);
+  } on TimeoutException {
+    return null;
+  }
+  if (response == null) return null;
+  debugLog('submitConversationCorrection: status=${response.statusCode}');
+  if (response.statusCode != 200 && response.statusCode != 201 && response.statusCode != 202) return null;
+  try {
+    final submission = ConversationCorrectionSubmission.tryParse(jsonDecode(response.body));
+    if (submission == null || submission.conversationId != conversationId || submission.correctionId != correctionId) {
+      return null;
+    }
+    return submission;
+  } on FormatException {
+    return null;
+  }
 }
 
 class ConversationCorrectionSummary {
@@ -305,6 +849,7 @@ class ConversationCorrectionReceipt {
     required this.after,
     this.appliedAt,
     this.undoneAt,
+    this.failureCode,
   });
 
   final String correctionId;
@@ -314,8 +859,17 @@ class ConversationCorrectionReceipt {
   final ConversationCorrectionSummary after;
   final DateTime? appliedAt;
   final DateTime? undoneAt;
+  final String? failureCode;
 
-  bool get isPending => const {'submitted', 'queued', 'processing', 'pending'}.contains(status);
+  bool get isPending => const {
+        'submitted',
+        'queued',
+        'retry_queued',
+        'processing',
+        'canonical_pending',
+        'finalizing',
+        'pending',
+      }.contains(status);
   bool get isApplied => status == 'applied' && undoneAt == null;
   bool get isUndone => status == 'undone' || undoneAt != null;
   bool get isFailed => !isPending && !isApplied && !isUndone;
@@ -328,6 +882,7 @@ class ConversationCorrectionReceipt {
         after: ConversationCorrectionSummary.fromJson(json['after']),
         appliedAt: DateTime.tryParse(json['applied_at']?.toString() ?? '')?.toLocal(),
         undoneAt: DateTime.tryParse(json['undone_at']?.toString() ?? '')?.toLocal(),
+        failureCode: json['failure_code']?.toString(),
       );
 }
 
@@ -439,17 +994,89 @@ Future<ConversationReinterpretationJob?> getLatestConversationReinterpretation({
 Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
   required String conversationId,
   required String correctionId,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  Duration? requestTimeout,
+  ConversationCorrectionTransport transport = _defaultConversationCorrectionTransport,
+  void Function(String message) debugLog = Logger.debug,
 }) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId',
-    headers: {},
+  final authority = exactAuthority ?? WalOwnerAuthority.operationEntry();
+  final expectedUid = expectedAuthenticatedUid ?? authority?.uid;
+  if (authority == null || expectedUid == null || expectedUid.isEmpty || authority.uid != expectedUid) return null;
+  final encodedConversationId = Uri.encodeComponent(conversationId);
+  final encodedCorrectionId = Uri.encodeComponent(correctionId);
+  final response = await transport(
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/corrections/$encodedCorrectionId',
     method: 'GET',
     body: '',
+    expectedAuthenticatedUid: expectedUid,
+    exactAuthority: authority,
+    timeout: requestTimeout,
   );
-  if (response == null || response.statusCode != 200) return null;
-  final decoded = jsonDecode(response.body);
-  if (decoded is! Map) return null;
-  return ConversationCorrectionReceipt.fromJson(Map<String, dynamic>.from(decoded));
+  if (response == null) return null;
+  debugLog('getConversationCorrectionReceipt: status=${response.statusCode}');
+  if (response.statusCode != 200) return null;
+  try {
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) return null;
+    final receipt = ConversationCorrectionReceipt.fromJson(Map<String, dynamic>.from(decoded));
+    if (receipt.conversationId != conversationId || receipt.correctionId != correctionId) return null;
+    return receipt;
+  } on FormatException {
+    return null;
+  }
+}
+
+// Mirrors the bounded backend correction SLA: 120s provider + 30s terminal
+// overhead, a 300s durable backend operation window with bounded reclaims, and
+// a further 30s client margin. The
+// first poll is immediate.
+const conversationCorrectionBackendTerminalBound = Duration(seconds: 150);
+const conversationCorrectionSubmitBudget = Duration(seconds: 30);
+const conversationCorrectionClientPollMargin = Duration(seconds: 30);
+const conversationCorrectionClientPollBudget = Duration(seconds: 330);
+
+Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
+  required String conversationId,
+  required String correctionId,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  ConversationCorrectionReceiptFetcher fetchReceipt = getConversationCorrectionReceipt,
+  Future<void> Function(Duration duration) wait = Future<void>.delayed,
+  Duration pollInterval = const Duration(seconds: 1),
+  Duration pollBudget = conversationCorrectionClientPollBudget,
+  int? maxAttempts,
+  Duration Function()? elapsed,
+}) async {
+  if (pollBudget <= Duration.zero || (maxAttempts != null && maxAttempts < 1)) return null;
+  final stopwatch = Stopwatch()..start();
+  final elapsedTime = elapsed ?? (() => stopwatch.elapsed);
+  var attempts = 0;
+  while (true) {
+    final remainingBeforeRequest = pollBudget - elapsedTime();
+    if (remainingBeforeRequest <= Duration.zero || (maxAttempts != null && attempts >= maxAttempts)) return null;
+    if (!exactAuthority.isExactCurrent()) return null;
+    attempts += 1;
+    final requestTimeout =
+        remainingBeforeRequest < ApiClient.requestTimeoutRead ? remainingBeforeRequest : ApiClient.requestTimeoutRead;
+    ConversationCorrectionReceipt? receipt;
+    try {
+      receipt = await fetchReceipt(
+        conversationId: conversationId,
+        correctionId: correctionId,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+        requestTimeout: requestTimeout,
+      ).timeout(remainingBeforeRequest);
+    } on TimeoutException {
+      return null;
+    }
+    if (!exactAuthority.isExactCurrent()) return null;
+    if (receipt != null && !receipt.isPending) return receipt;
+    final remainingBeforeWait = pollBudget - elapsedTime();
+    if (remainingBeforeWait <= Duration.zero || (maxAttempts != null && attempts >= maxAttempts)) return null;
+    await wait(pollInterval < remainingBeforeWait ? pollInterval : remainingBeforeWait);
+  }
 }
 
 Future<ConversationCorrectionReceipt?> undoConversationCorrection({
@@ -603,11 +1230,7 @@ Future<bool> assignBulkConversationTranscriptSegments(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/segments/assign-bulk',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'segment_ids': segmentIds,
-      'assign_type': assignType,
-      'value': value,
-    }),
+    body: jsonEncode({'segment_ids': segmentIds, 'assign_type': assignType, 'value': value}),
   );
   if (response == null) return false;
   Logger.debug('assignBulkConversationTranscriptSegments: ${response.body}');
@@ -645,47 +1268,26 @@ Future<bool> setConversationStarred(
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationEventsState(
-  String conversationId,
-  List<int> eventsIdx,
-  List<bool> values,
-) async {
-  print(jsonEncode({
-    'events_idx': eventsIdx,
-    'values': values,
-  }));
+Future<bool> setConversationEventsState(String conversationId, List<int> eventsIdx, List<bool> values) async {
+  print(jsonEncode({'events_idx': eventsIdx, 'values': values}));
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/events',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'events_idx': eventsIdx,
-      'values': values,
-    }),
+    body: jsonEncode({'events_idx': eventsIdx, 'values': values}),
   );
   if (response == null) return false;
   Logger.debug('setConversationEventsState: ${response.body}');
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationActionItemState(
-  String conversationId,
-  List<int> actionItemsIdx,
-  List<bool> values,
-) async {
-  print(jsonEncode({
-    'items_idx': actionItemsIdx,
-    'values': values,
-    'conversation_id': conversationId,
-  }));
+Future<bool> setConversationActionItemState(String conversationId, List<int> actionItemsIdx, List<bool> values) async {
+  print(jsonEncode({'items_idx': actionItemsIdx, 'values': values, 'conversation_id': conversationId}));
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'items_idx': actionItemsIdx,
-      'values': values,
-    }),
+    body: jsonEncode({'items_idx': actionItemsIdx, 'values': values}),
   );
   if (response == null) return false;
   Logger.debug('setConversationActionItemState: ${response.body}');
@@ -693,11 +1295,12 @@ Future<bool> setConversationActionItemState(
 }
 
 Future<bool> updateActionItemDescription(
-    String conversationId, String oldDescription, String newDescription, int idx) async {
-  var body = {
-    'old_description': oldDescription,
-    'description': newDescription,
-  };
+  String conversationId,
+  String oldDescription,
+  String newDescription,
+  int idx,
+) async {
+  var body = {'old_description': oldDescription, 'description': newDescription};
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items/$idx',
     headers: {},
@@ -714,10 +1317,7 @@ Future<bool> deleteConversationActionItem(String conversationId, ActionItem item
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items',
     headers: {},
     method: 'DELETE',
-    body: jsonEncode({
-      'completed': item.completed,
-      'description': item.description,
-    }),
+    body: jsonEncode({'completed': item.completed, 'description': item.description}),
   );
   if (response == null) return false;
   Logger.debug('deleteConversationActionItem: ${response.body}');
@@ -753,10 +1353,7 @@ Future<List<ServerConversation>> sendStorageToBackend(File file, String sdCardDa
   }
 }
 
-Future<SyncLocalFilesResponse> syncLocalFiles(
-  List<File> files, {
-  String? expectedAuthenticatedUid,
-}) async {
+Future<SyncLocalFilesResponse> syncLocalFiles(List<File> files, {String? expectedAuthenticatedUid}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw StateError('AI consent is required before stored audio sync');
   }
@@ -796,8 +1393,12 @@ Future<(List<ServerConversation>, int, int)> searchConversationsServer(
     url: '${Env.apiBaseUrl}v1/conversations/search',
     headers: {},
     method: 'POST',
-    body:
-        jsonEncode({'query': query, 'page': page ?? 1, 'per_page': limit ?? 10, 'include_discarded': includeDiscarded}),
+    body: jsonEncode({
+      'query': query,
+      'page': page ?? 1,
+      'per_page': limit ?? 10,
+      'include_discarded': includeDiscarded,
+    }),
   );
   if (response == null) return (<ServerConversation>[], 0, 0);
   if (response.statusCode == 200) {
@@ -816,9 +1417,7 @@ Future<String> testConversationPrompt(String prompt, String conversationId) asyn
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/test-prompt',
     headers: {},
     method: 'POST',
-    body: jsonEncode({
-      'prompt': prompt,
-    }),
+    body: jsonEncode({'prompt': prompt}),
   );
   if (response == null) return '';
   if (response.statusCode == 200) {
@@ -848,12 +1447,7 @@ Future<ActionItemsResponse> getActionItems({
     url += '&end_date=${endDate.toIso8601String()}';
   }
 
-  var response = await makeApiCall(
-    url: url,
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: url, headers: {}, method: 'GET', body: '');
 
   if (response == null) return ActionItemsResponse(actionItems: [], hasMore: false);
 
@@ -883,11 +1477,7 @@ Future<List<App>> getConversationSuggestedApps(String conversationId) async {
   return [];
 }
 
-Future<bool> updateActionItemStateByMetadata(
-  String conversationId,
-  int itemIndex,
-  bool newState,
-) async {
+Future<bool> updateActionItemStateByMetadata(String conversationId, int itemIndex, bool newState) async {
   return await setConversationActionItemState(conversationId, [itemIndex], [newState]);
 }
 
@@ -920,10 +1510,7 @@ class MergeConversationsResponse {
 }
 
 /// Initiate merging of multiple conversations
-Future<MergeConversationsResponse?> mergeConversations(
-  List<String> conversationIds, {
-  bool reprocess = true,
-}) async {
+Future<MergeConversationsResponse?> mergeConversations(List<String> conversationIds, {bool reprocess = true}) async {
   if (conversationIds.length < 2) {
     Logger.debug('mergeConversations: At least 2 conversations required');
     return null;
@@ -933,10 +1520,7 @@ Future<MergeConversationsResponse?> mergeConversations(
     url: '${Env.apiBaseUrl}v1/conversations/merge',
     headers: {},
     method: 'POST',
-    body: jsonEncode({
-      'conversation_ids': conversationIds,
-      'reprocess': reprocess,
-    }),
+    body: jsonEncode({'conversation_ids': conversationIds, 'reprocess': reprocess}),
   );
 
   if (response == null) return null;

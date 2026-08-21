@@ -48,13 +48,28 @@ class UnknownEvent extends MessageEvent {
 class MessageServiceStatusEvent extends MessageEvent {
   final String status;
   final String? statusText;
+  final int? protocolVersion;
+  final String? conversationId;
+  final String? generation;
+  final String? ownerToken;
 
-  MessageServiceStatusEvent({required this.status, this.statusText}) : super(eventType: 'service_status');
+  MessageServiceStatusEvent({
+    required this.status,
+    this.statusText,
+    this.protocolVersion,
+    this.conversationId,
+    this.generation,
+    this.ownerToken,
+  }) : super(eventType: 'service_status');
 
   factory MessageServiceStatusEvent.fromJson(Map<String, dynamic> json) {
     return MessageServiceStatusEvent(
       status: json['status'],
       statusText: json['status_text'],
+      protocolVersion: json['protocol_version'],
+      conversationId: json['conversation_id'],
+      generation: json['generation'],
+      ownerToken: json['owner_token'],
     );
   }
 }

@@ -393,6 +393,17 @@ class Conversation(BaseModel):
     processing_retry_transcript_sha256: Optional[str] = None
     processing_retry_generic_summary_sha256: Optional[str] = None
     processing_retry_source_request_id: Optional[str] = None
+    capture_protocol_version: Optional[int] = None
+    capture_generation: Optional[str] = None
+    capture_owner_token: Optional[str] = None
+    capture_state: Optional[str] = None
+    capture_lease_expires_at: Optional[datetime] = None
+    capture_drained_at: Optional[datetime] = None
+    capture_finalization_claim_token: Optional[str] = None
+    capture_finalization_lease_expires_at: Optional[datetime] = None
+    capture_finalization_attempt_count: Optional[int] = None
+    capture_finalization_started_at: Optional[datetime] = None
+    capture_terminal_at: Optional[datetime] = None
     is_locked: bool = False
     data_protection_level: Optional[str] = None
     folder_id: Optional[str] = Field(default=None, description="ID of the folder this conversation belongs to")

@@ -297,6 +297,7 @@ extension FlutterError: Error {}
       ]
       let outputType = output?.portType
       let hasHeadset = outputType.map(privateOutputTypes.contains) ?? false
+      let routeClassification = SystemEllaVoiceAudioSession().routeSnapshot().classification
 
       return [
           "outputName": output?.portName ?? "",
@@ -305,47 +306,38 @@ extension FlutterError: Error {}
           "hasHeadset": hasHeadset,
           "usesPhoneSpeaker": outputType == .builtInSpeaker,
           "usesReceiver": outputType == .builtInReceiver,
+          "routeClassification": routeClassification.rawValue,
           "outputVolume": AVAudioSession.sharedInstance().outputVolume,
       ]
   }
 
   private func ensureAudibleVoiceOutput(usage: String) -> [String: Any] {
-      let audioSession = AVAudioSession.sharedInstance()
-      do {
-          if usage == "playback" {
-              // Standard Ella replies do not capture while audio is playing.
-              // Keep them out of the quieter bidirectional voice-processing
-              // path and let iOS use its normal media/headset output route.
-              try audioSession.setCategory(
-                  .playback,
-                  mode: .spokenAudio,
-                  options: [.allowBluetoothA2DP, .allowAirPlay]
-              )
-          } else {
-              // V2V gates its microphone while remote PCM is playing, so the
-              // default mode preserves full-range output without applying a
-              // second voice-processing profile over the streamed response.
-              try audioSession.setCategory(
-                  .playAndRecord,
-                  mode: .default,
-                  options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
-              )
-          }
-          try audioSession.setActive(true, options: [])
-
-          let outputType = audioSession.currentRoute.outputs.first?.portType
-          if usage != "playback" && (outputType == nil || outputType == .builtInReceiver) {
-              try audioSession.overrideOutputAudioPort(.speaker)
-          }
-
-          var payload = currentAudioRoutePayload()
-          payload["success"] = payload["hasOutput"] as? Bool == true && payload["usesReceiver"] as? Bool != true
-          return payload
-      } catch {
-          var payload = currentAudioRoutePayload()
-          payload["success"] = false
-          return payload
+      guard let routeUsage = EllaVoiceAudioRouteUsage(rawValue: usage) else {
+          return [
+              "success": false,
+              "routeClassification": SystemEllaVoiceAudioSession().routeSnapshot().classification.rawValue,
+              "failureCode": EllaVoiceAudioRouteFailure.invalidUsage.rawValue,
+          ]
       }
+
+      let outcome = EllaVoiceAudioRoutePolicy().apply(
+          usage: routeUsage,
+          session: SystemEllaVoiceAudioSession()
+      )
+      var payload: [String: Any] = [
+          "success": outcome.success,
+          "routeClassification": outcome.classification.rawValue,
+          "usage": outcome.usage.rawValue,
+      ]
+      if let failure = outcome.failure {
+          payload["failureCode"] = failure.rawValue
+      }
+      print(
+          "AppDelegate: Ella audio route usage=\(outcome.usage.rawValue) " +
+          "classification=\(outcome.classification.rawValue) " +
+          "success=\(outcome.success) failure=\(outcome.failure?.rawValue ?? "none")"
+      )
+      return payload
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
@@ -415,6 +407,9 @@ extension FlutterError: Error {}
   // MARK: - Silent Push for Apple Reminders Auto-Sync
 
   private let syncEventStore = EKEventStore()
+  private lazy var appleRemindersAutoSyncService = AppleRemindersSyncService(
+      sink: EventKitAppleRemindersSyncSink(eventStore: syncEventStore)
+  )
 
   override func application(
       _ application: UIApplication,
@@ -507,10 +502,13 @@ extension FlutterError: Error {}
 
       // iOS 17+ uses .fullAccess and .writeOnly, older iOS uses .authorized
       var hasAccess = false
+      var canReconcile = false
       if #available(iOS 17.0, *) {
           hasAccess = status == .fullAccess || status == .writeOnly
+          canReconcile = status == .fullAccess
       } else {
           hasAccess = status == .authorized
+          canReconcile = status == .authorized
       }
 
       guard hasAccess else {
@@ -526,29 +524,28 @@ extension FlutterError: Error {}
           return nil
       }()
 
-      // Create reminder
-      let reminder = EKReminder(eventStore: syncEventStore)
-      reminder.title = description
-      reminder.notes = "From Omi"
-      reminder.calendar = syncEventStore.defaultCalendarForNewReminders()
-
-      if let due = dueDate {
-          reminder.dueDateComponents = Calendar.current.dateComponents(
-              [.year, .month, .day, .hour, .minute], from: due
-          )
-      }
-
-      do {
-          try syncEventStore.save(reminder, commit: true)
-
-          // Notify Flutter to mark as exported via API
-          DispatchQueue.main.async {
-              self.appleRemindersChannel?.invokeMethod("markExported", arguments: ["action_item_id": actionItemId])
+      let idempotencyKey = (userInfo["idempotency_key"] as? String) ?? actionItemId
+      appleRemindersAutoSyncService.sync(
+          idempotencyKey: idempotencyKey,
+          title: description,
+          dueDate: dueDate,
+          canReconcile: canReconcile
+      ) { [weak self] outcome in
+          switch outcome {
+          case .performed:
+              // Notify Flutter to mark as exported via API
+              DispatchQueue.main.async {
+                  self?.appleRemindersChannel?.invokeMethod(
+                      "markExported",
+                      arguments: ["action_item_id": actionItemId]
+                  )
+              }
+              completionHandler(.newData)
+          case .alreadyCompleted:
+              completionHandler(.noData)
+          case .ambiguous, .failed:
+              completionHandler(.failed)
           }
-
-          completionHandler(.newData)
-      } catch {
-          completionHandler(.failed)
       }
   }
 

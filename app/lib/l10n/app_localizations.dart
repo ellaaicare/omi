@@ -15837,6 +15837,24 @@ abstract class AppLocalizations {
   /// **'Ella couldn\'t update this memory'**
   String get memoryCorrectionFailed;
 
+  /// Correction failure shown for an unavailable or changed owner-bound AI runtime
+  ///
+  /// In en, this message translates to:
+  /// **'Ella can\'t reach your correction service right now'**
+  String get memoryCorrectionRuntimeUnavailable;
+
+  /// Correction failure shown when the active memory version changed
+  ///
+  /// In en, this message translates to:
+  /// **'This memory changed before Ella could apply your correction'**
+  String get memoryCorrectionMemoryChanged;
+
+  /// Correction failure shown when correction processing could not be started
+  ///
+  /// In en, this message translates to:
+  /// **'Ella\'s correction service is temporarily unavailable'**
+  String get memoryCorrectionServiceUnavailable;
+
   /// Action that opens a correction receipt
   ///
   /// In en, this message translates to:

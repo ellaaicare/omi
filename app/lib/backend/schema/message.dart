@@ -3,6 +3,30 @@ import 'package:uuid/uuid.dart';
 
 enum MessageSender { ai, human }
 
+const int maxCanonicalTurnOrdinal = 0x7FFFFFFFFFFFFFFF;
+const int maxCanonicalEventSequence = 0x7FFFFFFF;
+final RegExp _canonicalOrderingDecimalPattern = RegExp(r'^(0|[1-9][0-9]*)$');
+
+/// Cross-runtime ordering grammar: JSON integers or canonical ASCII decimal
+/// strings (`0` or non-zero digits without a leading zero), within the field's
+/// existing signed range. Invalid legacy values fail closed to the caller's
+/// role/identity fallback rather than participating as partially parsed data.
+int? parseCanonicalOrderingInteger(Object? value, {required int maximum}) {
+  if (value is int) return value >= 0 && value <= maximum ? value : null;
+  if (value is! String || !_canonicalOrderingDecimalPattern.hasMatch(value)) return null;
+  final maximumDigits = maximum.toString();
+  if (value.length > maximumDigits.length ||
+      (value.length == maximumDigits.length && value.compareTo(maximumDigits) > 0)) {
+    return null;
+  }
+  return int.tryParse(value);
+}
+
+int? parseCanonicalTurnOrdinal(Object? value) => parseCanonicalOrderingInteger(value, maximum: maxCanonicalTurnOrdinal);
+
+int? parseCanonicalEventSequence(Object? value) =>
+    parseCanonicalOrderingInteger(value, maximum: maxCanonicalEventSequence);
+
 enum MessageType {
   text('text'),
   daySummary('day_summary'),
@@ -202,6 +226,13 @@ class ServerMessage {
   /// Whether this message originated from voice chat (client-side only, not persisted)
   bool fromVoice;
 
+  /// Durable canonical ordering fields. These survive cache round-trips so an
+  /// equal-time user/assistant pair cannot be reordered when history is merged.
+  String? canonicalConversationId;
+  String? canonicalTurnId;
+  int? canonicalTurnOrdinal;
+  int? canonicalEventSequence;
+
   List<String> thinkings = [];
   ChartData? chartData;
 
@@ -220,9 +251,15 @@ class ServerMessage {
     this.rating,
     this.chartData,
     this.fromVoice = false,
+    this.canonicalConversationId,
+    this.canonicalTurnId,
+    this.canonicalTurnOrdinal,
+    this.canonicalEventSequence,
   });
 
   static ServerMessage fromJson(Map<String, dynamic> json) {
+    final metadata =
+        json['metadata'] is Map ? Map<String, dynamic>.from(json['metadata'] as Map) : const <String, dynamic>{};
     return ServerMessage(
       json['id'],
       DateTime.parse(json['created_at']).toLocal(),
@@ -238,6 +275,10 @@ class ServerMessage {
       rating: json['rating'],
       chartData: json['chart_data'] != null ? ChartData.fromJson(json['chart_data']) : null,
       fromVoice: json['from_voice'] ?? false,
+      canonicalConversationId: metadata['conversation_id']?.toString(),
+      canonicalTurnId: metadata['turn_id']?.toString(),
+      canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
+      canonicalEventSequence: parseCanonicalEventSequence(metadata['event_sequence']),
     );
   }
 
@@ -256,7 +297,38 @@ class ServerMessage {
       'rating': rating,
       'chart_data': chartData?.toJson(),
       'from_voice': fromVoice,
+      if (canonicalConversationId != null ||
+          canonicalTurnId != null ||
+          canonicalTurnOrdinal != null ||
+          canonicalEventSequence != null)
+        'metadata': {
+          if (canonicalConversationId != null) 'conversation_id': canonicalConversationId,
+          if (canonicalTurnId != null) 'turn_id': canonicalTurnId,
+          if (canonicalTurnOrdinal != null) 'turn_ordinal': canonicalTurnOrdinal,
+          if (canonicalEventSequence != null) 'event_sequence': canonicalEventSequence,
+        },
     };
+  }
+
+  String get durableTurnIdentity {
+    final explicit = canonicalTurnId ?? '';
+    if (explicit.isNotEmpty) return explicit;
+    for (final suffix in const [':user', ':assistant']) {
+      if (id.endsWith(suffix) && id.length > suffix.length) return id.substring(0, id.length - suffix.length);
+    }
+    return id;
+  }
+
+  int? get durableTurnOrdinal {
+    final ordinal = canonicalTurnOrdinal;
+    if (ordinal != null && ordinal >= 0 && ordinal <= maxCanonicalTurnOrdinal) return ordinal;
+    return null;
+  }
+
+  int get durableEventSequence {
+    final sequence = canonicalEventSequence;
+    if (sequence != null && sequence >= 0 && sequence <= maxCanonicalEventSequence) return sequence;
+    return sender == MessageSender.human ? 0 : 1;
   }
 
   bool areFilesOfSameType() {
@@ -299,6 +371,31 @@ class ServerMessage {
   }
 
   bool get isEmpty => id == '0000';
+}
+
+int compareServerMessagesChronologically(ServerMessage first, ServerMessage second) {
+  final timestampOrder = first.createdAt.compareTo(second.createdAt);
+  if (timestampOrder != 0) return timestampOrder;
+
+  final conversationOrder = (first.canonicalConversationId ?? '').compareTo(second.canonicalConversationId ?? '');
+  if (conversationOrder != 0) return conversationOrder;
+
+  final firstTurnOrdinal = first.durableTurnOrdinal;
+  final secondTurnOrdinal = second.durableTurnOrdinal;
+  final ordinalPresenceOrder = (firstTurnOrdinal == null ? 1 : 0).compareTo(secondTurnOrdinal == null ? 1 : 0);
+  if (ordinalPresenceOrder != 0) return ordinalPresenceOrder;
+  if (firstTurnOrdinal != null && secondTurnOrdinal != null) {
+    final ordinalOrder = firstTurnOrdinal.compareTo(secondTurnOrdinal);
+    if (ordinalOrder != 0) return ordinalOrder;
+  }
+
+  final turnOrder = first.durableTurnIdentity.compareTo(second.durableTurnIdentity);
+  if (turnOrder != 0) return turnOrder;
+
+  final sequenceOrder = first.durableEventSequence.compareTo(second.durableEventSequence);
+  if (sequenceOrder != 0) return sequenceOrder;
+
+  return first.id.compareTo(second.id);
 }
 
 enum MessageChunkType {

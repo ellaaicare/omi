@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -9,6 +12,139 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/services/v2v_turn_reconciler.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+
+class _HydrationGateStore implements V2VTurnDurableStore {
+  _HydrationGateStore(this.delegate, this.releaseHydration);
+
+  final V2VTurnDurableStore delegate;
+  final Future<void> releaseHydration;
+  String loadedAuthorityFingerprint = '';
+
+  @override
+  Future<void> clearOwner({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
+  }) =>
+      delegate.clearOwner(
+        uid: uid,
+        ownerNamespace: ownerNamespace,
+        authorityFingerprint: authorityFingerprint,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+
+  @override
+  Future<List<V2VTranscriptTurn>> load({
+    required String uid,
+    required String ownerNamespace,
+    required String authorityFingerprint,
+    required V2VAuthorityCurrent isAuthorityCurrent,
+  }) async {
+    loadedAuthorityFingerprint = authorityFingerprint;
+    await releaseHydration;
+    return delegate.load(
+      uid: uid,
+      ownerNamespace: ownerNamespace,
+      authorityFingerprint: authorityFingerprint,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
+  @override
+  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.put(turn, isAuthorityCurrent: isAuthorityCurrent);
+
+  @override
+  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
+      delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
+}
+
+Future<void> _grantOperationalAuthority(String uid) async {
+  final preferences = SharedPreferencesUtil()..uid = uid;
+  preferences.verifiedPersonaId = 'persona-a';
+  preferences.acceptAiConsent(
+    receiptId: 'aicr_$uid',
+    uid: uid,
+    profileBindingId: 'profile-$uid',
+    serverDecidedAt: '2026-08-15T00:00:00Z',
+  );
+  await preferences.saveEllaProvisioningReceipt(uid, {
+    'state': 'ready',
+    'binding_state': 'active',
+    'binding_revision': 3,
+    'effective_policy_revision': 'policy-3',
+  });
+  await preferences.markEllaProvisioningVerified(uid);
+  preferences.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: 'aicr_$uid',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-$uid',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+}
+
+Future<ActiveWalAuthority> _restoreOperationalAuthorityFromPreferences(String uid) async {
+  final preferences = SharedPreferencesUtil();
+  await preferences.markEllaProvisioningVerified(uid);
+  preferences.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: preferences.aiConsentReceiptId,
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: preferences.aiConsentProfileBindingId,
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+  return WalOwnerAuthority.active(preferences: preferences, authenticatedUid: uid)!;
+}
+
+class _FakeV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
+  _FakeV2VMicrophoneRecorder(this.operations);
+
+  final List<String> operations;
+  final StreamController<Uint8List> _controller = StreamController<Uint8List>.broadcast();
+  RecordConfig? config;
+  bool _stopped = false;
+
+  @override
+  Future<void> useEllaManagedAudioSession() async {
+    operations.add('recorder.disableAudioSessionManagement');
+  }
+
+  @override
+  Future<bool> hasPermission() async {
+    operations.add('recorder.permission');
+    return true;
+  }
+
+  @override
+  Future<Stream<Uint8List>> startStream(RecordConfig config) async {
+    operations.add('recorder.startStream');
+    this.config = config;
+    return _controller.stream;
+  }
+
+  @override
+  Future<String?> stop() async {
+    operations.add('recorder.stop');
+    if (!_stopped) {
+      _stopped = true;
+      await _controller.close();
+    }
+    return null;
+  }
+
+  @override
+  Future<void> dispose() async {
+    operations.add('recorder.dispose');
+  }
+}
 
 void main() {
   group('typed voice policy outcomes', () {
@@ -399,6 +535,390 @@ void main() {
       await client.disconnect();
     });
 
+    test('cold process restores stable authority before synchronous buffered transcript delivery and mic', () async {
+      await _grantOperationalAuthority('uid-a');
+      final firstProcessAuthority = WalOwnerAuthority.active(
+        preferences: SharedPreferencesUtil(),
+        authenticatedUid: 'uid-a',
+      );
+      expect(firstProcessAuthority, isNotNull);
+
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-cold-process-');
+      addTearDown(() async {
+        if (directory.existsSync()) await directory.delete(recursive: true);
+      });
+      final firstProcessStore = FileV2VTurnDurableStore(baseDirectory: directory);
+      final firstProcessOwner = firstProcessAuthority!.owner;
+      final baseTime = DateTime.utc(2026, 8, 15, 20);
+      for (var ordinal = 1; ordinal <= 200; ordinal++) {
+        final turnId = 'v2v-turn-${ordinal.toRadixString(16).padLeft(32, '0')}';
+        await firstProcessStore.put(
+          V2VTranscriptTurn(
+            uid: firstProcessOwner.uid,
+            ownerNamespace: firstProcessOwner.storageNamespace,
+            authorityFingerprint: firstProcessOwner.authorityFingerprint,
+            sessionId: 'restored-session',
+            turnId: turnId,
+            userEventId: '$turnId:user',
+            assistantEventId: '$turnId:assistant',
+            userTranscript: 'Restored question',
+            assistantTranscript: 'Restored answer',
+            startedAt: baseTime.add(Duration(seconds: ordinal * 2)),
+            completedAt: baseTime.add(Duration(seconds: ordinal * 2 + 1)),
+          ),
+          isAuthorityCurrent: () => true,
+        );
+      }
+
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final activeAuthority = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      final owner = activeAuthority.owner;
+      expect(owner.authorityGenerationAtCapture, isNot(firstProcessOwner.authorityGenerationAtCapture));
+      expect(owner.authorityFingerprint, firstProcessOwner.authorityFingerprint);
+      expect(owner.matches(firstProcessOwner), isFalse);
+
+      final testAuthority = ActiveWalAuthority(
+        owner: owner,
+        consent: activeAuthority.consent,
+        currentCheck: () {
+          final currentOwner = WalOwnerAuthority.currentOwner(
+            preferences: SharedPreferencesUtil(),
+            authenticatedUid: 'uid-a',
+          );
+          return currentOwner != null &&
+              owner.matches(currentOwner) &&
+              activeAuthority.consent.isCurrent(preferences: SharedPreferencesUtil());
+        },
+      );
+      final releaseHydration = Completer<void>();
+      final backingStore = FileV2VTurnDurableStore(baseDirectory: directory);
+      final gatedStore = _HydrationGateStore(backingStore, releaseHydration.future);
+      final reconciler = V2VTurnReconciler(durableStore: gatedStore, writer: (_) async => false);
+      const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+          '"session_id":"session-jti-1","turn_id":"v2v-turn-ffffffffffffffffffffffffffffffff",'
+          '"user_event_id":"v2v-turn-ffffffffffffffffffffffffffffffff:user",'
+          '"assistant_event_id":"v2v-turn-ffffffffffffffffffffffffffffffff:assistant",'
+          '"user_text":"Question","assistant_text":"Answer",'
+          '"started_at":"2026-08-15T20:10:00Z","completed_at":"2026-08-15T20:10:02Z"}';
+      late final StreamController<dynamic> websocketController;
+      websocketController = StreamController<dynamic>(
+        sync: true,
+        onListen: () => websocketController.add(terminalFrame),
+      );
+      final order = <String>[];
+      final sentFrames = <String>[];
+      var armedSessionId = '';
+      Future<bool>? terminalAcceptance;
+      late final V2VClient client;
+      client = V2VClient(
+        onTerminalTurnDurable: (terminalTurn) {
+          order.add('terminal-persist-started');
+          expect(armedSessionId, 'session-jti-1');
+          terminalAcceptance = reconciler.persistTerminalTurnForAck(armedSessionId, terminalTurn);
+          return terminalAcceptance!;
+        },
+        onEvent: (event) {
+          if (event.type != 'transcript_turn') return;
+          order.add('terminal-delivered');
+        },
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice',
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'session-jti-1',
+        },
+        audioSessionConfigurator: () async {},
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: websocketController.stream,
+          send: (value) => sentFrames.add(value as String),
+          close: websocketController.close,
+        ),
+        microphoneStarter: () async {
+          order.add('microphone-started');
+          return true;
+        },
+      );
+
+      final connect = client.connect(
+        provider: 'grok-voice',
+        beforeTransportActivation: (sessionId) async {
+          order.add('hydration-started');
+          final armed = await armEllaVoiceTranscriptSessionBeforeTransport(
+            reconciler: reconciler,
+            authenticatedUid: 'uid-a',
+            sessionId: sessionId,
+            persistTranscriptTurns: true,
+            isStartupCurrent: () => true,
+            authorityCapture: (_) => testAuthority,
+          );
+          if (armed) armedSessionId = sessionId;
+          order.add('session-armed');
+          return armed;
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(order, ['hydration-started']);
+      expect(gatedStore.loadedAuthorityFingerprint, owner.authorityFingerprint);
+      releaseHydration.complete();
+      final receipt = await connect;
+      expect(receipt.connected, isTrue);
+      await client.settleTerminalTurnsForTesting();
+      expect(terminalAcceptance, isNotNull);
+      expect(await terminalAcceptance!, isTrue);
+      expect(order, [
+        'hydration-started',
+        'session-armed',
+        'microphone-started',
+        'terminal-persist-started',
+        'terminal-delivered',
+      ]);
+      expect(jsonDecode(sentFrames.single), {
+        'type': 'transcript_turn_ack',
+        'contract_version': 1,
+        'session_id': 'session-jti-1',
+        'turn_id': 'v2v-turn-ffffffffffffffffffffffffffffffff',
+      });
+      expect(
+        (await backingStore.load(
+          uid: owner.uid,
+          ownerNamespace: owner.storageNamespace,
+          authorityFingerprint: owner.authorityFingerprint,
+          isAuthorityCurrent: testAuthority.isExactCurrent,
+        ))
+            .map((turn) => turn.turnId),
+        contains('v2v-turn-ffffffffffffffffffffffffffffffff'),
+      );
+      await client.disconnect();
+    });
+
+    test('cold re-grant cannot ABA-hydrate the revoked server authority outbox', () async {
+      await _grantOperationalAuthority('uid-a');
+      final authorityA = WalOwnerAuthority.active(
+        preferences: SharedPreferencesUtil(),
+        authenticatedUid: 'uid-a',
+      )!;
+      final directory = await Directory.systemTemp.createTemp('ella-v2v-cold-regrant-');
+      addTearDown(() async {
+        if (directory.existsSync()) await directory.delete(recursive: true);
+      });
+      final firstProcessStore = FileV2VTurnDurableStore(baseDirectory: directory);
+      const oldTurnId = 'v2v-turn-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      await firstProcessStore.put(
+        V2VTranscriptTurn(
+          uid: authorityA.uid,
+          ownerNamespace: authorityA.owner.storageNamespace,
+          authorityFingerprint: authorityA.owner.authorityFingerprint,
+          sessionId: 'revoked-session',
+          turnId: oldTurnId,
+          userEventId: '$oldTurnId:user',
+          assistantEventId: '$oldTurnId:assistant',
+          userTranscript: 'Old question',
+          assistantTranscript: 'Old answer',
+          startedAt: DateTime.utc(2026, 8, 15, 21),
+          completedAt: DateTime.utc(2026, 8, 15, 21, 0, 1),
+        ),
+        isAuthorityCurrent: () => true,
+      );
+
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final restoredAuthorityA = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      expect(restoredAuthorityA.owner.authorityFingerprint, authorityA.owner.authorityFingerprint);
+
+      final preferences = SharedPreferencesUtil();
+      preferences.declineAiConsent();
+      preferences.acceptAiConsent(
+        receiptId: 'aicr_uid-a-regrant',
+        uid: 'uid-a',
+        profileBindingId: 'profile-uid-a',
+        serverDecidedAt: '2026-08-15T01:00:00Z',
+      );
+      final authorityB = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      expect(authorityB.owner.storageNamespace, authorityA.owner.storageNamespace);
+      expect(authorityB.owner.authorityFingerprint, isNot(authorityA.owner.authorityFingerprint));
+
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final coldAuthorityB = await _restoreOperationalAuthorityFromPreferences('uid-a');
+      expect(coldAuthorityB.owner.authorityFingerprint, authorityB.owner.authorityFingerprint);
+
+      final writes = <V2VTranscriptTurn>[];
+      final reconciler = V2VTurnReconciler(
+        durableStore: FileV2VTurnDurableStore(baseDirectory: directory),
+        writer: (turn) async {
+          writes.add(turn);
+          return true;
+        },
+      );
+      final testAuthority = ActiveWalAuthority(
+        owner: coldAuthorityB.owner,
+        consent: coldAuthorityB.consent,
+        currentCheck: () {
+          final currentOwner = WalOwnerAuthority.currentOwner(
+            preferences: SharedPreferencesUtil(),
+            authenticatedUid: 'uid-a',
+          );
+          return currentOwner != null &&
+              coldAuthorityB.owner.matches(currentOwner) &&
+              coldAuthorityB.consent.isCurrent(preferences: SharedPreferencesUtil());
+        },
+      );
+      expect(
+        await armEllaVoiceTranscriptSessionBeforeTransport(
+          reconciler: reconciler,
+          authenticatedUid: 'uid-a',
+          sessionId: 'new-session',
+          persistTranscriptTurns: true,
+          isStartupCurrent: () => true,
+          authorityCapture: (_) => testAuthority,
+        ),
+        isTrue,
+      );
+      await reconciler.settle();
+      expect(writes, isEmpty);
+    });
+
+    test('canonical success with lost ACK survives restart and new-session proxy replay exactly once', () async {
+      grantCurrentConsent();
+      const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+          '"session_id":"session-jti-1","turn_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",'
+          '"user_event_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:user",'
+          '"assistant_event_id":"v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:assistant",'
+          '"user_text":"Question","assistant_text":"Answer",'
+          '"started_at":"2026-08-15T20:10:00Z","completed_at":"2026-08-15T20:10:02Z"}';
+      final persistenceStarted = Completer<void>();
+      final releasePersistence = Completer<void>();
+      var appOwnsTurnDurably = false;
+      final canonicalRows = <String, Map<String, dynamic>>{};
+      Future<bool> persistCanonical(V2VTerminalTranscriptTurn turn) async {
+        final sourceIdentity = 'ios_voice:uid-a:${turn.turnId}';
+        final rows = [
+          {
+            'source_identity': sourceIdentity,
+            'event_id': turn.userEventId,
+            'role': 'user',
+            'text': turn.userTranscript,
+            'started_at': turn.startedAt.toUtc().toIso8601String(),
+            'ended_at': turn.completedAt.toUtc().toIso8601String(),
+          },
+          {
+            'source_identity': sourceIdentity,
+            'event_id': turn.assistantEventId,
+            'role': 'assistant',
+            'text': turn.assistantTranscript,
+            'started_at': turn.completedAt.toUtc().toIso8601String(),
+            'ended_at': turn.completedAt.toUtc().toIso8601String(),
+          },
+        ];
+        for (final row in rows) {
+          final existing = canonicalRows[row['event_id']];
+          if (existing != null && jsonEncode(existing) != jsonEncode(row)) return false;
+        }
+        for (final row in rows) {
+          canonicalRows.putIfAbsent(row['event_id'] as String, () => row);
+        }
+        return true;
+      }
+
+      final firstSentFrames = <String>[];
+      final firstSocket = StreamController<dynamic>(sync: true);
+      final firstClient = V2VClient(
+        onTerminalTurnDurable: (turn) async {
+          appOwnsTurnDurably = await persistCanonical(turn);
+          persistenceStarted.complete();
+          await releasePersistence.future;
+          return appOwnsTurnDurably;
+        },
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice',
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'session-jti-1',
+        },
+        audioSessionConfigurator: () async {},
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: firstSocket.stream,
+          send: (value) => firstSentFrames.add(value as String),
+          close: firstSocket.close,
+        ),
+        microphoneStarter: () async => true,
+      );
+      expect(
+        (await firstClient.connect(provider: 'grok-voice', beforeTransportActivation: (_) async => true)).connected,
+        isTrue,
+      );
+
+      firstSocket.add(terminalFrame);
+      await persistenceStarted.future;
+      await firstClient.disconnect();
+      releasePersistence.complete();
+      await firstClient.settleTerminalTurnsForTesting();
+
+      expect(appOwnsTurnDurably, isTrue);
+      expect(firstSentFrames, isEmpty);
+
+      final replaySentFrames = <String>[];
+      final replaySocket = StreamController<dynamic>(sync: true);
+      final replayClient = V2VClient(
+        onTerminalTurnDurable: persistCanonical,
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice',
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'session-jti-2',
+        },
+        audioSessionConfigurator: () async {},
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: replaySocket.stream,
+          send: (value) => replaySentFrames.add(value as String),
+          close: replaySocket.close,
+        ),
+        microphoneStarter: () async => true,
+      );
+      expect(
+        (await replayClient.connect(provider: 'grok-voice', beforeTransportActivation: (_) async => true)).connected,
+        isTrue,
+      );
+
+      final reboundReplay = Map<String, dynamic>.from(jsonDecode(terminalFrame) as Map)
+        ..['session_id'] = 'session-jti-2';
+      replaySocket.add(jsonEncode(reboundReplay));
+      await replayClient.settleTerminalTurnsForTesting();
+
+      expect(jsonDecode(replaySentFrames.single), {
+        'type': 'transcript_turn_ack',
+        'contract_version': 1,
+        'session_id': 'session-jti-2',
+        'turn_id': 'v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      });
+      expect(canonicalRows, hasLength(2));
+      expect(canonicalRows.values.map((row) => row['source_identity']).toSet(), {
+        'ios_voice:uid-a:v2v-turn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      });
+
+      for (final collision in [
+        Map<String, dynamic>.from(reboundReplay)..['assistant_text'] = 'Conflicting answer',
+        Map<String, dynamic>.from(reboundReplay)..['started_at'] = '2026-08-15T20:10:01Z',
+      ]) {
+        replaySocket.add(jsonEncode(collision));
+        await replayClient.settleTerminalTurnsForTesting();
+      }
+      expect(replaySentFrames, hasLength(1), reason: 'payload/timestamp collisions must not be ACKed');
+      expect(canonicalRows, hasLength(2));
+      await replayClient.disconnect();
+    });
+
     test('revocation during delayed startup produces zero protected egress and zero microphone frames', () async {
       grantCurrentConsent();
       final preferences = SharedPreferencesUtil();
@@ -559,12 +1079,93 @@ void main() {
       await client.disconnect();
     });
 
-    test('assistant transcript alone does not close the microphone gate', () async {
+    test('real recorder adapter yields session ownership then re-verifies accepted speaker and external routes',
+        () async {
+      for (final acceptedRoute in ['speaker', 'bluetoothHFP', 'bluetoothA2DP', 'airPlay']) {
+        grantCurrentConsent();
+        final authority = AiConsentAuthoritySnapshot.capture(
+          preferences: SharedPreferencesUtil(),
+          expectedUid: 'uid-a',
+        );
+        expect(authority, isNotNull);
+
+        final operations = <String>[];
+        final recorder = _FakeV2VMicrophoneRecorder(operations);
+        final client = V2VClient(
+          onEvent: (_) {},
+          onConnectionChanged: (_) {},
+          microphoneRecorderFactory: () => recorder,
+          audibleOutputEnforcer: () async {
+            operations.add('ella.verifyInteractiveRoute:$acceptedRoute');
+            return true;
+          },
+        );
+
+        expect(
+          await client.startAuthorizedMicrophoneForTesting(
+            authority: authority!,
+            shouldContinue: () => true,
+          ),
+          isTrue,
+          reason: '$acceptedRoute must remain an accepted interactive output',
+        );
+        expect(operations.take(4), [
+          'recorder.disableAudioSessionManagement',
+          'recorder.permission',
+          'recorder.startStream',
+          'ella.verifyInteractiveRoute:$acceptedRoute',
+        ]);
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.defaultToSpeaker));
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.allowBluetooth));
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.allowBluetoothA2DP));
+        expect(recorder.config?.iosConfig.categoryOptions, contains(IosAudioCategoryOption.allowAirPlay));
+        await client.disconnect();
+      }
+    });
+
+    test('real recorder adapter fails closed after start when post-start route verification fails', () async {
       grantCurrentConsent();
       final authority = AiConsentAuthoritySnapshot.capture(
         preferences: SharedPreferencesUtil(),
         expectedUid: 'uid-a',
       );
+      expect(authority, isNotNull);
+
+      final operations = <String>[];
+      final recorder = _FakeV2VMicrophoneRecorder(operations);
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneRecorderFactory: () => recorder,
+        audibleOutputEnforcer: () async {
+          operations.add('ella.verifyInteractiveRoute:receiver');
+          return false;
+        },
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isFalse,
+      );
+      expect(operations, [
+        'recorder.disableAudioSessionManagement',
+        'recorder.permission',
+        'recorder.startStream',
+        'ella.verifyInteractiveRoute:receiver',
+        'recorder.stop',
+        'recorder.dispose',
+      ]);
+      expect(client.micChunksSentForTesting, 0);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('assistant transcript alone does not close the microphone gate', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final events = <V2VEvent>[];
@@ -581,10 +1182,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -599,10 +1197,7 @@ void main() {
 
     test('PCM playback waits for WAV completion then restores the interactive route and mic', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final audioRoutes = <String>[];
@@ -635,10 +1230,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -670,10 +1262,7 @@ void main() {
 
     test('WAV playback failure reports the error and reopens the authorized mic', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final events = <V2VEvent>[];
@@ -700,10 +1289,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -721,10 +1307,7 @@ void main() {
 
     test('disconnect invalidates held WAV playback without reopening the mic', () async {
       grantCurrentConsent();
-      final authority = AiConsentAuthoritySnapshot.capture(
-        preferences: SharedPreferencesUtil(),
-        expectedUid: 'uid-a',
-      );
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
       expect(authority, isNotNull);
 
       final playbackEntered = Completer<void>();
@@ -749,10 +1332,7 @@ void main() {
       );
 
       expect(
-        await client.startAuthorizedMicrophoneForTesting(
-          authority: authority!,
-          shouldContinue: () => true,
-        ),
+        await client.startAuthorizedMicrophoneForTesting(authority: authority!, shouldContinue: () => true),
         isTrue,
       );
       client.markConnectedForTesting();
@@ -773,18 +1353,67 @@ void main() {
   });
 
   group('V2VClient proxy event mapping', () {
-    test('maps transcript deltas as assistant transcripts', () {
+    test('parses exact proxy ordering with audio done before two identical terminal turns', () {
+      final events = <V2VEvent>[];
+      final client = V2VClient(onEvent: events.add);
+
+      for (final ordinal in [1, 2]) {
+        final suffix = ordinal.toRadixString(16).padLeft(32, '0');
+        client.handleMessageForTesting('{"type":"user_transcript","text":"yes"}');
+        client.handleMessageForTesting('{"type":"transcript","text":"Answer $ordinal"}');
+        client.handleMessageForTesting('{"type":"audio_done"}');
+        client.handleMessageForTesting(
+          '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+          '"session_id":"session-jti-1","turn_id":"v2v-turn-$suffix",'
+          '"user_event_id":"v2v-turn-$suffix:user",'
+          '"assistant_event_id":"v2v-turn-$suffix:assistant",'
+          '"user_text":"yes","assistant_text":"Answer $ordinal",'
+          '"started_at":"2026-08-15T20:00:00Z","completed_at":"2026-08-15T20:00:02Z"}',
+        );
+      }
+
+      expect(events.map((event) => event.type).where((type) => type != 'v2v_debug'), [
+        'user_transcript',
+        'transcript',
+        'audio_done',
+        'transcript_turn',
+        'user_transcript',
+        'transcript',
+        'audio_done',
+        'transcript_turn',
+      ]);
+      final terminalTurns = events.map((event) => event.terminalTurn).whereType<V2VTerminalTranscriptTurn>().toList();
+      expect(terminalTurns.map((turn) => turn.userTranscript), ['yes', 'yes']);
+      expect(terminalTurns.map((turn) => turn.turnId).toSet(), hasLength(2));
+    });
+
+    test('accepts only custom proxy transcript events, not raw provider frames', () {
       expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript'), isTrue);
-      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript_delta'), isTrue);
-      expect(V2VClient.treatsAsAssistantTranscriptEvent('response.audio_transcript.delta'), isTrue);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript_delta'), isFalse);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('response.output_audio_transcript.done'), isFalse);
       expect(V2VClient.treatsAsAssistantTranscriptEvent('user_transcript'), isFalse);
     });
 
-    test('separates audio completion from generic response completion', () {
-      expect(V2VClient.treatsAsAudioDoneEvent('response.audio.done'), isTrue);
+    test('accepts only the proxy audio completion frame', () {
+      expect(V2VClient.treatsAsAudioDoneEvent('audio_done'), isTrue);
+      expect(V2VClient.treatsAsAudioDoneEvent('response.audio.done'), isFalse);
       expect(V2VClient.treatsAsAudioDoneEvent('response.done'), isFalse);
-      expect(V2VClient.treatsAsResponseCompleteEvent('response.done'), isTrue);
-      expect(V2VClient.treatsAsResponseCompleteEvent('audio_done'), isFalse);
+    });
+
+    test('drops malformed terminal turns instead of inferring a partial boundary', () {
+      final events = <V2VEvent>[];
+      final client = V2VClient(onEvent: events.add);
+
+      client.handleMessageForTesting(
+        '{"type":"transcript_turn","contract_version":1,"terminal":true,'
+        '"session_id":"session-jti-1","turn_id":"v2v-turn-invalid",'
+        '"user_text":"Question","assistant_text":"Partial"}',
+      );
+      client.handleMessageForTesting(
+        '{"type":"response.output_audio_transcript.done","transcript":"Partial","response_id":"raw-provider"}',
+      );
+
+      expect(events.where((event) => event.type == 'transcript_turn'), isEmpty);
     });
 
     test('parses identifier-only memory reinterpretation events', () {

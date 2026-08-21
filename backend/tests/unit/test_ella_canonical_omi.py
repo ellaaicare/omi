@@ -1,10 +1,11 @@
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from utils.ella.canonical_omi import build_omi_canonical_event
+from utils.ella.canonical_omi import build_omi_canonical_event, reserve_omi_canonical_publication
 
 
-def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
+def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript(monkeypatch):
     conversation = {
         "id": "cafe-123",
         "created_at": datetime(2026, 5, 7, 18, 56, 59, tzinfo=timezone.utc),
@@ -50,6 +51,38 @@ def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
     assert event["metadata"]["active_summary_version_id"] == "obs-v2"
     assert event["metadata"]["transcript_segments"][0]["text"] == "Can I get the waffle?"
     assert event["metadata"]["trace_id"] == "trace-cafe"
+    assert "publication_fence" not in event["metadata"]
+
+    fenced_event = build_omi_canonical_event(
+        "5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+        conversation,
+        summary_source="observer",
+        summary_kind="observer_enriched",
+        trace_id="trace-cafe",
+        publication_fence={
+            "scope": "correction:owner-1:cafe-123:corr-1",
+            "attempt_token": "attempt-b",
+            "generation": 2,
+        },
+    )
+    assert fenced_event["metadata"]["publication_fence"]["generation"] == 2
+
+    reservation_requests = []
+
+    def reserve(url, **kwargs):
+        reservation_requests.append({"url": url, **kwargs})
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True, **kwargs["json"]})
+
+    monkeypatch.setattr("utils.ella.canonical_omi.requests.post", reserve)
+    reservation = reserve_omi_canonical_publication(fenced_event["metadata"]["publication_fence"])
+    assert reservation == {
+        "ok": True,
+        "scope": "correction:owner-1:cafe-123:corr-1",
+        "attempt_token": "attempt-b",
+        "generation": 2,
+    }
+    assert reservation_requests[0]["url"].endswith("/v1/ella/publication-fences/reserve")
+    assert reservation_requests[0]["timeout"] == 5.0
 
 
 def test_build_omi_canonical_event_json_normalizes_nested_timestamps():
@@ -73,3 +106,23 @@ def test_build_omi_canonical_event_json_normalizes_nested_timestamps():
     assert event["metadata"]["structured"]["events"][0]["observed_at"] == "2026-05-07T18:57:12Z"
     assert event["metadata"]["summary_versions"][0]["created_at"] == "2026-05-07T18:57:12Z"
     assert event["metadata"]["transcript_segments"][0]["timestamp"] == "2026-05-07T18:57:12Z"
+
+
+def test_build_omi_canonical_event_receipts_exact_active_version_lineage():
+    event = build_omi_canonical_event(
+        "uid-123",
+        {
+            "id": "conv-1",
+            "created_at": datetime(2026, 8, 16, tzinfo=timezone.utc),
+            "structured": {"title": "Restored"},
+            "summary_versions": [
+                {"id": "base-v1"},
+                {"id": "corrected-v2", "based_on_version_id": "base-v1"},
+                {"id": "undo-v3", "based_on_version_id": "corrected-v2"},
+            ],
+            "active_summary_version_id": "undo-v3",
+        },
+    )
+
+    assert event["metadata"]["active_summary_version_id"] == "undo-v3"
+    assert event["metadata"]["summary_version_ancestor_ids"] == ["corrected-v2", "base-v1"]

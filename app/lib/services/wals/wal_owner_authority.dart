@@ -146,13 +146,14 @@ class WalOwnerAuthority {
     }
     if (!prefs.hasCurrentEllaProvisioningAuthority(uid: firebaseUid, bindingRevision: bindingRevision)) return null;
 
-    return WalOwner(
+    final owner = WalOwner(
       uid: firebaseUid,
       profileBindingId: profileBindingId,
       bindingRevision: bindingRevision,
       consentReceiptId: consentReceiptId,
       authorityGenerationAtCapture: prefs.aiConsentAuthorityGeneration,
     );
+    return owner.hasValidAuthorityIdentity ? owner : null;
   }
 
   static ActiveWalAuthority? active({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
