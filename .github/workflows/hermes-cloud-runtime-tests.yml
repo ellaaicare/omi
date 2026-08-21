@@ -1001,6 +1001,12 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_targets_exact_closed_conversation"
             "tests/unit/test_conversation_processing_failures.py::test_initial_processing_claim_rejects_a_durable_capture_owner"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_effect_successor_reuses_token_and_stale_predecessor_cannot_complete"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[action_items]"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[usage]"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[audio]"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_usage_receipt_and_increment_commit_atomically_once"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_completed_summary_resumes_missing_effect_after_lost_ack"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
             "tests/unit/test_conversation_processing_callers.py::test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
@@ -1016,9 +1022,12 @@ jobs:
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_explicit_source_currentness_uses_only_latest_canonical_version"
           )
           for required_id in "${required_today_card_ids[@]}"; do
-            grep -Fqx "$required_id" <<<"$today_card_ids"
+            if ! grep -Fqx "$required_id" <<<"$today_card_ids"; then
+              echo "::error::required Today/capture test is not collected: $required_id"
+              exit 1
+            fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 221
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 227
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
