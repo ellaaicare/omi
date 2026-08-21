@@ -199,6 +199,7 @@ from routers import conversations as conversations_router
 from routers import developer as developer_router
 from utils.conversations import merge_conversations as merge_processor
 from utils.conversations import postprocess_conversation as postprocess_processor
+from utils.ella import postprocess as ella_postprocess
 
 
 @pytest.fixture(autouse=True)
@@ -1384,6 +1385,134 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
     assert all(receipt["state"] == "completed" for receipt in terminal_receipts.values())
 
 
+def test_capture_ready_http_failure_retries_same_effect_without_duplicate_summary(monkeypatch):
+    conversation = _long_conversation()
+    state = {'live_claim': 'claim-a', 'effects': {}, 'summary_commits': 0, 'terminal_attempts': []}
+    http_calls = []
+    responses = iter([200, 503, 200, 200])
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise ella_postprocess.requests.HTTPError(f'HTTP {self.status_code}')
+
+    def claim_effect(_uid, conversation_id, generation, owner_token, claim_token, effect_id):
+        assert (conversation_id, generation, owner_token) == (conversation.id, 'generation-a', 'owner-a')
+        receipt = state['effects'].get(effect_id)
+        if receipt and receipt['state'] == 'completed':
+            return {
+                'outcome': 'completed',
+                'operation_token': receipt['operation_token'],
+                'result': receipt.get('result'),
+            }
+        if claim_token != state['live_claim']:
+            return {'outcome': 'lost'}
+        operation_token = conversation_processor.capture_finalization_effect_operation_token(
+            conversation_id,
+            generation,
+            owner_token,
+            effect_id,
+        )
+        state['effects'][effect_id] = {
+            'state': 'claimed',
+            'claim_token': claim_token,
+            'operation_token': operation_token,
+        }
+        return {'outcome': 'claimed', 'operation_token': operation_token}
+
+    def complete_effect(
+        _uid,
+        _conversation_id,
+        _generation,
+        _owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+    ):
+        receipt = state['effects'][effect_id]
+        if (
+            claim_token != state['live_claim']
+            or receipt['claim_token'] != claim_token
+            or receipt['operation_token'] != operation_token
+        ):
+            return False
+        receipt.update({'state': 'completed', 'result': result})
+        return True
+
+    def commit_summary(_operation_token):
+        state['summary_commits'] += 1
+        return {'active_summary_version_id': 'summary-version-a'}
+
+    def post(url, **kwargs):
+        http_calls.append((url, kwargs))
+        return Response(next(responses))
+
+    def terminalize_if_complete():
+        completed = bool(state['effects']) and all(
+            receipt.get('state') == 'completed' for receipt in state['effects'].values()
+        )
+        state['terminal_attempts'].append(completed)
+        return completed
+
+    monkeypatch.setattr(conversation_processor, 'claim_capture_finalization_effect', claim_effect)
+    monkeypatch.setattr(conversation_processor, 'complete_capture_finalization_effect', complete_effect)
+    monkeypatch.setattr(ella_postprocess, 'POSTPROCESS_ENABLED', True)
+    monkeypatch.setattr(ella_postprocess, 'HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS', frozenset())
+    monkeypatch.setattr(ella_postprocess.requests, 'post', post)
+
+    predecessor = conversation_processor.CaptureFinalizationEffectRunner(
+        'uid-1',
+        conversation.id,
+        ('generation-a', 'owner-a', 'claim-a'),
+    )
+    summary_result = predecessor.run('result:summary_commit', commit_summary)
+    post_effect_id = 'post:ella_postprocess_webhook'
+    post_operation = lambda operation_token: ella_postprocess.fire_postprocess_webhook(
+        'uid-1',
+        conversation,
+        idempotency_key=operation_token,
+        synchronous=True,
+    )
+
+    with pytest.raises(ella_postprocess.requests.HTTPError):
+        predecessor.run(post_effect_id, post_operation)
+
+    first_operation_token = state['effects'][post_effect_id]['operation_token']
+    assert summary_result == {'active_summary_version_id': 'summary-version-a'}
+    assert state['summary_commits'] == 1
+    assert state['effects']['result:summary_commit']['state'] == 'completed'
+    assert state['effects'][post_effect_id]['state'] == 'claimed'
+    assert terminalize_if_complete() is False
+
+    state['live_claim'] = 'claim-b'
+    successor = conversation_processor.CaptureFinalizationEffectRunner(
+        'uid-1',
+        conversation.id,
+        ('generation-a', 'owner-a', 'claim-b'),
+    )
+    assert successor.run('result:summary_commit', commit_summary) == summary_result
+    successor.run(post_effect_id, post_operation)
+
+    assert state['summary_commits'] == 1
+    assert state['effects'][post_effect_id]['state'] == 'completed'
+    assert state['effects'][post_effect_id]['operation_token'] == first_operation_token
+    assert terminalize_if_complete() is True
+    call_count = len(http_calls)
+    successor.run(post_effect_id, post_operation)
+    assert len(http_calls) == call_count
+    assert [call[1]['headers']['Idempotency-Key'] for call in http_calls] == [
+        f'{first_operation_token}:completed',
+        f'{first_operation_token}:ready',
+        f'{first_operation_token}:completed',
+        f'{first_operation_token}:ready',
+    ]
+    assert state['terminal_attempts'] == [False, True]
+
+
 def test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_effects(monkeypatch):
     conversation = _long_conversation()
     commit_kwargs = []
@@ -1679,6 +1808,13 @@ def test_manual_conversation_processing_rejects_live_capture_owner(monkeypatch):
         lambda _uid: conversation.model_dump(),
     )
     monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: (
+            conversation.model_dump() if (uid, conversation_id) == ("uid-1", conversation.id) else None
+        ),
+    )
+    monkeypatch.setattr(
         conversations_router.redis_db,
         "acquire_in_progress_processing_fence",
         lambda uid, conversation_id, token: False,
@@ -1745,6 +1881,7 @@ def test_manual_conversation_processing_targets_exact_closed_conversation(monkey
             {
                 "_claim_already_held": True,
                 "_initial_processing_claim_token": "durable-processing-claim",
+                "capture_finalization": None,
             },
         )
     ]

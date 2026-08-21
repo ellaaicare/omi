@@ -222,6 +222,11 @@ def fire_postprocess_webhook(
                     f"[FLOW:POSTPROCESS] conversation-ready uid={_uid} conv={_conv_short} segments={_segments} status={r.status_code} latency={_ms}ms",
                     flush=True,
                 )
+                if synchronous and not 200 <= r.status_code < 300:
+                    raise requests.HTTPError(
+                        f'conversation-ready webhook returned HTTP {r.status_code}',
+                        response=r,
+                    )
             except Exception as _e:
                 print(
                     f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={_uid} conv={_conv_short} error={_e}", flush=True

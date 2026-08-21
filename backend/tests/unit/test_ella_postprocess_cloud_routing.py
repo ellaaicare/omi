@@ -207,6 +207,34 @@ def test_capture_delivery_http_failure_is_not_acknowledged(monkeypatch):
     assert calls[0][1]["headers"]["Idempotency-Key"] == "capture-operation-a:completed"
 
 
+def test_capture_conversation_ready_http_failure_is_not_acknowledged(monkeypatch):
+    monkeypatch.setattr(postprocess, "POSTPROCESS_ENABLED", True)
+    monkeypatch.setattr(postprocess, "HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS", frozenset())
+    calls = []
+    responses = iter([FakeResponse(status_code=200), FakeResponse(status_code=503)])
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(postprocess.requests, "post", fake_post)
+
+    with pytest.raises(postprocess.requests.HTTPError):
+        postprocess.fire_postprocess_webhook(
+            "legacy-user",
+            _conversation(),
+            idempotency_key="capture-operation-a",
+            synchronous=True,
+        )
+
+    assert [url for url, _ in calls] == [
+        postprocess.POSTPROCESS_WEBHOOK_URL,
+        postprocess.CONVERSATION_READY_WEBHOOK_URL,
+    ]
+    assert calls[0][1]["headers"]["Idempotency-Key"] == "capture-operation-a:completed"
+    assert calls[1][1]["headers"]["Idempotency-Key"] == "capture-operation-a:ready"
+
+
 def test_legacy_delivery_preserves_best_effort_http_failure(monkeypatch):
     monkeypatch.setattr(postprocess, "POSTPROCESS_ENABLED", True)
     monkeypatch.setattr(postprocess, "HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS", frozenset())

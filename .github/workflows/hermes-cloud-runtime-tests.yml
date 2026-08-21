@@ -672,10 +672,13 @@ jobs:
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[opus_fs320]"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[pcm16]"
             "tests/unit/test_capture_protocol_v2_live.py::test_drain_and_finalization_require_exact_tuple_and_reach_terminal"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_explicit_terminal_failure_completes_without_provider_retry"
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 48
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 51
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
@@ -845,6 +848,7 @@ jobs:
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_cleanup_recovers_from_partial_cleanup_idempotently"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_show_and_cleanup_accept_expected_post_enrichment_state_only"
             "tests/unit/test_ella_postprocess_cloud_routing.py::test_capture_delivery_http_failure_is_not_acknowledged"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_capture_conversation_ready_http_failure_is_not_acknowledged"
             "tests/unit/test_ella_postprocess_cloud_routing.py::test_legacy_delivery_preserves_best_effort_http_failure"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
             "tests/unit/test_ella_runtime_route_isolation.py::test_isolated_hermes_chat_has_a_bounded_provider_timeout"
@@ -921,7 +925,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 20
-          test "$collected" -eq 566
+          test "$collected" -eq 567
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1007,6 +1011,7 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[audio]"
             "tests/unit/test_conversation_processing_failures.py::test_capture_usage_receipt_and_increment_commit_atomically_once"
             "tests/unit/test_conversation_processing_failures.py::test_capture_completed_summary_resumes_missing_effect_after_lost_ack"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_ready_http_failure_retries_same_effect_without_duplicate_summary"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
             "tests/unit/test_conversation_processing_callers.py::test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
@@ -1027,7 +1032,7 @@ jobs:
               exit 1
             fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 227
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 228
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \

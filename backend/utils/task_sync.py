@@ -7,6 +7,16 @@ import database.action_items as action_items_db
 import database.task_sync as task_sync_db
 from utils.notifications import send_apple_reminders_sync_push
 
+TERMINAL_TASK_SYNC_ERROR_CODES = frozenset({'no_workspace', 'no_list', 'unsupported'})
+
+
+def _task_sync_result_is_terminal(result: dict) -> bool:
+    if result.get('synced') is True:
+        return True
+    if result.get('retryable') is False:
+        return True
+    return result.get('error_code') in TERMINAL_TASK_SYNC_ERROR_CODES
+
 
 async def auto_sync_action_item(uid: str, action_item: dict, idempotency_key: Optional[str] = None) -> dict:
     """
@@ -62,16 +72,29 @@ async def auto_sync_action_item(uid: str, action_item: dict, idempotency_key: Op
         if not idempotency_key:
             return result
 
-        completion = task_sync_db.complete_task_sync(
-            uid,
-            idempotency_key,
-            action_item['id'],
-            default_app,
-            claim_token,
-            result,
-        )
-        if completion.get('outcome') == 'completed':
-            return completion.get('result') or result
+        if _task_sync_result_is_terminal(result):
+            completion = task_sync_db.complete_task_sync(
+                uid,
+                idempotency_key,
+                action_item['id'],
+                default_app,
+                claim_token,
+                result,
+            )
+            if completion.get('outcome') == 'completed':
+                return completion.get('result') or result
+        else:
+            completion = task_sync_db.release_task_sync(
+                uid,
+                idempotency_key,
+                action_item['id'],
+                default_app,
+                claim_token,
+            )
+            if completion.get('outcome') == 'released':
+                return result
+            if completion.get('outcome') == 'completed':
+                return completion.get('result') or result
         return {"synced": False, "platform": default_app, "reason": "stale_sync_claim"}
 
     except Exception as e:
@@ -114,7 +137,14 @@ async def _sync_to_cloud_service(
         )
         return {"synced": True, "platform": app_key, "external_task_id": result.get("external_task_id")}
 
-    return {"synced": False, "platform": app_key, "error": result.get("error")}
+    error_code = result.get("error_code")
+    return {
+        "synced": False,
+        "platform": app_key,
+        "error": result.get("error"),
+        "error_code": error_code,
+        "retryable": error_code not in TERMINAL_TASK_SYNC_ERROR_CODES,
+    }
 
 
 def _sync_to_apple_reminders(

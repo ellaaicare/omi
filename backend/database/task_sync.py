@@ -240,3 +240,76 @@ def complete_task_sync(
         result,
         now,
     )
+
+
+def _release_task_sync_transaction(
+    transaction,
+    receipt_ref,
+    idempotency_key: str,
+    action_item_id: str,
+    platform: str,
+    claim_token: str,
+    now: datetime,
+) -> dict:
+    snapshot = receipt_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'outcome': 'lost'}
+    receipt = snapshot.to_dict()
+    _assert_receipt_identity(receipt, idempotency_key, action_item_id, platform)
+    if receipt.get('state') == 'completed':
+        return {'outcome': 'completed', 'result': receipt.get('result')}
+    if receipt.get('state') != 'claimed' or receipt.get('claim_token') != claim_token:
+        return {'outcome': 'lost'}
+    transaction.set(
+        receipt_ref,
+        {
+            'state': 'retryable',
+            'claim_token': None,
+            'lease_expires_at': now,
+            'updated_at': now,
+        },
+        merge=True,
+    )
+    return {'outcome': 'released'}
+
+
+@transactional
+def _release_task_sync(
+    transaction,
+    receipt_ref,
+    idempotency_key: str,
+    action_item_id: str,
+    platform: str,
+    claim_token: str,
+    now: datetime,
+) -> dict:
+    return _release_task_sync_transaction(
+        transaction,
+        receipt_ref,
+        idempotency_key,
+        action_item_id,
+        platform,
+        claim_token,
+        now,
+    )
+
+
+def release_task_sync(
+    uid: str,
+    idempotency_key: str,
+    action_item_id: str,
+    platform: str,
+    claim_token: str,
+    *,
+    now: Optional[datetime] = None,
+) -> dict:
+    now = now or datetime.now(timezone.utc)
+    return _release_task_sync(
+        db.transaction(),
+        _task_sync_receipt_ref(uid, idempotency_key),
+        idempotency_key,
+        action_item_id,
+        platform,
+        claim_token,
+        now,
+    )

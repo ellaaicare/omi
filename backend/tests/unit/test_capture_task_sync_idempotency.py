@@ -117,6 +117,46 @@ def test_task_sync_receipt_reclaim_and_completion_are_exact_claim_cas():
     assert receipt_ref.data['result'] == result
 
 
+def test_task_sync_retry_release_is_exact_claim_cas():
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc)
+    receipt_ref = _ReceiptRef()
+    transaction = _Transaction()
+    identity = ('stable-operation', 'action-item-a', 'google_tasks')
+
+    assert task_sync_db._claim_task_sync_transaction(
+        transaction,
+        receipt_ref,
+        *identity,
+        'claim-a',
+        now,
+        15,
+    ) == {'outcome': 'claimed'}
+    assert task_sync_db._release_task_sync_transaction(
+        transaction,
+        receipt_ref,
+        *identity,
+        'claim-a',
+        now + timedelta(seconds=1),
+    ) == {'outcome': 'released'}
+    assert receipt_ref.data['state'] == 'retryable'
+    assert receipt_ref.data['claim_token'] is None
+    assert task_sync_db._release_task_sync_transaction(
+        transaction,
+        receipt_ref,
+        *identity,
+        'claim-a',
+        now + timedelta(seconds=2),
+    ) == {'outcome': 'lost'}
+    assert task_sync_db._claim_task_sync_transaction(
+        transaction,
+        receipt_ref,
+        *identity,
+        'claim-b',
+        now + timedelta(seconds=2),
+        15,
+    ) == {'outcome': 'claimed'}
+
+
 class _Response:
     status_code = 201
 
@@ -152,6 +192,152 @@ def _integration(app_key):
     if app_key == 'clickup':
         integration['list_id'] = 'clickup-list-a'
     return integration
+
+
+def _install_in_memory_receipts(monkeypatch):
+    state = {'receipt': None, 'claim_operation_keys': [], 'releases': 0, 'completions': 0}
+
+    def claim_task_sync(uid, operation_key, action_item_id, platform, claim_token):
+        state['claim_operation_keys'].append(operation_key)
+        receipt = state['receipt']
+        if receipt and receipt['state'] == 'completed':
+            return {'outcome': 'completed', 'result': receipt['result']}
+        if receipt and receipt['state'] == 'claimed':
+            return {'outcome': 'busy'}
+        state['receipt'] = {
+            'state': 'claimed',
+            'claim_token': claim_token,
+            'operation_key': operation_key,
+            'action_item_id': action_item_id,
+            'platform': platform,
+        }
+        return {'outcome': 'claimed'}
+
+    def release_task_sync(uid, operation_key, action_item_id, platform, claim_token):
+        receipt = state['receipt']
+        if not receipt or receipt['state'] != 'claimed' or receipt['claim_token'] != claim_token:
+            return {'outcome': 'lost'}
+        assert (receipt['operation_key'], receipt['action_item_id'], receipt['platform']) == (
+            operation_key,
+            action_item_id,
+            platform,
+        )
+        receipt.update({'state': 'retryable', 'claim_token': None})
+        state['releases'] += 1
+        return {'outcome': 'released'}
+
+    def complete_task_sync(uid, operation_key, action_item_id, platform, claim_token, result):
+        receipt = state['receipt']
+        if receipt and receipt['state'] == 'completed':
+            return {'outcome': 'completed', 'result': receipt['result']}
+        if not receipt or receipt['state'] != 'claimed' or receipt['claim_token'] != claim_token:
+            return {'outcome': 'lost'}
+        assert (receipt['operation_key'], receipt['action_item_id'], receipt['platform']) == (
+            operation_key,
+            action_item_id,
+            platform,
+        )
+        receipt.update({'state': 'completed', 'result': result})
+        state['completions'] += 1
+        return {'outcome': 'completed', 'result': result}
+
+    monkeypatch.setattr(task_sync_db, 'claim_task_sync', claim_task_sync)
+    monkeypatch.setattr(task_sync_db, 'release_task_sync', release_task_sync)
+    monkeypatch.setattr(task_sync_db, 'complete_task_sync', complete_task_sync)
+    return state
+
+
+def test_auto_sync_transient_failure_releases_then_retries_same_operation_once(monkeypatch):
+    app_key = 'todoist'
+    state = _install_in_memory_receipts(monkeypatch)
+    provider_calls = []
+    provider_results = iter(
+        [
+            {'success': False, 'error': 'temporary provider failure', 'error_code': 'api_error'},
+            {'success': True, 'external_task_id': 'external-success'},
+        ]
+    )
+
+    async def create_task(**kwargs):
+        provider_calls.append(kwargs)
+        return next(provider_results)
+
+    monkeypatch.setattr(task_sync.users_db, 'get_default_task_integration', lambda uid: app_key)
+    monkeypatch.setattr(task_sync.users_db, 'get_task_integration', lambda uid, platform: _integration(app_key))
+    monkeypatch.setattr(task_integrations, '_create_task_internal', create_task)
+    monkeypatch.setattr(task_sync.action_items_db, 'update_action_item', lambda *args, **kwargs: None)
+
+    action_items = [{'id': 'action-item-a', 'description': 'Retry safely'}]
+    finalization_operation = 'stable-finalization-operation'
+    first = asyncio.run(
+        task_sync.auto_sync_action_items_batch(
+            'authenticated-user',
+            action_items,
+            idempotency_key=finalization_operation,
+        )
+    )
+    second = asyncio.run(
+        task_sync.auto_sync_action_items_batch(
+            'authenticated-user',
+            action_items,
+            idempotency_key=finalization_operation,
+        )
+    )
+    replay = asyncio.run(
+        task_sync.auto_sync_action_items_batch(
+            'authenticated-user',
+            action_items,
+            idempotency_key=finalization_operation,
+        )
+    )
+
+    assert first == [
+        {
+            'synced': False,
+            'platform': app_key,
+            'error': 'temporary provider failure',
+            'error_code': 'api_error',
+            'retryable': True,
+        }
+    ]
+    assert second == replay == [{'synced': True, 'platform': app_key, 'external_task_id': 'external-success'}]
+    assert state['releases'] == 1
+    assert state['completions'] == 1
+    assert len(set(state['claim_operation_keys'])) == 1
+    assert len(provider_calls) == 2
+    assert len([call for call in provider_calls if call['idempotency_key'] == state['claim_operation_keys'][0]]) == 2
+
+
+def test_auto_sync_explicit_terminal_failure_completes_without_provider_retry(monkeypatch):
+    app_key = 'asana'
+    state = _install_in_memory_receipts(monkeypatch)
+    provider_calls = []
+
+    async def create_task(**kwargs):
+        provider_calls.append(kwargs)
+        return {'success': False, 'error': 'No workspace configured', 'error_code': 'no_workspace'}
+
+    monkeypatch.setattr(task_sync.users_db, 'get_default_task_integration', lambda uid: app_key)
+    monkeypatch.setattr(task_sync.users_db, 'get_task_integration', lambda uid, platform: _integration(app_key))
+    monkeypatch.setattr(task_integrations, '_create_task_internal', create_task)
+
+    action_items = [{'id': 'action-item-a', 'description': 'Terminal configuration error'}]
+    first = asyncio.run(task_sync.auto_sync_action_items_batch('authenticated-user', action_items, 'stable-operation'))
+    replay = asyncio.run(task_sync.auto_sync_action_items_batch('authenticated-user', action_items, 'stable-operation'))
+
+    expected = [
+        {
+            'synced': False,
+            'platform': app_key,
+            'error': 'No workspace configured',
+            'error_code': 'no_workspace',
+            'retryable': False,
+        }
+    ]
+    assert first == replay == expected
+    assert state['releases'] == 0
+    assert state['completions'] == 1
+    assert len(provider_calls) == 1
 
 
 @pytest.mark.parametrize('app_key', ['todoist', 'asana', 'google_tasks', 'clickup', 'apple_reminders'])
