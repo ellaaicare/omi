@@ -66,6 +66,12 @@ IPA_PATH="$BUILD_DIR/EllaCare.ipa"
 PUBSPEC_VERSION="$(awk '/^version:/ {print $2; exit}' "$APP_DIR/pubspec.yaml")"
 EXPECTED_BUILD_NAME="${PUBSPEC_VERSION%%+*}"
 EXPECTED_BUILD_NUMBER="${PUBSPEC_VERSION##*+}"
+RELEASE_ARTIFACT_ROOT="${ELLA_RELEASE_ARTIFACT_ROOT:-$HOME/.release-artifacts/ella-ios}"
+DSYM_BUILD_DIR="$RELEASE_ARTIFACT_ROOT/$EXPECTED_BUILD_NUMBER"
+DSYM_ARTIFACT_DIR="$DSYM_BUILD_DIR/dSYMs"
+DSYM_ARCHIVE_PATH="$DSYM_BUILD_DIR/EllaCare-$EXPECTED_BUILD_NUMBER.dSYMs.zip"
+DSYM_RECEIPT_PATH="$DSYM_BUILD_DIR/EllaCare-$EXPECTED_BUILD_NUMBER.dSYMs.receipt.txt"
+CRASHLYTICS_UPLOAD_SYMBOLS="$IOS_DIR/Pods/FirebaseCrashlytics/upload-symbols"
 
 if [ "$FLAVOR" = "prod" ]; then
   BUNDLE_ID="com.ellaaicare.ella"
@@ -222,6 +228,7 @@ if [ ! -f "$PLIST_PATH" ]; then
   echo "ERROR: $PLIST_PATH not found for FLAVOR=$FLAVOR"
   exit 1
 fi
+FIREBASE_PLIST_PATH="$APP_DIR/$PLIST_PATH"
 
 # Runner must use the same flavor-specific Firebase config selected above.
 cp "$PLIST_PATH" ios/Runner/GoogleService-Info.plist
@@ -315,6 +322,63 @@ if [ "$ACTUAL_BUILD_NAME" != "$EXPECTED_BUILD_NAME" ] || [ "$ACTUAL_BUILD_NUMBER
   exit 1
 fi
 
+APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_BUNDLE/Info.plist")"
+APP_EXECUTABLE="$APP_BUNDLE/$APP_EXECUTABLE_NAME"
+APP_DSYM_PATH="$ARCHIVE_PATH/dSYMs/$(basename "$APP_BUNDLE").dSYM"
+if [ ! -f "$APP_EXECUTABLE" ]; then
+  echo "ERROR: Archived app executable is missing"
+  exit 1
+fi
+if [ ! -d "$APP_DSYM_PATH" ]; then
+  echo "ERROR: Exact app dSYM is missing from the archive"
+  exit 1
+fi
+
+# Preserve the exact archive symbols before signing or packaging. Rebuilding the
+# same version can produce different UUIDs, so an existing build receipt is never
+# overwritten implicitly.
+log "Preserving exact archive dSYMs"
+if [ -L "$RELEASE_ARTIFACT_ROOT" ]; then
+  echo "ERROR: Release artifact root must not be a symlink"
+  exit 1
+fi
+mkdir -p "$RELEASE_ARTIFACT_ROOT"
+chmod 700 "$RELEASE_ARTIFACT_ROOT"
+if ! mkdir "$DSYM_BUILD_DIR"; then
+  echo "ERROR: Refusing to overwrite retained dSYM artifacts for build $EXPECTED_BUILD_NUMBER"
+  exit 1
+fi
+chmod 700 "$DSYM_BUILD_DIR"
+
+APP_UUIDS="$(xcrun dwarfdump --uuid "$APP_EXECUTABLE" | awk '{print toupper($2)}' | sort -u)"
+DSYM_UUIDS="$(xcrun dwarfdump --uuid "$APP_DSYM_PATH" | awk '{print toupper($2)}' | sort -u)"
+if [ -z "$APP_UUIDS" ] || [ "$APP_UUIDS" != "$DSYM_UUIDS" ]; then
+  echo "ERROR: Archived app and dSYM UUIDs do not match"
+  exit 1
+fi
+
+ditto "$ARCHIVE_PATH/dSYMs" "$DSYM_ARTIFACT_DIR"
+chmod 700 "$DSYM_ARTIFACT_DIR"
+ditto -c -k --sequesterRsrc --keepParent "$DSYM_ARTIFACT_DIR" "$DSYM_ARCHIVE_PATH"
+chmod 600 "$DSYM_ARCHIVE_PATH"
+SOURCE_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+{
+  printf 'source_sha=%s\n' "$SOURCE_SHA"
+  printf 'version=%s\n' "$EXPECTED_BUILD_NAME"
+  printf 'build=%s\n' "$EXPECTED_BUILD_NUMBER"
+  printf 'app_dsym_uuids=%s\n' "$(echo "$DSYM_UUIDS" | paste -sd, -)"
+  printf 'archive_sha256=%s\n' "$(shasum -a 256 "$DSYM_ARCHIVE_PATH" | awk '{print $1}')"
+  echo 'file_sha256:'
+  (
+    cd "$DSYM_ARTIFACT_DIR"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r symbol_file; do
+      shasum -a 256 "$symbol_file"
+    done
+  )
+} > "$DSYM_RECEIPT_PATH"
+chmod 600 "$DSYM_RECEIPT_PATH"
+log "Exact dSYMs retained for build $EXPECTED_BUILD_NUMBER"
+
 # ── Step 7: Embed provisioning profile ───────────────────────
 log "Embedding provisioning profile"
 cp "$PROFILE" "$APP_BUNDLE/embedded.mobileprovision"
@@ -330,12 +394,6 @@ log "Signing with rcodesign (Distribution)"
 # Verify with rcodesign as well; the host's system verifier is not reliable for
 # distribution signatures in this environment.
 SIGNATURE_INFO="/tmp/ella-rcodesign-signature-info.yaml"
-APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_BUNDLE/Info.plist")"
-APP_EXECUTABLE="$APP_BUNDLE/$APP_EXECUTABLE_NAME"
-if [ ! -f "$APP_EXECUTABLE" ]; then
-  echo "ERROR: Signed app executable is missing"
-  exit 1
-fi
 "$RCODESIGN" verify "$APP_EXECUTABLE"
 "$RCODESIGN" print-signature-info "$APP_EXECUTABLE" > "$SIGNATURE_INFO"
 if ! grep -q "apple_certificate_profile: apple-distribution" "$SIGNATURE_INFO"; then
@@ -362,6 +420,19 @@ if [ "${SKIP_UPLOAD:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ ! -x "$CRASHLYTICS_UPLOAD_SYMBOLS" ]; then
+  echo "ERROR: Firebase Crashlytics upload-symbols is unavailable"
+  exit 1
+fi
+if ! "$CRASHLYTICS_UPLOAD_SYMBOLS" \
+  -val \
+  -gsp "$FIREBASE_PLIST_PATH" \
+  -p ios \
+  -- "$DSYM_ARCHIVE_PATH" >/dev/null; then
+  echo "ERROR: Retained dSYM bundle failed Crashlytics argument validation"
+  exit 1
+fi
+
 log "Uploading to TestFlight"
 UPLOAD_LOG="/tmp/ella-altool-upload.log"
 if ! xcrun altool --upload-app \
@@ -378,4 +449,13 @@ if grep -Eq "ERROR:|Failed to upload|ENTITY_ERROR" "$UPLOAD_LOG"; then
   exit 1
 fi
 
-log "Done! Build uploaded to TestFlight."
+log "Uploading exact dSYMs to Firebase Crashlytics"
+if ! "$CRASHLYTICS_UPLOAD_SYMBOLS" \
+  -gsp "$FIREBASE_PLIST_PATH" \
+  -p ios \
+  -- "$DSYM_ARCHIVE_PATH"; then
+  echo "ERROR: Crashlytics dSYM upload failed; the Apple build exists but release observability is incomplete"
+  exit 1
+fi
+
+log "Done! Build uploaded to TestFlight with exact Crashlytics dSYMs."

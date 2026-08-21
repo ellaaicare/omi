@@ -109,6 +109,34 @@ void main() {
     expect(script, contains(r'ELLA_GUARDIAN_ENABLED=$ELLA_GUARDIAN_ENABLED'));
   });
 
+  test('release helper retains and uploads the exact build-numbered Crashlytics dSYMs', () {
+    final script = File('${_appRoot().path}/ios/build-and-upload.sh').readAsStringSync();
+
+    expect(
+      script,
+      contains(r'RELEASE_ARTIFACT_ROOT="${ELLA_RELEASE_ARTIFACT_ROOT:-$HOME/.release-artifacts/ella-ios}"'),
+    );
+    expect(script, contains(r'DSYM_ARTIFACT_DIR="$DSYM_BUILD_DIR/dSYMs"'));
+    expect(script, contains(r'DSYM_ARCHIVE_PATH="$DSYM_BUILD_DIR/EllaCare-$EXPECTED_BUILD_NUMBER.dSYMs.zip"'));
+    expect(script, contains(r'xcrun dwarfdump --uuid "$APP_EXECUTABLE"'));
+    expect(script, contains(r'xcrun dwarfdump --uuid "$APP_DSYM_PATH"'));
+    expect(script, contains('Refusing to overwrite retained dSYM artifacts'));
+    expect(script, contains(r'archive_sha256=%s\n'));
+    expect(script, contains(r'Pods/FirebaseCrashlytics/upload-symbols'));
+    expect(script, contains('  -val \\'));
+    expect(script, contains(r'-gsp "$FIREBASE_PLIST_PATH"'));
+    expect(script, contains(r'-- "$DSYM_ARCHIVE_PATH"'));
+
+    final preserveIndex = script.indexOf('log "Preserving exact archive dSYMs"');
+    final skipUploadIndex = script.indexOf(r'if [ "${SKIP_UPLOAD:-0}" = "1" ]');
+    final appleUploadIndex = script.indexOf('xcrun altool --upload-app');
+    final crashlyticsUploadIndex = script.indexOf('log "Uploading exact dSYMs to Firebase Crashlytics"');
+    expect(preserveIndex, greaterThanOrEqualTo(0));
+    expect(skipUploadIndex, greaterThanOrEqualTo(0));
+    expect(preserveIndex, lessThan(skipUploadIndex));
+    expect(appleUploadIndex, lessThan(crashlyticsUploadIndex));
+  });
+
   test('native Guardian polling, playback reporting, and injection require explicit availability', () {
     final appRoot = _appRoot();
     final manager = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianModeManager.swift').readAsStringSync();
