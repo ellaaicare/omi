@@ -585,13 +585,20 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     shutdown_source = source.split("finally:\n        if not use_custom_stt", maxsplit=1)[1].split(
         "# STT sockets", maxsplit=1
     )[0]
+    disconnect_finalize_compact = "".join(disconnect_finalize_source.split())
+    lifecycle_compact = "".join(lifecycle_source.split())
 
     assert "bind_capture_conversation(segment)" in source
     assert "CAPTURE_CONVERSATION_ID_KEY: conversation_id" in source
     assert "prepare_conversation_bound_capture_batch(" in stream_source
     assert "conversation_id=batch_conversation_id" in stream_source
-    assert "drain_capture_persistence_batches(uid, conversation_id, session_id)" in disconnect_finalize_source
-    assert "drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)" in lifecycle_source
+    assert (
+        "drain_capture_persistence_batches(uid,conversation_id,session_id,generation_id)" in disconnect_finalize_compact
+    )
+    assert (
+        "drain_capture_persistence_batches(uid,conversation_id_to_process,session_id,generation_id,)"
+        in lifecycle_compact
+    )
     assert "if wait_for_buffers and not await _wait_for_capture_buffers_to_drain(conversation_id):" in process_source
     assert "return False" in process_source
     assert "processing_result = await request_conversation_processing(conversation_id)" in process_source
@@ -606,9 +613,9 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert lifecycle_source.index("expected_conversation_id=conversation_id_to_process") < lifecycle_source.index(
         "_schedule_conversation_processing_after_rotation(conversation_id_to_process)"
     )
-    assert lifecycle_source.index(
-        "drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)"
-    ) < lifecycle_source.index("expected_conversation_id=conversation_id_to_process")
+    assert lifecycle_compact.index(
+        "drain_capture_persistence_batches(uid,conversation_id_to_process,session_id,generation_id,)"
+    ) < lifecycle_compact.index("expected_conversation_id=conversation_id_to_process")
     assert "await _process_conversation_after_rotation(conversation_id_to_process)" not in lifecycle_source
     assert "conversation_finalize_tasks.add(task)" in process_source
     assert "conversation_finalize_tasks.discard(completed)" in process_source
@@ -618,9 +625,9 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "expected_conversation_id=conversation_id" in disconnect_finalize_source
     assert "expected_owner_id=session_id" in disconnect_finalize_source
     assert 'reason="socket_ownership_lost"' in disconnect_finalize_source
-    assert disconnect_finalize_source.index(
-        "drain_capture_persistence_batches(uid, conversation_id, session_id)"
-    ) < disconnect_finalize_source.index("expected_conversation_id=conversation_id")
+    assert disconnect_finalize_compact.index(
+        "drain_capture_persistence_batches(uid,conversation_id,session_id,generation_id)"
+    ) < disconnect_finalize_compact.index("expected_conversation_id=conversation_id")
     assert disconnect_finalize_source.index(
         "expected_conversation_id=conversation_id"
     ) < disconnect_finalize_source.index("_process_conversation(conversation_id, wait_for_buffers=False)")

@@ -27,7 +27,7 @@ from models.hermes_cloud_enrichment_contract import (
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
-from ._client import db
+from ._client import db, document_id_from_seed
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
 from utils.other.storage import list_audio_chunks
 
@@ -818,6 +818,8 @@ def _stock_summary_authority_update(
     durable_conversation: Dict[str, Any],
     processing_conversation: Dict[str, Any],
     expected_active_summary_version_id: Optional[str],
+    *,
+    deterministic: bool = False,
 ) -> Dict[str, Any]:
     authority = _validate_summary_authority(durable_conversation)
     if authority['status'] == conversation_stock_summary_malformed:
@@ -855,22 +857,22 @@ def _stock_summary_authority_update(
     if not _has_summary_content(structured):
         return {'status': 'version_unavailable', 'reason': 'summary_content_missing'}
 
+    new_version = _build_stock_summary_version(
+        durable_conversation or processing_conversation,
+        structured,
+        based_on_version_id=current_active_id or None,
+        deterministic=deterministic or authority['status'] == 'empty',
+    )
+    if deterministic and current_active_id == new_version['id']:
+        return {
+            'status': 'committed',
+            'update_data': update_data,
+            'active_summary_version_id': current_active_id,
+        }
+
     versions = copy.deepcopy(durable_conversation.get('summary_versions') or [])
     for version in versions:
         version['is_active'] = False
-
-    if authority['status'] == 'empty':
-        new_version = _build_stock_summary_version(
-            durable_conversation or processing_conversation,
-            structured,
-            deterministic=True,
-        )
-    else:
-        new_version = _build_stock_summary_version(
-            durable_conversation,
-            structured,
-            based_on_version_id=current_active_id,
-        )
     versions.append(new_version)
     update_data['summary_versions'] = versions
     update_data['active_summary_version_id'] = new_version['id']
@@ -956,6 +958,7 @@ def _commit_stock_summary_processing_result_transaction(
         durable_conversation,
         processing_conversation,
         expected_active_summary_version_id,
+        deterministic=bool(capture_finalization),
     )
     if update_result['status'] != 'committed':
         return {
@@ -1712,6 +1715,7 @@ def ensure_voice_memory_summary_version(
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,
+    idempotency_key: Optional[str] = None,
 ) -> List[AudioFile]:
     """
     Create audio file records by merging chunks from a conversation.
@@ -1742,7 +1746,13 @@ def create_audio_files_from_chunks(
             time_gap = chunk['timestamp'] - prev_chunk['timestamp']
             if time_gap > 30:
                 # Gap detected, finalize current group
-                audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+                audio_file = _finalize_audio_file_group(
+                    uid,
+                    conversation_id,
+                    current_group,
+                    audio_files,
+                    idempotency_key=idempotency_key,
+                )
                 if audio_file:
                     audio_files.append(audio_file)
                 current_group = [chunk]
@@ -1751,15 +1761,29 @@ def create_audio_files_from_chunks(
 
     # Finalize last group
     if current_group:
-        audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+        audio_file = _finalize_audio_file_group(
+            uid,
+            conversation_id,
+            current_group,
+            audio_files,
+            idempotency_key=idempotency_key,
+        )
         if audio_file:
             audio_files.append(audio_file)
 
     return audio_files
 
 
+def capture_audio_file_id(idempotency_key: str, group_index: int) -> str:
+    return document_id_from_seed(f'{idempotency_key}:audio-file:{group_index}')
+
+
 def _finalize_audio_file_group(
-    uid: str, conversation_id: str, chunk_group: List[dict], existing_files: List[AudioFile]
+    uid: str,
+    conversation_id: str,
+    chunk_group: List[dict],
+    existing_files: List[AudioFile],
+    idempotency_key: Optional[str] = None,
 ) -> Optional[AudioFile]:
     """
     Create an AudioFile record that references chunks (no merging).
@@ -1777,7 +1801,7 @@ def _finalize_audio_file_group(
         return None
 
     # Generate file ID
-    file_id = str(uuid.uuid4())
+    file_id = capture_audio_file_id(idempotency_key, len(existing_files)) if idempotency_key else str(uuid.uuid4())
 
     # Extract timestamps
     timestamps = [chunk['timestamp'] for chunk in chunk_group]

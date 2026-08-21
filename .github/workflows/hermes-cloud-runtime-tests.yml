@@ -162,6 +162,9 @@ on:
       - "backend/tests/unit/test_ella_scanner_batching.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
+      - "backend/tests/unit/test_capture_protocol_v2_live.py"
+      - "backend/tests/unit/test_capture_task_sync_idempotency.py"
+      - "backend/tests/unit/test_capture_webhook_delivery.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
@@ -325,6 +328,9 @@ on:
       - "backend/tests/unit/test_ella_scanner_batching.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
+      - "backend/tests/unit/test_capture_protocol_v2_live.py"
+      - "backend/tests/unit/test_capture_task_sync_idempotency.py"
+      - "backend/tests/unit/test_capture_webhook_delivery.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -395,7 +401,13 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
+          database/action_items.py
+          database/chat.py
           database/conversations.py
+          database/folders.py
+          database/redis_db.py
+          database/task_sync.py
+          database/user_usage.py
           database/redis_db.py
           database/ella_caregivers.py
           database/ella_provisioning.py
@@ -407,6 +419,7 @@ jobs:
           database/runtime_targets.py
           database/voice_canary.py
           models/conversation.py
+          models/message_event.py
           models/conversation_integrity.py
           models/hermes_cloud_enrichment_contract.py
           routers/transcribe.py
@@ -504,6 +517,10 @@ jobs:
           routers/users.py
           routers/conversations.py routers/developer.py
           routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
+          routers/task_integrations.py
+          utils/analytics.py
+          utils/app_integrations.py
+          utils/conversations/capture_protocol.py
           utils/conversations/process_conversation.py
           utils/conversations/postprocess_conversation.py
           utils/conversations/merge_conversations.py
@@ -536,7 +553,11 @@ jobs:
           utils/ella/__init__.py utils/ella/canonical_auth.py utils/ella/canonical_context.py
           utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py utils/ella/postprocess.py
           utils/ella/scanner.py utils/ella/scanner_keyterms.py
+          utils/llm/knowledge_graph.py
+          utils/notifications.py
           utils/other/endpoints.py
+          utils/task_sync.py
+          utils/webhooks.py
           utils/capture_buffer.py
           scripts/voice_canary_admin.py
           scripts/ella_memory_e2e_smoke.py
@@ -545,6 +566,9 @@ jobs:
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_capture_buffer_retention.py
           tests/unit/test_capture_incident_1210_regressions.py
+          tests/unit/test_capture_protocol_v2_live.py
+          tests/unit/test_capture_task_sync_idempotency.py
+          tests/unit/test_capture_webhook_delivery.py
           tests/unit/test_conversation_summary_cas.py
           tests/unit/test_conversation_processing_callers.py
           tests/unit/test_authority_advisory_lock.py
@@ -607,7 +631,10 @@ jobs:
           capture_ids="$(
             pytest --collect-only -q \
               tests/unit/test_capture_buffer_retention.py \
-              tests/unit/test_capture_incident_1210_regressions.py |
+              tests/unit/test_capture_incident_1210_regressions.py \
+              tests/unit/test_capture_protocol_v2_live.py \
+              tests/unit/test_capture_task_sync_idempotency.py \
+              tests/unit/test_capture_webhook_delivery.py |
               sed '/^$/d'
           )"
           required_capture_ids=(
@@ -641,14 +668,22 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_ownership_loss_exits_old_stream_and_photos_have_no_unfenced_write_path"
             "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
+            "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[opus_fs320]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[pcm16]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_drain_and_finalization_require_exact_tuple_and_reach_terminal"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
+            "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 30
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 48
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
           pytest \
             tests/unit/test_capture_buffer_retention.py \
             tests/unit/test_capture_incident_1210_regressions.py \
+            tests/unit/test_capture_protocol_v2_live.py \
+            tests/unit/test_capture_task_sync_idempotency.py \
+            tests/unit/test_capture_webhook_delivery.py \
             -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
 
@@ -1107,11 +1142,13 @@ jobs:
             "tests/unit/test_conversation_summary_cas.py::test_initial_processing_claim_promotes_in_progress_once_with_partial_update"
             "tests/unit/test_conversation_summary_cas.py::test_released_processing_claim_fences_terminal_failure_from_new_claimant"
             "tests/unit/test_conversation_summary_cas.py::test_terminal_failure_updates_only_the_exact_released_generation"
+            "tests/unit/test_conversation_summary_cas.py::test_capture_finalizer_summary_commit_requires_exact_unexpired_claim_in_same_transaction"
+            "tests/unit/test_conversation_summary_cas.py::test_capture_summary_commit_replay_after_lost_receipt_keeps_one_deterministic_version"
           )
           for required_id in "${required_conversation_summary_cas_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
-          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 48
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 50
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v

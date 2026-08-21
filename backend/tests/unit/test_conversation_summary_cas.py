@@ -645,6 +645,55 @@ def test_capture_finalizer_summary_commit_requires_exact_unexpired_claim_in_same
     assert expired_transaction.updates == []
 
 
+def test_capture_summary_commit_replay_after_lost_receipt_keeps_one_deterministic_version(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    now = datetime.now(timezone.utc)
+    conversation_ref = _ConversationRef(
+        {
+            "id": "conversation-1",
+            "created_at": "2026-07-22T00:00:00+00:00",
+            "structured": {},
+            "summary_versions": [],
+            "active_summary_version_id": None,
+            "status": "processing",
+            "discarded": False,
+            "data_protection_level": "standard",
+            "capture_protocol_version": 2,
+            "capture_generation": "generation-a",
+            "capture_owner_token": "owner-a",
+            "capture_state": "finalizing",
+            "capture_finalization_claim_token": "claim-a",
+            "capture_finalization_lease_expires_at": now + timedelta(seconds=30),
+        }
+    )
+    exact_tuple = ("generation-a", "owner-a", "claim-a")
+
+    first = conversations._commit_stock_summary_processing_result_transaction(
+        _Transaction(),
+        conversation_ref,
+        "uid-1",
+        _stock_processing_payload(),
+        expected_active_summary_version_id=None,
+        capture_finalization=exact_tuple,
+    )
+    first_version_id = first["active_summary_version_id"]
+    assert len(conversation_ref.data["summary_versions"]) == 1
+
+    replay = conversations._commit_stock_summary_processing_result_transaction(
+        _Transaction(),
+        conversation_ref,
+        "uid-1",
+        _stock_processing_payload(active_summary_version_id=first_version_id),
+        expected_active_summary_version_id=first_version_id,
+        capture_finalization=exact_tuple,
+    )
+
+    assert replay["status"] == "committed"
+    assert replay["active_summary_version_id"] == first_version_id
+    assert conversation_ref.data["active_summary_version_id"] == first_version_id
+    assert [version["id"] for version in conversation_ref.data["summary_versions"]] == [first_version_id]
+
+
 def test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_process_metadata(monkeypatch):
     conversations = _load_conversations_module(monkeypatch)
     durable = {
