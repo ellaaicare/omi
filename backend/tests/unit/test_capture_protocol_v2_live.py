@@ -195,62 +195,6 @@ def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_p
     assert _updated(authority_ref.data, transaction, authority_ref)['conversation_id'] == 'capture-b'
 
 
-def test_rotation_retry_accepts_only_the_exact_already_installed_successor(capture_protocol):
-    now = datetime.now(timezone.utc)
-    authority_ref = _Document()
-    predecessor_ref = _Document(
-        {
-            'id': 'capture-legacy',
-            'status': 'in_progress',
-            'capture_owner_id': None,
-        }
-    )
-    successor_ref = _Document(
-        {
-            'id': 'capture-b',
-            'status': 'in_progress',
-            'capture_owner_id': 'owner-b',
-        }
-    )
-    first_transaction = _Transaction()
-
-    first_install = capture_protocol._install_authority_transaction.to_wrap(
-        first_transaction,
-        authority_ref,
-        successor_ref,
-        'capture-b',
-        'generation-b',
-        'owner-b',
-        now,
-        'capture-legacy',
-        predecessor_ref,
-        False,
-    )
-
-    assert first_install is True
-    authority_ref.data = _updated({}, first_transaction, authority_ref)
-    predecessor_ref.data = _updated(predecessor_ref.data, first_transaction, predecessor_ref)
-    successor_ref.data = _updated(successor_ref.data, first_transaction, successor_ref)
-
-    retry_transaction = _Transaction()
-    retry_install = capture_protocol._install_authority_transaction.to_wrap(
-        retry_transaction,
-        authority_ref,
-        successor_ref,
-        'capture-b',
-        'generation-b',
-        'owner-b',
-        now,
-        'capture-legacy',
-        predecessor_ref,
-        False,
-    )
-
-    assert retry_install is True
-    assert retry_transaction.updates == []
-    assert retry_transaction.sets == []
-
-
 def test_rotation_rejects_stale_generation_without_writes(capture_protocol):
     transaction = _Transaction()
     installed = capture_protocol._install_authority_transaction.to_wrap(
@@ -312,6 +256,27 @@ def test_expired_predecessor_allows_new_generation_reconnect(capture_protocol):
     assert current_authority['conversation_id'] == 'capture-b'
     assert current_authority['generation'] == 'generation-b'
     assert current_authority['owner_token'] == 'owner-b'
+
+    authority_ref.data = current_authority
+    predecessor_ref.data = _updated(predecessor, transaction, predecessor_ref)
+    successor_ref.data = successor
+    retry_transaction = _Transaction()
+    retry_install = capture_protocol._install_authority_transaction.to_wrap(
+        retry_transaction,
+        authority_ref,
+        successor_ref,
+        'capture-b',
+        'generation-b',
+        'owner-b',
+        now,
+        'capture-a',
+        predecessor_ref,
+        False,
+    )
+
+    assert retry_install is True
+    assert retry_transaction.updates == []
+    assert retry_transaction.sets == []
 
 
 def test_drained_predecessor_allows_exact_new_generation_rotation(capture_protocol):
