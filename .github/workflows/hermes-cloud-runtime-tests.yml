@@ -1012,6 +1012,7 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_capture_usage_receipt_and_increment_commit_atomically_once"
             "tests/unit/test_conversation_processing_failures.py::test_capture_completed_summary_resumes_missing_effect_after_lost_ack"
             "tests/unit/test_conversation_processing_failures.py::test_capture_ready_http_failure_retries_same_effect_without_duplicate_summary"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_task_sync_transient_failure_keeps_outer_effect_reclaimable"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
             "tests/unit/test_conversation_processing_callers.py::test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"

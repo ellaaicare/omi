@@ -269,13 +269,14 @@ def test_auto_sync_transient_failure_releases_then_retries_same_operation_once(m
 
     action_items = [{'id': 'action-item-a', 'description': 'Retry safely'}]
     finalization_operation = 'stable-finalization-operation'
-    first = asyncio.run(
-        task_sync.auto_sync_action_items_batch(
-            'authenticated-user',
-            action_items,
-            idempotency_key=finalization_operation,
+    with pytest.raises(task_sync.RetryableTaskSyncError, match='task_sync_retryable'):
+        asyncio.run(
+            task_sync.auto_sync_action_items_batch(
+                'authenticated-user',
+                action_items,
+                idempotency_key=finalization_operation,
+            )
         )
-    )
     second = asyncio.run(
         task_sync.auto_sync_action_items_batch(
             'authenticated-user',
@@ -291,15 +292,6 @@ def test_auto_sync_transient_failure_releases_then_retries_same_operation_once(m
         )
     )
 
-    assert first == [
-        {
-            'synced': False,
-            'platform': app_key,
-            'error': 'temporary provider failure',
-            'error_code': 'api_error',
-            'retryable': True,
-        }
-    ]
     assert second == replay == [{'synced': True, 'platform': app_key, 'external_task_id': 'external-success'}]
     assert state['releases'] == 1
     assert state['completions'] == 1

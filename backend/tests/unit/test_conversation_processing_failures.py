@@ -201,6 +201,8 @@ from utils.conversations import merge_conversations as merge_processor
 from utils.conversations import postprocess_conversation as postprocess_processor
 from utils.ella import postprocess as ella_postprocess
 
+_REAL_SAVE_ACTION_ITEMS = conversation_processor._save_action_items
+
 
 @pytest.fixture(autouse=True)
 def _claim_persisted_processing(monkeypatch):
@@ -1511,6 +1513,109 @@ def test_capture_ready_http_failure_retries_same_effect_without_duplicate_summar
         f'{first_operation_token}:ready',
     ]
     assert state['terminal_attempts'] == [False, True]
+
+
+def test_capture_task_sync_transient_failure_keeps_outer_effect_reclaimable(monkeypatch):
+    conversation = _long_conversation()
+    conversation.structured.action_items = [
+        conversation_processor.ActionItem(description='Retry this task exactly once')
+    ]
+    state = {'live_claim': 'claim-a', 'effects': {}}
+    created_item_writes = []
+    delete_writes = []
+    task_sync_attempts = []
+
+    def claim_effect(_uid, conversation_id, generation, owner_token, claim_token, effect_id):
+        assert (conversation_id, generation, owner_token) == (conversation.id, 'generation-a', 'owner-a')
+        receipt = state['effects'].get(effect_id)
+        if receipt and receipt['state'] == 'completed':
+            return {
+                'outcome': 'completed',
+                'operation_token': receipt['operation_token'],
+                'result': receipt.get('result'),
+            }
+        if claim_token != state['live_claim']:
+            return {'outcome': 'lost'}
+        operation_token = conversation_processor.capture_finalization_effect_operation_token(
+            conversation_id,
+            generation,
+            owner_token,
+            effect_id,
+        )
+        state['effects'][effect_id] = {
+            'state': 'claimed',
+            'claim_token': claim_token,
+            'operation_token': operation_token,
+        }
+        return {'outcome': 'claimed', 'operation_token': operation_token}
+
+    def complete_effect(
+        _uid,
+        _conversation_id,
+        _generation,
+        _owner_token,
+        claim_token,
+        effect_id,
+        operation_token,
+        result,
+    ):
+        receipt = state['effects'][effect_id]
+        if (
+            claim_token != state['live_claim']
+            or receipt['claim_token'] != claim_token
+            or receipt['operation_token'] != operation_token
+        ):
+            return False
+        receipt.update({'state': 'completed', 'result': result})
+        return True
+
+    def create_items(_uid, _items, idempotency_key=None):
+        created_item_writes.append(idempotency_key)
+        return ['action-item-a']
+
+    async def auto_sync(_uid, _items, idempotency_key=None):
+        task_sync_attempts.append(idempotency_key)
+        if len(task_sync_attempts) == 1:
+            raise RuntimeError('task_sync_retryable')
+        return [{'synced': True, 'external_task_id': 'external-a'}]
+
+    monkeypatch.setattr(conversation_processor, 'claim_capture_finalization_effect', claim_effect)
+    monkeypatch.setattr(conversation_processor, 'complete_capture_finalization_effect', complete_effect)
+    monkeypatch.setattr(conversation_processor.action_items_db, 'create_action_items_batch', create_items)
+    monkeypatch.setattr(
+        conversation_processor.action_items_db,
+        'delete_action_items_for_conversation',
+        lambda *_args, **_kwargs: delete_writes.append('delete'),
+    )
+    monkeypatch.setattr(conversation_processor, 'auto_sync_action_items_batch', auto_sync)
+
+    predecessor = conversation_processor.CaptureFinalizationEffectRunner(
+        'uid-1',
+        conversation.id,
+        ('generation-a', 'owner-a', 'claim-a'),
+    )
+    with pytest.raises(RuntimeError, match='task_sync_retryable'):
+        _REAL_SAVE_ACTION_ITEMS('uid-1', conversation, predecessor)
+
+    outer_effect = state['effects']['action_items:auto_sync']
+    operation_token = outer_effect['operation_token']
+    assert outer_effect['state'] == 'claimed'
+    assert len(created_item_writes) == 1
+    assert delete_writes == ['delete']
+
+    state['live_claim'] = 'claim-b'
+    successor = conversation_processor.CaptureFinalizationEffectRunner(
+        'uid-1',
+        conversation.id,
+        ('generation-a', 'owner-a', 'claim-b'),
+    )
+    _REAL_SAVE_ACTION_ITEMS('uid-1', conversation, successor)
+
+    assert state['effects']['action_items:auto_sync']['state'] == 'completed'
+    assert state['effects']['action_items:auto_sync']['operation_token'] == operation_token
+    assert task_sync_attempts == [operation_token, operation_token]
+    assert len(created_item_writes) == 1
+    assert delete_writes == ['delete']
 
 
 def test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_effects(monkeypatch):
