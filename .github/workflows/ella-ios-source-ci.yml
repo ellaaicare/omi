@@ -839,7 +839,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 80 and Firestore CAS 5 contracts
+    name: Callback 79, artwork 16, and Firestore CAS 5 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
