@@ -980,15 +980,11 @@ class PostgresTodayCardRepository:
 async def invalidate_deleted_conversation_source(uid: str, conversation_id: str) -> int:
     """Tombstone and remove exact canonical evidence before source deletion."""
     repository = PostgresTodayCardRepository(get_ella_postgres_pool)
-    try:
-        return await repository.tombstone_source(
-            uid=uid,
-            source_id=conversation_id,
-            reason="source_deleted",
-        )
-    except asyncpg.UndefinedTableError:
-        # Preserve the additive migration compatibility window. Once migration
-        # 016 exists, every other failure blocks deletion before content can be
-        # detached from its source.
-        logger.warning("[FLOW:TODAY-CARD] delete invalidation unavailable before migration 016")
-        return 0
+    # Missing migration 016 must block source deletion. Swallowing the error
+    # would leave canonical evidence eligible to regenerate after its source
+    # has been removed from Firestore.
+    return await repository.tombstone_source(
+        uid=uid,
+        source_id=conversation_id,
+        reason="source_deleted",
+    )
