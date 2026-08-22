@@ -2883,6 +2883,14 @@ class EllaProvisioningRepository:
 
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
         requested_binding_id = str(binding.get("binding_id") or uuid.uuid4())
+        runtime_target_mode = binding.get("runtime_target_mode") or None
+        if runtime_target_mode is None and binding.get("role", "user") == "user":
+            # Self-hosted hermes chat requires a valid target mode on the
+            # binding (see runtime_resolver._self_hosted_target_mode). Fresh
+            # user provisioning historically left it NULL, so every first chat
+            # turn raised self_hosted_runtime_target_mode_required. Default the
+            # user chat lane to 'hermes-chat' unless the provider pins a mode.
+            runtime_target_mode = "hermes-chat"
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -2907,11 +2915,11 @@ class EllaProvisioningRepository:
                         internal_gateway_url, gateway_port, service_label, credential_ref,
                         honcho_workspace, observed_peer, observer_peer, template_version,
                         model_policy_version, voice_policy_version, health_state,
-                        health_receipt, revision, active
+                        health_receipt, runtime_target_mode, revision, active
                     )
                     SELECT
                         $1, u.id, u.id, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
+                        $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, 1, false
                     FROM users u
                     WHERE u.omi_uid = $2
                     ON CONFLICT (user_id, role, provider)
@@ -2934,6 +2942,10 @@ class EllaProvisioningRepository:
                         voice_policy_version = EXCLUDED.voice_policy_version,
                         health_state = EXCLUDED.health_state,
                         health_receipt = EXCLUDED.health_receipt,
+                        runtime_target_mode = COALESCE(
+                            EXCLUDED.runtime_target_mode,
+                            ella_runtime_bindings.runtime_target_mode
+                        ),
                         revision = ella_runtime_bindings.revision + 1,
                         active = ella_runtime_bindings.active,
                         updated_at = CURRENT_TIMESTAMP
@@ -2958,12 +2970,135 @@ class EllaProvisioningRepository:
                     binding["voice_policy_version"],
                     binding.get("health_state", "pending"),
                     json.dumps(binding.get("health_receipt") or {}),
+                    runtime_target_mode,
                 )
         if not row:
             raise LookupError("user_not_found")
         if binding.get("binding_id") and str(row["id"]) != requested_binding_id:
             raise RuntimePoolClaimError("honcho_attestation_binding_mismatch")
         return dict(row)
+
+    async def seed_voice_entitlement_if_absent(self, *, uid: str) -> bool:
+        """Create or safely recover a self-hosted grok voice entitlement.
+
+        Fresh self-hosted hermes user provisioning should carry a working
+        grok-voice entitlement so the first voice/chat session does not open
+        with ``no_entitlement``. Mirrors the shape proven live on the existing
+        self-hosted canary accounts (realcryptoplato etc.): status=active,
+        plan=canary, provider_allowlist={grok-voice}, mode_allowlist={v4},
+        explicit quota (daily 2700s / monthly 43200s / session 1200s).
+
+        No-clobber / row precedence: every existing entitlement is left
+        untouched except the exact invitationless auto-provision shape tied to
+        the content-free recovery receipt for a previous
+        ``managed_cloud_consent_grant_changed`` quarantine. Returns True when a
+        row was newly inserted or safely recovered.
+        """
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO voice_entitlements (
+                        uid, status, plan, daily_limit_s, monthly_limit_s,
+                        max_session_s, max_concurrent,
+                        provider_allowlist, model_allowlist, mode_allowlist,
+                        fallback_policy, operator_note
+                    ) VALUES (
+                        $1, 'active', 'canary', $2, $3, $4, $5,
+                        $6::text[], $7::text[], $8::text[], $9::jsonb, $10
+                    )
+                    ON CONFLICT (uid) DO NOTHING
+                    RETURNING revision
+                    """,
+                    uid,
+                    2700,
+                    43200,
+                    1200,
+                    1,
+                    ["grok-voice"],
+                    [],
+                    ["v4"],
+                    json.dumps({"enabled": False, "order": []}),
+                    "auto-provision self-hosted grok voice",
+                )
+                if row is not None:
+                    return True
+
+                recovery_candidates = await connection.fetch(
+                    """
+                    SELECT job.id AS job_id, binding.id AS binding_id
+                    FROM users account
+                    JOIN ella_provisioning_jobs job
+                      ON job.user_id = account.id
+                    JOIN ella_runtime_bindings binding
+                      ON binding.user_id = account.id
+                     AND binding.provider = 'hermes'
+                     AND binding.role = 'user'
+                     AND binding.template_version = job.target_schema_version
+                    WHERE account.omi_uid = $1
+                      AND account.status = 'PENDING'
+                      AND job.state = 'provisioning'
+                      AND job.stage = 'smoke_passed'
+                      AND job.retryable = TRUE
+                      AND job.error_code IS NULL
+                      AND job.receipts @> '[{"type":"fresh_consent_regrant_rearmed","content_free":true}]'::jsonb
+                      AND binding.status = 'shadow'
+                      AND binding.active = FALSE
+                      AND binding.health_state = 'healthy'
+                      AND binding.runtime_target_mode = 'hermes-chat'
+                      AND binding.quarantine_reason IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_invitation_redemptions redemption
+                          WHERE redemption.user_id = account.id
+                      )
+                    FOR UPDATE OF job, binding
+                    """,
+                    uid,
+                )
+                if len(recovery_candidates) != 1:
+                    return False
+
+                row = await connection.fetchrow(
+                    """
+                    UPDATE voice_entitlements
+                    SET status = 'active',
+                        revision = revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE uid = $1
+                      AND status = 'revoked'
+                      AND invitation_id IS NULL
+                      AND plan = 'canary'
+                      AND daily_limit_s = 2700
+                      AND monthly_limit_s = 43200
+                      AND max_session_s = 1200
+                      AND max_concurrent = 1
+                      AND provider_allowlist = ARRAY['grok-voice']::text[]
+                      AND model_allowlist = ARRAY[]::text[]
+                      AND mode_allowlist = ARRAY['v4']::text[]
+                      AND fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                      AND operator_note = 'auto-provision self-hosted grok voice'
+                      AND consent_authority_epoch IS NULL
+                      AND invitation_consent_pending = FALSE
+                    RETURNING revision
+                    """,
+                    uid,
+                )
+                return row is not None
 
     async def activate_runtime_binding(
         self,
@@ -3302,6 +3437,57 @@ class EllaProvisioningRepository:
         )
         return bool(row and row["eligible"])
 
+    async def resolve_self_hosted_active_direct(
+        self,
+        uid: str,
+        role: str = "user",
+        template_version: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return a health-validated active self-hosted binding row directly.
+
+        This is the row-intrinsic validity gate used as the authoritative fallback
+        for accounts that predate the invitation->redemption->target routing chain
+        (e.g. migrated Plato accounts). It validates the binding on its own terms
+        (active, healthy, hermes) and does NOT relax any of the row's own validity
+        fields nor the invitation/consent chain for accounts that have one.
+
+        `template_version` is an OPTIONAL extra filter for direct callers; the
+        resolver wiring passes authoritative-yes (does NOT forward the job-target
+        schema), so a migrated account's healthy active binding resolves on both
+        `POST /ensure` and `GET /status` regardless of a stale job target schema.
+        """
+        row = await self.pool.fetchrow(
+            """
+            SELECT b.*, u.omi_uid, u.name, u.status AS user_status, u.profile_class
+            FROM ella_runtime_bindings b
+            JOIN users u ON u.id = b.user_id
+            WHERE u.omi_uid = $1
+              AND b.role = $2
+              AND b.provider = 'hermes'
+              AND b.active = true
+              AND b.status = 'active'
+              AND b.health_state = 'healthy'
+              AND ($3::text IS NULL OR b.template_version = $3)
+            """,
+            uid,
+            role,
+            template_version,
+        )
+        return _row_dict(row)
+
+    async def _resolve_self_hosted_active_direct(
+        self,
+        uid: str,
+        role: str = "user",
+        template_version: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Compatibility wrapper for existing internal callers."""
+        return await self.resolve_self_hosted_active_direct(
+            uid=uid,
+            role=role,
+            template_version=template_version,
+        )
+
     async def resolve_active_runtime(
         self,
         uid: str,
@@ -3532,7 +3718,21 @@ class EllaProvisioningRepository:
                         list(SELF_HOSTED_RUNTIME_TARGET_MODES),
                     )
                     if not row:
-                        return None
+                        # Legacy/retained accounts predating the invitation chain may
+                        # hold a fully healthy active hermes binding with no
+                        # invitation/redemption/target rows. Fall back to the raw
+                        # binding when it is valid on its own terms (active, healthy,
+                        # hermes) instead of manufacturing an incomplete ready
+                        # receipt (`binding_state=inactive`) for an unrouted job.
+                        # Authoritative-yes for schema routing: do NOT gate the
+                        # fallback on the job-target serializer's template_version.
+                        # A migrated account's healthy active binding is the source
+                        # of truth for its own schema; `GET /status` passes the
+                        # (possibly stale) job-target schema here, and requiring a
+                        # match would reproduce the "incomplete on status" bug the
+                        # fallback exists to fix. `POST /ensure` passes None (inert).
+                        fallback = await self.resolve_self_hosted_active_direct(uid=uid, role=role)
+                        return fallback
                     decision = await voice_canary_db.revalidate_runtime_resolution_on_connection(
                         connection,
                         uid=uid,

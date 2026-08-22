@@ -28,6 +28,20 @@ TOKEN_ISSUANCE_LIMIT_PER_MINUTE = int(os.getenv("ELLA_VOICE_TOKEN_ISSUANCE_LIMIT
 SOCKET_ACCEPT_LIMIT_PER_MINUTE = int(os.getenv("ELLA_VOICE_SOCKET_ACCEPT_LIMIT_PER_MINUTE", "8"))
 AUTH_FAILURE_ALERT_THRESHOLD = int(os.getenv("ELLA_VOICE_AUTH_FAILURE_ALERT_THRESHOLD", "10"))
 
+
+def _self_hosted_fresh_uid_relax_enabled() -> bool:
+    """INTERIM relax (Plato, #1189): admit brand-new self-hosted UIDs that hold
+    no invitation admission yet, mirroring provisioning.self_hosted_fresh_uid_relax_enabled.
+    Invitation gating returns when ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID is unset.
+    """
+    return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 _pool: Optional[asyncpg.Pool] = None
 
 
@@ -748,19 +762,34 @@ async def get_entitlement_contract_for_connection(
         await _expire_stale_sessions(conn, current, uid=uid)
     row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
     if not row:
+        quota = {
+            "daily_used_s": 0,
+            "daily_limit_s": 0,
+            "monthly_used_s": 0,
+            "monthly_limit_s": 0,
+            "max_session_s": 0,
+            "max_concurrent": 0,
+            "soft_limit_ratio": DEFAULT_SOFT_LIMIT_RATIO,
+            "resets_at": (_day_start(current) + timedelta(days=1)).isoformat(),
+            "monthly_resets_at": _next_month(current).isoformat(),
+        }
+        if _self_hosted_fresh_uid_relax_enabled():
+            # INTERIM relax (Plato, #1189 fresh-user E2E): a brand-new
+            # self-hosted UID admitted without an invitation chain has no
+            # voice_entitlements row yet. Front the client entitlement gate with
+            # a provisionable status so it proceeds to /onboarding/ensure (also
+            # relaxed under this flag) instead of the invite-code entry wall.
+            # Only active while ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID
+            # is set; strict invitation gating returns when the flag is unset.
+            return {
+                "status": "invited",
+                "plan": "canary",
+                "revision": 0,
+                "quota": quota,
+            }
         return {
             "status": "none",
-            "quota": {
-                "daily_used_s": 0,
-                "daily_limit_s": 0,
-                "monthly_used_s": 0,
-                "monthly_limit_s": 0,
-                "max_session_s": 0,
-                "max_concurrent": 0,
-                "soft_limit_ratio": DEFAULT_SOFT_LIMIT_RATIO,
-                "resets_at": (_day_start(current) + timedelta(days=1)).isoformat(),
-                "monthly_resets_at": _next_month(current).isoformat(),
-            },
+            "quota": quota,
         }
     entitlement = _record_dict(row)
     rollup = await _usage_rollup(conn, uid, current)

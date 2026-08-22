@@ -3,7 +3,9 @@
     {
       "id": "canonical-assistant-turn",
       "created_at": "2026-08-03T12:01:00+00:00",
+      "timestamp": "2026-08-03T12:01:00+00:00",
       "text": "Exact assistant history response.",
+      "content": "Exact assistant history response.",
       "sender": "ai",
       "type": "text",
       "plugin_id": null,
@@ -21,7 +23,9 @@
     {
       "id": "canonical-user-turn",
       "created_at": "2026-08-03T12:00:00+00:00",
+      "timestamp": "2026-08-03T12:00:00+00:00",
       "text": "Exact user history request.",
+      "content": "Exact user history request.",
       "sender": "human",
       "type": "text",
       "plugin_id": null,

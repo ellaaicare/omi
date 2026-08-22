@@ -33,12 +33,14 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "promote_cloud_binding"),
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
+    ("database/ella_provisioning.py", "seed_voice_entitlement_if_absent"),
     ("database/ella_provisioning.py", "stage_runtime_binding"),
     ("database/ella_provisioning.py", "update_guardian_mode"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
     ("database/managed_cloud_consent.py", "synchronize_denial"),
     ("database/managed_cloud_consent.py", "synchronize_grant"),
@@ -57,6 +59,7 @@ DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 
@@ -66,6 +69,7 @@ PROOF_GATED_HELPERS = {
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 EXPECTED_GLOBAL_USER_WRITERS = {
@@ -77,6 +81,7 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/ella_provisioning.py", "update_guardian_mode"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/managed_cloud_consent.py", "synchronize_denial"),
     ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
@@ -124,6 +129,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"cloud_quarantine"',
     ),
+    ("database/ella_provisioning.py", "seed_voice_entitlement_if_absent"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_seed_voice_entitlement_if_absent_creates_once_without_clobber",
+    ),
     ("database/ella_provisioning.py", "stage_runtime_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"runtime_stage"',
@@ -143,6 +152,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"consent_regrant"',
+    ),
+    ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine",
     ),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"): (
         "tests/postgres/test_invitation_redemption_postgres.py",

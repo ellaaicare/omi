@@ -37,6 +37,8 @@ sys.modules.setdefault("utils.conversations.generic_summary", summary_stub)
 from database.memory_reinterpretations import (
     InMemoryMemoryReinterpretationRepository,
     PostgresMemoryReinterpretationRepository,
+    canonical_refs,
+    canonical_transcript_hash,
 )
 from ella.routers import corrections, memory_reinterpretation as reinterpretation_router
 from ella.routers.canonical_events import (
@@ -56,6 +58,7 @@ from ella.services.memory_reinterpretation import (
     ReinterpretationWorkerError,
     run_worker_loop,
     worker_runtime_metrics,
+    _validate_rows,
 )
 
 UID = "CaseSensitiveUserA"
@@ -649,10 +652,35 @@ async def _loader(uid, conversation_id):
     return None
 
 
-def test_worker_no_change_finishes_without_proposals_or_writes():
+def test_daily_card_worker_scope_validation_and_no_change_completion():
     async def run():
         repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
         await _seed_job(repository)
+        job = next(iter(repository.jobs.values()))
+        rows = repository.rows[(UID, SESSION_ID)]
+        for row in rows:
+            row["scope_kind"] = "daily_card"
+
+        _validate_rows(job, rows)
+
+        mixed_rows = [
+            *rows,
+            {
+                **rows[0],
+                "event_id": "mixed-memory-turn",
+                "source_identity": "mixed-memory-source",
+                "scope_kind": "memory",
+            },
+        ]
+        mixed_job = {
+            **job,
+            "transcript_hash": canonical_transcript_hash(mixed_rows),
+            "canonical_refs": canonical_refs(mixed_rows),
+        }
+        with pytest.raises(ReinterpretationWorkerError, match="canonical_scope_mismatch") as error:
+            _validate_rows(mixed_job, mixed_rows)
+        assert error.value.retryable is False
+
         repository.now += timedelta(seconds=1)
         hermes = _Hermes({"outcome": "no_change", "proposals": []})
 

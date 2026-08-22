@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import uuid
 from dataclasses import dataclass
@@ -169,10 +170,12 @@ async def _seed_grant(pool, uid):
 
 def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     async def scenario(pool):
-        await pool.execute("""
+        await pool.execute(
+            """
             INSERT INTO users (omi_uid, guardian_mode)
             VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
-            """)
+            """
+        )
         previous_pool = guardian._pool
         guardian._pool = pool
         try:
@@ -189,7 +192,8 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
 def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
-        await pool.execute("""
+        await pool.execute(
+            """
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -266,7 +270,8 @@ def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects
                     'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
                     'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
                 );
-            """)
+            """
+        )
 
         before = {
             table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
@@ -364,6 +369,23 @@ def _managed_cloud_grant(uid: str, *, revision: str = "one") -> managed_cloud_co
         processor_set_hash=LINEAGE.processor_set_hash,
         scope_version=LINEAGE.scope_version,
         scope_hash=LINEAGE.scope_hash,
+    )
+
+
+def _reissued_managed_cloud_grant(
+    grant: managed_cloud_consent.ManagedCloudGrant,
+    *,
+    receipt_id: str,
+) -> managed_cloud_consent.ManagedCloudGrant:
+    return managed_cloud_consent.ManagedCloudGrant(
+        account_uid=grant.account_uid,
+        profile_uid=grant.profile_uid,
+        consent_receipt_id=receipt_id,
+        profile_binding_id=grant.profile_binding_id,
+        policy_version=grant.policy_version,
+        processor_set_hash=grant.processor_set_hash,
+        scope_version=grant.scope_version,
+        scope_hash=grant.scope_hash,
     )
 
 
@@ -570,19 +592,23 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """)
-            await conn.execute("""
+                """
+            )
+            await conn.execute(
+                """
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """)
+                """
+            )
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -1801,6 +1827,11 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         owner = authority_advisory_lock.provisional_identity_owner(uid)
 
         async with pool.acquire() as conn:
+            # Match production: a fresh authority bootstrap must provide the
+            # Firebase-verified email and explicitly persist updated_at; neither
+            # production column has a default that can mask an incomplete INSERT.
+            await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+            await conn.execute("ALTER TABLE users ALTER COLUMN updated_at DROP DEFAULT")
             before = await conn.fetchval(
                 "SELECT 1 FROM users WHERE omi_uid = $1",
                 uid,
@@ -1810,13 +1841,15 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         result = await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="one"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-consent@example.invalid",
         )
         assert result["user_id"] == owner.account_id
 
         async with pool.acquire() as observer:
             row = await observer.fetchrow(
                 """
-                SELECT id, omi_uid, name, timezone, status
+                SELECT id, omi_uid, email, name, timezone, status, identities,
+                       updated_at
                 FROM users
                 WHERE omi_uid = $1
                 """,
@@ -1839,20 +1872,37 @@ def test_consent_bootstrap_creates_users_row_and_grant():
                 owner.account_id,
             )
         assert row is not None
-        assert tuple(row.values()) == (
+        identities = json.loads(row["identities"]) if isinstance(row["identities"], str) else row["identities"]
+        assert tuple(row.values())[:-2] == (
             owner.account_id,
             uid,
+            "fresh-consent@example.invalid",
             "Synthetic User",
             "UTC",
             "PENDING",
         )
+        assert identities == {"omi_uid": uid, "email": "fresh-consent@example.invalid"}
+        assert row["updated_at"] is not None
         assert decision == "granted"
         assert receipt_ref and receipt_ref.startswith("sha256:")
+
+        # Normal provisioning must reconcile the bootstrap row without changing
+        # its deterministic owner or rejecting the same verified identity.
+        identity = await EllaProvisioningRepository(pool).ensure_user_identity(
+            uid=uid,
+            email="fresh-consent@example.invalid",
+            name="Fresh Consent User",
+            timezone_name="America/Los_Angeles",
+        )
+        assert identity["id"] == owner.account_id
+        assert identity["email"] == "fresh-consent@example.invalid"
+        assert identity["name"] == "Fresh Consent User"
 
         # Idempotent re-consent reconciles onto the same deterministic row.
         result_two = await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="two"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-consent@example.invalid",
         )
         assert result_two["user_id"] == owner.account_id
         async with pool.acquire() as observer:
@@ -1861,6 +1911,27 @@ def test_consent_bootstrap_creates_users_row_and_grant():
                 uid,
             )
         assert count == 1
+
+        blank_email_uid = "synthetic-consent-bootstrap-blank-email"
+        blank_email_owner = authority_advisory_lock.provisional_identity_owner(blank_email_uid)
+        with pytest.raises(
+            managed_cloud_consent.ManagedCloudAuthorityUnavailable,
+            match="managed_cloud_authority_unavailable",
+        ) as blank_email_error:
+            await managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(blank_email_uid),
+                allow_fresh_uid_bootstrap=True,
+            )
+        assert blank_email_error.value.__cause__.code == "authority_lock_bootstrap_email_missing"
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT 1 FROM users WHERE omi_uid = $1", blank_email_uid) is None
+            assert (
+                await observer.fetchval(
+                    "SELECT 1 FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    blank_email_owner.account_id,
+                )
+                is None
+            )
 
         # A different fresh UID with the relax flag off fails closed first.
         strict_uid = "synthetic-consent-bootstrap-strict"
@@ -1883,6 +1954,617 @@ def test_consent_bootstrap_creates_users_row_and_grant():
     asyncio.run(_run_with_database(scenario))
 
 
+def test_consent_bootstrap_reconciles_email_owner_and_rejects_conflicting_owners():
+    async def scenario(pool):
+        uid = "synthetic-consent-email-owner"
+        email = "consent-email-owner@example.invalid"
+        async with pool.acquire() as conn:
+            await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+            email_owner_id = await conn.fetchval(
+                """
+                INSERT INTO users (email, name, status, profile_class)
+                VALUES ($1, 'Legacy Email Owner', 'PENDING', 'real')
+                RETURNING id
+                """,
+                email,
+            )
+
+        result = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email=email,
+        )
+        assert result["user_id"] == email_owner_id
+
+        async with pool.acquire() as observer:
+            reconciled = await observer.fetchrow(
+                """
+                SELECT id, omi_uid, email, identities ->> 'omi_uid' AS identity_uid
+                FROM users
+                WHERE id = $1
+                """,
+                email_owner_id,
+            )
+            assert tuple(reconciled.values()) == (email_owner_id, uid, email, uid)
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    email_owner_id,
+                )
+                == 1
+            )
+
+            conflicting_uid = "synthetic-consent-conflicting-uid"
+            conflicting_email = "synthetic-consent-conflicting-email@example.invalid"
+            uid_owner_id = await observer.fetchval(
+                """
+                INSERT INTO users (omi_uid, email, name, status, profile_class)
+                VALUES ($1, $2, 'UID Owner', 'PENDING', 'real')
+                RETURNING id
+                """,
+                conflicting_uid,
+                "uid-owner@example.invalid",
+            )
+            email_conflict_owner_id = await observer.fetchval(
+                """
+                INSERT INTO users (email, name, status, profile_class)
+                VALUES ($1, 'Email Conflict Owner', 'PENDING', 'real')
+                RETURNING id
+                """,
+                conflicting_email,
+            )
+
+        with pytest.raises(
+            managed_cloud_consent.ManagedCloudAuthorityUnavailable,
+            match="managed_cloud_authority_unavailable",
+        ) as conflict:
+            await managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(conflicting_uid),
+                allow_fresh_uid_bootstrap=True,
+                bootstrap_email=conflicting_email,
+            )
+        assert conflict.value.__cause__.code == "authority_lock_identity_conflict"
+
+        async with pool.acquire() as observer:
+            owners = await observer.fetch(
+                """
+                SELECT id, omi_uid, email
+                FROM users
+                WHERE id = ANY($1::uuid[])
+                ORDER BY id
+                """,
+                [uid_owner_id, email_conflict_owner_id],
+            )
+            assert {row["id"] for row in owners} == {uid_owner_id, email_conflict_owner_id}
+            assert next(row for row in owners if row["id"] == uid_owner_id)["omi_uid"] == conflicting_uid
+            assert next(row for row in owners if row["id"] == email_conflict_owner_id)["omi_uid"] is None
+            assert (
+                await observer.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM ella_managed_cloud_consent_authority
+                    WHERE user_id = ANY($1::uuid[])
+                    """,
+                    [uid_owner_id, email_conflict_owner_id],
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_consent_bootstrap_serializes_concurrent_email_owner_claims():
+    async def scenario(pool):
+        uid = "synthetic-consent-email-owner-concurrent"
+        email = "consent-email-owner-concurrent@example.invalid"
+        async with pool.acquire() as conn:
+            await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+            email_owner_id = await conn.fetchval(
+                """
+                INSERT INTO users (email, name, status, profile_class)
+                VALUES ($1, 'Concurrent Email Owner', 'PENDING', 'real')
+                RETURNING id
+                """,
+                email,
+            )
+
+        grant = _managed_cloud_grant(uid)
+        results = await asyncio.gather(
+            managed_cloud_consent.synchronize_grant(
+                grant=grant,
+                allow_fresh_uid_bootstrap=True,
+                bootstrap_email=email,
+            ),
+            managed_cloud_consent.synchronize_grant(
+                grant=grant,
+                allow_fresh_uid_bootstrap=True,
+                bootstrap_email=email,
+            ),
+        )
+        assert [result["user_id"] for result in results] == [email_owner_id, email_owner_id]
+
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT COUNT(*) FROM users WHERE omi_uid = $1", uid) == 1
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    email_owner_id,
+                )
+                == 1
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_fresh_managed_terminal_decisions_without_email_leave_zero_usable_authority():
+    async def scenario(pool):
+        async with pool.acquire() as conn:
+            await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+
+        for decision in ("declined", "revoked"):
+            uid = f"synthetic-consent-terminal-{decision}"
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO voice_entitlements (uid, status) VALUES ($1, 'active')",
+                    uid,
+                )
+
+            result = await managed_cloud_consent.synchronize_denial(
+                uid=uid,
+                decision=decision,
+            )
+            assert result == {"decision": decision, "authority_absent": True}
+
+            async with pool.acquire() as observer:
+                assert await observer.fetchval("SELECT 1 FROM users WHERE omi_uid = $1", uid) is None
+                assert (
+                    await observer.fetchval(
+                        """
+                        SELECT COUNT(*)
+                        FROM ella_managed_cloud_consent_authority authority
+                        JOIN users app_user ON app_user.id = authority.user_id
+                        WHERE app_user.omi_uid = $1
+                        """,
+                        uid,
+                    )
+                    == 0
+                )
+                assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "revoked"
+                assert await observer.fetchval("SELECT COUNT(*) FROM voice_active_sessions WHERE uid = $1", uid) == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+@pytest.mark.parametrize("decision", ("declined", "revoked"))
+def test_fresh_managed_terminal_decision_reconciles_email_owner_before_quarantine(decision):
+    async def scenario(pool):
+        uid = f"synthetic-email-owner-terminal-{decision}"
+        email = f"email-owner-terminal-{decision}@example.invalid"
+        async with pool.acquire() as conn:
+            await conn.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO users (email, name, status, profile_class)
+                VALUES ($1, 'Legacy Email Owner', 'PENDING', 'real')
+                RETURNING id
+                """,
+                email,
+            )
+            await conn.execute(
+                "INSERT INTO voice_entitlements (uid, status) VALUES ($1, 'active')",
+                uid,
+            )
+
+        result = await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision=decision,
+            verified_email=email,
+        )
+        assert result["user_id"] == user_id
+        assert result["decision"] == decision
+
+        async with pool.acquire() as observer:
+            identity = await observer.fetchrow(
+                "SELECT omi_uid, email FROM users WHERE id = $1",
+                user_id,
+            )
+            assert tuple(identity.values()) == (uid, email)
+            assert (
+                await observer.fetchval(
+                    "SELECT decision FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    user_id,
+                )
+                == decision
+            )
+            assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "revoked"
+            assert await observer.fetchval("SELECT COUNT(*) FROM voice_active_sessions WHERE uid = $1", uid) == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
+    async def scenario(pool):
+        uid = "synthetic-fresh-regrant-recovery"
+        initial_grant = _managed_cloud_grant(uid)
+        initial = await managed_cloud_consent.synchronize_grant(
+            grant=initial_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        user_id = initial["user_id"]
+        job_id = uuid.uuid4()
+        binding_id = uuid.uuid4()
+        repository = EllaProvisioningRepository(pool)
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ella_provisioning_jobs (
+                    id, user_id, target_schema_version, request_payload_hash,
+                    state, stage, retryable
+                ) VALUES (
+                    $1, $2, 'hermes-user-v1', 'synthetic',
+                    'provisioning', 'smoke_passed', TRUE
+                )
+                """,
+                job_id,
+                user_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    id, user_id, account_user_id, profile_user_id,
+                    role, provider, profile_name, agent_id,
+                    template_version, model_policy_version, voice_policy_version,
+                    health_state, health_receipt, runtime_target_mode,
+                    status, active
+                ) VALUES (
+                    $1, $2, $2, $2,
+                    'user', 'hermes', 'fresh-regrant-profile', 'fresh-regrant-agent',
+                    'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                    'healthy', '{}'::jsonb, 'hermes-chat',
+                    'shadow', FALSE
+                )
+                """,
+                binding_id,
+                user_id,
+            )
+            initial_epoch = await conn.fetchval(
+                """
+                SELECT authority_epoch
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            initial_revision = await conn.fetchval(
+                """
+                SELECT revision
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+
+        exact_repeat = await managed_cloud_consent.synchronize_grant(
+            grant=initial_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        assert exact_repeat["authority_epoch"] == initial_epoch
+        assert exact_repeat["revision"] == initial_revision
+
+        repeated_grant = _reissued_managed_cloud_grant(
+            initial_grant,
+            receipt_id="synthetic-receipt-reaffirmed",
+        )
+        repeated = await managed_cloud_consent.synchronize_grant(
+            grant=repeated_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        assert repeated["authority_epoch"] == initial_epoch
+
+        async with pool.acquire() as observer:
+            unchanged = await observer.fetchrow(
+                """
+                SELECT job.state, job.stage, binding.status,
+                       binding.health_state, binding.active,
+                       entitlement.status AS entitlement_status
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = job.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = $2
+                WHERE job.id = $1
+                """,
+                job_id,
+                uid,
+            )
+        assert tuple(unchanged.values()) == (
+            "provisioning",
+            "smoke_passed",
+            "shadow",
+            "healthy",
+            False,
+            "active",
+        )
+
+        # Reproduce the exact production state left by the old receipt-change
+        # path. The next valid same-contract grant may rearm this state, but it
+        # must not activate either the binding or voice row by itself.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_provisioning_jobs
+                SET state = 'blocked',
+                    stage = 'runtime_ready',
+                    retryable = FALSE,
+                    error_code = 'invitation_authority_revoked',
+                    error_detail = '{"content_free":true,"reason":"managed_cloud_consent_grant_changed"}'::jsonb
+                WHERE id = $1
+                """,
+                job_id,
+            )
+            await conn.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET status = 'disabled',
+                    active = FALSE,
+                    health_state = 'unhealthy',
+                    quarantine_reason = 'managed_cloud_consent_grant_changed',
+                    disabled_at = CURRENT_TIMESTAMP,
+                    runtime_target_mode = NULL
+                WHERE id = $1
+                """,
+                binding_id,
+            )
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET status = 'revoked', revision = revision + 1
+                WHERE uid = $1
+                """,
+                uid,
+            )
+
+        nonmatching_grant = _reissued_managed_cloud_grant(
+            initial_grant,
+            receipt_id="synthetic-receipt-nonmatching-quarantine",
+        )
+        nonmatching = await managed_cloud_consent.synchronize_grant(
+            grant=nonmatching_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        assert nonmatching["authority_epoch"] == initial_epoch
+        async with pool.acquire() as observer:
+            still_blocked = await observer.fetchrow(
+                """
+                SELECT job.state, job.error_code, binding.status,
+                       binding.runtime_target_mode,
+                       entitlement.status AS entitlement_status
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = job.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = $2
+                WHERE job.id = $1
+                """,
+                job_id,
+                uid,
+            )
+        assert tuple(still_blocked.values()) == (
+            "blocked",
+            "invitation_authority_revoked",
+            "disabled",
+            None,
+            "revoked",
+        )
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET runtime_target_mode = 'hermes-chat'
+                WHERE id = $1
+                """,
+                binding_id,
+            )
+
+        recovery_grant = _reissued_managed_cloud_grant(
+            initial_grant,
+            receipt_id="synthetic-receipt-recovery",
+        )
+        recovered = await managed_cloud_consent.synchronize_grant(
+            grant=recovery_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        assert recovered["authority_epoch"] == initial_epoch
+
+        async with pool.acquire() as observer:
+            pending = await observer.fetchrow(
+                """
+                SELECT job.state, job.stage, job.retryable, job.error_code,
+                       binding.status, binding.health_state, binding.active,
+                       binding.quarantine_reason,
+                       entitlement.status AS entitlement_status
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = job.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = $2
+                WHERE job.id = $1
+                """,
+                job_id,
+                uid,
+            )
+        assert tuple(pending.values()) == (
+            "pending",
+            "identity_ready",
+            True,
+            None,
+            "shadow",
+            "pending",
+            False,
+            None,
+            "revoked",
+        )
+
+        staged = await repository.stage_runtime_binding(
+            uid=uid,
+            binding={
+                "binding_id": str(binding_id),
+                "provider": "hermes",
+                "profile_name": "fresh-regrant-profile",
+                "agent_id": "fresh-regrant-agent",
+                "template_version": "hermes-user-v1",
+                "model_policy_version": "model-policy-v1",
+                "voice_policy_version": "voice-policy-v1",
+                "health_state": "healthy",
+                "health_receipt": {"content_free": True},
+                "runtime_target_mode": "hermes-chat",
+            },
+        )
+        assert staged["status"] == "shadow"
+        smoke_passed = await repository.update_job(
+            job_id=str(job_id),
+            state="provisioning",
+            stage="smoke_passed",
+            retryable=True,
+            receipt={"type": "runtime_smoke_passed", "content_free": True},
+        )
+        assert smoke_passed["stage"] == "smoke_passed"
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+        activated = await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=False,
+        )
+        assert activated["id"] == binding_id
+        assert activated["status"] == "active"
+        assert activated["active"] is True
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT status FROM users WHERE id = $1", user_id) == "ACTIVE"
+            assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "active"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_seed_voice_entitlement_if_absent_creates_once_without_clobber():
+    async def scenario(pool):
+        uid = "synthetic-fresh-voice-seed"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO users (omi_uid, email, profile_class)
+                VALUES ($1, $2, 'real')
+                """,
+                uid,
+                "fresh-voice-seed@example.invalid",
+            )
+
+        repository = EllaProvisioningRepository(pool)
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+
+        async with pool.acquire() as observer:
+            seeded = await observer.fetchrow(
+                """
+                SELECT status, plan, daily_limit_s, monthly_limit_s,
+                       max_session_s, max_concurrent,
+                       provider_allowlist, mode_allowlist, revision
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert dict(seeded) == {
+            "status": "active",
+            "plan": "canary",
+            "daily_limit_s": 2700,
+            "monthly_limit_s": 43200,
+            "max_session_s": 1200,
+            "max_concurrent": 1,
+            "provider_allowlist": ["grok-voice"],
+            "mode_allowlist": ["v4"],
+            "revision": 1,
+        }
+
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is False
+        async with pool.acquire() as observer:
+            unchanged = await observer.fetchrow(
+                """
+                SELECT status, provider_allowlist, mode_allowlist, revision
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert dict(unchanged) == {
+            "status": "active",
+            "provider_allowlist": ["grok-voice"],
+            "mode_allowlist": ["v4"],
+            "revision": 1,
+        }
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET status = 'revoked', revision = revision + 1
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is False
+        async with pool.acquire() as observer:
+            unrearmed = await observer.fetchrow(
+                """
+                SELECT status, provider_allowlist, mode_allowlist, revision
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert dict(unrearmed) == {
+            "status": "revoked",
+            "provider_allowlist": ["grok-voice"],
+            "mode_allowlist": ["v4"],
+            "revision": 2,
+        }
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET status = 'revoked',
+                    operator_note = 'operator-controlled',
+                    revision = revision + 1
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is False
+        async with pool.acquire() as observer:
+            operator_row = await observer.fetchrow(
+                """
+                SELECT status, operator_note, revision
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert dict(operator_row) == {
+            "status": "revoked",
+            "operator_note": "operator-controlled",
+            "revision": 3,
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
     """A confirmed delete frees the UID for a fresh bootstrap on relogin.
 
@@ -1899,6 +2581,7 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
         await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="one"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-delete@example.invalid",
         )
 
         async with pool.acquire() as observer:
@@ -1940,6 +2623,7 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
         result = await managed_cloud_consent.synchronize_grant(
             grant=_managed_cloud_grant(uid, revision="two"),
             allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-delete@example.invalid",
         )
         assert result["user_id"] == owner.account_id
         async with pool.acquire() as observer:

@@ -46,6 +46,12 @@ class EllaRequestAuthority:
         return bound_subject
 
 
+@dataclass(frozen=True)
+class FirebaseTokenIdentity:
+    uid: str
+    verified_email: str = ""
+
+
 def _version_tuple(value: str) -> tuple[int, ...]:
     if not CLIENT_VERSION_RE.fullmatch(value):
         raise ValueError
@@ -98,13 +104,13 @@ def require_supported_ella_client(
         raise HTTPException(status_code=426, detail={"code": "update_required", "minimum_build": minimum})
 
 
-def get_exact_firebase_uid(
+def get_firebase_token_identity(
     authorization: Optional[str] = Header(None),
     x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
     x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
     x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
-) -> str:
-    """Return the Firebase subject without admin-key or local-dev fallbacks."""
+) -> FirebaseTokenIdentity:
+    """Return the exact Firebase subject and optional verified email."""
     parts = authorization.split() if authorization else []
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
         raise HTTPException(status_code=401, detail="Missing or invalid Firebase bearer")
@@ -115,8 +121,25 @@ def get_exact_firebase_uid(
     uid = str(decoded.get("uid") or "").strip() if isinstance(decoded, dict) else ""
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid Firebase bearer subject")
+    email = str(decoded.get("email") or "").strip().lower() if isinstance(decoded, dict) else ""
+    verified_email = email if decoded.get("email_verified") is True else ""
     require_supported_ella_client(x_app_version, x_ella_app_build, x_ella_client_version)
-    return uid
+    return FirebaseTokenIdentity(uid=uid, verified_email=verified_email)
+
+
+def get_exact_firebase_uid(
+    authorization: Optional[str] = Header(None),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
+) -> str:
+    """Return the Firebase subject without admin-key or local-dev fallbacks."""
+    return get_firebase_token_identity(
+        authorization,
+        x_app_version,
+        x_ella_app_build,
+        x_ella_client_version,
+    ).uid
 
 
 def require_matching_firebase_uid(authenticated_uid: str, claimed_uid: Optional[str], *, feature: str) -> str:

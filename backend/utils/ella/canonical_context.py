@@ -168,11 +168,17 @@ def canonical_events_to_chat_turns(events: list[dict[str, Any]], *, limit: int =
 def canonical_events_to_server_messages(events: list[dict[str, Any]], *, limit: int = 50) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for event in reversed(list(events)[-limit:]):
+        timestamp = _event_time(event)
+        text = _event_text(event, max_chars=2000)
         messages.append(
             {
                 "id": str(event.get("event_id") or event.get("id") or ""),
-                "created_at": _event_time(event),
-                "text": _event_text(event, max_chars=2000),
+                # Keep the normal ServerMessage keys and the legacy Ella iOS
+                # aliases together. TestFlight 807 reads only content/timestamp.
+                "created_at": timestamp,
+                "timestamp": timestamp,
+                "text": text,
+                "content": text,
                 "sender": "ai" if _role_for_event(event) == "assistant" else "human",
                 "type": "text",
                 "plugin_id": None,

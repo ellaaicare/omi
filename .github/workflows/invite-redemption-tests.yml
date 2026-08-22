@@ -170,7 +170,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 160
+          test "$collected" -eq 190
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -202,6 +202,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_attestation_window_covers_max_slow_response_and_rejects_invalid_config"
             "tests/unit/test_ella_provisioning_service.py::test_total_deadline_cancels_real_local_slow_drip_before_binding_writes"
             "tests/unit/test_ella_provisioning_service.py::test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write"
+            "tests/unit/test_ella_provisioning_service.py::test_provision_conflict_contract_matches_reviewed_shim_codes"
+            "tests/unit/test_ella_provisioning_service.py::test_recursive_provision_conflict_is_content_free_and_nonretryable"
+            "tests/unit/test_ella_provisioning_service.py::test_provision_conflict_rechecks_authority_after_inflight_body_drift"
             "tests/unit/test_ella_provisioning_service.py::test_total_deadline_rejects_delayed_json_parse_before_binding_write"
             "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[verification]"
             "tests/unit/test_ella_provisioning_service.py::test_total_deadline_stops_delayed_verification_and_local_publication[staging]"
@@ -209,6 +212,12 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_external_cancellation_after_provider_work_records_retryable_reconciliation"
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_positive_healthy_active"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_negative_disabled_unhealthy"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_no_row_returns_none"
+            "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_requires_hermes_provider"
+            "tests/unit/test_ella_provisioning_service.py::test_public_receipt_flattened_voice_mode_parse_contract"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope"

@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 sys.modules.setdefault("websockets", ModuleType("websockets"))
+sys.modules.setdefault("database.proposals", ModuleType("database.proposals"))
 conversations_module = ModuleType("database.conversations")
 conversations_module._decrypt_conversation_data = lambda value: value
 sys.modules.setdefault("database.conversations", conversations_module)
@@ -27,8 +28,12 @@ def voice_authority_defaults(monkeypatch):
     async def self_hosted_disabled(_uid):
         return False
 
+    async def no_direct_runtime(_uid):
+        return None
+
     monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", False)
     monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_disabled)
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", no_direct_runtime)
     monkeypatch.setattr(
         voice,
         "runtime_authority_identity",
@@ -207,6 +212,67 @@ def test_chat_history_rejects_query_uid_that_differs_from_firebase_subject():
     with pytest.raises(HTTPException) as error:
         asyncio.run(chat.ella_chat_history("user-b", authenticated_uid="user-a"))
     assert error.value.status_code == 403
+
+
+def test_isolated_hermes_chat_has_a_bounded_provider_timeout(monkeypatch):
+    captured = {}
+
+    async def no_events(*_args, **_kwargs):
+        return []
+
+    async def no_temporal(*_args, **_kwargs):
+        return "recent context", []
+
+    async def canonical_write(*_args, **_kwargs):
+        return None
+
+    async def stable_runtime(_identity):
+        return _invitation_chat_runtime()
+
+    class TimedOutStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aiter_lines(self):
+            raise chat.httpx.ReadTimeout("content-free provider timeout")
+            yield
+
+    class TimedClient:
+        def __init__(self, *_args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return TimedOutStreamResponse()
+
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal)
+    monkeypatch.setattr(chat, "_write_ios_chat_canonical_event", canonical_write)
+    monkeypatch.setattr(chat, "revalidate_runtime_authority", stable_runtime)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", TimedClient)
+
+    chunks = asyncio.run(
+        _collect_stream(
+            chat._stream_hermes_chat(
+                "content-free timeout test",
+                "invited-user",
+                runtime=_invitation_chat_runtime(),
+            )
+        )
+    )
+
+    assert captured["timeout"] == chat.HERMES_CHAT_REQUEST_TIMEOUT_SECONDS == 60.0
+    assert chunks == ["data: Error: Hermes request timed out\n\n"]
 
 
 def test_mounted_chat_history_authenticates_before_runtime_or_history_work(monkeypatch):
@@ -610,6 +676,78 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
     assert claims["voice_mode"] == "v4"
     assert claims["provider"] == "grok-voice"
     assert claims["isolated_runtime"] is True
+
+
+def test_active_direct_hermes_binding_forces_isolated_grok_voice_without_rollout_flags(monkeypatch):
+    runtime = _invitation_chat_runtime(uid="fresh-user")
+    direct_resolutions = []
+    policy_calls = []
+
+    async def direct_runtime(uid):
+        direct_resolutions.append(uid)
+        return runtime
+
+    async def forbidden_rollout_runtime(*_args, **_kwargs):
+        raise AssertionError("row-intrinsic binding must not enter rollout-classified resolution")
+
+    async def evaluate_issuance(**kwargs):
+        policy_calls.append(kwargs)
+        return SimpleNamespace(
+            allowed=True,
+            code="ok",
+            entitlement={"revision": 3},
+            quota={},
+        )
+
+    class Pool:
+        async def fetchrow(self, *_args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", direct_runtime)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", forbidden_rollout_runtime)
+    monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", evaluate_issuance)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(uid="fresh-user", provider="grok-voice"),
+            authenticated_uid="fresh-user",
+        )
+    )
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert result.provider == "grok-voice"
+    assert result.voice_mode == "v4"
+    assert claims["isolated_runtime"] is True
+    assert claims["runtime_authority_digest"] == RUNTIME_AUTHORITY_DIGEST
+    assert claims["entitlement_revision"] == 3
+    assert len(policy_calls) == 1
+    principal = voice.VoiceProxyPrincipal(
+        uid="fresh-user",
+        session_id=claims["jti"],
+        provider=claims["provider"],
+        voice_mode=claims["voice_mode"],
+        isolated_runtime=claims["isolated_runtime"],
+        entitlement_revision=claims["entitlement_revision"],
+        correlation_id=claims["correlation_id"],
+        runtime_authority_digest=claims["runtime_authority_digest"],
+    )
+    assert asyncio.run(voice._resolve_voice_runtime(principal)) is runtime
+    assert direct_resolutions == ["fresh-user", "fresh-user", "fresh-user"]
 
 
 def test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry(monkeypatch):

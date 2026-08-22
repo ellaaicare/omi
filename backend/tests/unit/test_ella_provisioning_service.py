@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import database
 from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_MODEL,
     SELF_HOSTED_RUNTIME_PROVIDER,
@@ -41,12 +42,14 @@ from ella.services.provisioning import (
     DEFAULT_PROVISION_TIMEOUT_SECONDS,
     MAX_PROVISION_RESPONSE_BYTES,
     MAX_PROVISION_TIMEOUT_SECONDS,
+    PROVISION_CONFLICT_CODES,
     HermesProvisionClient,
     ProvisionDeadline,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
     extract_runtime_binding,
+    current_self_hosted_runtime_lineage,
     provision_idempotency_key,
     provision_timeout_seconds,
     public_receipt,
@@ -234,6 +237,9 @@ class FakeRepository:
             self_hosted_admission is not None if self_hosted_owned is None else bool(self_hosted_owned)
         )
         self.job_calls = []
+        self.voice_seed_calls = []
+        self.voice_seed_result = False
+        self.last_activation_arguments = None
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -292,6 +298,10 @@ class FakeRepository:
         del uid, provider, role
         return "44444444-4444-4444-4444-444444444444"
 
+    async def seed_voice_entitlement_if_absent(self, *, uid):
+        self.voice_seed_calls.append(uid)
+        return self.voice_seed_result
+
     async def stage_runtime_binding(self, *, uid, binding):
         self.staged = dict(
             binding,
@@ -314,7 +324,11 @@ class FakeRepository:
         authority_lineage=None,
         model=SELF_HOSTED_RUNTIME_MODEL,
     ):
-        del require_invitation_target, authority_lineage, model
+        self.last_activation_arguments = {
+            "require_invitation_target": require_invitation_target,
+            "authority_lineage": authority_lineage,
+            "model": model,
+        }
         self.activation_calls += 1
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
@@ -351,6 +365,58 @@ def _local_provision_client(base_url: str) -> HermesProvisionClient:
             return authority
 
     return LocalProvisionClient()
+
+
+async def _provision_with_response(
+    response_body: bytes,
+    *,
+    status_code: int = 409,
+    declared_length: int | None = None,
+    client_factory=None,
+    deadline_check=None,
+    during_body=None,
+):
+    async def respond(reader, writer):
+        headers = await reader.readuntil(b"\r\n\r\n")
+        content_length = next(
+            (
+                int(line.split(":", 1)[1].strip())
+                for line in headers.decode("ascii").split("\r\n")
+                if line.lower().startswith("content-length:")
+            ),
+            0,
+        )
+        if content_length:
+            await reader.readexactly(content_length)
+        response_length = len(response_body) if declared_length is None else declared_length
+        response_headers = (
+            f"HTTP/1.1 {status_code} Conflict\r\n"
+            f"Content-Length: {response_length}\r\n"
+            "Content-Type: application/json\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        if during_body is None or not response_body:
+            writer.write(response_headers + response_body)
+        else:
+            writer.write(response_headers + response_body[:1])
+            await writer.drain()
+            await during_body()
+            writer.write(response_body[1:])
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(respond, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    client = _local_provision_client(base_url) if client_factory is None else client_factory(base_url)
+    async with server:
+        return await client.provision(
+            VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            "hermes-user-v1",
+            attestation_challenge=_attestation_challenge(),
+            deadline_check=deadline_check,
+        )
 
 
 class _FakeDocument:
@@ -1671,6 +1737,7 @@ if module_name == "ella.routers.callbacks":
     fake_exact_auth.ELLA_SUBJECT_UID_HEADER = "X-Ella-Subject-Uid"
     fake_exact_auth.EllaRequestAuthority = object
     fake_exact_auth.get_exact_firebase_uid = lambda *args, **kwargs: None
+    fake_exact_auth.get_firebase_or_service_authority = lambda *args, **kwargs: None
     fake_exact_auth.get_exact_service_authority = lambda *args, **kwargs: None
     fake_exact_auth.require_matching_firebase_uid = lambda *args, **kwargs: None
     sys.modules["utils.ella.exact_firebase_auth"] = fake_exact_auth
@@ -1874,6 +1941,77 @@ def test_attestation_window_covers_max_slow_response_and_rejects_invalid_config(
     assert rejected_repository.job["error_code"] == "honcho_attestation_window_invalid"
 
 
+def test_fresh_self_hosted_provision_seeds_grok_voice(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    firestore_seeds = []
+    monkeypatch.setattr(
+        provisioning_service,
+        "_ensure_self_hosted_grok_voice_mode",
+        lambda uid, **_: firestore_seeds.append(uid),
+    )
+
+    repository = FakeRepository()
+    repository.voice_seed_result = True
+    client = FakeProvisionClient(_runtime_receipt())
+    asyncio.run(
+        ProvisioningCoordinator(repository, client).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    # Both server-side seeds ran for the fresh user, and provisioning completed
+    # to an active binding (the provisioned-active-row requirement).
+    assert repository.voice_seed_calls == ["user-a"]
+    assert firestore_seeds == ["user-a"]
+    assert repository.job["state"] == "ready"
+    assert repository.activation_calls == 1
+    assert repository.binding is not None and repository.binding["active"]
+
+
+def test_grok_voice_firestore_seed_gated_on_fresh_entitlement_row(monkeypatch):
+    """The Firestore voice_mode write only happens when a fresh DB entitlement
+    row was actually inserted, so a returning/operator-seeded user's voice state
+    is never auto-written (row precedence). Injects a fake database.app_settings
+    so the lazy import inside _ensure_self_hosted_grok_voice_mode resolves to a
+    controllable stub without touching real Firestore."""
+
+    class _FakeAppSettings:
+        def __init__(self):
+            self.calls = []
+
+        def get_voice_settings(self, uid):
+            self.calls.append(("get", uid))
+            return {}
+
+        def save_voice_settings(self, uid, voice):
+            self.calls.append(("save", uid, voice))
+
+    fake = _FakeAppSettings()
+    monkeypatch.setitem(sys.modules, "database.app_settings", fake)
+    monkeypatch.setattr(database, "app_settings", fake, raising=False)
+
+    # No fresh row -> firestore is never even read.
+    provisioning_service._ensure_self_hosted_grok_voice_mode("u1", fresh_entitlement_created=False)
+    assert fake.calls == []
+
+    # Empty uid -> no-op even if a row was flagged fresh.
+    provisioning_service._ensure_self_hosted_grok_voice_mode("", fresh_entitlement_created=True)
+    assert fake.calls == []
+
+    # Fresh row + no existing voice_mode -> seed grok-voice.
+    provisioning_service._ensure_self_hosted_grok_voice_mode("u2", fresh_entitlement_created=True)
+    assert fake.calls == [("get", "u2"), ("save", "u2", {"voice_mode": "grok-voice"})]
+
+    # Fresh row but the user already picked a voice mode -> preserved, no clobber.
+    fake.get_voice_settings = lambda uid: fake.calls.append(("get", uid)) or {"voice_mode": "elevenlabs"}
+    provisioning_service._ensure_self_hosted_grok_voice_mode("u3", fresh_entitlement_created=True)
+    assert fake.calls == [
+        ("get", "u2"),
+        ("save", "u2", {"voice_mode": "grok-voice"}),
+        ("get", "u3"),
+    ]
+
+
 def test_total_deadline_cancels_real_local_slow_drip_before_binding_writes(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
     monkeypatch.setattr(
@@ -1986,6 +2124,228 @@ def test_oversized_provision_receipt_is_rejected_before_parse_or_binding_write(m
         assert repository.job["error_code"] == "invalid_provision_receipt"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("response_body", "expected_code"),
+    (
+        (
+            b'{"detail":{"code":"unsafe_existing_profile_capabilities","message":"must-not-persist"}}',
+            "unsafe_existing_profile_capabilities",
+        ),
+        (b'{"detail":{"code":"runtime_profile_config_invalid"}}', "runtime_profile_config_invalid"),
+        (b'{"detail":{"code":"runtime_policy_conflict"}}', "runtime_policy_conflict"),
+        (b'{"detail":{"code":"runtime_reservation_missing"}}', "runtime_reservation_missing"),
+        (b'{"detail":{"code":"unreviewed_conflict","message":"must-not-persist"}}', "provision_request_conflict"),
+        (b"not-json", "provision_request_conflict"),
+    ),
+)
+def test_streamed_provision_conflicts_are_content_free_and_nonretryable(response_body, expected_code):
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(_provision_with_response(response_body))
+
+    assert error.value.code == expected_code
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+    assert "must-not-persist" not in str(error.value.detail)
+
+
+def test_provision_conflict_contract_matches_reviewed_shim_codes():
+    assert PROVISION_CONFLICT_CODES == {
+        "agent_owner_mapping_conflict",
+        "agent_workspace_mapping_conflict",
+        "agent_workspace_outside_profiles_root",
+        "honcho_config_invalid",
+        "honcho_identity_conflict",
+        "honcho_profile_map_alias_conflict",
+        "honcho_profile_map_conflict",
+        "invalid_profile_name",
+        "legacy_caregiver_profile_requires_migration",
+        "legacy_profile_requires_migration",
+        "plato_runtime_rollback_forbidden",
+        "profile_ownership_conflict",
+        "profile_ownership_invalid",
+        "registry_identity_conflict",
+        "runtime_policy_conflict",
+        "runtime_profile_config_invalid",
+        "runtime_profile_identity_conflict",
+        "runtime_profile_identity_unmanaged",
+        "runtime_profile_soul_drift",
+        "runtime_reservation_missing",
+        "unowned_profile_exists",
+        "unsafe_existing_profile_capabilities",
+        "unsafe_profile_ownership_path",
+        "unsafe_profile_path",
+    }
+
+
+def test_recursive_provision_conflict_is_content_free_and_nonretryable():
+    nested = b'{"detail":' + (b"[" * 1_500) + b"0" + (b"]" * 1_500) + b"}"
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(_provision_with_response(nested))
+
+    assert error.value.code == "provision_request_conflict"
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+
+
+@pytest.mark.parametrize(
+    ("response_body", "declared_length"),
+    (
+        (b'{"detail":{"code":"runtime_policy_conflict"}}', None),
+        (b"", MAX_PROVISION_RESPONSE_BYTES + 1),
+    ),
+)
+def test_provision_conflict_rechecks_total_deadline_after_body_read(response_body, declared_length):
+    def expired_deadline():
+        raise ProvisioningError("provision_transaction_timeout", retryable=True)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                response_body,
+                declared_length=declared_length,
+                deadline_check=expired_deadline,
+            )
+        )
+
+    assert error.value.code == "provision_transaction_timeout"
+
+
+def test_provision_conflict_rechecks_total_deadline_after_json_parse(monkeypatch):
+    parsed = {"value": False}
+    original_loads = provisioning_service.json.loads
+
+    def delayed_loads(payload, *args, **kwargs):
+        result = original_loads(payload, *args, **kwargs)
+        parsed["value"] = True
+        return result
+
+    def deadline_check():
+        if parsed["value"]:
+            raise ProvisioningError("provision_transaction_timeout", retryable=True)
+
+    monkeypatch.setattr(provisioning_service.json, "loads", delayed_loads)
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b'{"detail":{"code":"runtime_policy_conflict"}}',
+                deadline_check=deadline_check,
+            )
+        )
+
+    assert error.value.code == "provision_transaction_timeout"
+
+
+def test_provision_conflict_rechecks_authority_after_inflight_body_drift():
+    state = {"drifted": False, "resolve_calls": 0}
+
+    def client_factory(base_url):
+        snapshot = ProvisionAuthoritySnapshot(b"d" * 32)
+        authority = ProvisionAuthority(
+            base_url=base_url,
+            token="synthetic-local-provider-token",
+            token_reference="LOCAL_TEST_ONLY",
+            _snapshot=snapshot,
+        )
+
+        class DriftingProvisionClient(HermesProvisionClient):
+            @staticmethod
+            def resolve_authority(expected_snapshot=None):
+                state["resolve_calls"] += 1
+                if state["drifted"]:
+                    raise ProvisioningError("provision_authority_changed", retryable=False)
+                if expected_snapshot is not None and not snapshot.matches(expected_snapshot):
+                    raise AssertionError("unexpected authority snapshot")
+                return authority
+
+        return DriftingProvisionClient()
+
+    async def drift_after_initial_response_check():
+        while state["resolve_calls"] < 4:
+            await asyncio.sleep(0)
+        state["drifted"] = True
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b'{"detail":{"code":"runtime_policy_conflict"}}',
+                client_factory=client_factory,
+                during_body=drift_after_initial_response_check,
+            )
+        )
+
+    assert error.value.code == "provision_authority_changed"
+    assert error.value.retryable is False
+    assert state["resolve_calls"] == 5
+
+
+def test_oversized_provision_conflict_is_content_free_and_nonretryable():
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            _provision_with_response(
+                b"",
+                declared_length=MAX_PROVISION_RESPONSE_BYTES + 1,
+            )
+        )
+
+    assert error.value.code == "provision_request_conflict"
+    assert error.value.retryable is False
+    assert error.value.detail == {"status": 409}
+
+
+def test_known_provision_conflict_blocks_job_without_reconciliation_retry(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", raising=False)
+    response_body = b'{"detail":{"code":"unsafe_existing_profile_capabilities","message":"must-not-persist"}}'
+
+    async def scenario():
+        async def respond(reader, writer):
+            headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                (
+                    int(line.split(":", 1)[1].strip())
+                    for line in headers.decode("ascii").split("\r\n")
+                    if line.lower().startswith("content-length:")
+                ),
+                0,
+            )
+            if content_length:
+                await reader.readexactly(content_length)
+            writer.write(
+                (
+                    "HTTP/1.1 409 Conflict\r\n"
+                    f"Content-Length: {len(response_body)}\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                + response_body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        repository = FakeRepository()
+        coordinator = ProvisioningCoordinator(repository, _local_provision_client(f"http://127.0.0.1:{port}"))
+        async with server:
+            await coordinator.process_claimed_job(
+                job=_job(state="provisioning", stage="profile_ready"),
+                identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+            )
+        return repository
+
+    repository = asyncio.run(scenario())
+
+    assert repository.job["state"] == "blocked"
+    assert repository.job["retryable"] is False
+    assert repository.job["error_code"] == "unsafe_existing_profile_capabilities"
+    update = repository.job_calls[-1]
+    assert update["error_detail"] == {"status": 409}
+    assert update["receipt"] is None
+    assert "must-not-persist" not in str(update)
 
 
 def test_total_deadline_rejects_delayed_json_parse_before_binding_write(monkeypatch):
@@ -2266,6 +2626,145 @@ def test_legacy_omi_identity_repair_preserves_cloud_sync_default():
     assert payload["store_recording_permission"] is False
 
 
+def _row_like(**fields):
+    return {**fields}
+
+
+class _FilteringFakePool:
+    """Emulate the row-intrinsic WHERE gate of _resolve_self_hosted_active_direct:
+    a row is returned only if provider=hermes, active=true, status=active and
+    health_state=healthy (plus optional template match). This lets the unit test
+    exercise the validity logic the SQL encodes, instead of a blind row echo."""
+
+    def __init__(self, row):
+        self.row = row
+        self.calls = []
+
+    async def fetchrow(self, query, *args):
+        self.calls.append((query, args))
+        r = self.row
+        if r is None:
+            return None
+        if r.get("provider") != "hermes":
+            return None
+        if r.get("active") is not True:
+            return None
+        if r.get("status") != "active":
+            return None
+        if r.get("health_state") != "healthy":
+            return None
+        template = args[2] if len(args) > 2 else None
+        if template is not None and r.get("template_version") != template:
+            return None
+        return r
+
+
+def test_resolve_self_hosted_active_direct_positive_healthy_active():
+    """A health-validated active hermes binding resolves even without the
+    invitation->redemption->target chain (realcryptoplato-shaped row)."""
+    pool = _FilteringFakePool(
+        _row_like(
+            id="232285ea-7290-5751-9ed7-6c2046d304f5",
+            role="user",
+            provider="hermes",
+            status="active",
+            active=True,
+            health_state="healthy",
+            revision=2,
+            template_version="hermes-user-v1",
+            model_policy_version="frontier-v1",
+            voice_policy_version="ella-voice-v1",
+            omi_uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+            user_status="ACTIVE",
+            profile_class="real",
+        )
+    )
+    repository = EllaProvisioningRepository(pool)
+
+    row = asyncio.run(
+        repository.resolve_self_hosted_active_direct(
+            uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+            role="user",
+            template_version="hermes-user-v1",
+        )
+    )
+
+    assert row is not None
+    assert row["active"] is True
+    assert row["health_state"] == "healthy"
+    assert row["provider"] == "hermes"
+    assert row["revision"] == 2
+    # Query must be the row-intrinsic validity gate (active+healthy+hermes).
+    query = pool.calls[0][0].lower()
+    assert "provider = 'hermes'" in query
+    assert "active = true" in query
+    assert "health_state = 'healthy'" in query
+    # No invitation-chain tables in the fallback query.
+    assert "ella_invitation_redemptions" not in query
+    assert "ella_runtime_targets" not in query
+
+
+def test_resolve_self_hosted_active_direct_negative_disabled_unhealthy():
+    """A disabled/unhealthy binding does NOT resolve (greglindberg-shaped row),
+    preserving his invitation_authority_revoked block as real."""
+    pool = _FilteringFakePool(
+        _row_like(
+            id="d6c9a57b-5724-5257-b0f8-f0118617bd18",
+            role="user",
+            provider="hermes",
+            status="disabled",
+            active=False,
+            health_state="unhealthy",
+            revision=3,
+            template_version="hermes-user-v1",
+            user_status="ACTIVE",
+            profile_class="real",
+        )
+    )
+    repository = EllaProvisioningRepository(pool)
+
+    row = asyncio.run(
+        repository._resolve_self_hosted_active_direct(
+            uid="5aGC5YE9BnhcSoTxxtT4ar6ILQy2",
+            role="user",
+            template_version="hermes-user-v1",
+        )
+    )
+
+    assert row is None
+
+
+def test_resolve_self_hosted_active_direct_no_row_returns_none():
+    pool = _FilteringFakePool(None)
+    repository = EllaProvisioningRepository(pool)
+
+    row = asyncio.run(
+        repository._resolve_self_hosted_active_direct(uid="no-such-uid", role="user", template_version="hermes-user-v1")
+    )
+
+    assert row is None
+
+
+def test_resolve_self_hosted_active_direct_requires_hermes_provider():
+    """A non-hermes active binding must not satisfy the fallback gate."""
+    pool = _FilteringFakePool(
+        _row_like(
+            id="other-0000",
+            role="user",
+            provider="someother",
+            active=True,
+            status="active",
+            health_state="healthy",
+            revision=1,
+        )
+    )
+    repository = EllaProvisioningRepository(pool)
+    row = asyncio.run(repository._resolve_self_hosted_active_direct(uid="u", role="user"))
+    # The row-intrinsic gate must reject a non-hermes provider even when the
+    # other validity fields are satisfied.
+    assert row is None
+
+
 def test_repository_schema_preflight_reports_missing_objects():
     pool = _FakeSchemaPool(
         {
@@ -2408,6 +2907,43 @@ def test_public_receipt_does_not_expose_runtime_secrets():
     assert "TOP_SECRET" not in serialized
     assert "100.76.138.56" not in serialized
     assert "/private/workspace" not in serialized
+
+
+def test_public_receipt_flattened_voice_mode_parse_contract():
+    """The 807 client parses a flat `effective_voice_mode` from the ensure/status
+    response body (receipt). Pin the parse contract: the field is flat (not nested
+    under effective_policy), defaults to empty (ElevenLabs fallback), and is never
+    emitted as a non-string."""
+    binding = {
+        "active": True,
+        "revision": 7,
+        "model_policy_version": "frontier-v1",
+        "voice_policy_version": "ella-voice-v1",
+    }
+    # 1. Flat field present when a value is resolved, and it round-trips exactly.
+    with_value = public_receipt(_job(state="ready", stage="active"), binding, effective_voice_mode="grok-voice")
+    assert with_value["effective_voice_mode"] == "grok-voice"
+    assert isinstance(with_value["effective_voice_mode"], str)
+    flattened = {k: v for k, v in with_value.items() if k == "effective_voice_mode"}
+    assert "effective_voice_mode" in flattened
+    # The field must be top-level (flat), not nested under effective_policy.
+    assert "effective_voice_mode" not in with_value.get("effective_policy", {})
+    assert with_value["state"] == "ready"
+    assert with_value["binding_state"] == "active"
+
+    # 2. Empty / absent input leaves the field empty-string, never an internal type.
+    for value in ("", None):
+        receipt = public_receipt(_job(state="ready", stage="active"), binding, effective_voice_mode=value)
+        assert receipt["effective_voice_mode"] == ""
+        assert isinstance(receipt["effective_voice_mode"], str)
+
+    # 3. No value provided at all -> empty-string default (ElevenLabs fallback).
+    defaulted = public_receipt(_job(state="ready", stage="active"), binding)
+    assert defaulted["effective_voice_mode"] == ""
+
+    # 4. Non-string inputs are coerced to a safe string, never raised through.
+    coerced = public_receipt(_job(state="ready", stage="active"), binding, effective_voice_mode="grok-voice")
+    assert coerced["effective_voice_mode"] == "grok-voice"
 
 
 def test_retained_compatibility_receipt_is_operational_and_credential_free():
@@ -2643,7 +3179,7 @@ def test_missing_attestation_key_fails_before_provisioner_or_binding_write(monke
 
 def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
-    identity = VerifiedIdentity("fresh-relax-user", "user@example.test", "User", "UTC")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
     repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
 
     # Without the relax flag a fresh self-hosted UID is denied (strict gate).
@@ -2678,6 +3214,51 @@ def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch)
 
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
+
+
+def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv(
+        "ELLA_HERMES_PROVISION_ATTESTATION_KEY",
+        "unit-test-attestation-key-32-bytes-minimum",
+    )
+    identity = VerifiedIdentity("fresh-relax-user", "user@example.test", "User", "UTC")
+
+    relaxed_repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+    asyncio.run(
+        ProvisioningCoordinator(
+            relaxed_repository,
+            FakeProvisionClient(_runtime_receipt()),
+        ).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=identity,
+        )
+    )
+    assert relaxed_repository.job["state"] == "ready"
+    assert relaxed_repository.last_activation_arguments == {
+        "require_invitation_target": False,
+        "authority_lineage": None,
+        "model": SELF_HOSTED_RUNTIME_MODEL,
+    }
+
+    admission = _self_hosted_admission(identity.uid)
+    invitation_repository = FakeRepository(
+        self_hosted_admission=admission,
+        self_hosted_owned=True,
+    )
+    asyncio.run(
+        ProvisioningCoordinator(
+            invitation_repository,
+            FakeProvisionClient(_runtime_receipt()),
+        ).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=identity,
+        )
+    )
+    assert invitation_repository.job["state"] == "ready"
+    assert invitation_repository.last_activation_arguments["require_invitation_target"] is True
+    assert invitation_repository.last_activation_arguments["authority_lineage"] == current_self_hosted_runtime_lineage()
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
@@ -2860,3 +3441,51 @@ def test_legacy_8210_receipt_cannot_activate(monkeypatch):
     assert repository.job["retryable"] is True
     assert repository.job["error_code"] == "runtime_receipt_missing"
     assert repository.binding is None
+
+
+def test_fresh_provision_stages_user_binding_with_hermes_chat_mode(monkeypatch):
+    # Sophia review criterion for the fresh-provision fix: a fresh provision
+    # must produce a binding whose runtime_target_mode lets the first chat
+    # turn pass. Regression guard for self_hosted_runtime_target_mode_required
+    # (binding created with NULL mode -> every chat turn failed authority).
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
+    asyncio.run(
+        coordinator.process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    assert repository.staged["runtime_target_mode"] == "hermes-chat"
+    assert repository.binding["runtime_target_mode"] == "hermes-chat"
+
+
+@pytest.mark.parametrize("key", ["runtimeTargetMode", "runtime_target_mode"])
+def test_provider_pinned_mode_is_staged_and_honored(monkeypatch, key):
+    # Mode-source decision: if the provision result pins a valid self-hosted
+    # mode, that wins over the user default (e.g. a hermes-voice lane).
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"][key] = "hermes-voice"
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(receipt))
+    asyncio.run(
+        coordinator.process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles"),
+        )
+    )
+    assert repository.staged["runtime_target_mode"] == "hermes-voice"
+    assert repository.binding["runtime_target_mode"] == "hermes-voice"
+
+
+def test_extract_runtime_binding_rejects_unknown_provider_mode():
+    # A provider-pinned mode outside the self-hosted set must fail loudly at
+    # receipt extraction, not persist a mode that re-triggers
+    # self_hosted_runtime_target_mode_required on every chat turn.
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"]["runtimeTargetMode"] = "banana-mode"
+    with pytest.raises(ProvisioningError, match="invalid_runtime_target_mode") as error:
+        _extract(receipt)
+    assert error.value.retryable is False

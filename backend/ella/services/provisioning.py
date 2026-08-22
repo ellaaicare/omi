@@ -84,6 +84,35 @@ DEFAULT_ATTESTATION_VERIFICATION_GRACE_SECONDS = 30.0
 ATTESTATION_VERIFICATION_GRACE_ENV = "ELLA_HERMES_PROVISION_ATTESTATION_VERIFICATION_GRACE_SECONDS"
 ATTESTATION_CLOCK_SKEW_MARGIN_SECONDS = 1.0
 MAX_PROVISION_RESPONSE_BYTES = 262_144
+PROVISION_CONFLICT_FALLBACK_CODE = "provision_request_conflict"
+PROVISION_CONFLICT_CODES = frozenset(
+    {
+        "agent_owner_mapping_conflict",
+        "agent_workspace_mapping_conflict",
+        "agent_workspace_outside_profiles_root",
+        "honcho_config_invalid",
+        "honcho_identity_conflict",
+        "honcho_profile_map_alias_conflict",
+        "honcho_profile_map_conflict",
+        "invalid_profile_name",
+        "legacy_caregiver_profile_requires_migration",
+        "legacy_profile_requires_migration",
+        "plato_runtime_rollback_forbidden",
+        "profile_ownership_conflict",
+        "profile_ownership_invalid",
+        "registry_identity_conflict",
+        "runtime_profile_identity_conflict",
+        "runtime_profile_identity_unmanaged",
+        "runtime_profile_config_invalid",
+        "runtime_policy_conflict",
+        "runtime_reservation_missing",
+        "runtime_profile_soul_drift",
+        "unowned_profile_exists",
+        "unsafe_existing_profile_capabilities",
+        "unsafe_profile_ownership_path",
+        "unsafe_profile_path",
+    }
+)
 RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
 DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS = 120
 DEFAULT_CLOUD_POOL_LOW_WATER = 2
@@ -360,7 +389,48 @@ def stable_payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def _ensure_self_hosted_grok_voice_mode(
+    uid: str,
+    *,
+    fresh_entitlement_created: bool = False,
+) -> None:
+    """Seed Firestore voice_mode=grok-voice only when a fresh DB row was inserted.
+
+    The public onboarding receipt surfaces ``effective_voice_mode`` from the
+    Firestore-backed voice settings (onboarding._resolved_voice_mode ->
+    app_settings.get_voice_settings), and the client routes to the Grok lane off
+    that receipt field.
+
+    Gated on ``fresh_entitlement_created`` so the two side effects stay atomic
+    for genuinely fresh users: the receipt only advertises grok-voice when
+    ``seed_voice_entitlement_if_absent`` actually inserted an active row (i.e.
+    the entitlement really permits grok). A returning self-hosted user with an
+    existing revoked/suspended (non-grok) entitlement row, or an operator-seeded
+    row, is left untouched -- auto-provision never writes their voice mode. The
+    only-if-absent write also preserves an existing user voice choice. Never
+    allowed to break provisioning on a settings write.
+    """
+    if not uid or not fresh_entitlement_created:
+        return
+    try:
+        from database import app_settings as app_settings_db
+
+        current = app_settings_db.get_voice_settings(uid) or {}
+        if str((current.get("voice_mode") or "").strip()):
+            return  # preserve existing choice; do not clobber
+        app_settings_db.save_voice_settings(uid, {"voice_mode": "grok-voice"})
+    except Exception:  # noqa: BLE001 - settings seed must never fail provisioning
+        logger.warning(
+            "grok voice-mode provisioning seed failed for uid=%s; DB entitlement still seeded",
+            uid,
+        )
+
+
+def public_receipt(
+    job: dict[str, Any],
+    binding: Optional[dict[str, Any]] = None,
+    effective_voice_mode: str = "",
+) -> dict[str, Any]:
     state = str(job.get("state") or "pending")
     stage = str(job.get("stage") or "identity_ready")
     public_state = {
@@ -396,6 +466,7 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         ),
         "runtime_provider": str(binding.get("provider") or "") if binding else None,
         "runtime_status": str(binding.get("status") or "") if binding else None,
+        "effective_voice_mode": str(effective_voice_mode or ""),
     }
     if job.get("error_code"):
         result["error_code"] = job["error_code"]
@@ -485,6 +556,22 @@ async def _bounded_provision_response_body(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
+def _provision_conflict_code(response_body: bytes) -> str:
+    try:
+        payload = json.loads(response_body)
+    except (RecursionError, UnicodeDecodeError, ValueError):
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    if not isinstance(payload, dict):
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    code = detail.get("code")
+    if not isinstance(code, str) or code not in PROVISION_CONFLICT_CODES:
+        return PROVISION_CONFLICT_FALLBACK_CODE
+    return code
+
+
 class HermesProvisionClient:
     @staticmethod
     def resolve_authority(expected_snapshot: ProvisionAuthoritySnapshot | None = None) -> ProvisionAuthority:
@@ -546,7 +633,28 @@ class HermesProvisionClient:
                     self.resolve_authority(send_snapshot)
 
                     if response.status_code == 409:
-                        raise ProvisioningError("runtime_capacity", retryable=True)
+                        try:
+                            response_body = await _bounded_provision_response_body(response)
+                        except ProvisioningError as exc:
+                            self.resolve_authority(send_snapshot)
+                            if deadline_check is not None:
+                                deadline_check()
+                            raise ProvisioningError(
+                                PROVISION_CONFLICT_FALLBACK_CODE,
+                                retryable=False,
+                                detail={"status": 409},
+                            ) from exc
+                        self.resolve_authority(send_snapshot)
+                        if deadline_check is not None:
+                            deadline_check()
+                        conflict_code = _provision_conflict_code(response_body)
+                        if deadline_check is not None:
+                            deadline_check()
+                        raise ProvisioningError(
+                            conflict_code,
+                            retryable=False,
+                            detail={"status": 409},
+                        )
                     if 300 <= response.status_code < 400:
                         raise ProvisioningError(
                             "provision_request_rejected", retryable=False, detail={"status": response.status_code}
@@ -600,6 +708,10 @@ def extract_runtime_binding(
     provider = str(raw.get("provider") or "").lower()
     profile_name = str(raw.get("profileName") or raw.get("profile_name") or "")
     agent_id = str(raw.get("agentId") or raw.get("agent_id") or "")
+    raw_mode = str(raw.get("runtimeTargetMode") or raw.get("runtime_target_mode") or "").strip()
+    runtime_target_mode = raw_mode or None
+    if runtime_target_mode is not None and runtime_target_mode not in SELF_HOSTED_RUNTIME_TARGET_MODES:
+        raise ProvisioningError("invalid_runtime_target_mode", retryable=False)
     workspace_root = raw.get("workspaceRoot") or raw.get("workspace_root")
     internal_gateway_url = raw.get("internalGatewayUrl") or raw.get("internal_gateway_url")
     gateway_port = raw.get("gatewayPort") or raw.get("gateway_port")
@@ -755,6 +867,7 @@ def extract_runtime_binding(
         "provider": "hermes",
         "profile_name": profile_name,
         "agent_id": agent_id,
+        "runtime_target_mode": runtime_target_mode,
         "workspace_root": str(workspace_root),
         "internal_gateway_url": gateway_url,
         "gateway_port": parsed_port,
@@ -1198,6 +1311,13 @@ class ProvisioningCoordinator:
                 expected_template_version=str(job["target_schema_version"]),
                 now=int(self.clock()),
             )
+            # Mode-source decision: a provider-pinned mode (validated by
+            # extract_runtime_binding) wins; absent mode defaults the user chat
+            # lane to 'hermes-chat'. Without a valid mode, every first chat
+            # turn raises self_hosted_runtime_target_mode_required (the fresh
+            # signup replay defect this corrects).
+            if binding_data.get("runtime_target_mode") is None and binding_data.get("role", "user") == "user":
+                binding_data["runtime_target_mode"] = "hermes-chat"
             deadline_check()
             binding = await self._repository_call(
                 authority_snapshot,
@@ -1220,13 +1340,31 @@ class ProvisioningCoordinator:
                 },
             )
             deadline_check()
+            # Seed the fresh self-hosted user's grok voice entitlement (DB,
+            # create-if-absent) and Firestore voice_mode (only-if-absent) so the
+            # first voice/chat session is not entitlement-gated and the public
+            # receipt carries effective_voice_mode=grok-voice for the client.
+            voice_entitlement_created = await self._repository_call(
+                authority_snapshot,
+                self.repository.seed_voice_entitlement_if_absent,
+                uid=identity.uid,
+            )
+            # Firestore voice_mode only when a fresh DB entitlement row was
+            # inserted or the exact auto-provisioned quarantine row was safely
+            # recovered -- keeps operator-seeded voice state untouched.
+            _ensure_self_hosted_grok_voice_mode(
+                identity.uid,
+                fresh_entitlement_created=bool(voice_entitlement_created),
+            )
+            deadline_check()
+            invitation_target_required = invitation_admission is not None
             activated = await self._repository_call(
                 authority_snapshot,
                 self.repository.activate_runtime_binding,
                 uid=identity.uid,
                 provider="hermes",
-                require_invitation_target=self_hosted_required,
-                authority_lineage=(current_self_hosted_runtime_lineage() if self_hosted_required else None),
+                require_invitation_target=invitation_target_required,
+                authority_lineage=(current_self_hosted_runtime_lineage() if invitation_target_required else None),
                 model=SELF_HOSTED_RUNTIME_MODEL,
             )
             deadline_check()
@@ -1248,7 +1386,7 @@ class ProvisioningCoordinator:
         except ProvisioningError as exc:
             if exc.code == "hermes_provision_authority_drift":
                 return
-            reconciliation_required = bool(progress.get("provider_work_started"))
+            reconciliation_required = bool(progress.get("provider_work_started")) and exc.detail.get("status") != 409
             retryable = exc.retryable or reconciliation_required
             error_detail = dict(exc.detail)
             receipt = None

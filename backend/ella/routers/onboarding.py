@@ -21,6 +21,7 @@ from ella.services.ai_consent import (
     MANAGED_CLOUD_PHOTON_SCOPE,
     require_current_ai_consent,
 )
+from ella.services.app_settings import normalize_voice_mode
 from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.provisioning import (
     DEFAULT_TARGET_SCHEMA_VERSION,
@@ -96,6 +97,35 @@ def _verified_identity(uid: str, payload: OnboardingEnsureRequest) -> VerifiedId
 
 async def _coordinator() -> ProvisioningCoordinator:
     return ProvisioningCoordinator(await EllaProvisioningRepository.create(firestore_db=_firestore_db))
+
+
+def _resolved_voice_mode(uid: str) -> str:
+    """Resolve the provisioned voice mode from the per-user settings control plane.
+
+    Reads the server-backed Firestore voice settings (the same store backed by
+    GET/PATCH /v1/ella/settings). An empty result leaves the receipt's
+    ``effective_voice_mode`` empty so the client falls through to its local
+    pick (ElevenLabs default) — preserving today's behavior for every user
+    without a provisioned value.
+    """
+    if not uid:
+        return ""
+    try:
+        # Import lazily inside the function: the module-level import in this
+        # router runs `database._client.db = firestore.Client()` transitively at
+        # import time, which breaks test collection / jobs that lack a
+        # FIRESTORE_EMULATOR_HOST (DefaultCredentialsError on import). Runtime
+        # degradation is already graceful under the try/except below.
+        from database import app_settings as app_settings_db
+
+        voice = app_settings_db.get_voice_settings(uid) or {}
+        raw = str(voice.get("voice_mode") or "").strip()
+        if not raw:
+            return ""
+        return normalize_voice_mode(raw)
+    except Exception:  # noqa: BLE001 - never let settings lookup break onboarding
+        logger.warning("voice-settings lookup failed for uid=%s; defaulting to empty", uid)
+        return ""
 
 
 async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[dict[str, Any]]:
@@ -204,7 +234,7 @@ async def ensure_onboarding(
             detail={"code": exc.code},
         ) from exc
 
-    receipt = public_receipt(job, binding)
+    receipt = public_receipt(job, binding, effective_voice_mode=_resolved_voice_mode(uid))
     if claimed:
         try:
             if authority_snapshot is not None:
@@ -306,4 +336,4 @@ async def onboarding_status(
         )
     if not binding and cloud_required:
         binding = await repository.resolve_cloud_binding_state(uid)
-    return public_receipt(job, binding)
+    return public_receipt(job, binding, effective_voice_mode=_resolved_voice_mode(uid))
