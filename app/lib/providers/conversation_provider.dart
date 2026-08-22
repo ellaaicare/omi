@@ -55,6 +55,7 @@ class ConversationProvider extends ChangeNotifier {
   bool hasMoreConversations = true;
   bool loadMoreConversationsFailed = false;
   int _conversationPageOffset = 0;
+  int _paginationRequestGeneration = 0;
   bool hasLoadedConversations = false;
   bool hasFreshConversations = false;
   bool isShowingCachedConversations = false;
@@ -154,6 +155,7 @@ class ConversationProvider extends ChangeNotifier {
     hasMoreConversations = true;
     loadMoreConversationsFailed = false;
     _conversationPageOffset = 0;
+    _paginationRequestGeneration++;
     hasLoadedConversations = false;
     hasFreshConversations = false;
     isShowingCachedConversations = false;
@@ -951,6 +953,7 @@ class ConversationProvider extends ChangeNotifier {
       return;
     }
     final operationGeneration = _operationGeneration;
+    final paginationRequestGeneration = ++_paginationRequestGeneration;
     isLoadingMoreConversations = true;
     loadMoreConversationsFailed = false;
     if (_conversationPageOffset == 0) {
@@ -979,7 +982,12 @@ class ConversationProvider extends ChangeNotifier {
               expectedAuthenticatedUid: lease.uid,
               exactAuthority: lease,
             );
-      if (invalidated || operationGeneration != _operationGeneration || !lease.isCurrent) return;
+      if (invalidated ||
+          operationGeneration != _operationGeneration ||
+          paginationRequestGeneration != _paginationRequestGeneration ||
+          !lease.isCurrent) {
+        return;
+      }
       if (!result.succeeded) {
         loadMoreConversationsFailed = true;
         return;
@@ -1013,7 +1021,10 @@ class ConversationProvider extends ChangeNotifier {
       // Account transitions invalidate the page without displaying an error
       // in the next account's UI.
     } catch (error, stackTrace) {
-      if (!invalidated && operationGeneration == _operationGeneration && lease.isCurrent) {
+      if (!invalidated &&
+          operationGeneration == _operationGeneration &&
+          paginationRequestGeneration == _paginationRequestGeneration &&
+          lease.isCurrent) {
         loadMoreConversationsFailed = true;
         Logger.error('Failed to load more memories: $error\n$stackTrace');
       }
@@ -1193,6 +1204,7 @@ class ConversationProvider extends ChangeNotifier {
     final lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
     if (lease == null) return false;
     final generation = _operationGeneration;
+    _paginationRequestGeneration++;
     try {
       final deleted = await _conversationDelete(conversation.id, lease);
       if (!deleted || generation != _operationGeneration || !lease.isCurrent) return false;

@@ -467,6 +467,39 @@ void main() {
     expect(provider.conversations.map((item) => item.id), contains('memory-older'));
   });
 
+  test('confirmed deletion invalidates an in-flight page that used the pre-delete offset', () async {
+    final authority = _MutableAuthority('uid-a');
+    final initial = List.generate(50, (index) => conversation('memory-$index'));
+    final stalePage = Completer<ConversationsFetchResult>();
+    final requestedOffsets = <int>[];
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsFetchCall: () async => ConversationsFetchResult.success(initial),
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+      conversationDeleteCall: (_, __) async => true,
+      conversationsPageFetchCall: ({required limit, required offset}) {
+        requestedOffsets.add(offset);
+        if (requestedOffsets.length == 1) return stalePage.future;
+        return Future.value(ConversationsFetchResult.success([conversation('memory-after-delete')]));
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.fetchConversations();
+    final oldPageRequest = provider.getMoreConversationsFromServer();
+    await pumpEventQueue();
+    expect(requestedOffsets, [50]);
+
+    expect(await provider.deleteConversationPermanently(provider.conversations.first), isTrue);
+    stalePage.complete(ConversationsFetchResult.success([conversation('memory-stale-offset')]));
+    await oldPageRequest;
+    expect(provider.conversations.map((item) => item.id), isNot(contains('memory-stale-offset')));
+
+    await provider.getMoreConversationsFromServer();
+    expect(requestedOffsets, [50, 49]);
+    expect(provider.conversations.map((item) => item.id), contains('memory-after-delete'));
+  });
+
   test('account transition discards a delayed memory page and clears loading state', () async {
     final authority = _MutableAuthority('uid-a');
     final response = Completer<ConversationsFetchResult>();

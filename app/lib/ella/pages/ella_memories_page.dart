@@ -55,6 +55,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   void _loadMoreIfNeeded(ConversationProvider provider) {
     if (!mounted || !_scrollController.hasClients || !provider.hasLoadedConversations) return;
+    if (provider.loadMoreConversationsFailed) return;
     if (_scrollController.position.extentAfter < 720) {
       unawaited(provider.getMoreConversationsFromServer());
     }

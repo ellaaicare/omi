@@ -220,6 +220,37 @@ void main() {
     expect(provider.hasMoreConversations, isFalse);
   });
 
+  testWidgets('a failed automatic page waits for the visible retry action', (tester) async {
+    final authority = _MutableAuthority('test-user');
+    var pageRequests = 0;
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        pageRequests += 1;
+        return pageRequests == 1
+            ? const ConversationsFetchResult.failure(statusCode: 503)
+            : ConversationsFetchResult.success([memory('memory-older')]);
+      },
+    )
+      ..conversations = [memory('memory-current')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(pageRequests, 1);
+    expect(find.byKey(const Key('memories-load-more-failed')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('retry-load-more-memories')));
+    await tester.pumpAndSettle();
+
+    expect(pageRequests, 2);
+    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+  });
+
   testWidgets('Back to recent appears after scrolling and returns to the newest memories', (tester) async {
     final provider = ConversationProvider()
       ..conversations = List.generate(36, (index) => memory('memory-$index', title: 'Memory $index'))
