@@ -64,6 +64,7 @@ on:
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/summary_recovery.py"
+      - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/today_card.py"
       - "backend/ella/services/today_card_postgres.py"
       - "backend/ella/services/voice_honcho.py"
@@ -120,6 +121,7 @@ on:
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
       - "backend/tests/unit/test_ella_incident_1182_*.py"
       - "backend/tests/unit/test_ella_escalations_router_auth.py"
@@ -205,6 +207,7 @@ on:
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/summary_recovery.py"
+      - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/today_card.py"
       - "backend/ella/services/today_card_postgres.py"
       - "backend/ella/services/voice_honcho.py"
@@ -261,6 +264,7 @@ on:
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
+      - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
       - "backend/tests/unit/test_ella_incident_1182_*.py"
       - "backend/tests/unit/test_ella_escalations_router_auth.py"
@@ -396,6 +400,7 @@ jobs:
           ella/services/runtime_errors.py
           ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
+          ella/services/summary_writeback.py
           ella/services/today_card.py
           ella/services/today_card_postgres.py
           ella/services/voice_honcho.py
@@ -705,6 +710,14 @@ jobs:
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
+            "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[memory]"
+            "tests/unit/test_voice_proxy_auth.py::test_scoped_search_returns_only_the_server_resolved_subject[daily_card]"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_rejects_supported_attestation_with_quote_from_another_transcript"
+            "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_ignores_self_attestation_and_requires_independent_verifier"
+            "tests/unit/test_hermes_cloud_runtime.py::test_grounding_verifier_is_stateless_and_uses_transcript_admission"
+            "tests/unit/test_hermes_cloud_runtime.py::test_broker_grounding_verifier_fails_closed_before_admission"
+            "tests/unit/test_hermes_broker_prototype.py::test_grounding_verifier_fails_closed_before_broker_admission"
+            "tests/unit/test_ella_provisioning_repository.py::test_stateless_runtime_interaction_skips_predecessor_at_create_and_claim"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_activation_rejects_tampered_attestation_before_publication"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
@@ -718,6 +731,10 @@ jobs:
               tests/unit/test_ella_provisioning_service.py \
               tests/unit/test_ella_runtime_route_isolation.py \
               tests/unit/test_voice_proxy_auth.py \
+              tests/unit/test_hermes_cloud_enrichment.py \
+              tests/unit/test_hermes_cloud_runtime.py \
+              tests/unit/test_hermes_broker_prototype.py \
+              tests/unit/test_ella_provisioning_repository.py \
               tests/postgres/test_hermes_cloud_pool_postgres.py \
               tests/postgres/test_invitation_redemption_postgres.py |
               sed '/^$/d'
@@ -729,7 +746,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 548
+          test "$collected" -eq 558
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -766,6 +783,8 @@ jobs:
               tests/unit/test_today_card.py \
               tests/unit/test_today_card_api.py \
               tests/unit/test_today_card_postgres.py \
+              tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event \
+              tests/unit/test_ella_canonical_omi.py \
               tests/unit/test_today_card_reinterpretation.py \
               tests/unit/test_conversation_processing_failures.py \
               tests/postgres/test_today_card_lifecycle_postgres.py |
@@ -776,6 +795,10 @@ jobs:
             "tests/unit/test_today_card_postgres.py::test_deleted_source_invalidation_is_exact_uid_and_source"
             "tests/unit/test_today_card_postgres.py::test_materialized_save_fails_closed_when_selected_source_is_tombstoned"
             "tests/unit/test_today_card_postgres.py::test_today_card_router_registration_has_no_function_local_imports"
+            "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_emits_bound_semantic_grounding_provenance"
+            "tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event"
+            "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[summary]"
+            "tests/unit/test_today_card_postgres.py::test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced[owner]"
             "tests/unit/test_today_card_api.py::test_internal_uid_mutations_require_exact_service_subject"
             "tests/unit/test_today_card_api.py::test_cross_account_materialize_due_route_is_not_exposed"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
@@ -793,11 +816,17 @@ jobs:
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
             tests/unit/test_today_card_postgres.py \
+            tests/unit/test_ella_canonical_omi.py \
             tests/unit/test_today_card_reinterpretation.py \
             tests/unit/test_conversation_processing_failures.py \
             tests/postgres/test_today_card_lifecycle_postgres.py \
             -v | tee /tmp/today-card-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/today-card-pytest.log
+          pytest \
+            tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event \
+            tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_cannot_be_copied_or_mutated_before_writeback \
+            -v | tee /tmp/today-card-grounding-writeback-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/today-card-grounding-writeback-pytest.log
 
           authority_split_ids="$(
             pytest --collect-only -q \
@@ -881,7 +910,7 @@ jobs:
             -v
           test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 15
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
+          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 73
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
           pytest tests/unit/test_ella_guardian_delivery.py -v

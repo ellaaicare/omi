@@ -1,6 +1,7 @@
 """Shared direct conversation-summary writeback with version and ledger provenance."""
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -8,7 +9,13 @@ from typing import Any, Awaitable, Callable, Optional
 import database.conversations as conversations_db
 from ella.services.summary_sanitizer import sanitize_summary_update
 from models.conversation import CategoryEnum
-from utils.ella.canonical_omi import write_omi_canonical_event
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+    write_omi_canonical_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +58,7 @@ async def write_conversation_summary(
     require_canonical: bool = False,
     require_based_on_match: bool = False,
     preserve_generated_results: bool = False,
+    today_card_grounding: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -156,6 +164,52 @@ async def write_conversation_summary(
         based_on_version_id=based_on_version_id,
         activate=set_active,
     )
+    bound_today_card_grounding: Optional[dict[str, Any]] = None
+    if today_card_grounding is not None:
+        raw_segments = conversation.get('transcript_segments') or []
+        transcript_segments: list[dict[str, Any]] = []
+        for segment in raw_segments:
+            if isinstance(segment, dict):
+                transcript_segments.append(dict(segment))
+            elif hasattr(segment, 'model_dump'):
+                transcript_segments.append(segment.model_dump(mode='json'))
+            elif hasattr(segment, 'dict'):
+                transcript_segments.append(segment.dict())
+        quote_hashes = today_card_grounding.get('supporting_quote_hashes')
+        quote_hashes_are_valid = (
+            isinstance(quote_hashes, list)
+            and bool(quote_hashes)
+            and all(
+                isinstance(value, str)
+                and value.startswith('sha256:')
+                and len(value.removeprefix('sha256:')) == 64
+                and all(character in '0123456789abcdef' for character in value.removeprefix('sha256:'))
+                for value in quote_hashes
+            )
+        )
+        if not (
+            summary_source == 'hermes_cloud'
+            and summary_kind == 'hermes_enriched'
+            and today_card_grounding.get('contract_version') == TODAY_CARD_GROUNDING_CONTRACT_VERSION
+            and today_card_grounding.get('attester') == TODAY_CARD_GROUNDING_ATTESTER
+            and today_card_grounding.get('semantic_outcome') == 'supported'
+            and today_card_grounding.get('transcript_hash') == transcript_grounding_hash(transcript_segments)
+            and today_card_grounding.get('summary_hash') == summary_grounding_hash(structured)
+            and today_card_grounding.get('owner_hash') == 'sha256:' + hashlib.sha256(uid.encode('utf-8')).hexdigest()
+            and today_card_grounding.get('conversation_id_hash')
+            == 'sha256:' + hashlib.sha256(conversation_id.encode('utf-8')).hexdigest()
+            and bool(str(today_card_grounding.get('runtime_interaction_id') or '').strip())
+            and bool(str(today_card_grounding.get('canonical_assistant_event_id') or '').strip())
+            and bool(str(today_card_grounding.get('verifier_runtime_interaction_id') or '').strip())
+            and bool(str(today_card_grounding.get('verifier_canonical_assistant_event_id') or '').strip())
+            and today_card_grounding.get('policy_version') == 'hermes-cloud-grounding-verifier-v1'
+            and quote_hashes_are_valid
+        ):
+            raise ValueError('today_card_grounding_attestation_invalid')
+        bound_today_card_grounding = {
+            **today_card_grounding,
+            'source_version_id': version_update['new_summary_version_id'],
+        }
     state_updated_at = datetime.now(timezone.utc)
     update_data['summary_versions'] = version_update['summary_versions']
     update_data['active_summary_version_id'] = version_update['active_summary_version_id']
@@ -168,6 +222,7 @@ async def write_conversation_summary(
         'updated_at': state_updated_at,
         'error': None,
         'canonical_status': 'pending' if require_canonical else 'unconfirmed',
+        'today_card_grounding': bound_today_card_grounding,
     }
 
     if internal_assessment_fetcher:

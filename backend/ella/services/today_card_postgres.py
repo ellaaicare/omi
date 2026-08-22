@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
@@ -27,8 +29,15 @@ from ella.services.today_card import (
     deterministic_card_id,
     evidence_is_safe,
     materialization_window,
+    source_text_is_meaningful,
     sha256_ref,
     today_card_source_pack,
+)
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
 )
 
 logger = logging.getLogger("ella.today_card")
@@ -99,6 +108,19 @@ def _strict_bool(mapping: dict[str, Any], key: str, default: bool) -> bool:
     return mapping[key] is True
 
 
+def _first_nonnegative_number(*values: Any) -> float | None:
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(parsed) and parsed >= 0:
+            return parsed
+    return None
+
+
 def _card_from_row(row: Any) -> TodayCardRecord:
     content = _record_value(row, "content")
     return TodayCardRecord(
@@ -154,6 +176,69 @@ def _source_tags(metadata: dict[str, Any], scan_policy: str) -> list[str]:
     return sorted({str(tag).strip().lower() for tag in raw_tags if str(tag).strip()})
 
 
+def _has_grounded_content_provenance(
+    today: dict[str, Any],
+    source_version_id: str | None,
+    *,
+    structured: dict[str, Any],
+    transcript_segments: list[Any],
+    summary_versions: list[Any],
+    conversation_id: str | None,
+    expected_uid: str | None,
+) -> bool:
+    grounding = today.get("grounding")
+    if not isinstance(grounding, dict) or not source_version_id:
+        return False
+    normalized_segments = [dict(segment) for segment in transcript_segments if isinstance(segment, dict)]
+    matching_versions = [
+        version
+        for version in summary_versions
+        if isinstance(version, dict) and str(version.get("id") or "") == source_version_id
+    ]
+    if len(matching_versions) != 1:
+        return False
+    active_version = matching_versions[0]
+    if (
+        str(active_version.get("title") or "").strip() != str(structured.get("title") or "").strip()
+        or str(active_version.get("overview") or "").strip() != str(structured.get("overview") or "").strip()
+        or active_version.get("source") != "hermes_cloud"
+        or active_version.get("kind") != "hermes_enriched"
+    ):
+        return False
+    quote_hashes = grounding.get("supporting_quote_hashes")
+    expected_owner_hash = "sha256:" + hashlib.sha256(expected_uid.encode("utf-8")).hexdigest() if expected_uid else None
+    valid_quote_hashes = (
+        isinstance(quote_hashes, list)
+        and bool(quote_hashes)
+        and all(
+            isinstance(value, str)
+            and value.startswith("sha256:")
+            and len(value.removeprefix("sha256:")) == 64
+            and all(character in "0123456789abcdef" for character in value.removeprefix("sha256:"))
+            for value in quote_hashes
+        )
+    )
+    return (
+        grounding.get("contract_version") == TODAY_CARD_GROUNDING_CONTRACT_VERSION
+        and grounding.get("attester") == TODAY_CARD_GROUNDING_ATTESTER
+        and grounding.get("semantic_outcome") == "supported"
+        and grounding.get("source_version_id") == source_version_id
+        and grounding.get("transcript_hash") == transcript_grounding_hash(normalized_segments)
+        and grounding.get("summary_hash") == summary_grounding_hash(structured)
+        and conversation_id is not None
+        and grounding.get("conversation_id_hash")
+        == "sha256:" + hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()
+        and expected_owner_hash is not None
+        and grounding.get("owner_hash") == expected_owner_hash
+        and bool(str(grounding.get("runtime_interaction_id") or "").strip())
+        and bool(str(grounding.get("canonical_assistant_event_id") or "").strip())
+        and bool(str(grounding.get("verifier_runtime_interaction_id") or "").strip())
+        and bool(str(grounding.get("verifier_canonical_assistant_event_id") or "").strip())
+        and grounding.get("policy_version") == "hermes-cloud-grounding-verifier-v1"
+        and valid_quote_hashes
+    )
+
+
 async def lock_today_card_source_validity(conn: Any, uid: str) -> None:
     """Serialize canonical evidence writes, invalidation, and card publication per owner."""
     await conn.execute(
@@ -167,11 +252,14 @@ def _evidence_from_row(
     *,
     previous_day_start: datetime,
     previous_day_end: datetime,
+    expected_uid: str | None = None,
 ) -> TodayCardEvidence | None:
     metadata = _json_object(_record_value(row, "metadata"))
     source_ref = _json_object(_record_value(row, "source_ref"))
+    expected_owner_uid = expected_uid or _record_value(row, "uid")
     today = metadata.get("today_card") if isinstance(metadata.get("today_card"), dict) else {}
     structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
+    source_quality = metadata.get("source_quality") if isinstance(metadata.get("source_quality"), dict) else {}
     adapter = str(metadata.get("adapter") or "")
     occurred_at = _record_value(row, "started_at")
     if not isinstance(occurred_at, datetime):
@@ -190,6 +278,15 @@ def _evidence_from_row(
 
     title = str(today.get("title") or structured.get("title") or metadata.get("title") or "").strip()
     summary = str(today.get("summary") or structured.get("overview") or _record_value(row, "text") or "").strip()
+    summary_lines = [line.strip() for line in summary.splitlines() if line.strip()]
+    summary = " ".join(
+        (
+            line
+            if index == len(summary_lines) - 1 or line.endswith((".", "!", "?", ";", ":", ",", "—", "–", "-"))
+            else f"{line}."
+        )
+        for index, line in enumerate(summary_lines)
+    )
     source_id = str(
         source_ref.get("conversation_id") or today.get("source_id") or _record_value(row, "event_id") or ""
     ).strip()
@@ -201,11 +298,40 @@ def _evidence_from_row(
     conversation_id = str(source_ref.get("conversation_id") or "").strip() or None
     source_type = "conversation_summary" if conversation_id else str(today.get("source_type") or "canonical_event")
     confidence = today.get("confidence")
+    transcript_word_count_value = _first_nonnegative_number(
+        today.get("transcript_word_count"),
+        source_quality.get("transcript_word_count"),
+        structured.get("transcript_word_count"),
+        metadata.get("transcript_word_count"),
+    )
+    transcript_word_count = int(transcript_word_count_value) if transcript_word_count_value is not None else None
+    capture_duration_seconds = _first_nonnegative_number(
+        today.get("capture_duration_seconds"),
+        source_quality.get("capture_duration_seconds"),
+        source_quality.get("duration_seconds"),
+        structured.get("duration_seconds"),
+        metadata.get("duration_seconds"),
+    )
+    source_text_meaningful = source_text_is_meaningful(title, summary)
+    if adapter == "omi-enriched-conversation":
+        transcript_segments = metadata.get("transcript_segments")
+        summary_versions = metadata.get("summary_versions")
+        source_text_meaningful = source_text_meaningful and _has_grounded_content_provenance(
+            today,
+            source_version_id,
+            structured=structured,
+            transcript_segments=(transcript_segments if isinstance(transcript_segments, list) else []),
+            summary_versions=(summary_versions if isinstance(summary_versions, list) else []),
+            conversation_id=conversation_id,
+            expected_uid=(str(expected_owner_uid) if expected_owner_uid else None),
+        )
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
-        confidence = 0.9 if adapter == "omi-enriched-conversation" and source_version_id else 0.0
+        confidence = (
+            0.82 if adapter == "omi-enriched-conversation" and source_version_id and source_text_meaningful else 0.0
+        )
     privacy_scope = str(_record_value(row, "privacy_scope") or "user_private")
     scan_policy = str(_record_value(row, "scan_policy") or "none")
-    meaningful = _strict_bool(today, "meaningful", len(summary) >= 12 or len(title) >= 12)
+    meaningful = source_text_meaningful and _strict_bool(today, "meaningful", source_text_meaningful)
     confirmed = _strict_bool(today, "confirmed", False)
     positive_or_neutral = _strict_bool(today, "positive_or_neutral", True)
     superseded = _strict_bool(today, "superseded", False)
@@ -239,6 +365,8 @@ def _evidence_from_row(
                 "tags": tags,
                 "person_keys": person_keys,
                 "topic_keys": topic_keys,
+                "transcript_word_count": transcript_word_count,
+                "capture_duration_seconds": capture_duration_seconds,
             }
         ),
         privacy_scope=privacy_scope,
@@ -258,6 +386,8 @@ def _evidence_from_row(
         tags=tags,
         person_keys=person_keys,
         topic_keys=topic_keys,
+        transcript_word_count=transcript_word_count,
+        capture_duration_seconds=capture_duration_seconds,
     )
 
 
@@ -312,6 +442,7 @@ async def _sources_are_current(queryable: Any, card: TodayCardRecord) -> bool:
                 row,
                 previous_day_start=previous_day_start,
                 previous_day_end=previous_day_end,
+                expected_uid=card.uid,
             )
         except (TypeError, ValueError):
             return False
@@ -379,6 +510,7 @@ async def _load_evidence(
                 row,
                 previous_day_start=previous_day_start,
                 previous_day_end=previous_day_end,
+                expected_uid=uid,
             )
         except (TypeError, ValueError):
             logger.warning("[FLOW:TODAY-CARD] malformed canonical evidence skipped")

@@ -1,7 +1,33 @@
 import json
+import hashlib
 from datetime import datetime, timezone
 
-from utils.ella.canonical_omi import build_omi_canonical_event
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    build_omi_canonical_event,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
+
+
+def _semantic_receipt(conversation, source_version_id, uid="uid-123"):
+    return {
+        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        "attester": TODAY_CARD_GROUNDING_ATTESTER,
+        "semantic_outcome": "supported",
+        "source_version_id": source_version_id,
+        "transcript_hash": transcript_grounding_hash(conversation["transcript_segments"]),
+        "summary_hash": summary_grounding_hash(conversation["structured"]),
+        "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
+        "owner_hash": "sha256:" + hashlib.sha256(uid.encode("utf-8")).hexdigest(),
+        "conversation_id_hash": "sha256:" + hashlib.sha256(conversation["id"].encode("utf-8")).hexdigest(),
+        "runtime_interaction_id": "runtime-interaction-a",
+        "canonical_assistant_event_id": "canonical-assistant-a",
+        "verifier_runtime_interaction_id": "verifier-runtime-a",
+        "verifier_canonical_assistant_event_id": "verifier-assistant-a",
+    }
 
 
 def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
@@ -50,6 +76,77 @@ def test_build_omi_canonical_event_preserves_enriched_summary_and_transcript():
     assert event["metadata"]["active_summary_version_id"] == "obs-v2"
     assert event["metadata"]["transcript_segments"][0]["text"] == "Can I get the waffle?"
     assert event["metadata"]["trace_id"] == "trace-cafe"
+    grounding = event["metadata"]["today_card"]["grounding"]
+    assert grounding == {}
+
+
+def test_build_omi_canonical_event_emits_bound_semantic_grounding_provenance():
+    base = {
+        "id": "grounded-123",
+        "started_at": datetime(2026, 5, 7, 18, 56, 59, tzinfo=timezone.utc),
+        "finished_at": datetime(2026, 5, 7, 18, 57, 20, tzinfo=timezone.utc),
+        "structured": {"title": "A grounded visit", "overview": "A meaningful visit in the garden."},
+        "active_summary_version_id": "obs-v3",
+        "summary_versions": [
+            {
+                "id": "obs-v3",
+                "title": "A grounded visit",
+                "overview": "A meaningful visit in the garden.",
+                "source": "hermes_cloud",
+                "kind": "hermes_enriched",
+            }
+        ],
+    }
+    english = dict(base)
+    english["transcript_segments"] = [
+        {
+            "text": "We planted tomatoes together and planned another garden visit for next Sunday morning.",
+            "timestamp": datetime(2026, 5, 7, 18, 57, 12, tzinfo=timezone.utc),
+        }
+    ]
+    english["enrichment_state"] = {"today_card_grounding": _semantic_receipt(english, "obs-v3")}
+    japanese = dict(base)
+    japanese["id"] = "grounded-ja"
+    japanese["transcript_segments"] = [{"text": "今日は母と一緒に庭でトマトを植えて来週また会う約束をしました"}]
+    japanese["enrichment_state"] = {"today_card_grounding": _semantic_receipt(japanese, "obs-v3")}
+
+    english_event = build_omi_canonical_event("uid-123", english)
+    japanese_event = build_omi_canonical_event("uid-123", japanese)
+
+    english_grounding = english_event["metadata"]["today_card"]["grounding"]
+    japanese_grounding = japanese_event["metadata"]["today_card"]["grounding"]
+    assert english_grounding["semantic_outcome"] == "supported"
+    assert japanese_grounding["semantic_outcome"] == "supported"
+    assert english_grounding["source_version_id"] == "obs-v3"
+    assert japanese_grounding["source_version_id"] == "obs-v3"
+    assert english_grounding["transcript_hash"] == transcript_grounding_hash(
+        english_event["metadata"]["transcript_segments"]
+    )
+
+
+def test_build_omi_canonical_event_rejects_forged_or_stale_semantic_grounding():
+    conversation = {
+        "id": "grounded-stale",
+        "structured": {"title": "Garden visit", "overview": "We planted tomatoes in the garden."},
+        "active_summary_version_id": "summary-v2",
+        "summary_versions": [
+            {
+                "id": "summary-v2",
+                "title": "Garden visit",
+                "overview": "We planted tomatoes in the garden.",
+                "source": "hermes_cloud",
+                "kind": "hermes_enriched",
+            }
+        ],
+        "transcript_segments": [{"text": "We planted tomatoes in the garden after lunch."}],
+    }
+    receipt = _semantic_receipt(conversation, "summary-v2")
+    receipt["summary_hash"] = "sha256:" + ("0" * 64)
+    conversation["enrichment_state"] = {"today_card_grounding": receipt}
+
+    event = build_omi_canonical_event("uid-123", conversation)
+
+    assert event["metadata"]["today_card"]["grounding"] == {}
 
 
 def test_build_omi_canonical_event_json_normalizes_nested_timestamps():

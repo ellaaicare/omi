@@ -2,6 +2,8 @@ import asyncio
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from ella.services.today_card import (
     DeterministicTodayCardRenderer,
     TODAY_CARD_CONTRACT_VERSION,
@@ -16,6 +18,7 @@ from ella.services.today_card import (
     TodayCardState,
     TodayCardUserContext,
     deterministic_card_id,
+    evidence_is_safe,
     select_today_card_evidence,
     sha256_ref,
 )
@@ -126,6 +129,130 @@ def _materialize(repository, renderer=None):
             LOCAL_DATE,
         )
     )
+
+
+def test_low_value_fragment_and_meta_summary_are_never_safe_sources():
+    fragment = _source(
+        TodayCardKind.recap,
+        "fragment",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "A very short moment",
+            "summary": (
+                "This tiny recording caught only the word So before it ended. "
+                "There is not enough context to know what was being discussed."
+            ),
+        }
+    )
+    one_word = fragment.model_copy(update={"title": "So", "summary": "So"})
+    generic_title_one_word = fragment.model_copy(update={"title": "A captured moment", "summary": "So"})
+    short_transcript = _source(
+        TodayCardKind.recap,
+        "short-transcript",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(update={"transcript_word_count": 1})
+    short_capture = _source(
+        TodayCardKind.recap,
+        "short-capture",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(update={"capture_duration_seconds": 2.5})
+
+    assert evidence_is_safe(fragment) is False
+    assert evidence_is_safe(one_word) is False
+    assert evidence_is_safe(generic_title_one_word) is False
+    assert evidence_is_safe(short_transcript) is False
+    assert evidence_is_safe(short_capture) is False
+
+
+def test_meaningful_non_latin_is_safe_but_title_cannot_rescue_terse_body():
+    non_latin = _source(
+        TodayCardKind.recap,
+        "japanese-garden",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "庭の思い出",
+            "summary": "今日は母と庭でトマトを植えました",
+        }
+    )
+    title_rich = _source(
+        TodayCardKind.recap,
+        "title-rich",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "Alex and Priya planted tomatoes together",
+            "summary": "Garden",
+        }
+    )
+
+    assert evidence_is_safe(non_latin) is True
+    assert evidence_is_safe(title_rich) is False
+
+
+@pytest.mark.parametrize(
+    "junk_summary",
+    [
+        "The recording was too short to provide a useful summary.",
+        ("The recording lacked enough detail to summarize what happened. " "No useful context was available."),
+        ("The clip was inaudible and could not support a useful summary. " "Nothing meaningful could be recovered."),
+        "Almost no speech was captured to summarize what happened; no usable detail remained.",
+        ("The recording lacked enough detail to summarize what happened. " "No coherent account could be produced."),
+        "The recording was too short to summarize what happened. No one could tell what it meant.",
+        ("The clip was inaudible and could not support a useful summary. " "There was nothing useful to work with."),
+        ("The recording lacked enough detail to summarize what happened. " "No clear account could be produced."),
+        (
+            "The recording lacked enough detail to summarize what happened. "
+            "No intelligible meaning could be recovered."
+        ),
+        (
+            "Almost no speech was captured to summarize what happened. "
+            "The remaining words did not form a coherent thought."
+        ),
+        "The audio was mostly silence and could not be summarized.",
+        ("The recording was too short to summarize what happened. " "There was too little to work with."),
+        ("The recording was too short to summarize what happened. " "Only silence remained."),
+        ("The recording was too short to summarize what happened. " "What remained was unusable."),
+        ("The recording was too short to summarize what happened. " "The fragment offered zero usable context."),
+        ("The recording was too short to summarize what happened. " "The meaning remained unknown."),
+        ("The recording was too short to summarize what happened. " "A coherent account was impossible."),
+        ("The recording was too short to summarize what happened. " "The captured words were useless."),
+        ("The recording was too short to summarize what happened. " "The rest was silence."),
+        "The audio was entirely silent and could not be summarized.",
+        "The clip contained no speech and could not be summarized.",
+        "The recording was pure static and could not be summarized.",
+        "The audio was dead quiet and impossible to summarize.",
+        "The clip had zero words and could not be summarized.",
+        "録音が短すぎて内容を要約できませんでした。",
+        ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
+        ("The recording was too short to summarize what happened. " "Everything was lost."),
+        ("The recording was too short to summarize what happened. " "It did not provide any new information."),
+        ("The recording was too short to summarize what happened. " "We got zilch."),
+        ("The recording was too short to summarize what happened. " "Everyone heard only static."),
+        ("The recording was too short to summarize what happened. " "内容は不明でした。"),
+    ],
+)
+def test_low_value_summary_never_reaches_rendered_card_even_with_substantive_title(junk_summary):
+    evidence = _source(
+        TodayCardKind.recap,
+        "title-cannot-rescue-junk",
+        occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+    ).model_copy(
+        update={
+            "title": "Alex and Priya planted tomatoes together",
+            "summary": junk_summary,
+        }
+    )
+
+    result = _materialize(InMemoryTodayCardRepository([evidence]))
+    serialized = result.card.model_dump_json()
+
+    assert evidence_is_safe(evidence) is False
+    assert result.card.state == TodayCardState.degraded
+    assert result.card.reason_code == "no_safe_source"
+    assert result.card.content is None
+    assert junk_summary not in serialized
 
 
 def test_active_day_materializes_truthful_recap_before_older_memory():

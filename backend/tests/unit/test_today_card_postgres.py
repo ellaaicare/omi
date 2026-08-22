@@ -1,5 +1,6 @@
 import asyncio
 import ast
+import hashlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -10,23 +11,73 @@ from ella.routers import canonical_events
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services import today_card_postgres
 from ella.services.today_card import (
+    DeterministicTodayCardRenderer,
+    TodayCardAvoidance,
     TodayCardContent,
     TodayCardKind,
+    TodayCardMaterializationClaim,
+    TodayCardMaterializer,
     TodayCardRecord,
     TodayCardSourceRef,
     TodayCardState,
+    TodayCardUserContext,
+    deterministic_card_id,
     sha256_ref,
     today_card_source_pack,
 )
 from ella.services.today_card_postgres import PostgresTodayCardRepository
+from utils.ella.canonical_omi import (
+    TODAY_CARD_GROUNDING_ATTESTER,
+    TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+    summary_grounding_hash,
+    transcript_grounding_hash,
+)
 
 NOW = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
 
 
-def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none"):
-    return {
+def _attest_row(row):
+    row.setdefault("uid", "uid-a")
+    metadata = row["metadata"]
+    source_version_id = row["source_ref"]["active_summary_version_id"]
+    metadata["summary_versions"] = [
+        {
+            "id": source_version_id,
+            "title": metadata["structured"].get("title") or "",
+            "overview": metadata["structured"].get("overview") or "",
+            "source": "hermes_cloud",
+            "kind": "hermes_enriched",
+        }
+    ]
+    transcript_segments = metadata.setdefault(
+        "transcript_segments",
+        [{"text": "We planted tomatoes together and planned another garden visit after lunch."}],
+    )
+    metadata.setdefault("today_card", {})["grounding"] = {
+        "contract_version": TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+        "attester": TODAY_CARD_GROUNDING_ATTESTER,
+        "semantic_outcome": "supported",
+        "source_version_id": source_version_id,
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
+        "summary_hash": summary_grounding_hash(metadata["structured"]),
+        "supporting_quote_hashes": ["sha256:" + ("a" * 64)],
+        "policy_version": "hermes-cloud-grounding-verifier-v1",
+        "owner_hash": "sha256:" + hashlib.sha256(row["uid"].encode("utf-8")).hexdigest(),
+        "conversation_id_hash": "sha256:"
+        + hashlib.sha256(row["source_ref"]["conversation_id"].encode("utf-8")).hexdigest(),
+        "runtime_interaction_id": "runtime-interaction-a",
+        "canonical_assistant_event_id": "canonical-assistant-a",
+        "verifier_runtime_interaction_id": "verifier-runtime-a",
+        "verifier_canonical_assistant_event_id": "verifier-assistant-a",
+    }
+    return row
+
+
+def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_policy="none", grounded=True):
+    row = {
+        "uid": "uid-a",
         "event_id": "omi:conversation-a:summary",
-        "text": "Grounded body.",
+        "text": "Grounded body with a useful remembered detail.",
         "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
         "privacy_scope": privacy_scope,
         "scan_policy": scan_policy,
@@ -36,9 +87,14 @@ def _summary_row(version="summary-v2", *, privacy_scope="user_private", scan_pol
         },
         "metadata": {
             "adapter": "omi-enriched-conversation",
-            "structured": {"title": "Grounded", "overview": "Grounded body."},
+            "structured": {"title": "Grounded", "overview": "Grounded body with a useful remembered detail."},
+            "transcript_segments": [
+                {"text": "We planted tomatoes together and planned another garden visit after lunch."}
+            ],
+            "today_card": {},
         },
     }
+    return _attest_row(row) if grounded else row
 
 
 def _card(version="summary-v2"):
@@ -60,8 +116,8 @@ def _card(version="summary-v2"):
         content=TodayCardContent(
             eyebrow="A NOTE FROM YESTERDAY",
             headline="Grounded",
-            body="Grounded body.",
-            spoken_text="Grounded. Grounded body.",
+            body="Grounded body with a useful remembered detail.",
+            spoken_text="Grounded. Grounded body with a useful remembered detail.",
             sentence_source_ids=["conversation-a"],
         ),
         source_refs=[source],
@@ -87,6 +143,53 @@ class Pool:
 
     async def fetch(self, *_args):
         return []
+
+
+class MaterializationRepository:
+    def __init__(self, evidence):
+        self.evidence = [evidence]
+        self.current = None
+
+    async def get_user_context(self, uid):
+        return TodayCardUserContext(uid=uid, timezone="UTC", canonical_event_count=1)
+
+    async def get_current(self, _uid, _local_date):
+        return self.current
+
+    async def claim_materialization(self, *, uid, local_date, timezone_name, now, force_regenerate):
+        del force_regenerate
+        self.current = TodayCardRecord(
+            card_id=deterministic_card_id(uid, local_date),
+            uid=uid,
+            local_date=local_date,
+            timezone=timezone_name,
+            version=1,
+            state=TodayCardState.preparing,
+            updated_at=now,
+        )
+        return TodayCardMaterializationClaim(card=self.current, acquired=True)
+
+    async def load_evidence(self, **_kwargs):
+        return self.evidence
+
+    async def load_avoidance(self, _uid, _local_date):
+        return TodayCardAvoidance()
+
+    async def sources_are_current(self, _card):
+        return True
+
+    async def save_materialized(self, card):
+        self.current = card
+        return card
+
+
+def _materialize_evidence(evidence):
+    return asyncio.run(
+        TodayCardMaterializer(
+            MaterializationRepository(evidence),
+            clock=lambda: NOW,
+        ).materialize("uid-a", date(2026, 8, 1))
+    ).card
 
 
 def test_sources_are_current_requires_exact_owner_conversation_and_active_version():
@@ -150,21 +253,27 @@ def test_source_less_card_becomes_stale_when_delayed_canonical_evidence_arrives(
         async def fetch(self, query, *_args):
             assert "ella_today_card_source_tombstones" in query
             return [
-                {
-                    "event_id": "omi:conversation-late:summary",
-                    "text": "A delayed but eligible source.",
-                    "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
-                    "privacy_scope": "user_private",
-                    "scan_policy": "none",
-                    "source_ref": {
-                        "conversation_id": "conversation-late",
-                        "active_summary_version_id": "summary-v1",
-                    },
-                    "metadata": {
-                        "adapter": "omi-enriched-conversation",
-                        "structured": {"title": "Late source", "overview": "A delayed but eligible source."},
-                    },
-                }
+                _attest_row(
+                    {
+                        "event_id": "omi:conversation-late:summary",
+                        "text": "A delayed but eligible source.",
+                        "started_at": datetime(2026, 7, 31, 18, tzinfo=timezone.utc),
+                        "privacy_scope": "user_private",
+                        "scan_policy": "none",
+                        "source_ref": {
+                            "conversation_id": "conversation-late",
+                            "active_summary_version_id": "summary-v1",
+                        },
+                        "metadata": {
+                            "adapter": "omi-enriched-conversation",
+                            "structured": {"title": "Late source", "overview": "A delayed but eligible source."},
+                            "transcript_segments": [
+                                {"text": "A delayed but eligible source arrived after processing completed."}
+                            ],
+                            "today_card": {},
+                        },
+                    }
+                )
             ]
 
     card = _card().model_copy(
@@ -590,3 +699,647 @@ def test_internal_assessment_risk_and_string_booleans_fail_closed():
 
     assert evidence[0].confirmed is False
     assert "safety" in evidence[0].tags
+
+
+def test_enriched_adapter_does_not_promote_missing_context_meta_summary():
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A very short moment",
+        "overview": (
+            "This tiny recording caught only the word So before it ended. "
+            "There is not enough context to know what was being discussed."
+        ),
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The recording was too short to provide a useful summary of what happened.",
+        "The recording ended before enough speech was captured to create a useful summary.",
+        "There was too little audio to determine what the person meant.",
+    ],
+)
+def test_enriched_adapter_rejects_alternative_insufficient_capture_commentary(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count is None
+    assert evidence.capture_duration_seconds is None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The audio did not contain enough information to create a summary.",
+        "The clip was brief and could not support a useful summary.",
+        "There was insufficient audio for a coherent recap.",
+        "The recording lacked enough detail to summarize what happened.",
+        "There were too few words in the clip to tell what happened.",
+        "The recording ended prematurely and could not support a useful summary.",
+        "The audio was inaudible and could not support a useful summary.",
+        "Almost no speech was captured to summarize what happened.",
+    ],
+)
+def test_enriched_adapter_rejects_structural_insufficiency_commentary(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count is None
+    assert evidence.capture_duration_seconds is None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_enriched_adapter_rejects_terse_summary_despite_substantive_title_and_provenance():
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "Alex and Priya planted tomatoes together",
+        "overview": "Garden",
+    }
+    _attest_row(row)
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The audio was too short for the story, so we discussed what it meant.",
+        "The recording was too short, yet it was useful for understanding the song.",
+        "They discussed a recording and agreed there was not enough evidence to understand the decision.",
+    ],
+)
+def test_enriched_adapter_keeps_meaningful_discussion_of_recordings(summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A thoughtful conversation",
+        "overview": summary,
+    }
+    _attest_row(row)
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count is None
+    assert evidence.capture_duration_seconds is None
+    assert evidence.meaningful is True
+    assert evidence.confidence == 0.82
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        (
+            "The recording was too short to summarize the whole documentary, "
+            "so everyone chose the missing scenes to film next."
+        ),
+        "The recording was too short to summarize the documentary but everyone chose the missing scenes to film next.",
+        "The recording was too short to summarize the documentary: everyone chose the missing scenes to film next.",
+        "The clip was brief and hard to summarize — we planned next week's episode anyway.",
+        "The recording was too short to summarize the documentary, and everyone chose the missing scenes to film next.",
+        "The recording was too short to summarize the documentary, or everyone could plan a second filming day.",
+        (
+            "Although the recording was too short to summarize the documentary, "
+            "everyone planned a second filming day."
+        ),
+        "The recording was too short to summarize the documentary while everyone kept editing the final scene.",
+        "The recording was too short to summarize the documentary\nEveryone planned a second filming day.",
+        (
+            "The recording was too short to summarize the documentary, but the hosts wrote a summary of Maria's "
+            "neighborhood garden plan."
+        ),
+        (
+            "The recording was too short to summarize the documentary, but Maria did not cancel the neighborhood "
+            "screening."
+        ),
+        ("The recording was too short to summarize the podcast, but the hosts were not discouraged."),
+        (
+            "The recording was too short to summarize the documentary, but Maria continued without delaying the "
+            "neighborhood screening."
+        ),
+    ],
+)
+def test_enriched_adapter_rejects_source_commentary_without_structured_content_provenance(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        ("The recording lacked enough detail to summarize what happened. " "No useful context was available."),
+        ("The clip was inaudible and could not support a useful summary. " "Nothing meaningful could be recovered."),
+        "Almost no speech was captured to summarize what happened; no usable detail remained.",
+        ("The recording lacked enough detail to summarize what happened. " "No coherent account could be produced."),
+        "The recording was too short to summarize what happened. No one could tell what it meant.",
+        ("The clip was inaudible and could not support a useful summary. " "There was nothing useful to work with."),
+        ("The recording lacked enough detail to summarize what happened. " "No clear account could be produced."),
+        (
+            "The recording lacked enough detail to summarize what happened. "
+            "No intelligible meaning could be recovered."
+        ),
+        (
+            "Almost no speech was captured to summarize what happened. "
+            "The remaining words did not form a coherent thought."
+        ),
+        "The audio was mostly silence and could not be summarized.",
+        ("The recording was too short to summarize what happened. " "There was too little to work with."),
+        ("The recording was too short to summarize what happened. " "Only silence remained."),
+        ("The recording was too short to summarize what happened. " "What remained was unusable."),
+        ("The recording was too short to summarize what happened. " "The fragment offered zero usable context."),
+        ("The recording was too short to summarize what happened. " "The meaning remained unknown."),
+        ("The recording was too short to summarize what happened. " "A coherent account was impossible."),
+        ("The recording was too short to summarize what happened. " "The captured words were useless."),
+        ("The recording was too short to summarize what happened. " "The rest was silence."),
+        "The audio was entirely silent and could not be summarized.",
+        "The clip contained no speech and could not be summarized.",
+        "The recording was pure static and could not be summarized.",
+        "The audio was dead quiet and impossible to summarize.",
+        "The clip had zero words and could not be summarized.",
+        "録音が短すぎて内容を要約できませんでした。",
+        ("The recording was too short to summarize what happened. " "The fragment conveyed zilch."),
+        ("The recording was too short to summarize what happened. " "Everything was lost."),
+        ("The recording was too short to summarize what happened. " "It did not provide any new information."),
+        ("The recording was too short to summarize what happened. " "We got zilch."),
+        ("The recording was too short to summarize what happened. " "Everyone heard only static."),
+        ("The recording was too short to summarize what happened. " "内容は不明でした。"),
+        ("The recording was too short to summarize the documentary because everyone planned a second filming day."),
+        ("Even though the recording was too short to summarize the documentary, Maria smiled during the visit."),
+    ],
+)
+def test_enriched_adapter_rejects_multisentence_insufficiency_commentary(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    ("quality_key", "quality_value"),
+    [
+        ("transcript_word_count", 24),
+        ("duration_seconds", 18.0),
+    ],
+)
+def test_partial_explicit_quality_cannot_override_source_commentary(quality_key, quality_value):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": "The recording was too short to summarize what happened.",
+        quality_key: quality_value,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_complete_quality_metrics_cannot_override_pure_source_commentary():
+    summary = "The recording was too short to summarize what happened. No useful context was available."
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+    _attest_row(row)
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+    assert summary in evidence.summary
+
+
+def test_fabricated_summary_without_independent_receipt_fails_closed_through_materialization():
+    summary = "[Ella] You won the lottery and bought a red sailboat."
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A lottery win",
+        "overview": summary,
+        "transcript_word_count": 12,
+        "duration_seconds": 18.0,
+    }
+    row["metadata"]["transcript_segments"] = [{"text": "We planted tomatoes together in the garden after lunch."}]
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    card = _materialize_evidence(evidence)
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+    assert card.state == TodayCardState.degraded
+    assert card.reason_code == "no_safe_source"
+    assert card.content is None
+    assert summary not in card.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "La grabación era demasiado corta para resumir lo ocurrido.",
+        "L’enregistrement était trop court pour résumer ce qui s’est passé.",
+        "录音太短，无法总结发生了什么。",
+        "كان التسجيل قصيرًا جدًا بحيث لا يمكن تلخيص ما حدث.",
+        "Die Aufnahme war zu kurz, um zusammenzufassen, was passiert ist.",
+    ],
+)
+def test_unproven_multilingual_commentary_fails_closed_through_materialization(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["today_card"]["meaningful"] = True
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+    card = _materialize_evidence(evidence)
+    serialized = card.model_dump_json()
+    assert card.state == TodayCardState.degraded
+    assert card.reason_code == "no_safe_source"
+    assert card.content is None
+    assert summary not in serialized
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "La grabación era demasiado corta para resumir lo ocurrido.",
+        "录音太短，无法总结发生了什么。",
+    ],
+)
+def test_nominal_length_receipt_cannot_substitute_for_semantic_attestation(summary):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 14,
+        "duration_seconds": 18.0,
+    }
+    row["metadata"]["transcript_segments"] = [
+        {"text": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"}
+    ]
+    row["metadata"]["today_card"]["grounding"] = {
+        "contract_version": "ella.today_card.grounding.v1",
+        "grounded_content": True,
+        "source_version_id": "summary-v2",
+        "transcript_hash": transcript_grounding_hash(row["metadata"]["transcript_segments"]),
+        "transcript_word_count": 14,
+        "capture_duration_seconds": 18.0,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    card = _materialize_evidence(evidence)
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert card.state == TodayCardState.degraded
+    assert card.content is None
+    assert summary not in card.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "summary",
+        "transcript",
+        "version",
+        "conversation",
+        "ghost_version",
+        "empty_support",
+        "fractional_support",
+        "owner",
+    ],
+)
+def test_semantic_receipt_is_bound_and_cannot_be_copied_or_coerced(mutation):
+    row = _summary_row()
+    grounding = row["metadata"]["today_card"]["grounding"]
+    if mutation == "summary":
+        row["metadata"]["structured"][
+            "overview"
+        ] = "A copied receipt now covers an unrelated lottery and sailboat story."
+    elif mutation == "transcript":
+        row["metadata"]["transcript_segments"][0]["text"] = "A different transcript replaced the attested source."
+    elif mutation == "version":
+        row["source_ref"]["active_summary_version_id"] = "summary-v3"
+    elif mutation == "conversation":
+        row["source_ref"]["conversation_id"] = "conversation-b"
+    elif mutation == "ghost_version":
+        row["metadata"]["summary_versions"] = []
+    elif mutation == "empty_support":
+        grounding["supporting_quote_hashes"] = []
+    elif mutation == "fractional_support":
+        grounding["supporting_quote_hashes"] = [12.1]
+    elif mutation == "owner":
+        grounding["owner_hash"] = "sha256:" + hashlib.sha256(b"uid-b").hexdigest()
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    card = _materialize_evidence(evidence)
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert card.state == TodayCardState.degraded
+    assert card.content is None
+
+
+@pytest.mark.parametrize(
+    ("title", "summary"),
+    [
+        ("庭の思い出", "今日は母と庭でトマトを植えました。"),
+        ("Una tarde tranquila", "Plantamos tomates juntos en el jardín."),
+        ("زيارة عائلية", "تحدثنا وضحكنا معًا في الحديقة."),
+    ],
+)
+def test_structurally_grounded_unicode_content_remains_eligible(title, summary):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": title,
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+    _attest_row(row)
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is True
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+    card = _materialize_evidence(evidence)
+    assert card.state == TodayCardState.ready
+    assert card.content is not None
+    assert card.content.body == summary
+    assert summary in card.content.spoken_text
+
+
+@pytest.mark.parametrize(
+    "grounding",
+    [
+        None,
+        {},
+        {"contract_version": "ella.today_card.grounding.v0", "grounded_content": True},
+        {
+            "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+            "grounded_content": False,
+            "source_version_id": "summary-v2",
+        },
+        {
+            "contract_version": today_card_postgres.TODAY_CARD_GROUNDING_CONTRACT_VERSION,
+            "grounded_content": True,
+            "source_version_id": "wrong-version",
+        },
+    ],
+)
+def test_legacy_adapter_requires_exact_grounding_provenance(grounding):
+    row = _summary_row(grounded=False)
+    row["metadata"]["today_card"] = {"grounding": grounding}
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize("with_quality", [False, True])
+def test_enriched_adapter_rejects_one_word_body_despite_generic_title(with_quality):
+    row = _summary_row(grounded=False)
+    structured = {
+        "title": "A captured moment",
+        "overview": "So",
+    }
+    if with_quality:
+        structured.update({"transcript_word_count": 24, "duration_seconds": 18.0})
+    row["metadata"]["structured"] = structured
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (
+            "Everyone chose the missing documentary scenes,\nand planned a second filming day.",
+            "Everyone chose the missing documentary scenes, and planned a second filming day.",
+        ),
+        (
+            "Maria described the neighborhood garden —\neveryone planned another visit.",
+            "Maria described the neighborhood garden — everyone planned another visit.",
+        ),
+    ],
+)
+def test_enriched_adapter_preserves_multiline_punctuation_in_rendered_output(summary, expected):
+    row = _summary_row()
+    row["metadata"]["structured"] = {
+        "title": "A captured moment",
+        "overview": summary,
+        "transcript_word_count": 24,
+        "duration_seconds": 18.0,
+    }
+    _attest_row(row)
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.summary == expected
+    assert today_card_postgres.evidence_is_safe(evidence) is True
+    content = asyncio.run(
+        DeterministicTodayCardRenderer().render(
+            selected=evidence,
+            local_date=date(2026, 8, 1),
+            timezone_name="UTC",
+            private_consolidation={},
+        )
+    )
+    serialized = content.model_dump_json()
+    assert content.body == expected
+    assert content.spoken_text.endswith(expected)
+    assert ",." not in serialized
+    assert "—." not in serialized
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Alex planted tomatoes today",
+        "Morning tea with Margaret",
+        "母と庭でトマトを植えた朝",
+    ],
+)
+def test_enriched_adapter_rejects_low_value_summary_despite_substantive_title(title):
+    row = _summary_row(grounded=False)
+    row["metadata"]["structured"] = {
+        "title": title,
+        "overview": "The recording was too short to provide a useful summary.",
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.meaningful is False
+    assert evidence.confidence == 0.0
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_enriched_adapter_honors_explicit_capture_quality_metrics():
+    row = _summary_row()
+    row["metadata"]["source_quality"] = {
+        "transcript_word_count": 4,
+        "capture_duration_seconds": 3.5,
+    }
+
+    evidence = today_card_postgres._evidence_from_row(
+        row,
+        previous_day_start=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        previous_day_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence.transcript_word_count == 4
+    assert evidence.capture_duration_seconds == 3.5
+    assert today_card_postgres.evidence_is_safe(evidence) is False
+
+
+def test_capture_quality_metrics_ignore_nonfinite_values():
+    assert today_card_postgres._first_nonnegative_number(float("nan"), float("inf"), 9) == 9
+    assert today_card_postgres._first_nonnegative_number(float("-inf"), -1) is None

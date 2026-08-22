@@ -3927,6 +3927,44 @@ async def unified_search(request: Request):
     elif not _validate_agent_uid(agent_id, uid):
         raise HTTPException(status_code=403, detail="agent_id does not belong to this uid")
 
+    resolved_session_scope = await _resolve_principal_session_scope(principal)
+    if resolved_session_scope:
+        scope_kind = str(resolved_session_scope["kind"])
+        scope_metadata = {
+            "provenance": "voice_session_scope",
+            "scope_kind": scope_kind,
+            "conversation_id": resolved_session_scope.get("conversation_id") or "",
+            "active_summary_version_id": resolved_session_scope.get("active_summary_version_id") or "",
+            "card_id": resolved_session_scope.get("card_id") or "",
+            "card_version": resolved_session_scope.get("card_version"),
+            "card_evidence_hash": resolved_session_scope.get("card_evidence_hash") or "",
+        }
+        result = {
+            "source": "session_scope",
+            "title": str(resolved_session_scope.get("title") or "Selected context")[:300],
+            "content": str(resolved_session_scope.get("overview") or "")[:1600],
+            "timestamp": str(resolved_session_scope.get("occurred_at") or ""),
+            "score": 1000,
+            "metadata": scope_metadata,
+        }
+        requested_set = set(requested_sources or [])
+        logger.info(
+            "[FLOW:UNIFIED-SEARCH] uid=%s role=%s scope=%s results=1 denied_global=%s",
+            uid,
+            agent_role,
+            scope_kind,
+            sorted(requested_set),
+        )
+        return {
+            "results": [result],
+            "sources_searched": ["session_scope"],
+            "sources_denied": sorted(requested_set),
+            "provenance": {"voice_session_scope": 1},
+            "total_results": 1,
+            "query": query,
+            "scope_bound": True,
+        }
+
     _start = time.time()
     honcho_target = None
     honcho_target_reason = ""

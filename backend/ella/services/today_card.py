@@ -20,6 +20,10 @@ TODAY_CARD_MATERIALIZATION_HOUR = 3
 TODAY_CARD_SOURCE_COOLDOWN_DAYS = 30
 TODAY_CARD_TOPIC_COOLDOWN_DAYS = 14
 TODAY_CARD_MIN_CONFIDENCE = 0.75
+TODAY_CARD_MIN_SOURCE_WORDS = 4
+TODAY_CARD_MIN_TRANSCRIPT_WORDS = 12
+TODAY_CARD_MIN_TRANSCRIPT_NON_ASCII_ALPHANUMERIC = 12
+TODAY_CARD_MIN_CAPTURE_SECONDS = 8.0
 
 _DENIED_PRIVACY_SCOPES = {
     "caregiver_private",
@@ -42,6 +46,44 @@ _DENIED_TAGS = {
     "self_harm",
 }
 _WHITESPACE = re.compile(r"\s+")
+_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
+_LOW_VALUE_SOURCE_LIMITATION = (
+    re.compile(
+        r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,48}\b"
+        r"(?:brief|caught\s+only|captured\s+only|contains?\s+only|"
+        r"did\s+not\s+(?:capture|contain|include|provide)\s+enough|ended?\s+(?:before\s+enough|prematurely)|"
+        r"inaudible|lacks?|lacked\s+(?:enough|sufficient)|mostly\s+silence|too\s+(?:few|little|short)|unusable)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:almost\s+no|brief|inaudible|insufficient|too\s+(?:few|little|short)|unusable)\b.{0,24}\b"
+        r"(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:not|isn't|wasn't|is\s+not|was\s+not)\s+enough\b.{0,24}\b"
+        r"(?:audio|context|detail|information|speech)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:audio|captures?|clips?|recordings?|transcripts?|speech)\b.{0,32}\b(?:"
+        r"(?:entirely|mostly)\s+(?:silent|silence)|"
+        r"(?:dead\s+quiet|pure\s+static)|"
+        r"(?:captured|contained|had|included)\s+(?:no|zero)\s+(?:audio|speech|words?))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:録音|音声|クリップ|文字起こし).{0,24}(?:短すぎ|短い|不十分|無音|雑音|言葉がない|音声がない)",
+        re.IGNORECASE,
+    ),
+)
+_LOW_VALUE_SUMMARY_OUTCOME = re.compile(
+    r"\b(?:recap|summar(?:y|iz(?:e|ed|ing)|is(?:e|ed|ing))|to\s+(?:determine|infer|know|tell|understand)|"
+    r"(?:cannot|can't|could\s+not|couldn't)\s+(?:determine|infer|know|tell|understand)|"
+    r"only\s+(?:the\s+)?(?:fragment|word|words))\b|"
+    r"(?:要約|判断|推測|理解).{0,12}(?:でき(?:な|ません|ず)|不能|困難)",
+    re.IGNORECASE,
+)
 
 
 class TodayCardState(str, Enum):
@@ -89,6 +131,8 @@ class TodayCardEvidence(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=50)
     person_keys: list[str] = Field(default_factory=list, max_length=50)
     topic_keys: list[str] = Field(default_factory=list, max_length=50)
+    transcript_word_count: int | None = Field(default=None, ge=0)
+    capture_duration_seconds: float | None = Field(default=None, ge=0.0)
 
     @field_validator("title", "summary")
     @classmethod
@@ -227,6 +271,38 @@ def materialization_window(local_date: date, timezone_name: str) -> tuple[dateti
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
+def _text_has_substance(text: str) -> bool:
+    words = _WORD.findall(text)
+    if len(words) >= TODAY_CARD_MIN_SOURCE_WORDS and len({word.casefold() for word in words}) >= 3:
+        return True
+
+    alphanumeric = [character.casefold() for character in text if character.isalnum()]
+    non_ascii_alphanumeric = [character for character in alphanumeric if not character.isascii()]
+    return len(alphanumeric) >= 8 and len(non_ascii_alphanumeric) >= 4 and len(set(alphanumeric)) >= 3
+
+
+def _summary_is_low_value_commentary(summary: str) -> bool:
+    normalized = _WHITESPACE.sub(" ", summary).strip()
+    has_source_limitation = any(pattern.search(normalized) for pattern in _LOW_VALUE_SOURCE_LIMITATION)
+    has_summary_outcome = bool(_LOW_VALUE_SUMMARY_OUTCOME.search(normalized))
+    return has_source_limitation and has_summary_outcome
+
+
+def _summary_has_minimum_grounding(summary: str) -> bool:
+    return _text_has_substance(summary)
+
+
+def source_text_is_meaningful(title: str, summary: str) -> bool:
+    """Require a grounded body and reject source-quality commentary before render."""
+    normalized_title = _WHITESPACE.sub(" ", title).strip()
+    normalized_summary = _WHITESPACE.sub(" ", summary).strip()
+    if _summary_is_low_value_commentary(normalized_summary):
+        return False
+    if not _summary_has_minimum_grounding(normalized_summary):
+        return False
+    return _text_has_substance(f"{normalized_title} {normalized_summary}".strip())
+
+
 def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
     tags = {str(tag).strip().lower() for tag in evidence.tags}
     if evidence.source.privacy_scope.lower() in _DENIED_PRIVACY_SCOPES:
@@ -240,6 +316,15 @@ def evidence_is_safe(evidence: TodayCardEvidence) -> bool:
     if not evidence.positive_or_neutral:
         return False
     if not evidence.title and not evidence.summary:
+        return False
+    if not source_text_is_meaningful(evidence.title, evidence.summary):
+        return False
+    if evidence.transcript_word_count is not None and evidence.transcript_word_count < TODAY_CARD_MIN_TRANSCRIPT_WORDS:
+        return False
+    if (
+        evidence.capture_duration_seconds is not None
+        and evidence.capture_duration_seconds < TODAY_CARD_MIN_CAPTURE_SECONDS
+    ):
         return False
     return True
 

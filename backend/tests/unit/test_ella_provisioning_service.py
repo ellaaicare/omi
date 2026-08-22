@@ -1731,6 +1731,10 @@ if module_name == "ella.routers.callbacks":
     fake_notifications.send_notification = lambda *args, **kwargs: None
     sys.modules["utils.notifications"] = fake_notifications
     fake_canonical_omi = types.ModuleType("utils.ella.canonical_omi")
+    fake_canonical_omi.TODAY_CARD_GROUNDING_ATTESTER = "hermes_cloud_grounding_verifier"
+    fake_canonical_omi.TODAY_CARD_GROUNDING_CONTRACT_VERSION = "ella.today_card.semantic-grounding.v1"
+    fake_canonical_omi.summary_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
+    fake_canonical_omi.transcript_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
     fake_exact_auth = types.ModuleType("utils.ella.exact_firebase_auth")
