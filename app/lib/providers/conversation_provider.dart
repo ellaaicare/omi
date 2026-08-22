@@ -1197,10 +1197,15 @@ class ConversationProvider extends ChangeNotifier {
       final deleted = await _conversationDelete(conversation.id, lease);
       if (!deleted || generation != _operationGeneration || !lease.isCurrent) return false;
 
+      final removedConsumedConversation = conversations.any((item) => item.id == conversation.id) ||
+          processingConversations.any((item) => item.id == conversation.id);
       conversations.removeWhere((item) => item.id == conversation.id);
       searchedConversations.removeWhere((item) => item.id == conversation.id);
       processingConversations.removeWhere((item) => item.id == conversation.id);
       failedConversations.removeWhere((item) => item.id == conversation.id);
+      if (removedConsumedConversation && _conversationPageOffset > 0) {
+        _conversationPageOffset -= 1;
+      }
       _groupConversationsByDateWithoutNotify();
       final cachedConversations = SharedPreferencesUtil()
           .cachedConversations

@@ -442,6 +442,31 @@ void main() {
     expect(provider.hasMoreConversations, isFalse);
   });
 
+  test('confirmed deletion contracts the consumed offset before requesting the next page', () async {
+    final authority = _MutableAuthority('uid-a');
+    final initial = List.generate(50, (index) => conversation('memory-$index'));
+    final requestedOffsets = <int>[];
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsFetchCall: () async => ConversationsFetchResult.success(initial),
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+      conversationDeleteCall: (_, __) async => true,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        requestedOffsets.add(offset);
+        return ConversationsFetchResult.success([conversation('memory-older')]);
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.fetchConversations();
+    expect(provider.conversations, hasLength(50));
+    expect(await provider.deleteConversationPermanently(provider.conversations.first), isTrue);
+    await provider.getMoreConversationsFromServer();
+
+    expect(requestedOffsets, [49]);
+    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+  });
+
   test('account transition discards a delayed memory page and clears loading state', () async {
     final authority = _MutableAuthority('uid-a');
     final response = Completer<ConversationsFetchResult>();

@@ -88,7 +88,8 @@ void main() {
     )
       ..conversations = [memory('memory-1')]
       ..hasLoadedConversations = true
-      ..hasFreshConversations = true;
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -124,7 +125,8 @@ void main() {
     )
       ..conversations = [memory('memory-2')]
       ..hasLoadedConversations = true
-      ..hasFreshConversations = true;
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -146,7 +148,8 @@ void main() {
     )
       ..conversations = [memory('memory-delayed')]
       ..hasLoadedConversations = true
-      ..hasFreshConversations = true;
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -190,6 +193,30 @@ void main() {
 
     expect(pageRequests, 1);
     expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+    expect(provider.hasMoreConversations, isFalse);
+  });
+
+  testWidgets('a short first page automatically requests older memories without a scroll event', (tester) async {
+    final authority = _MutableAuthority('test-user');
+    var pageRequests = 0;
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        pageRequests += 1;
+        expect(offset, 1);
+        return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
+      },
+    )
+      ..conversations = [memory('memory-current')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+
+    expect(pageRequests, 1);
+    expect(provider.conversations.map((item) => item.id), containsAll(['memory-current', 'memory-older']));
     expect(provider.hasMoreConversations, isFalse);
   });
 

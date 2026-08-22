@@ -50,9 +50,18 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     if (shouldShowBackToRecent != _showBackToRecent && mounted) {
       setState(() => _showBackToRecent = shouldShowBackToRecent);
     }
-    if (position.extentAfter < 720 && mounted) {
-      unawaited(context.read<ConversationProvider>().getMoreConversationsFromServer());
+    _loadMoreIfNeeded(context.read<ConversationProvider>());
+  }
+
+  void _loadMoreIfNeeded(ConversationProvider provider) {
+    if (!mounted || !_scrollController.hasClients || !provider.hasLoadedConversations) return;
+    if (_scrollController.position.extentAfter < 720) {
+      unawaited(provider.getMoreConversationsFromServer());
     }
+  }
+
+  void _checkPaginationAfterLayout(ConversationProvider provider) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadMoreIfNeeded(provider));
   }
 
   void _scrollBackToRecent() {
@@ -68,6 +77,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final groups = _group(conversationProvider.visibleConversations);
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
+    _checkPaginationAfterLayout(conversationProvider);
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
