@@ -3192,6 +3192,12 @@ class AppLocalizationsKo extends AppLocalizations {
   String get chat => '채팅';
 
   @override
+  String get backToRecentMemories => 'Back to recent';
+
+  @override
+  String get couldntLoadMoreMemories => 'Ella couldn\'t load older memories.';
+
+  @override
   String get actions => '액션';
 
   @override

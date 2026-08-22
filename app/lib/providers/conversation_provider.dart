@@ -23,6 +23,8 @@ typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResu
 });
 
 typedef ConversationsFetchCall = Future<ConversationsFetchResult> Function();
+typedef ConversationsPageFetchCall = Future<ConversationsFetchResult> Function(
+    {required int limit, required int offset});
 typedef ConversationDeleteCall = Future<bool> Function(
   String conversationId,
   ExactAccountAuthorityVerifier exactAuthority,
@@ -49,6 +51,10 @@ class ConversationProvider extends ChangeNotifier {
   Map<DateTime, List<ServerConversation>> groupedConversations = {};
 
   bool isLoadingConversations = false;
+  bool isLoadingMoreConversations = false;
+  bool hasMoreConversations = true;
+  bool loadMoreConversationsFailed = false;
+  int _conversationPageOffset = 0;
   bool hasLoadedConversations = false;
   bool hasFreshConversations = false;
   bool isShowingCachedConversations = false;
@@ -88,6 +94,7 @@ class ConversationProvider extends ChangeNotifier {
   final AppReviewService _appReviewService = AppReviewService();
   final RetryConversationProcessingCall _retryConversationProcessing;
   final ConversationsFetchCall? _conversationsFetch;
+  final ConversationsPageFetchCall? _conversationsPageFetch;
   final ConversationsFetchCall? _failedConversationsFetch;
   final ConversationDeleteCall _conversationDelete;
   final ActiveAccountAuthorityProvider _activeAuthority;
@@ -100,6 +107,7 @@ class ConversationProvider extends ChangeNotifier {
   ConversationProvider({
     RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing,
     ConversationsFetchCall? conversationsFetchCall,
+    ConversationsPageFetchCall? conversationsPageFetchCall,
     ConversationsFetchCall? failedConversationsFetchCall,
     ConversationDeleteCall? conversationDeleteCall,
     ActiveAccountAuthorityProvider activeAuthority = WalOwnerAuthority.activeAccount,
@@ -107,6 +115,7 @@ class ConversationProvider extends ChangeNotifier {
     Duration failedConversationsFetchTimeout = const Duration(seconds: 8),
   })  : _retryConversationProcessing = retryConversationProcessingCall,
         _conversationsFetch = conversationsFetchCall,
+        _conversationsPageFetch = conversationsPageFetchCall,
         _failedConversationsFetch = failedConversationsFetchCall,
         _conversationDelete = conversationDeleteCall ??
             ((conversationId, authority) => deleteConversationServer(
@@ -141,6 +150,10 @@ class ConversationProvider extends ChangeNotifier {
     }
     _processingRetryPolls.clear();
     isLoadingConversations = false;
+    isLoadingMoreConversations = false;
+    hasMoreConversations = true;
+    loadMoreConversationsFailed = false;
+    _conversationPageOffset = 0;
     hasLoadedConversations = false;
     hasFreshConversations = false;
     isShowingCachedConversations = false;
@@ -505,6 +518,8 @@ class ConversationProvider extends ChangeNotifier {
       if (SharedPreferencesUtil().demoMode) {
         fetchedConversations = DemoFixtures.conversations();
         failedConversations = [];
+        hasMoreConversations = false;
+        _conversationPageOffset = fetchedConversations.length;
       } else {
         final conversationsFuture = _getConversationsFromServer();
         final failuresFuture = _getFailedConversationsFromServer();
@@ -524,6 +539,9 @@ class ConversationProvider extends ChangeNotifier {
           return;
         }
         fetchedConversations = result.conversations;
+        hasMoreConversations = fetchedConversations.length >= _conversationPageSize;
+        loadMoreConversationsFailed = false;
+        _conversationPageOffset = fetchedConversations.length;
       }
 
       if (requestId != _fetchRequestId) return;
@@ -916,37 +934,95 @@ class ConversationProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future getMoreConversationsFromServer() async {
+  static const int _conversationPageSize = 50;
+
+  Future<void> getMoreConversationsFromServer() async {
     if (SharedPreferencesUtil().demoMode) return;
-    if (conversations.length % 50 != 0) return;
-    if (isLoadingConversations) return;
-    setLoadingConversations(true);
+    if (!hasMoreConversations || isLoadingConversations || isLoadingMoreConversations) return;
+
+    var invalidated = false;
+    final lease = EllaAccountCommitBarrier.begin(
+      authorityProvider: _activeAuthority,
+      onInvalidated: () => invalidated = true,
+    );
+    if (lease == null) {
+      loadMoreConversationsFailed = true;
+      notifyListeners();
+      return;
+    }
+    final operationGeneration = _operationGeneration;
+    isLoadingMoreConversations = true;
+    loadMoreConversationsFailed = false;
+    if (_conversationPageOffset == 0) {
+      _conversationPageOffset = <String>{
+        ...conversations.map((conversation) => conversation.id),
+        ...processingConversations.map((conversation) => conversation.id),
+      }.length;
+    }
+    notifyListeners();
 
     // Date filter if selected
     final (startDate, endDate) = _getDateFilterRange();
-
     try {
-      final result = await getConversationsResult(
-        offset: conversations.length,
-        statuses: const [ConversationStatus.processing, ConversationStatus.completed],
-        includeDiscarded: showDiscardedConversations,
-        startDate: startDate,
-        endDate: endDate,
-        folderId: selectedFolderId,
-        starred: showStarredOnly ? true : null,
-      );
-      if (!result.succeeded) return;
+      final pageFetch = _conversationsPageFetch;
+      final result = pageFetch != null
+          ? await pageFetch(limit: _conversationPageSize, offset: _conversationPageOffset)
+          : await getConversationsResult(
+              limit: _conversationPageSize,
+              offset: _conversationPageOffset,
+              statuses: const [ConversationStatus.processing, ConversationStatus.completed],
+              includeDiscarded: showDiscardedConversations,
+              startDate: startDate,
+              endDate: endDate,
+              folderId: selectedFolderId,
+              starred: showStarredOnly ? true : null,
+              expectedAuthenticatedUid: lease.uid,
+              exactAuthority: lease,
+            );
+      if (invalidated || operationGeneration != _operationGeneration || !lease.isCurrent) return;
+      if (!result.succeeded) {
+        loadMoreConversationsFailed = true;
+        return;
+      }
       final newConversations = result.conversations;
+      _conversationPageOffset += newConversations.length;
+      hasMoreConversations = newConversations.length >= _conversationPageSize;
       failedConversations = _mergeRetryableFailures(
         failedConversations,
         newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
       );
-      conversations.addAll(newConversations);
+      final processingById = <String, ServerConversation>{
+        for (final conversation in processingConversations) conversation.id: conversation,
+      };
+      for (final conversation in newConversations.where((item) => item.status == ConversationStatus.processing)) {
+        processingById[conversation.id] = conversation;
+      }
+      processingConversations = processingById.values.toList();
+
+      final completedById = <String, ServerConversation>{
+        for (final conversation in conversations) conversation.id: conversation,
+      };
+      for (final conversation in newConversations.where((item) => item.status == ConversationStatus.completed)) {
+        completedById[conversation.id] = conversation;
+      }
+      conversations = completedById.values.toList();
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
+      if (selectedFolderId == null) SharedPreferencesUtil().cachedConversations = conversations;
       _groupConversationsByDateWithoutNotify();
+    } on ExactAccountAuthorityChangedException {
+      // Account transitions invalidate the page without displaying an error
+      // in the next account's UI.
+    } catch (error, stackTrace) {
+      if (!invalidated && operationGeneration == _operationGeneration && lease.isCurrent) {
+        loadMoreConversationsFailed = true;
+        Logger.error('Failed to load more memories: $error\n$stackTrace');
+      }
     } finally {
-      setLoadingConversations(false);
-      notifyListeners();
+      lease.close();
+      if (operationGeneration == _operationGeneration) {
+        isLoadingMoreConversations = false;
+        notifyListeners();
+      }
     }
   }
 

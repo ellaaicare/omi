@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -21,13 +23,41 @@ class EllaMemoriesPage extends StatefulWidget {
 
 class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   final Set<String> _deletingConversationIds = <String>{};
+  final ScrollController _scrollController = ScrollController();
+  bool _showBackToRecent = false;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_handleScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) context.read<ConversationProvider>().ensureFreshConversations();
     });
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_handleScroll)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _handleScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final shouldShowBackToRecent = position.pixels > 640;
+    if (shouldShowBackToRecent != _showBackToRecent && mounted) {
+      setState(() => _showBackToRecent = shouldShowBackToRecent);
+    }
+    if (position.extentAfter < 720 && mounted) {
+      unawaited(context.read<ConversationProvider>().getMoreConversationsFromServer());
+    }
+  }
+
+  void _scrollBackToRecent() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(0, duration: const Duration(milliseconds: 320), curve: Curves.easeOutCubic);
   }
 
   @override
@@ -44,12 +74,14 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: EllaColors.tealDeep),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text('Memories'),
+        title: Text(context.l10n.memories),
       ),
       body: RefreshIndicator(
         color: EllaColors.tealDeep,
         onRefresh: conversationProvider.getInitialConversations,
         child: ListView(
+          key: const Key('ella-memories-list'),
+          controller: _scrollController,
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
           children: [
             SizedBox(
@@ -106,17 +138,56 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                 const SizedBox(height: 16),
               ],
             if (!loading && groups.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 80),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 80),
                 child: Text(
-                  'Your memories will appear here. 🪽',
+                  context.l10n.createYourFirstMemory,
                   textAlign: TextAlign.center,
                   style: EllaTextStyles.body,
+                ),
+              ),
+            if (conversationProvider.isLoadingMoreConversations)
+              const Padding(
+                key: Key('memories-loading-more'),
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                  ),
+                ),
+              )
+            else if (conversationProvider.loadMoreConversationsFailed)
+              Padding(
+                key: const Key('memories-load-more-failed'),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Column(
+                  children: [
+                    Text(context.l10n.couldntLoadMoreMemories, style: EllaTextStyles.secondary),
+                    const SizedBox(height: 4),
+                    TextButton.icon(
+                      key: const Key('retry-load-more-memories'),
+                      onPressed: conversationProvider.getMoreConversationsFromServer,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: Text(context.l10n.tryAgain),
+                    ),
+                  ],
                 ),
               ),
           ],
         ),
       ),
+      floatingActionButton: _showBackToRecent
+          ? FloatingActionButton.extended(
+              key: const Key('back-to-recent-memories'),
+              onPressed: _scrollBackToRecent,
+              backgroundColor: EllaColors.tealDeep,
+              foregroundColor: EllaColors.paper,
+              icon: const Icon(Icons.arrow_upward_rounded),
+              label: Text(context.l10n.backToRecentMemories),
+            )
+          : null,
     );
   }
 
@@ -165,14 +236,14 @@ class _LiveMemoryCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: 70),
-          child: const Padding(
-            padding: EdgeInsets.all(EllaSizes.cardPadding),
+          child: Padding(
+            padding: const EdgeInsets.all(EllaSizes.cardPadding),
             child: Row(
               children: [
-                EllaBreathingDot(live: true),
-                SizedBox(width: 16),
-                Expanded(child: Text('In progress…', style: EllaTextStyles.display)),
-                Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+                const EllaBreathingDot(live: true),
+                const SizedBox(width: 16),
+                Expanded(child: Text(context.l10n.inProgress, style: EllaTextStyles.display)),
+                const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
               ],
             ),
           ),

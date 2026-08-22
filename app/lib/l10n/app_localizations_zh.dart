@@ -3187,6 +3187,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get chat => '聊天';
 
   @override
+  String get backToRecentMemories => 'Back to recent';
+
+  @override
+  String get couldntLoadMoreMemories => 'Ella couldn\'t load older memories.';
+
+  @override
   String get actions => '操作';
 
   @override

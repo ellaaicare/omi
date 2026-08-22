@@ -358,4 +358,112 @@ void main() {
     expect(provider.isLoadingConversations, isFalse);
     expect(provider.visibleConversations.map((item) => item.id), ['current']);
   });
+
+  test('memory pagination deduplicates shifted pages and records the terminal page', () async {
+    final authority = _MutableAuthority('uid-a');
+    final initial = List.generate(50, (index) => conversation('memory-$index'));
+    final refreshedDuplicate = ServerConversation(
+      id: 'memory-0',
+      createdAt: DateTime.parse('2026-07-08T19:00:00Z'),
+      structured: Structured('Updated memory', 'Updated overview'),
+    );
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        expect(limit, 50);
+        expect(offset, 50);
+        return ConversationsFetchResult.success([refreshedDuplicate, conversation('memory-older')]);
+      },
+    )
+      ..conversations = initial
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await provider.getMoreConversationsFromServer();
+
+    expect(provider.conversations, hasLength(51));
+    expect(provider.conversations.where((item) => item.id == 'memory-0'), hasLength(1));
+    expect(provider.conversations.firstWhere((item) => item.id == 'memory-0').structured.title, 'Updated memory');
+    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+    expect(provider.hasMoreConversations, isFalse);
+    expect(provider.isLoadingMoreConversations, isFalse);
+    expect(provider.loadMoreConversationsFailed, isFalse);
+  });
+
+  test('failed memory page is non-destructive and can be retried', () async {
+    final authority = _MutableAuthority('uid-a');
+    var requests = 0;
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        requests += 1;
+        return requests == 1
+            ? const ConversationsFetchResult.failure(statusCode: 503)
+            : ConversationsFetchResult.success([conversation('memory-older')]);
+      },
+    )
+      ..conversations = [conversation('memory-current')]
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await provider.getMoreConversationsFromServer();
+    expect(provider.conversations.map((item) => item.id), ['memory-current']);
+    expect(provider.loadMoreConversationsFailed, isTrue);
+    expect(provider.hasMoreConversations, isTrue);
+
+    await provider.getMoreConversationsFromServer();
+    expect(provider.conversations.map((item) => item.id), containsAll(['memory-current', 'memory-older']));
+    expect(provider.loadMoreConversationsFailed, isFalse);
+    expect(provider.hasMoreConversations, isFalse);
+  });
+
+  test('memory pagination advances the server offset when a full page contains only duplicates', () async {
+    final authority = _MutableAuthority('uid-a');
+    final initial = List.generate(50, (index) => conversation('memory-$index'));
+    final requestedOffsets = <int>[];
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        requestedOffsets.add(offset);
+        if (offset == 50) return ConversationsFetchResult.success(initial);
+        return ConversationsFetchResult.success([conversation('memory-older')]);
+      },
+    )
+      ..conversations = initial
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await provider.getMoreConversationsFromServer();
+    await provider.getMoreConversationsFromServer();
+
+    expect(requestedOffsets, [50, 100]);
+    expect(provider.conversations, hasLength(51));
+    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+    expect(provider.hasMoreConversations, isFalse);
+  });
+
+  test('account transition discards a delayed memory page and clears loading state', () async {
+    final authority = _MutableAuthority('uid-a');
+    final response = Completer<ConversationsFetchResult>();
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) => response.future,
+    )
+      ..conversations = [conversation('account-a-memory')]
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    final request = provider.getMoreConversationsFromServer();
+    await pumpEventQueue();
+    expect(provider.isLoadingMoreConversations, isTrue);
+
+    authority.current = false;
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    response.complete(ConversationsFetchResult.success([conversation('stale-account-a-page')]));
+    await request;
+
+    expect(provider.conversations.map((item) => item.id), ['account-a-memory']);
+    expect(provider.isLoadingMoreConversations, isFalse);
+    expect(provider.loadMoreConversationsFailed, isFalse);
+  });
 }
