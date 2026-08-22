@@ -365,6 +365,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
 
+    # Owner-scoped generated artwork for enriched memory cards
+    try:
+        from ella.routers.memory_artwork import router as memory_artwork_router
+
+        app.include_router(memory_artwork_router, tags=["Ella Memory Artwork"])
+        print("  🌐 /v1/ella/memory-artwork/* - Private generated memory artwork", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella memory artwork not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
