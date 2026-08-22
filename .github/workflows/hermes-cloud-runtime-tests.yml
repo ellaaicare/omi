@@ -1040,7 +1040,7 @@ jobs:
               exit 1
             fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 229
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 231
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
