@@ -6,7 +6,7 @@ import threading
 import types
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from models.conversation import Conversation, ConversationStatus, Structured
@@ -444,6 +444,31 @@ def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatc
     assert result == {"status": "Ok"}
     assert len(blocking_threads) == 3
     assert all(thread_id != loop_thread for thread_id in blocking_threads)
+
+
+def test_conversation_delete_keeps_source_when_today_card_migration_is_missing(monkeypatch):
+    source_deletes = []
+
+    def get_conversation(*_args):
+        return {"id": "conversation-a"}
+
+    def delete_source(*args):
+        source_deletes.append(args)
+
+    async def invalidate(*_args):
+        raise RuntimeError("ella_today_card_source_tombstones is missing")
+
+    monkeypatch.setattr(conversations_router, "_get_valid_conversation_by_id", get_conversation)
+    monkeypatch.setattr(conversations_router.conversations_db, "delete_conversation", delete_source)
+    monkeypatch.setattr(conversations_router, "delete_vector", delete_source)
+    monkeypatch.setattr(conversations_router, "invalidate_deleted_conversation_source", invalidate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(conversations_router.delete_conversation("conversation-a", "uid-a"))
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {"code": "today_card_source_invalidation_failed"}
+    assert source_deletes == []
 
 
 def test_developer_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatch):

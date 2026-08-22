@@ -3,6 +3,7 @@ import ast
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import asyncpg
 import pytest
 
 from ella.routers import canonical_events
@@ -298,6 +299,16 @@ def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
     assert all(args[0] == "uid-a" for args in invalidation_args)
     assert all('"source_id": "conversation-a"' in args[1] for args in invalidation_args)
     assert all(args[2] == "source_deleted" for args in invalidation_args)
+
+
+def test_deleted_source_invalidation_fails_closed_before_migration_016(monkeypatch):
+    async def tombstone_source(*_args, **_kwargs):
+        raise asyncpg.UndefinedTableError("ella_today_card_source_tombstones is missing")
+
+    monkeypatch.setattr(today_card_postgres.PostgresTodayCardRepository, "tombstone_source", tombstone_source)
+
+    with pytest.raises(asyncpg.UndefinedTableError):
+        asyncio.run(today_card_postgres.invalidate_deleted_conversation_source("uid-a", "conversation-a"))
 
 
 def test_materialized_save_fails_closed_when_selected_source_is_tombstoned():
