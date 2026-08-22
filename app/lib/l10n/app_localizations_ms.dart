@@ -3257,6 +3257,12 @@ class AppLocalizationsMs extends AppLocalizations {
   String get chat => 'Sembang';
 
   @override
+  String get backToRecentMemories => 'Back to recent';
+
+  @override
+  String get couldntLoadMoreMemories => 'Ella couldn\'t load older memories.';
+
+  @override
   String get actions => 'Tindakan';
 
   @override

@@ -3253,6 +3253,12 @@ class AppLocalizationsBg extends AppLocalizations {
   String get chat => 'Чат';
 
   @override
+  String get backToRecentMemories => 'Back to recent';
+
+  @override
+  String get couldntLoadMoreMemories => 'Ella couldn\'t load older memories.';
+
+  @override
   String get actions => 'Действия';
 
   @override

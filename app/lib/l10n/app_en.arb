@@ -3793,6 +3793,14 @@
   "@memories": {
     "description": "Navigation label for memories page"
   },
+  "backToRecentMemories": "Back to recent",
+  "@backToRecentMemories": {
+    "description": "Action that scrolls the memories list back to the newest memories"
+  },
+  "couldntLoadMoreMemories": "Ella couldn't load older memories.",
+  "@couldntLoadMoreMemories": {
+    "description": "Non-destructive pagination error shown below already loaded memories"
+  },
   "actions": "Actions",
   "@actions": {
     "description": "Navigation label for actions page"

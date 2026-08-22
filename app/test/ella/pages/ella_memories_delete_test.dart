@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -45,14 +46,14 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  ServerConversation memory(String id) {
+  ServerConversation memory(String id, {String title = 'A test memory'}) {
     final startedAt = DateTime.parse('2026-08-10T18:00:00Z');
     return ServerConversation(
       id: id,
       createdAt: startedAt,
       startedAt: startedAt,
       finishedAt: startedAt.add(const Duration(minutes: 3)),
-      structured: Structured('A test memory', 'A short transcript created this memory.'),
+      structured: Structured(title, 'A short transcript created this memory.'),
     );
   }
 
@@ -87,7 +88,8 @@ void main() {
     )
       ..conversations = [memory('memory-1')]
       ..hasLoadedConversations = true
-      ..hasFreshConversations = true;
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -123,7 +125,8 @@ void main() {
     )
       ..conversations = [memory('memory-2')]
       ..hasLoadedConversations = true
-      ..hasFreshConversations = true;
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -145,7 +148,8 @@ void main() {
     )
       ..conversations = [memory('memory-delayed')]
       ..hasLoadedConversations = true
-      ..hasFreshConversations = true;
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -163,5 +167,110 @@ void main() {
 
     expect(find.text('Memory Deleted.'), findsNothing);
     expect(find.text('An error occurred. Please try again.'), findsOneWidget);
+  });
+
+  testWidgets('scrolling near the end requests the next memory page', (tester) async {
+    final authority = _MutableAuthority('test-user');
+    var pageRequests = 0;
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        pageRequests += 1;
+        expect(limit, 50);
+        expect(offset, 50);
+        return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
+      },
+    )
+      ..conversations = List.generate(50, (index) => memory('memory-$index', title: 'Memory $index'))
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+    await tester.fling(find.byKey(const Key('ella-memories-list')), const Offset(0, -6000), 5000);
+    await tester.pumpAndSettle();
+
+    expect(pageRequests, 1);
+    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+    expect(provider.hasMoreConversations, isFalse);
+  });
+
+  testWidgets('a short first page automatically requests older memories without a scroll event', (tester) async {
+    final authority = _MutableAuthority('test-user');
+    var pageRequests = 0;
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        pageRequests += 1;
+        expect(offset, 1);
+        return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
+      },
+    )
+      ..conversations = [memory('memory-current')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+
+    expect(pageRequests, 1);
+    expect(provider.conversations.map((item) => item.id), containsAll(['memory-current', 'memory-older']));
+    expect(provider.hasMoreConversations, isFalse);
+  });
+
+  testWidgets('a failed automatic page waits for the visible retry action', (tester) async {
+    final authority = _MutableAuthority('test-user');
+    var pageRequests = 0;
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        pageRequests += 1;
+        return pageRequests == 1
+            ? const ConversationsFetchResult.failure(statusCode: 503)
+            : ConversationsFetchResult.success([memory('memory-older')]);
+      },
+    )
+      ..conversations = [memory('memory-current')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(pageRequests, 1);
+    expect(find.byKey(const Key('memories-load-more-failed')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('retry-load-more-memories')));
+    await tester.pumpAndSettle();
+
+    expect(pageRequests, 2);
+    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
+  });
+
+  testWidgets('Back to recent appears after scrolling and returns to the newest memories', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = List.generate(36, (index) => memory('memory-$index', title: 'Memory $index'))
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+    await tester.fling(find.byKey(const Key('ella-memories-list')), const Offset(0, -3200), 4000);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('back-to-recent-memories')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('back-to-recent-memories')));
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)).first,
+    );
+    expect(scrollable.position.pixels, closeTo(0, 0.5));
+    expect(find.byKey(const Key('back-to-recent-memories')), findsNothing);
   });
 }
