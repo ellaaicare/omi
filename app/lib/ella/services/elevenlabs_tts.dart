@@ -97,10 +97,8 @@ class ElevenLabsTts {
     List<IosTextToSpeechAudioCategoryOptions> options,
     IosTextToSpeechAudioMode mode,
   }) get onDeviceIosAudioConfiguration => (
-        category: IosTextToSpeechAudioCategory.playAndRecord,
+        category: IosTextToSpeechAudioCategory.playback,
         options: const [
-          IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
-          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
           IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
           IosTextToSpeechAudioCategoryOptions.allowAirPlay,
         ],
@@ -237,7 +235,7 @@ class ElevenLabsTts {
       final configuration = onDeviceIosAudioConfiguration;
       await tts.setSharedInstance(true);
       _requireCurrent(exactAuthority, 'during on-device TTS setup');
-      await tts.autoStopSharedSession(false);
+      await tts.autoStopSharedSession(true);
       _requireCurrent(exactAuthority, 'during on-device TTS setup');
       await tts.setIosAudioCategory(
         configuration.category,

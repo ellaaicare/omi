@@ -82,7 +82,8 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   BtDevice? get presentationPairedDevice => SharedPreferencesUtil().demoMode ? _demoDevice : pairedDevice;
 
-  bool get presentationIsConnected => SharedPreferencesUtil().demoMode ? true : isConnected;
+  bool get presentationIsConnected =>
+      SharedPreferencesUtil().demoMode || (isConnected && connectedDevice?.id.isNotEmpty == true);
 
   int get presentationBatteryLevel => SharedPreferencesUtil().demoMode ? 96 : batteryLevel;
 

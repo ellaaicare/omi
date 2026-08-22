@@ -38,4 +38,19 @@ class EllaVoiceAudioRoute {
       return false;
     }
   }
+
+  static Future<bool> release({
+    EllaVoiceAudioUsage usage = EllaVoiceAudioUsage.interactive,
+    @visibleForTesting MethodChannel channel = _channel,
+    @visibleForTesting bool? isIos,
+  }) async {
+    if (!(isIos ?? Platform.isIOS)) return true;
+    try {
+      return await channel.invokeMethod<bool>('releaseVoiceAudioSession', {'usage': usage.name}) == true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
 }

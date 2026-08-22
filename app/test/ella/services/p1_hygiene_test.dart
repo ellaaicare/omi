@@ -128,8 +128,9 @@ void main() {
     expect(manager, contains('guard let startLease = GuardianModeAvailability.shared.captureLease() else'));
     expect(
       manager.indexOf('guard let startLease = GuardianModeAvailability.shared.captureLease() else'),
-      lessThan(manager.indexOf('try audioSession.setActive(true)')),
+      lessThan(manager.indexOf('let routeOutcome = EllaVoiceAudioRoutePolicy().apply')),
     );
+    expect(manager, isNot(contains('try audioSession.setActive(true)')));
     expect(
       manager.indexOf('playbackReporter.report(event, lease: lease)', manager.indexOf('func reportPlaybackEvent')),
       lessThan(manager.indexOf('func injectRemoteAudio', manager.indexOf('func reportPlaybackEvent'))),

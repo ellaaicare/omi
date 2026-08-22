@@ -310,6 +310,28 @@ void main() {
     expect(transport.ensureCalls, 1);
   });
 
+  test('foreground revalidation repeats ensure for an already-ready account', () async {
+    final ready = EllaProvisioningResponse(
+      statusCode: 200,
+      receipt: EllaProvisioningReceipt.fromJson({
+        'state': 'ready',
+        'binding_state': 'active',
+        'binding_revision': 1,
+        'effective_policy_revision': 'policy-1',
+      }),
+    );
+    final transport = _FakeTransport(ensureResponses: [ready, ready]);
+    final provider = EllaProvisioningProvider(transport: transport);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    expect(provider.isOperational, isTrue);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+
+    expect(transport.ensureCalls, 2);
+    expect(provider.isOperational, isTrue);
+  });
+
   test('provisioning writes only a safe receipt and leaves retained compatibility values unchanged', () async {
     SharedPreferences.setMockInitialValues({
       'ellaProvisioningAccountUid': 'uid-a',

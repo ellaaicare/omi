@@ -112,7 +112,7 @@ struct EllaVoiceAudioRoutePolicy {
       guard configuredRoute.classification == .external else {
         return failure(.externalRouteLost, usage: usage, session: session)
       }
-    } else if configuredRoute.classification != .external {
+    } else if usage == .interactive && configuredRoute.classification != .external {
       do {
         try session.selectSpeaker()
       } catch {
@@ -164,10 +164,15 @@ struct EllaVoiceAudioRoutePolicy {
 
     func configure(for usage: EllaVoiceAudioRouteUsage) throws {
       switch usage {
-      case .playback, .interactive:
-        // Explicit speaker selection is only supported by playAndRecord.
-        // The default mode stays full range while Dart gates capture, and
-        // these options let an active external route survive.
+      case .playback:
+        // Playback-only audio must stay on the full-bandwidth media route.
+        // Using playAndRecord here forces CarPlay/Bluetooth onto HFP/dialog.
+        try audioSession.setCategory(
+          .playback,
+          mode: .default,
+          options: [.mixWithOthers, .allowBluetoothA2DP, .allowAirPlay]
+        )
+      case .interactive:
         try audioSession.setCategory(
           .playAndRecord,
           mode: .default,

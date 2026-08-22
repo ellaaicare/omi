@@ -132,10 +132,29 @@ void main() {
     });
 
     expect(
-      await EllaVoiceAudioRoute.ensureAudibleOutput(usage: EllaVoiceAudioUsage.playback, channel: channel, isIos: true),
+      await EllaVoiceAudioRoute.ensureAudibleOutput(
+        usage: EllaVoiceAudioUsage.playback,
+        channel: channel,
+        isIos: true,
+      ),
       isTrue,
     );
     expect(received?.arguments, {'usage': 'playback'});
+  });
+
+  test('interactive teardown asks native audio ownership to release', () async {
+    MethodCall? received;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      received = call;
+      return true;
+    });
+
+    expect(
+      await EllaVoiceAudioRoute.release(usage: EllaVoiceAudioUsage.interactive, channel: channel, isIos: true),
+      isTrue,
+    );
+    expect(received?.method, 'releaseVoiceAudioSession');
+    expect(received?.arguments, {'usage': 'interactive'});
   });
 
   test('Bluetooth and wired playback preserve a classified external route', () async {
@@ -165,10 +184,10 @@ void main() {
   test('on-device standard fallback uses Ella-compatible shared audio-session settings', () {
     final configuration = ElevenLabsTts.onDeviceIosAudioConfiguration;
 
-    expect(configuration.category, IosTextToSpeechAudioCategory.playAndRecord);
+    expect(configuration.category, IosTextToSpeechAudioCategory.playback);
     expect(configuration.mode, IosTextToSpeechAudioMode.defaultMode);
-    expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.defaultToSpeaker));
-    expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.allowBluetooth));
+    expect(configuration.options, isNot(contains(IosTextToSpeechAudioCategoryOptions.defaultToSpeaker)));
+    expect(configuration.options, isNot(contains(IosTextToSpeechAudioCategoryOptions.allowBluetooth)));
     expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP));
     expect(configuration.options, contains(IosTextToSpeechAudioCategoryOptions.allowAirPlay));
   });
@@ -187,12 +206,12 @@ void main() {
       },
     );
 
-    expect(adapter.category, IosTextToSpeechAudioCategory.playAndRecord);
+    expect(adapter.category, IosTextToSpeechAudioCategory.playback);
     expect(adapter.options, containsAll(ElevenLabsTts.onDeviceIosAudioConfiguration.options));
     expect(adapter.mode, IosTextToSpeechAudioMode.defaultMode);
     expect(operations, [
       'tts.sharedInstance:true',
-      'tts.autoStop:false',
+      'tts.autoStop:true',
       'tts.configureAudioSession',
       'tts.language',
       'tts.rate',

@@ -287,6 +287,21 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
+  test('connected presentation requires the concrete necklace used to start capture', () {
+    final provider = DeviceProvider();
+    addTearDown(provider.dispose);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    provider.isConnected = true;
+    expect(provider.presentationIsConnected, isFalse);
+
+    provider.connectedDevice = necklace;
+    expect(provider.presentationIsConnected, isTrue);
+
+    provider.isConnected = false;
+    expect(provider.presentationIsConnected, isFalse);
+  });
+
   test('queued connected callback is cancelled by device-service stop', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     var resolverCalls = 0;

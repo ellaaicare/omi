@@ -50,38 +50,23 @@ extension FlutterError: Error {}
     GeneratedPluginRegistrant.register(with: self)
     clearScopedGuardianNotifications()
 
-    // Configure audio session for background recording
-    do {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
-        try audioSession.setActive(true, options: [])
-        print("AppDelegate: Audio session configured for background recording")
-
-        // Observe audio session interruptions
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioSessionInterruption),
-            name: AVAudioSession.interruptionNotification,
-            object: audioSession
-        )
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioSessionRouteChange),
-            name: AVAudioSession.routeChangeNotification,
-            object: audioSession
-        )
-
-        // Reactivate audio session when app becomes active
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleApplicationDidBecomeActive),
-            name: UIApplication.didBecomeActiveNotification,
-            object: nil
-        )
-    } catch {
-        print("AppDelegate: Failed to configure audio session: \(error.localizedDescription)")
-    }
+    // Observe route state without taking ownership of the system audio session.
+    // Capture, voice, and Guardian activate an appropriate category only while
+    // they are actually running; a launch-time playAndRecord session forces
+    // CarPlay and other apps onto the low-bandwidth communications route.
+    let audioSession = AVAudioSession.sharedInstance()
+    NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleAudioSessionInterruption),
+        name: AVAudioSession.interruptionNotification,
+        object: audioSession
+    )
+    NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleAudioSessionRouteChange),
+        name: AVAudioSession.routeChangeNotification,
+        object: audioSession
+    )
 
 
       // Get Flutter view controller
@@ -186,6 +171,10 @@ extension FlutterError: Error {}
             let arguments = call.arguments as? [String: Any]
             let usage = arguments?["usage"] as? String ?? "interactive"
             result(self?.ensureAudibleVoiceOutput(usage: usage) ?? ["success": false])
+        case "releaseVoiceAudioSession":
+            let arguments = call.arguments as? [String: Any]
+            let usage = arguments?["usage"] as? String ?? "interactive"
+            result(self?.releaseVoiceAudioSession(usage: usage) ?? false)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -241,13 +230,8 @@ extension FlutterError: Error {}
           print("AppDelegate: Audio session interrupted")
       case .ended:
           print("AppDelegate: Audio session interruption ended")
-          // Reactivate audio session
-          do {
-              try AVAudioSession.sharedInstance().setActive(true)
-              print("AppDelegate: Audio session reactivated after interruption")
-          } catch {
-              print("AppDelegate: Failed to reactivate audio session: \(error)")
-          }
+          // The active feature owns reactivation. AppDelegate must not revive a
+          // stale playAndRecord category after that feature has already stopped.
       @unknown default:
           break
       }
@@ -340,16 +324,22 @@ extension FlutterError: Error {}
       return payload
   }
 
-  @objc private func handleApplicationDidBecomeActive(notification: Notification) {
-      // Ensure audio session is active when app becomes active
+  private func releaseVoiceAudioSession(usage: String) -> Bool {
+      guard EllaVoiceAudioRouteUsage(rawValue: usage) != nil else { return false }
+
+      if GuardianModeAvailability.shared.isEnabled {
+          return EllaVoiceAudioRoutePolicy().apply(
+              usage: .playback,
+              session: SystemEllaVoiceAudioSession()
+          ).success
+      }
+
       do {
-          let audioSession = AVAudioSession.sharedInstance()
-          if !audioSession.isOtherAudioPlaying {
-              try audioSession.setActive(true)
-              print("AppDelegate: Audio session reactivated on app becoming active")
-          }
+          try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+          return true
       } catch {
-          print("AppDelegate: Failed to reactivate audio session on app active: \(error)")
+          print("AppDelegate: Failed to release Ella audio session: \(error.localizedDescription)")
+          return false
       }
   }
 
@@ -553,7 +543,6 @@ extension FlutterError: Error {}
     // Remove audio session observers
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: nil)
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)
-    NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
 
     // If title and body are nil, then we don't need to show notification.
     if notificationTitleOnKill == nil || notificationBodyOnKill == nil {

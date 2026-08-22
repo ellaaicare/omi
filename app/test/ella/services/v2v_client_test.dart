@@ -511,6 +511,19 @@ void main() {
       await client.disconnect();
     });
 
+    test('disconnect releases the interactive iOS audio session', () async {
+      var releases = 0;
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        audioSessionReleaser: () async => releases++,
+      );
+
+      await client.disconnect();
+
+      expect(releases, 1);
+    });
+
     test('accepted server-verified v8 consent passes the mic gate before identity validation', () async {
       grantCurrentConsent();
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});

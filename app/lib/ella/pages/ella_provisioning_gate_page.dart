@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -22,11 +24,19 @@ class EllaProvisioningGatePage extends StatefulWidget {
     required this.readyChild,
     this.startOnMount = true,
     this.onSignOutOverride,
+    this.authenticatedUidProvider,
+    this.appVersionProvider,
+    this.consentAuthorityRefresher,
+    this.timezoneProvider,
   });
 
   final Widget readyChild;
   final bool startOnMount;
   final VoidCallback? onSignOutOverride;
+  final String Function()? authenticatedUidProvider;
+  final String Function()? appVersionProvider;
+  final Future<bool> Function(String uid)? consentAuthorityRefresher;
+  final Future<String> Function()? timezoneProvider;
 
   @override
   State<EllaProvisioningGatePage> createState() => _EllaProvisioningGatePageState();
@@ -34,6 +44,10 @@ class EllaProvisioningGatePage extends StatefulWidget {
 
 class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> with WidgetsBindingObserver {
   bool _consentDeferred = false;
+
+  String _authenticatedUid() => widget.authenticatedUidProvider?.call() ?? FirebaseAuth.instance.currentUser?.uid ?? '';
+
+  bool _isCurrentAuthenticatedUid(String uid) => mounted && uid.isNotEmpty && _authenticatedUid() == uid;
 
   @override
   void initState() {
@@ -44,29 +58,38 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
     }
   }
 
-  Future<void> _start({bool forceConsentPrompt = false}) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null || !mounted) return;
+  Future<void> _start({
+    bool forceConsentPrompt = false,
+    bool forceProvisioningRevalidation = false,
+    bool allowConsentPrompt = true,
+  }) async {
+    final uid = _authenticatedUid();
+    if (uid.isEmpty || !mounted) return;
+    final provisioningProvider = context.read<EllaProvisioningProvider>();
+    final locale = Localizations.localeOf(context).toLanguageTag();
 
     final preferences = SharedPreferencesUtil();
-    preferences.uid = user.uid;
-    await const EllaAccountIsolationService().prepareProvisioningAccount(user.uid, preferences: preferences);
-    if (!mounted) return;
+    preferences.uid = uid;
+    await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: preferences);
+    if (!_isCurrentAuthenticatedUid(uid)) return;
 
     final consentService = EllaAiConsentService();
-    var hasConsent = await consentService.refreshServerAuthority(uid: user.uid);
-    if (!mounted) return;
+    var hasConsent =
+        await (widget.consentAuthorityRefresher?.call(uid) ?? consentService.refreshServerAuthority(uid: uid));
+    if (!_isCurrentAuthenticatedUid(uid)) return;
     if (!hasConsent) {
+      if (!allowConsentPrompt) return;
       if (preferences.isCurrentAiConsentDeferred && !forceConsentPrompt) {
         setState(() => _consentDeferred = true);
         return;
       }
+      if (!mounted) return;
       final accepted = await AiConsentSheet.show(
         context,
-        onAccept: () => consentService.grantCurrentConsentWithOutcome(uid: user.uid),
-        onDecline: () => consentService.declineCurrentConsent(uid: user.uid),
+        onAccept: () => consentService.grantCurrentConsentWithOutcome(uid: uid),
+        onDecline: () => consentService.declineCurrentConsent(uid: uid),
       );
-      if (!mounted) return;
+      if (!_isCurrentAuthenticatedUid(uid)) return;
       hasConsent = accepted == true && preferences.aiConsentAccepted;
       if (!hasConsent) {
         setState(() => _consentDeferred = true);
@@ -77,27 +100,33 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
 
     String timezone;
     try {
-      timezone = await FlutterTimezone.getLocalTimezone();
+      timezone = await (widget.timezoneProvider?.call() ?? FlutterTimezone.getLocalTimezone());
     } catch (_) {
       timezone = DateTime.now().timeZoneName;
     }
-    if (!mounted) return;
+    if (!_isCurrentAuthenticatedUid(uid)) return;
 
-    await context.read<EllaProvisioningProvider>().start(
-          uid: user.uid,
-          requestContext: EllaProvisioningRequestContext(
-            appVersion: PlatformManager.instance.appVersion,
-            locale: Localizations.localeOf(context).toLanguageTag(),
-            timezone: timezone,
-            consentReceiptId: preferences.hasAccountBoundAiConsent(user.uid) ? preferences.aiConsentReceiptId : '',
-          ),
-        );
+    await provisioningProvider.start(
+      uid: uid,
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: widget.appVersionProvider?.call() ?? PlatformManager.instance.appVersion,
+        locale: locale,
+        timezone: timezone,
+        consentReceiptId: preferences.hasAccountBoundAiConsent(uid) ? preferences.aiConsentReceiptId : '',
+      ),
+      forceRevalidate: forceProvisioningRevalidation,
+    );
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
     context.read<EllaProvisioningProvider>().setForeground(state == AppLifecycleState.resumed);
+    if (state == AppLifecycleState.resumed) {
+      // Home can remain mounted after process-local consent/provisioning
+      // verification expires. Refresh both before protected features retry.
+      unawaited(_start(forceProvisioningRevalidation: true, allowConsentPrompt: false));
+    }
   }
 
   @override

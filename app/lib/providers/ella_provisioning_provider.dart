@@ -58,7 +58,11 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   String get supportCode => receipt?.supportCode ?? '';
 
-  Future<void> start({required String uid, required EllaProvisioningRequestContext requestContext}) async {
+  Future<void> start({
+    required String uid,
+    required EllaProvisioningRequestContext requestContext,
+    bool forceRevalidate = false,
+  }) async {
     if (uid.isEmpty) {
       _setFailure('auth_required', blocked: true);
       return;
@@ -67,6 +71,12 @@ class EllaProvisioningProvider extends ChangeNotifier {
       final consentReceiptId = requestContext.consentReceiptId;
       if (consentReceiptId.isNotEmpty && consentReceiptId != _requestContext?.consentReceiptId) {
         setConsentReceiptId(consentReceiptId);
+      }
+      if (forceRevalidate) {
+        _requestContext = requestContext;
+        _requestContextEpoch++;
+        await retry();
+        return;
       }
       if (isOperational ||
           _requestInFlight ||
