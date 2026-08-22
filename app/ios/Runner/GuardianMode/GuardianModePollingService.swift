@@ -72,7 +72,7 @@ final class GuardianModePollingService: @unchecked Sendable {
 
     typealias PollTransportCompletion = (Result<(Data, URLResponse), Error>) -> Void
     typealias PollTransport = (URLRequest, @escaping PollTransportCompletion) -> (() -> Void)
-    typealias TokenProvider = (GuardianWorkLease) async throws -> GuardianBearerCredential
+    typealias TokenProvider = (GuardianWorkLease, Bool) async throws -> GuardianBearerCredential
 
     struct Effects {
         let debugMutation: (PollResponse, [String: Any]) -> Void
@@ -143,7 +143,12 @@ final class GuardianModePollingService: @unchecked Sendable {
             task.resume()
             return task.cancel
         }
-        tokenProvider = GuardianFirebaseTokenBridge.shared.credential
+        tokenProvider = { lease, forcingRefresh in
+            try await GuardianFirebaseTokenBridge.shared.credential(
+                for: lease,
+                forcingRefresh: forcingRefresh
+            )
+        }
         let speechSynthesizer = AVSpeechSynthesizer()
         effects = Effects(
             debugMutation: { result, metadata in
@@ -250,12 +255,6 @@ final class GuardianModePollingService: @unchecked Sendable {
     }
 
     private func pollForNewAudio(lease: GuardianWorkLease) async throws -> PollResponse? {
-        let credential = try await tokenProvider(lease)
-        guard credential.uid == lease.uid,
-              GuardianModeAvailability.shared.isCurrent(lease) else {
-            throw GuardianCredentialError.ownerChanged
-        }
-
         var components = URLComponents(string: "\(backendURL)/v1/ella/guardian/next-audio")
         components?.queryItems = [URLQueryItem(name: "uid", value: lease.uid)]
 
@@ -265,9 +264,19 @@ final class GuardianModePollingService: @unchecked Sendable {
             ])
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await performAuthorizedTransport(request, lease: lease)
+        var credential = try await tokenProvider(lease, false)
+        try validate(credential: credential, lease: lease)
+        var request = authorizedRequest(url: url, credential: credential)
+        var (data, response) = try await performAuthorizedTransport(request, lease: lease)
+        if (response as? HTTPURLResponse)?.statusCode == 401 {
+            guard GuardianModeAvailability.shared.isCurrent(lease) else {
+                throw GuardianCredentialError.ownerChanged
+            }
+            credential = try await tokenProvider(lease, true)
+            try validate(credential: credential, lease: lease)
+            request = authorizedRequest(url: url, credential: credential)
+            (data, response) = try await performAuthorizedTransport(request, lease: lease)
+        }
         guard GuardianModeAvailability.shared.isCurrent(lease) else {
             throw GuardianCredentialError.ownerChanged
         }
@@ -292,6 +301,26 @@ final class GuardianModePollingService: @unchecked Sendable {
         }
 
         return nil
+    }
+
+    private func validate(
+        credential: GuardianBearerCredential,
+        lease: GuardianWorkLease
+    ) throws {
+        guard credential.uid == lease.uid,
+              !credential.token.isEmpty,
+              GuardianModeAvailability.shared.isCurrent(lease) else {
+            throw GuardianCredentialError.ownerChanged
+        }
+    }
+
+    private func authorizedRequest(
+        url: URL,
+        credential: GuardianBearerCredential
+    ) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        return request
     }
 
     private func performAuthorizedTransport(

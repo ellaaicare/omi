@@ -30,6 +30,7 @@ private final class FakeAudioSession: EllaVoiceAudioSessionRouting {
   var operations: [Operation] = []
   var failingOperation: Operation?
   var losesExternalDuringConfiguration = false
+  var routeAfterExternalLoss: EllaVoiceAudioRoutePort = .receiver
 
   init(outputs: [EllaVoiceAudioRoutePort]) {
     snapshot = EllaVoiceAudioRouteSnapshot(outputs: outputs)
@@ -52,7 +53,7 @@ private final class FakeAudioSession: EllaVoiceAudioSessionRouting {
     operations.append(operation)
     try failIfRequested(operation)
     if losesExternalDuringConfiguration {
-      snapshot = EllaVoiceAudioRouteSnapshot(outputs: [.receiver])
+      snapshot = EllaVoiceAudioRouteSnapshot(outputs: [routeAfterExternalLoss])
     } else if usage == .playback && snapshot.classification == .receiver {
       snapshot = EllaVoiceAudioRouteSnapshot(outputs: [.speaker])
     }
@@ -134,16 +135,31 @@ private func testSpeakerSelectionFailureIsTypedAndFailsClosed() throws {
     outcome.classification == .receiver, "failure did not report the actual receiver route")
 }
 
-private func testExternalRouteLossIsTypedAndFailsClosed() throws {
+private func testPlaybackFallsBackToSpeakerWhenExternalRouteDisconnects() throws {
   let session = FakeAudioSession(outputs: [.bluetoothHFP])
   session.losesExternalDuringConfiguration = true
+  session.routeAfterExternalLoss = .speaker
   let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .playback, session: session)
 
-  try expect(!outcome.success, "lost external route did not fail closed")
-  try expect(outcome.failure == .externalRouteLost, "lost external route was not typed")
+  try expect(outcome.success, "playback did not accept the verified speaker fallback")
+  try expect(
+    outcome.classification == .speaker,
+    "playback fallback did not verify the speaker route")
   try expect(
     !session.operations.contains(.selectSpeaker),
-    "lost external route silently fell back to speaker")
+    "playback fallback forced a speaker override instead of accepting the system route")
+}
+
+private func testInteractiveExternalRouteLossIsTypedAndFailsClosed() throws {
+  let session = FakeAudioSession(outputs: [.bluetoothHFP])
+  session.losesExternalDuringConfiguration = true
+  let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .interactive, session: session)
+
+  try expect(!outcome.success, "lost interactive external route did not fail closed")
+  try expect(outcome.failure == .externalRouteLost, "lost interactive external route was not typed")
+  try expect(
+    !session.operations.contains(.selectSpeaker),
+    "lost interactive route silently fell back to speaker")
 }
 
 private func testInteractiveRestoreClearsOverrideAndReestablishesSpeaker() throws {
@@ -174,7 +190,8 @@ private enum EllaVoiceAudioRoutePolicyTests {
       testInteractiveExternalRoutesRemainAuthoritative,
       testWiredPlaybackPreservesExternalOutput,
       testSpeakerSelectionFailureIsTypedAndFailsClosed,
-      testExternalRouteLossIsTypedAndFailsClosed,
+      testPlaybackFallsBackToSpeakerWhenExternalRouteDisconnects,
+      testInteractiveExternalRouteLossIsTypedAndFailsClosed,
       testInteractiveRestoreClearsOverrideAndReestablishesSpeaker,
     ]
     for test in tests { try test() }

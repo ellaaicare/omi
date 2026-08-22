@@ -108,7 +108,7 @@ struct EllaVoiceAudioRoutePolicy {
     }
 
     let configuredRoute = session.routeSnapshot()
-    if preservingExternalRoute {
+    if preservingExternalRoute && usage == .interactive {
       guard configuredRoute.classification == .external else {
         return failure(.externalRouteLost, usage: usage, session: session)
       }
