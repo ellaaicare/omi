@@ -53,6 +53,8 @@ private final class FakeAudioSession: EllaVoiceAudioSessionRouting {
     try failIfRequested(operation)
     if losesExternalDuringConfiguration {
       snapshot = EllaVoiceAudioRouteSnapshot(outputs: [.receiver])
+    } else if usage == .playback && snapshot.classification == .receiver {
+      snapshot = EllaVoiceAudioRouteSnapshot(outputs: [.speaker])
     }
   }
 
@@ -79,8 +81,8 @@ private func testPlaybackWithoutExternalOutputSelectsSpeaker() throws {
   try expect(outcome.success, "playback without an external output did not succeed")
   try expect(outcome.classification == .speaker, "playback did not verify the actual speaker route")
   try expect(
-    session.operations == [.configure(.playback), .activate, .selectSpeaker],
-    "playback did not explicitly select the loudspeaker"
+    session.operations == [.configure(.playback), .activate],
+    "playback did not remain on the playback-only route"
   )
 }
 
@@ -124,7 +126,7 @@ private func testWiredPlaybackPreservesExternalOutput() throws {
 private func testSpeakerSelectionFailureIsTypedAndFailsClosed() throws {
   let session = FakeAudioSession(outputs: [.receiver])
   session.failingOperation = .selectSpeaker
-  let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .playback, session: session)
+  let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .interactive, session: session)
 
   try expect(!outcome.success, "speaker selection failure did not fail closed")
   try expect(outcome.failure == .speakerSelectionFailed, "speaker selection failure was not typed")
@@ -156,7 +158,7 @@ private func testInteractiveRestoreClearsOverrideAndReestablishesSpeaker() throw
     restored.classification == .speaker, "interactive restore did not verify the speaker route")
   try expect(
     session.operations == [
-      .configure(.playback), .activate, .selectSpeaker,
+      .configure(.playback), .activate,
       .configure(.interactive), .resetOverride, .activate, .selectSpeaker,
     ],
     "interactive restore did not safely clear and rebuild the route"

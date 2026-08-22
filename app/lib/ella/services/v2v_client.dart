@@ -370,6 +370,7 @@ class V2VClient {
   final Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)?
       _sessionCreator;
   final Future<void> Function()? _audioSessionConfigurator;
+  final Future<void> Function()? _audioSessionReleaser;
   final V2VWebSocketTransport Function(Uri uri)? _webSocketConnector;
   final Duration _playbackMicCooldown;
 
@@ -389,6 +390,7 @@ class V2VClient {
     @visibleForTesting
     Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)? sessionCreator,
     @visibleForTesting Future<void> Function()? audioSessionConfigurator,
+    @visibleForTesting Future<void> Function()? audioSessionReleaser,
     @visibleForTesting V2VWebSocketTransport Function(Uri uri)? webSocketConnector,
     @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
@@ -405,6 +407,7 @@ class V2VClient {
         _providerRegistryValidator = providerRegistryValidator,
         _sessionCreator = sessionCreator,
         _audioSessionConfigurator = audioSessionConfigurator,
+        _audioSessionReleaser = audioSessionReleaser,
         _webSocketConnector = webSocketConnector,
         _playbackMicCooldown = playbackMicCooldown;
 
@@ -951,6 +954,10 @@ class V2VClient {
     await _stopMicStream(reason: 'disconnect');
     try {
       await _stopAudioPlayback(dispose: true);
+    } catch (_) {}
+    try {
+      await (_audioSessionReleaser?.call() ??
+          EllaVoiceAudioRoute.release(usage: EllaVoiceAudioUsage.interactive).then<void>((_) {}));
     } catch (_) {}
     _resetTurnState();
   }

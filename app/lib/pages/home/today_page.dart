@@ -813,8 +813,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         ? DateTime(2025, 7, 24, 9, 41)
         : (widget.nowProvider?.call() ?? DateTime.now());
     final reminders = todayUpcomingReminders(context.watch<ActionItemsProvider>().actionItems, now);
-    final deviceConnected = context.select<DeviceProvider, bool>((provider) => provider.presentationIsConnected);
     final device = context.watch<DeviceProvider>();
+    final connectedDevice = device.presentationConnectedDevice;
+    final deviceConnected = device.presentationIsConnected && connectedDevice != null;
     final hasNecklace = device.presentationPairedDevice != null;
     final deviceType =
         device.presentationConnectedDevice?.type ?? device.presentationPairedDevice?.type ?? DeviceType.omi;
@@ -884,7 +885,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 capture: capture,
                 isActive: homeCaptureOwned,
                 necklaceConnected: deviceConnected,
-                connectedDevice: device.presentationConnectedDevice,
+                connectedDevice: connectedDevice,
               ),
             ),
             if (showGuardianSurfaces) ...[

@@ -92,9 +92,18 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                 return
             }
 
-            // Activate audio session (configured in AppDelegate, activated here before playback)
+            // Guardian is playback-only. Keep it off the HFP/dialog route used
+            // by interactive microphone sessions.
+            let routeOutcome = EllaVoiceAudioRoutePolicy().apply(
+                usage: .playback,
+                session: SystemEllaVoiceAudioSession()
+            )
+            guard routeOutcome.success else {
+                throw NSError(domain: "GuardianMode", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "Guardian audio route is unavailable"
+                ])
+            }
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setActive(true)
 
             // Detailed audio session diagnostics
             NSLog("🔊 SESSION_STATE_DETAILED:")
@@ -189,7 +198,14 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                 : "N/A"
             NSLog("GuardianMode: Stopped (injections: \(successfulInjections)/\(totalInjections), success rate: \(rate))")
 
-            // Don't deactivate audio session - it's shared with other app components (recording, etc.)
+            let audioSession = AVAudioSession.sharedInstance()
+            if audioSession.category == .playback {
+                do {
+                    try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+                } catch {
+                    NSLog("GuardianMode: Could not release playback audio session: \(error.localizedDescription)")
+                }
+            }
         }
     }
 
