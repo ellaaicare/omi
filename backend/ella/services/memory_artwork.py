@@ -83,6 +83,8 @@ class MemoryArtworkRepository(Protocol):
 
     def set_preferences(self, uid: str, preferences: dict[str, Any]) -> None: ...
 
+    def mark_storage_cleanup_required(self, uid: str) -> None: ...
+
     def get_conversation(self, uid: str, memory_id: str) -> Optional[dict[str, Any]]: ...
 
     def list_recent_conversations(self, uid: str, *, limit: int) -> list[dict[str, Any]]: ...
@@ -99,6 +101,7 @@ class MemoryArtworkRepository(Protocol):
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
     set_preferences = staticmethod(artwork_db.set_preferences)
+    mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
     get_conversation = staticmethod(artwork_db.get_conversation)
     list_recent_conversations = staticmethod(artwork_db.list_recent_conversations)
     reserve_generation = staticmethod(artwork_db.reserve_generation)
@@ -319,6 +322,8 @@ class MemoryArtworkService:
         if style_version not in SUPPORTED_STYLE_VERSIONS:
             raise MemoryArtworkError("memory_artwork_style_version_invalid")
         authority = await self.authority_resolver(uid)
+        existing = self.repository.get_preferences(uid)
+        storage_cleanup_required = existing.get("storage_cleanup_required") is True
         self.repository.set_preferences(
             uid,
             {
@@ -329,6 +334,7 @@ class MemoryArtworkService:
                 "binding_id": authority.binding_id,
                 "profile_id": authority.profile_id,
                 "authority_digest": authority.authority_digest,
+                "storage_cleanup_required": storage_cleanup_required,
                 "updated_at": datetime.now(timezone.utc),
             },
         )
@@ -463,6 +469,15 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_source_changed")
+        if _source_is_sensitive(conversation):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="sensitive_source_excluded",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_sensitive_source_excluded")
         prompt, prompt_sha256 = _prompt_for(conversation, str(claimed.get("style_version") or ""))
         if prompt_sha256 != claimed.get("prompt_sha256"):
             self.repository.mark_generation_unavailable(
@@ -473,10 +488,50 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_prompt_changed")
+        # Persist cleanup intent before provider/storage work so account deletion
+        # fails closed even if the worker dies after an outcome-ambiguous upload.
+        self.repository.mark_storage_cleanup_required(uid)
+        # Re-evaluate every egress authority after the last local side effect.
+        # This is the final fence before the provider receives memory content.
+        preflight_authority = await self.authority_resolver(uid)
+        preflight_preferences = self.repository.get_preferences(uid)
+        preflight_conversation = self.repository.get_conversation(uid, memory_id) or {}
+        preflight_prompt, preflight_prompt_sha256 = _prompt_for(
+            preflight_conversation,
+            str(claimed.get("style_version") or ""),
+        )
+        if _source_is_sensitive(preflight_conversation):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="sensitive_source_excluded",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_sensitive_source_excluded")
+        if (
+            preflight_authority != authority
+            or preflight_preferences.get("consent") != "accepted"
+            or preflight_preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
+            or preflight_preferences.get("style_version") != claimed.get("style_version")
+            or preflight_preferences.get("binding_id") != authority.binding_id
+            or preflight_preferences.get("profile_id") != authority.profile_id
+            or preflight_preferences.get("authority_digest") != authority.authority_digest
+            or _terminal_enrichment(preflight_conversation) != claimed.get("enrichment_revision")
+            or preflight_prompt_sha256 != claimed.get("prompt_sha256")
+        ):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="pre_egress_authority_changed",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_authority_changed")
         provider = self.provider_factory()
         try:
             generated = await provider.generate(
-                prompt=prompt,
+                prompt=preflight_prompt,
                 style_version=str(claimed.get("style_version") or ""),
                 idempotency_key=generation_key,
             )
@@ -636,11 +691,24 @@ class MemoryArtworkService:
                 "status": status if status in {"generating", "unavailable", "declined"} else "unavailable",
                 "failure_code": artwork.get("failure_code") if isinstance(artwork, dict) else None,
             }
+        if (
+            preferences.get("consent") != "accepted"
+            or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
+            or preferences.get("style_version") != artwork.get("style_version")
+        ):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_consent_required",
+            }
         authority = await self.authority_resolver(uid)
         if (
             artwork.get("authority_digest") != authority.authority_digest
             or artwork.get("binding_id") != authority.binding_id
             or artwork.get("profile_id") != authority.profile_id
+            or preferences.get("authority_digest") != authority.authority_digest
+            or preferences.get("binding_id") != authority.binding_id
+            or preferences.get("profile_id") != authority.profile_id
         ):
             raise MemoryArtworkError("memory_artwork_authority_changed")
         object_key = str(artwork.get("object_key") or "")
@@ -700,3 +768,13 @@ async def enqueue_after_terminal_enrichment(uid: str, memory_id: str) -> None:
             await service.process(uid, memory_id)
     except Exception:
         return
+
+
+async def process_queued_artwork(uid: str, memory_ids: list[str]) -> None:
+    """Best-effort drain of durable reservations; retrying reclaims expired leases."""
+    service = MemoryArtworkService()
+    for memory_id in memory_ids[:MAX_BACKFILL_MEMORIES]:
+        try:
+            await service.process(uid, memory_id)
+        except Exception:
+            continue

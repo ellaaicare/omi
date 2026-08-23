@@ -31,6 +31,10 @@ def set_preferences(uid: str, preferences: dict[str, Any]) -> None:
     db.collection("users").document(uid).set({PREFERENCES_FIELD: preferences}, merge=True)
 
 
+def mark_storage_cleanup_required(uid: str) -> None:
+    db.collection("users").document(uid).update({f"{PREFERENCES_FIELD}.storage_cleanup_required": True})
+
+
 def get_conversation(uid: str, memory_id: str) -> Optional[dict[str, Any]]:
     snapshot = _conversation_ref(uid, memory_id).get()
     return snapshot.to_dict() if snapshot.exists else None

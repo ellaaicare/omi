@@ -137,6 +137,20 @@ class GCSMemoryArtworkStore:
         except NotFound:
             return
 
+    def delete_memory_prefix(self, *, uid: str, memory_id: str) -> int:
+        prefix = f"users/{_sha256(uid)}/profiles/"
+        deleted = 0
+        for blob in self.client.bucket(self.bucket_name).list_blobs(prefix=prefix):
+            match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or ""))
+            if match is None or match.group("owner") != _sha256(uid) or match.group("memory") != memory_id:
+                continue
+            try:
+                blob.delete()
+            except NotFound:
+                continue
+            deleted += 1
+        return deleted
+
     def delete_user_prefix(self, *, uid: str) -> int:
         prefix = f"users/{_sha256(uid)}/"
         deleted = 0
@@ -148,13 +162,14 @@ class GCSMemoryArtworkStore:
 
 def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversation: dict) -> None:
     artwork = conversation.get("artwork") if isinstance(conversation, dict) else None
-    object_key = str((artwork or {}).get("object_key") or "") if isinstance(artwork, dict) else ""
-    if not object_key:
+    if not isinstance(artwork, dict) or not artwork:
         return
-    GCSMemoryArtworkStore().delete(uid=uid, memory_id=memory_id, object_key=object_key)
+    GCSMemoryArtworkStore().delete_memory_prefix(uid=uid, memory_id=memory_id)
 
 
-def delete_all_user_artwork(uid: str) -> int:
+def delete_all_user_artwork(uid: str, *, required: bool = False) -> int:
     if not os.getenv("ELLA_MEMORY_ARTWORK_BUCKET", "").strip():
+        if required:
+            raise MemoryArtworkStorageError("memory_artwork_storage_not_configured")
         return 0
     return GCSMemoryArtworkStore().delete_user_prefix(uid=uid)

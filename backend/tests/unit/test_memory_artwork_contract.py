@@ -24,6 +24,7 @@ def _load_service_module():
         "claim_generation",
         "finalize_generation",
         "mark_generation_unavailable",
+        "mark_storage_cleanup_required",
         "claim_deletion",
     ):
         setattr(database_stub, name, lambda *args, **kwargs: None)
@@ -107,6 +108,9 @@ class FakeRepository:
 
     def set_preferences(self, uid, preferences):
         self.preferences_by_uid[uid] = copy.deepcopy(preferences)
+
+    def mark_storage_cleanup_required(self, uid):
+        self.preferences_by_uid.setdefault(uid, {})["storage_cleanup_required"] = True
 
     def get_conversation(self, uid, memory_id):
         value = self.conversations.get((uid, memory_id))
@@ -396,7 +400,7 @@ def test_authority_drift_after_provider_output_prevents_object_write():
     async def drifting_resolver(uid):
         nonlocal calls
         calls += 1
-        return _authority(uid, "digest-b" if calls >= 3 else "digest-a")
+        return _authority(uid, "digest-b" if calls >= 4 else "digest-a")
 
     provider = FakeProvider()
     store = FakeStore()
@@ -434,6 +438,85 @@ def test_sensitive_source_is_excluded_without_provider_egress():
     assert result["outcome"] == "sensitive_source_excluded"
     assert provider.calls == 0
     assert repository.reserve_writes == 0
+
+
+def test_sensitive_assessment_drift_after_enqueue_fails_before_provider_egress():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = FakeProvider()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+    repository.conversations[("owner-a", "memory-1")]["internal_assessment"] = {"risk_level": "high"}
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.process("owner-a", "memory-1"))
+
+    assert failure.value.code == "memory_artwork_sensitive_source_excluded"
+    assert provider.calls == 0
+
+
+def test_sensitive_assessment_drift_during_pre_egress_fence_fails_closed():
+    class DriftingRepository(FakeRepository):
+        def mark_storage_cleanup_required(self, uid):
+            super().mark_storage_cleanup_required(uid)
+            self.conversations[(uid, "memory-1")]["internal_assessment"] = {"risk_level": "high"}
+
+    repository = DriftingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = FakeProvider()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.process("owner-a", "memory-1"))
+
+    assert failure.value.code == "memory_artwork_sensitive_source_excluded"
+    assert provider.calls == 0
+
+
+@pytest.mark.parametrize(
+    "preferences",
+    [
+        {},
+        {"consent": "not_set"},
+        {"consent": "accepted", "consent_version": "stale"},
+    ],
+)
+def test_signed_url_requires_exact_current_consent(preferences):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+    asyncio.run(service.process("owner-a", "memory-1"))
+    repository.preferences_by_uid["owner-a"] = preferences
+
+    result = asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert result["status"] == "unavailable"
+    assert result["failure_code"] == "memory_artwork_consent_required"
+    assert store.signed == []
 
 
 def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent():
@@ -630,7 +713,7 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
     deleted = []
 
     class RecordingStore:
-        def delete(self, **kwargs):
+        def delete_memory_prefix(self, **kwargs):
             deleted.append(kwargs)
 
     monkeypatch.setattr(memory_artwork_storage, "GCSMemoryArtworkStore", RecordingStore)
@@ -639,16 +722,111 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
         "memory-1",
         {"artwork": {"object_key": object_key}},
     )
-    assert deleted == [{"uid": "owner-a", "memory_id": "memory-1", "object_key": object_key}]
+    assert deleted == [{"uid": "owner-a", "memory_id": "memory-1"}]
 
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
     assert conversations_source.index("delete_conversation_artwork_if_present") < conversations_source.index(
         "conversation_ref.delete()", conversations_source.index("def delete_conversation(uid, conversation_id)")
     )
-    assert account_route_source.index("delete_all_user_artwork(uid)") < account_route_source.index(
+    assert account_route_source.index("delete_all_user_artwork(uid, required=") < account_route_source.index(
         "delete_user_data(uid)", account_route_source.index("def delete_account")
     )
+
+
+def test_storage_prefix_cleanup_removes_all_outcome_ambiguous_memory_objects():
+    from utils.ella import memory_artwork_storage
+
+    owner_hash = memory_artwork_storage._sha256("owner-a")
+    other_owner_hash = memory_artwork_storage._sha256("owner-b")
+
+    class Blob:
+        def __init__(self, name):
+            self.name = name
+            self.deleted = False
+
+        def delete(self):
+            self.deleted = True
+
+    blobs = [
+        Blob(f"users/{owner_hash}/profiles/{'a' * 64}/memories/memory-1/{'1' * 64}.png"),
+        Blob(f"users/{owner_hash}/profiles/{'b' * 64}/memories/memory-1/{'2' * 64}.webp"),
+        Blob(f"users/{owner_hash}/profiles/{'a' * 64}/memories/memory-2/{'3' * 64}.png"),
+        Blob(f"users/{other_owner_hash}/profiles/{'a' * 64}/memories/memory-1/{'4' * 64}.png"),
+    ]
+
+    class Bucket:
+        def list_blobs(self, prefix):
+            return [blob for blob in blobs if blob.name.startswith(prefix)]
+
+    class Client:
+        def bucket(self, name):
+            assert name == "private-artwork"
+            return Bucket()
+
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    assert store.delete_memory_prefix(uid="owner-a", memory_id="memory-1") == 2
+    assert [blob.deleted for blob in blobs] == [True, True, False, False]
+
+
+def test_required_account_cleanup_fails_closed_without_configured_bucket(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    monkeypatch.delenv("ELLA_MEMORY_ARTWORK_BUCKET", raising=False)
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+        memory_artwork_storage.delete_all_user_artwork("owner-a", required=True)
+
+    assert str(failure.value) == "memory_artwork_storage_not_configured"
+
+
+def test_processing_marks_cleanup_required_before_provider_call():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+
+    class CheckingProvider(FakeProvider):
+        async def generate(self, **kwargs):
+            assert repository.preferences_by_uid["owner-a"]["storage_cleanup_required"] is True
+            return await super().generate(**kwargs)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=CheckingProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    assert asyncio.run(service.process("owner-a", "memory-1"))["status"] == "ready"
+
+
+def test_preference_update_preserves_existing_storage_cleanup_requirement():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = {
+        **_accepted_preferences(_authority()),
+        "storage_cleanup_required": True,
+    }
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        config=_enabled_config(),
+    )
+
+    asyncio.run(
+        service.set_preferences(
+            "owner-a",
+            consent="declined",
+            consent_version=artwork.ARTWORK_CONSENT_VERSION,
+            style_version=artwork.DEFAULT_STYLE_VERSION,
+        )
+    )
+
+    assert repository.preferences_by_uid["owner-a"]["consent"] == "declined"
+    assert repository.preferences_by_uid["owner-a"]["storage_cleanup_required"] is True
 
 
 def test_mounted_route_rejects_unauthenticated_request_before_service_work(monkeypatch):
@@ -678,6 +856,10 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
             self.calls += 1
             return {"status": "ready"}
 
+        async def enqueue(self, uid, memory_id):
+            self.calls += 1
+            return {"outcome": "reserved", "status": "generating"}
+
     fake = NeverCalled()
     monkeypatch.setattr(router_module, "MemoryArtworkService", lambda: fake)
     app = FastAPI()
@@ -687,6 +869,19 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
     response = client.get("/v1/ella/memories/memory-1/artwork")
     assert response.status_code == 401
     assert fake.calls == 0
+
+    drained = []
+
+    async def drain(uid, memory_ids):
+        drained.append((uid, memory_ids))
+
+    monkeypatch.setattr(router_module, "process_queued_artwork", drain)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+    response = client.post("/v1/ella/memories/memory-1/artwork")
+    assert response.status_code == 200
+    assert response.json()["processing_scheduled"] is True
+    assert fake.calls == 1
+    assert drained == [("owner-a", ["memory-1"])]
 
 
 def test_terminal_enrichment_hook_runs_idempotent_processor_without_raising(monkeypatch):
@@ -708,3 +903,20 @@ def test_terminal_enrichment_hook_runs_idempotent_processor_without_raising(monk
         ("enqueue", "owner-a", "memory-1"),
         ("process", "owner-a", "memory-1"),
     ]
+
+
+def test_bounded_processor_continues_after_one_memory_fails(monkeypatch):
+    calls = []
+
+    class Service:
+        async def process(self, uid, memory_id):
+            calls.append((uid, memory_id))
+            if memory_id == "memory-1":
+                raise artwork.MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True)
+            return {"outcome": "ready", "status": "ready"}
+
+    monkeypatch.setattr(artwork, "MemoryArtworkService", Service)
+
+    asyncio.run(artwork.process_queued_artwork("owner-a", ["memory-1", "memory-2"]))
+
+    assert calls == [("owner-a", "memory-1"), ("owner-a", "memory-2")]

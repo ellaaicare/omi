@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from ella.services.memory_artwork import (
@@ -13,6 +13,7 @@ from ella.services.memory_artwork import (
     DEFAULT_STYLE_VERSION,
     MemoryArtworkError,
     MemoryArtworkService,
+    process_queued_artwork,
 )
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
@@ -93,17 +94,33 @@ async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_fireba
 
 
 @router.post("/memories/{memory_id}/artwork")
-async def retry_memory_artwork(memory_id: str, uid: str = Depends(get_exact_firebase_uid)):
+async def retry_memory_artwork(
+    memory_id: str,
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(get_exact_firebase_uid),
+):
     try:
-        return await MemoryArtworkService().enqueue(uid, memory_id)
+        result = await MemoryArtworkService().enqueue(uid, memory_id)
+        if result.get("status") == "generating" and result.get("outcome") in {"reserved", "existing"}:
+            background_tasks.add_task(process_queued_artwork, uid, [memory_id])
+            result["processing_scheduled"] = True
+        return result
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 
 
 @router.post("/memory-artwork/backfill")
-async def backfill_memory_artwork(uid: str = Depends(get_exact_firebase_uid)):
+async def backfill_memory_artwork(
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(get_exact_firebase_uid),
+):
     try:
-        return await MemoryArtworkService().backfill(uid)
+        result = await MemoryArtworkService().backfill(uid)
+        memory_ids = list(result.get("memory_ids") or [])
+        if memory_ids:
+            background_tasks.add_task(process_queued_artwork, uid, memory_ids)
+            result["processing_scheduled"] = True
+        return result
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 

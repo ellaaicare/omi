@@ -16,6 +16,7 @@ from database import (
     notifications as notification_db,
     daily_summaries as daily_summaries_db,
 )
+import database.memory_artwork as memory_artwork_db
 from database.conversations import get_in_progress_conversation, get_conversation
 from database.redis_db import (
     cache_user_geolocation,
@@ -95,7 +96,8 @@ def get_user_profile_endpoint(uid: str = Depends(auth.get_current_user_uid)):
 @router.delete('/v1/users/delete-account', tags=['v1'])
 def delete_account(uid: str = Depends(auth.get_current_user_uid)):
     try:
-        delete_all_user_artwork(uid)
+        artwork_preferences = memory_artwork_db.get_preferences(uid)
+        delete_all_user_artwork(uid, required=artwork_preferences.get("storage_cleanup_required") is True)
         delete_user_data(uid)
         # delete user from firebase auth
         auth.delete_account(uid)
