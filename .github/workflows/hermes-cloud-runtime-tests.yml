@@ -1143,7 +1143,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py \
               -k "$callback_contract_selector" |
               grep -c '::'
-          )" -eq 80
+          )" -eq 81
           pytest tests/unit/test_ella_callbacks_summary_update.py -k "$callback_contract_selector" -v
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           baseline_summary_cas_selector='not (conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source)'
