@@ -116,7 +116,7 @@ def test_openapi_documents_exact_parallel_grounding_callback_contract():
     assert replay_fields <= set(conversation_data["properties"])
 
 
-def test_openapi_processor_disclosure_uses_only_exact_v8_processor_ids():
+def test_openapi_processor_disclosure_uses_only_exact_v9_processor_ids():
     contract = yaml.safe_load(
         (Path(__file__).resolve().parents[2] / "ella" / "docs" / "hermes-cloud-runtime-targets.openapi.yaml").read_text(
             encoding="utf-8"
@@ -124,9 +124,9 @@ def test_openapi_processor_disclosure_uses_only_exact_v8_processor_ids():
     )
     processors = {str(processor["id"]) for processor in ai_consent.PROCESSORS if isinstance(processor, dict)}
     paths = contract["paths"]
-    voice = paths["/v1/voice/session"]["post"]["x-ella-ai-data-processors-v8"]
-    listen = paths["/v4/listen"]["get"]["x-ella-ai-data-processors-v8"]
-    web_listen = paths["/v4/web/listen"]["get"]["x-ella-ai-data-processors-v8"]
+    voice = paths["/v1/voice/session"]["post"]["x-ella-ai-data-processors-v9"]
+    listen = paths["/v4/listen"]["get"]["x-ella-ai-data-processors-v9"]
+    web_listen = paths["/v4/web/listen"]["get"]["x-ella-ai-data-processors-v9"]
 
     assert set(voice["always"]) | set(voice["selected-live-voice-provider-one-of"]) <= processors
     assert set(listen["always"]) | set(listen["selected-stt-provider-one-of"]) <= processors

@@ -131,7 +131,7 @@ def test_target_refs_are_domain_separated_and_contain_no_identity():
     assert "account-a" not in account_ref + profile_ref
 
 
-def test_pilot_gate_requires_exact_v8_consent_and_all_uid_allowlists(
+def test_pilot_gate_requires_exact_v9_consent_and_all_uid_allowlists(
     monkeypatch,
 ):
     uid = "synthetic-pilot"
@@ -161,7 +161,7 @@ def test_pilot_gate_requires_exact_v8_consent_and_all_uid_allowlists(
         ),
     )
     admission = invitation_authority.authorize_invitation_pilot(uid)
-    assert admission.policy_version == "ai-data-processors-v8"
+    assert admission.policy_version == "ai-data-processors-v9"
     assert admission.account_uid == admission.profile_uid == uid
 
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "")
