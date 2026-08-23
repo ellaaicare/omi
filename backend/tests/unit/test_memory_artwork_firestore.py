@@ -99,6 +99,16 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
         )
         assert claimed["status"] == "processing"
         assert module.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token, now=now) is True
+        generation_lease_token = "generation-lease-a"
+        generation_claim = module.claim_generation(
+            uid,
+            memory_id,
+            generation_key=generation_key,
+            lease_token=generation_lease_token,
+            now=now,
+            lease_seconds=120,
+        )
+        assert generation_claim is not None
         assert module.has_processing_jobs(uid, now=now) is True
         assert module.has_processing_jobs(uid, now=now + timedelta(seconds=121)) is False
         assert (
@@ -106,7 +116,8 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
                 uid,
                 memory_id,
                 generation_key,
-                lease_token=lease_token,
+                generation_lease_token=generation_lease_token,
+                job_lease_token=lease_token,
             )
             is True
         )
@@ -118,7 +129,8 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
                 uid,
                 memory_id,
                 generation_key,
-                lease_token=lease_token,
+                generation_lease_token=generation_lease_token,
+                job_lease_token=lease_token,
             )
             is False
         )
