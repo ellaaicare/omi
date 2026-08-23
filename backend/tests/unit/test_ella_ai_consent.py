@@ -46,12 +46,12 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v8_contract():
+def test_policy_matches_exact_managed_cloud_v9_artwork_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v8"
+    assert policy["version"] == "ai-data-processors-v9"
     assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
-    assert policy["scope_version"] == "managed-cloud-internal-pilot-v2"
+    assert policy["scope_version"] == "managed-cloud-internal-pilot-v3"
     assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert (
         "|".join(
@@ -72,6 +72,7 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
                 "openai:language-live-voice",
                 "groq:language",
                 "xai-grok:language-live-voice",
+                "xai-imagine:memory-illustration",
                 "inworld:tts",
                 "elevenlabs:tts-fallback",
             ]
@@ -79,6 +80,10 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
         == policy["canonical_processor_set"]
     )
     assert consent.CURRENT_SCOPE_HASH == f"sha256:{hashlib.sha256(policy['canonical_scope'].encode()).hexdigest()}"
+    assert (
+        "artwork_provider=xai/grok-imagine-image-2.0;"
+        "source=selected_memory_summary_only;raw_audio=false;source_photos=false"
+    ) in policy["canonical_scope"]
     processors = {processor["id"]: processor for processor in policy["processors"]}
     assert processors["nous-hermes-cloud"] == {
         "id": "nous-hermes-cloud",
@@ -90,6 +95,14 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
             "hermes_cloud",
             "nous-hermes-cloud",
         ],
+        "third_party": True,
+    }
+    assert processors["xai-imagine"] == {
+        "id": "xai-imagine",
+        "legal_recipient": "xAI",
+        "function": "Illustrations for saved memories",
+        "data": "Selected memory title and summary; no raw microphone audio or source photos",
+        "provider_aliases": ["xai-imagine", "grok-imagine-image-2.0"],
         "third_party": True,
     }
     assert "honcho-cloud" not in processors
@@ -212,6 +225,13 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
             "xAI Grok",
             "Language processing and live voice",
             "Text, selected context, or live microphone audio",
+            True,
+        ),
+        (
+            "xai-imagine",
+            "xAI",
+            "Illustrations for saved memories",
+            "Selected memory title and summary; no raw microphone audio or source photos",
             True,
         ),
         ("inworld", "Inworld AI", "Voice synthesis", "Response text", True),
@@ -472,7 +492,7 @@ def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v8")
+    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v9")
 
 
 def test_revoke_supersedes_prior_grant():

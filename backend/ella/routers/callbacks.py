@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 import database.conversations as conversations_db
@@ -61,6 +61,7 @@ from ella.services.canonical_summary_source import (
     ELLA_CANONICAL_SOURCE_CONTRACT,
     conversation_data_payload,
 )
+from ella.services.memory_artwork import enqueue_after_terminal_enrichment
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
     runtime_authority_enabled,
@@ -498,6 +499,7 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
 async def update_conversation_summary(
     conversation_id: str,
     update: ConversationSummaryUpdate,
+    background_tasks: BackgroundTasks = None,
     request: Request = None,
     uid: str = None,
     service: EllaRequestAuthority = Depends(require_callback_service),
@@ -587,6 +589,8 @@ async def update_conversation_summary(
             writer_args.pop("canonical_preflight")
             writer_args["require_canonical"] = update.require_canonical
         result = await writer(**writer_args)
+        if background_tasks is not None:
+            background_tasks.add_task(enqueue_after_terminal_enrichment, uid, conversation_id)
         if cas_preconditions is not None:
             if response is not None:
                 if result.get("status") == "pending_reconciliation":

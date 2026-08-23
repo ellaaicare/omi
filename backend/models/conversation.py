@@ -334,6 +334,27 @@ class ConversationPostProcessing(BaseModel):
     fail_reason: Optional[str] = None
 
 
+class MemoryArtworkStatus(str, Enum):
+    ready = 'ready'
+    generating = 'generating'
+    unavailable = 'unavailable'
+    declined = 'declined'
+
+
+class MemoryArtworkState(BaseModel):
+    """Public, non-sensitive artwork state embedded in conversation responses."""
+
+    schema_version: str = 'ella.memory_artwork.v1'
+    status: MemoryArtworkStatus
+    style_version: Optional[str] = None
+    enrichment_revision: Optional[str] = None
+    content_type: Optional[str] = None
+    pixel_width: Optional[int] = None
+    pixel_height: Optional[int] = None
+    updated_at: Optional[datetime] = None
+    failure_code: Optional[str] = None
+
+
 class Conversation(BaseModel):
     id: str
     created_at: datetime
@@ -394,6 +415,7 @@ class Conversation(BaseModel):
     processing_retry_transcript_sha256: Optional[str] = None
     processing_retry_generic_summary_sha256: Optional[str] = None
     processing_retry_source_request_id: Optional[str] = None
+    artwork: Optional[MemoryArtworkState] = None
     capture_protocol_version: Optional[int] = None
     capture_state: Optional[str] = None
     is_locked: bool = False
