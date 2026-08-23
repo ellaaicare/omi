@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import copy
 import importlib.util
+import io
 import sys
 import types
 from datetime import datetime, timezone
@@ -9,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1159,3 +1162,86 @@ def test_terminal_enrichment_hook_runs_idempotent_processor_without_raising(monk
 
     assert asyncio.run(artwork.enqueue_after_terminal_enrichment("owner-a", "memory-1")) is None
     assert calls == [("enqueue", "owner-a", "memory-1")]
+
+
+def test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions(monkeypatch):
+    source = io.BytesIO()
+    Image.new("RGB", (900, 600), color=(84, 132, 118)).save(source, format="PNG")
+    encoded = base64.b64encode(source.getvalue()).decode("ascii")
+
+    class Response:
+        status_code = 200
+        content = b"bounded-json"
+
+        def json(self):
+            return {"data": [{"b64_json": encoded}]}
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setenv(artwork.XAI_API_KEY_ENV, "test-only-key")
+    client = Client()
+    provider = artwork.XaiMemoryArtworkProvider(client=client)
+
+    generated = asyncio.run(
+        provider.generate(
+            prompt="A calm abstract garden with no text or identifiable people.",
+            style_version=artwork.DEFAULT_STYLE_VERSION,
+            idempotency_key="a" * 64,
+        )
+    )
+
+    assert generated.content_type == "image/jpeg"
+    assert (generated.pixel_width, generated.pixel_height) == (artwork.TARGET_WIDTH, artwork.TARGET_HEIGHT)
+    with Image.open(io.BytesIO(generated.image_bytes)) as normalized:
+        assert normalized.size == (artwork.TARGET_WIDTH, artwork.TARGET_HEIGHT)
+        assert normalized.mode == "RGB"
+    assert len(client.calls) == 1
+    url, request = client.calls[0]
+    assert url == artwork.XAI_IMAGE_ENDPOINT
+    assert request["json"]["model"] == artwork.DEFAULT_XAI_IMAGE_MODEL
+    assert request["json"]["response_format"] == "b64_json"
+    assert request["json"]["aspect_ratio"] == "3:2"
+    assert request["headers"]["Authorization"] == "Bearer test-only-key"
+
+
+def test_xai_provider_rejects_vendor_url_only_response(monkeypatch):
+    class Response:
+        status_code = 200
+        content = b"bounded-json"
+
+        def json(self):
+            return {"data": [{"url": "https://vendor.invalid/temporary.jpg"}]}
+
+    class Client:
+        async def post(self, url, **kwargs):
+            return Response()
+
+    monkeypatch.setenv(artwork.XAI_API_KEY_ENV, "test-only-key")
+    provider = artwork.XaiMemoryArtworkProvider(client=Client())
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(
+            provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="a" * 64,
+            )
+        )
+
+    assert failure.value.code == "memory_artwork_provider_response_invalid"
+
+
+def test_xai_provider_selection_fails_closed_without_credential(monkeypatch):
+    monkeypatch.setenv(artwork.PROVIDER_KIND_ENV, "xai")
+    monkeypatch.delenv(artwork.XAI_API_KEY_ENV, raising=False)
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        artwork.memory_artwork_provider_factory()
+
+    assert failure.value.code == "memory_artwork_provider_credential_unavailable"

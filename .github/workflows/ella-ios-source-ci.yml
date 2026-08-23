@@ -896,8 +896,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 30 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=30 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 33 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=33 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
@@ -910,11 +910,14 @@ jobs:
           grep -Fq 'test_firestore_retry_reservation_preserves_attempt_history' <<<"$artwork_ids"
           grep -Fq 'test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven' <<<"$artwork_ids"
           grep -Fq 'test_terminal_enrichment_hook_runs_idempotent_processor_without_raising' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_rejects_vendor_url_only_response' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_selection_fails_closed_without_credential' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '30 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '33 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=30 actualCount=30 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=33 actualCount=33 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend

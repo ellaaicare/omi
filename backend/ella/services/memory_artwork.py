@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import io
 import json
 import os
 import secrets
@@ -15,10 +17,16 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 from urllib.parse import urlparse
 
 import httpx
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 import database.memory_artwork as artwork_db
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_authority_identity
-from utils.ella.memory_artwork_storage import GCSMemoryArtworkStore, MemoryArtworkStorageError, StoredArtwork
+from utils.ella.memory_artwork_storage import (
+    MAX_ARTWORK_BYTES,
+    GCSMemoryArtworkStore,
+    MemoryArtworkStorageError,
+    StoredArtwork,
+)
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = "ella.memory_artwork.consent.v1"
@@ -39,6 +47,12 @@ PROVIDER_ALLOWED_HOST_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST"
 WORKER_INTERVAL_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS"
 WORKER_BATCH_SIZE = 10
 WORKER_MAX_ATTEMPTS = 5
+PROVIDER_KIND_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER"
+XAI_API_KEY_ENV = "XAI_API_KEY"
+XAI_IMAGE_MODEL_ENV = "ELLA_MEMORY_ARTWORK_XAI_MODEL"
+XAI_IMAGE_ENDPOINT = "https://api.x.ai/v1/images/generations"
+DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image-2.0"
+MAX_PROVIDER_RESPONSE_BYTES = 20 * 1024 * 1024
 
 
 class MemoryArtworkError(RuntimeError):
@@ -223,6 +237,102 @@ class FirstPartyHTTPArtworkProvider:
         )
 
 
+class XaiMemoryArtworkProvider:
+    """Direct server-side xAI Imagine adapter with no vendor URL persistence."""
+
+    def __init__(self, *, client: Optional[httpx.AsyncClient] = None):
+        self.api_key = os.getenv(XAI_API_KEY_ENV, "").strip()
+        if not self.api_key:
+            raise MemoryArtworkError("memory_artwork_provider_credential_unavailable", retryable=True)
+        self.model = os.getenv(XAI_IMAGE_MODEL_ENV, DEFAULT_XAI_IMAGE_MODEL).strip()
+        if not self.model:
+            raise MemoryArtworkError("memory_artwork_provider_model_invalid", retryable=False)
+        self.client = client
+
+    @staticmethod
+    def _normalize_image(image_bytes: bytes) -> bytes:
+        if not image_bytes or len(image_bytes) > MAX_ARTWORK_BYTES:
+            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                width, height = source.size
+                if width <= 0 or height <= 0 or width * height > 24_000_000:
+                    raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+                normalized = ImageOps.fit(
+                    source.convert("RGB"),
+                    (TARGET_WIDTH, TARGET_HEIGHT),
+                    method=Image.Resampling.LANCZOS,
+                )
+                output = io.BytesIO()
+                normalized.save(output, format="JPEG", quality=88, optimize=True)
+                result = output.getvalue()
+        except (Image.DecompressionBombError, OSError, UnidentifiedImageError) as exc:
+            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
+        if not result or len(result) > MAX_ARTWORK_BYTES:
+            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+        return result
+
+    async def generate(self, *, prompt: str, style_version: str, idempotency_key: str) -> GeneratedArtwork:
+        owns_client = self.client is None
+        client = self.client or httpx.AsyncClient(
+            timeout=PROVIDER_TIMEOUT_SECONDS,
+            follow_redirects=False,
+            trust_env=False,
+        )
+        try:
+            response = await client.post(
+                XAI_IMAGE_ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": idempotency_key,
+                },
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "n": 1,
+                    "aspect_ratio": "3:2",
+                    "resolution": "2k",
+                    "quality": "low",
+                    "response_format": "b64_json",
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True) from exc
+        finally:
+            if owns_client:
+                await client.aclose()
+        if response.status_code != 200:
+            raise MemoryArtworkError("memory_artwork_provider_rejected", retryable=response.status_code >= 500)
+        if len(response.content) > MAX_PROVIDER_RESPONSE_BYTES:
+            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+        try:
+            payload = response.json()
+            item = payload["data"][0]
+            encoded = item["b64_json"]
+            if not isinstance(encoded, str):
+                raise TypeError("invalid image payload")
+            raw_image = base64.b64decode(encoded, validate=True)
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
+        normalized = self._normalize_image(raw_image)
+        return GeneratedArtwork(
+            image_bytes=normalized,
+            content_type="image/jpeg",
+            pixel_width=TARGET_WIDTH,
+            pixel_height=TARGET_HEIGHT,
+        )
+
+
+def memory_artwork_provider_factory() -> MemoryArtworkProvider:
+    provider_kind = os.getenv(PROVIDER_KIND_ENV, "first_party_adapter").strip().lower()
+    if provider_kind == "xai":
+        return XaiMemoryArtworkProvider()
+    if provider_kind == "first_party_adapter":
+        return FirstPartyHTTPArtworkProvider()
+    raise MemoryArtworkError("memory_artwork_provider_kind_invalid", retryable=False)
+
+
 async def resolve_memory_artwork_authority(uid: str) -> ArtworkRuntimeAuthority:
     try:
         runtime = await resolve_isolated_runtime(uid, target_mode="hermes-chat")
@@ -325,13 +435,13 @@ class MemoryArtworkService:
         *,
         repository: Optional[MemoryArtworkRepository] = None,
         authority_resolver: Callable[[str], Awaitable[ArtworkRuntimeAuthority]] = resolve_memory_artwork_authority,
-        provider_factory: Callable[[], MemoryArtworkProvider] = FirstPartyHTTPArtworkProvider,
+        provider_factory: Optional[Callable[[], MemoryArtworkProvider]] = None,
         store_factory: Callable[[], MemoryArtworkStore] = GCSMemoryArtworkStore,
         config: Optional[MemoryArtworkConfig] = None,
     ):
         self.repository = repository or FirestoreMemoryArtworkRepository()
         self.authority_resolver = authority_resolver
-        self.provider_factory = provider_factory
+        self.provider_factory = provider_factory or memory_artwork_provider_factory
         self.store_factory = store_factory
         self.config = config or MemoryArtworkConfig.from_env()
 

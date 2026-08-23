@@ -61,6 +61,20 @@ When approved, the operator also supplies:
 
 ```text
 ELLA_MEMORY_ARTWORK_BUCKET=<private first-party bucket name>
+ELLA_MEMORY_ARTWORK_PROVIDER=xai
+ELLA_MEMORY_ARTWORK_XAI_MODEL=grok-imagine-image-2.0
+XAI_API_KEY=<existing protected server-side credential>
+```
+
+The xAI adapter requests one 3:2 image as base64, normalizes it to the exact
+1536x1024 JPEG contract, and stores only the normalized first-party object. It
+does not persist a vendor-temporary URL. The model may be pinned with
+`ELLA_MEMORY_ARTWORK_XAI_MODEL`; the default is `grok-imagine-image-2.0`.
+
+The alternate fixed first-party adapter uses:
+
+```text
+ELLA_MEMORY_ARTWORK_PROVIDER=first_party_adapter
 ELLA_MEMORY_ARTWORK_PROVIDER_URL=<fixed first-party adapter URL>
 ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST=<exact adapter host>
 ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE=<root/service-owned 0600 token path>
