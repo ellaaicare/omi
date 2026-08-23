@@ -39,10 +39,10 @@ class SharedPreferencesUtil {
   static const bool isTodayDesignPreviewEnabled = !isPublicBuild && isTodayDesignPreviewConfigured;
   static const String currentAiConsentContractVersion = 'ai-data-processors-v9';
   static const String currentAiConsentProcessorSetHash =
-      'sha256:e0863f109ec60fea723a6b43c0b86b3b3c1f0035b1bff67be5a56d07a4587f3c';
+      'sha256:43f47e803ef838a0aee802c849e7daf75fa819f3224336311b9fbc32b6835c10';
   static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v3';
   static const String currentAiConsentScopeHash =
-      'sha256:aa7822066b482f12f43627a1b41e0b945f0b9199490d9f59be02ef671e82e97d';
+      'sha256:846b482055aa8241d4f4666925edcdacd02535ebaf997d78ac98fc27f7980c82';
   static const String currentAiConsentReceiptPrefix = 'aicr_';
 
   factory SharedPreferencesUtil() {

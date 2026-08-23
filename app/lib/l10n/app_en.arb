@@ -10491,7 +10491,7 @@
   "todayReadMore": "Read more",
   "voiceModalEndAction": "End",
   "ellaAuthDataDisclosure": "Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.",
-  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory or Daily Note; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
+  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
   "aiConsentProcessorDetailsLink": "Full processor details in Privacy Policy",
   "aiConsentNoSharingBeforeAllow": "Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.",
   "aiConsentRevokeAction": "Revoke AI permission",
@@ -10543,9 +10543,9 @@
   },
   "aiConsentXaiImagesTitle": "xAI image generation",
   "@aiConsentXaiImagesTitle": {
-    "description": "Legal recipient and purpose for generated memory and Daily Note illustrations"
+    "description": "Legal recipient and purpose for generated memory illustrations"
   },
-  "aiConsentXaiImagesBody": "Creates an illustration for a saved memory or Daily Note. It may receive only the selected title and summary, not your raw microphone audio or source photos.",
+  "aiConsentXaiImagesBody": "Creates an illustration for a saved memory. It may receive only that memory’s title and summary, not your raw microphone audio or source photos.",
   "@aiConsentXaiImagesBody": {
     "description": "Plain-language data categories and purpose for xAI image generation"
   },

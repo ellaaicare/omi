@@ -30,7 +30,7 @@ CANONICAL_PROCESSOR_SET = (
     "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
     "openai-codex:managed-agent-model|photon:messaging-delivery|"
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
-    "groq:language|xai-grok:language-live-voice|xai-imagine:memory-daily-note-illustration|"
+    "groq:language|xai-grok:language-live-voice|xai-imagine:memory-illustration|"
     "inworld:tts|elevenlabs:tts-fallback"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
@@ -39,7 +39,7 @@ CANONICAL_SCOPE = (
     "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|"
     "model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|"
     "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false|"
-    "artwork_provider=xai/grok-imagine-image-2.0;source=selected_summary_only;raw_audio=false;source_photos=false"
+    "artwork_provider=xai/grok-imagine-image-2.0;source=selected_memory_summary_only;raw_audio=false;source_photos=false"
 )
 CURRENT_SCOPE_HASH = f"sha256:{hashlib.sha256(CANONICAL_SCOPE.encode()).hexdigest()}"
 MANAGED_CLOUD_RUNTIME_PROVIDER = "hermes_cloud"
@@ -182,8 +182,8 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
     {
         "id": "xai-imagine",
         "legal_recipient": "xAI",
-        "function": "Illustrations for saved memories and Daily Notes",
-        "data": "Selected memory or Daily Note title and summary; no raw microphone audio or source photos",
+        "function": "Illustrations for saved memories",
+        "data": "Selected memory title and summary; no raw microphone audio or source photos",
         "provider_aliases": ["xai-imagine", "grok-imagine-image-2.0"],
         "third_party": True,
     },

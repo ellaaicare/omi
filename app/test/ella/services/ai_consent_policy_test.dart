@@ -12,11 +12,11 @@ void main() {
     expect(policy.version, SharedPreferencesUtil.currentAiConsentContractVersion);
     expect(policy.version, 'ai-data-processors-v9');
     expect(policy.processorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
-    expect(policy.processorSetHash, 'sha256:e0863f109ec60fea723a6b43c0b86b3b3c1f0035b1bff67be5a56d07a4587f3c');
+    expect(policy.processorSetHash, 'sha256:43f47e803ef838a0aee802c849e7daf75fa819f3224336311b9fbc32b6835c10');
     expect(policy.processorSetHash, 'sha256:${sha256.convert(utf8.encode(policy.canonicalProcessorSet))}');
     expect(policy.scopeVersion, SharedPreferencesUtil.currentAiConsentScopeVersion);
     expect(policy.scopeVersion, 'managed-cloud-internal-pilot-v3');
-    expect(policy.scopeHash, 'sha256:aa7822066b482f12f43627a1b41e0b945f0b9199490d9f59be02ef671e82e97d');
+    expect(policy.scopeHash, 'sha256:846b482055aa8241d4f4666925edcdacd02535ebaf997d78ac98fc27f7980c82');
     expect(policy.scopeHash, SharedPreferencesUtil.currentAiConsentScopeHash);
     expect(policy.scopeHash, 'sha256:${sha256.convert(utf8.encode(policy.canonicalScope))}');
 

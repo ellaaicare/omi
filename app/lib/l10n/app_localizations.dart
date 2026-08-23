@@ -16566,7 +16566,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory or Daily Note; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
+  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16701,7 +16701,7 @@ abstract class AppLocalizations {
   /// **'Sends iMessage content and basic delivery details only to one person you choose for testing.'**
   String get aiConsentPhotonBody;
 
-  /// Legal recipient and purpose for generated memory and Daily Note illustrations
+  /// Legal recipient and purpose for generated memory illustrations
   ///
   /// In en, this message translates to:
   /// **'xAI image generation'**
@@ -16710,7 +16710,7 @@ abstract class AppLocalizations {
   /// Plain-language data categories and purpose for xAI image generation
   ///
   /// In en, this message translates to:
-  /// **'Creates an illustration for a saved memory or Daily Note. It may receive only the selected title and summary, not your raw microphone audio or source photos.'**
+  /// **'Creates an illustration for a saved memory. It may receive only that memory’s title and summary, not your raw microphone audio or source photos.'**
   String get aiConsentXaiImagesBody;
 
   /// Explains the exact managed-cloud profile and messaging scope

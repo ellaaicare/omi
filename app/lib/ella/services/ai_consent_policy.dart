@@ -107,14 +107,14 @@ class AiConsentPolicy {
         'nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|'
         'openai-codex:managed-agent-model|photon:messaging-delivery|'
         'openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|'
-        'groq:language|xai-grok:language-live-voice|xai-imagine:memory-daily-note-illustration|'
+        'groq:language|xai-grok:language-live-voice|xai-imagine:memory-illustration|'
         'inworld:tts|elevenlabs:tts-fallback',
     scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
     scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     canonicalScope: 'profile_binding=server-profile-v1|runtime_provider=hermes_cloud|'
         'model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|'
         'photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false|'
-        'artwork_provider=xai/grok-imagine-image-2.0;source=selected_summary_only;raw_audio=false;source_photos=false',
+        'artwork_provider=xai/grok-imagine-image-2.0;source=selected_memory_summary_only;raw_audio=false;source_photos=false',
     processors: [
       AiConsentProcessor(
         id: 'deepgram',
@@ -214,8 +214,8 @@ class AiConsentPolicy {
       AiConsentProcessor(
         id: 'xai-imagine',
         name: 'xAI',
-        function: 'Illustrations for saved memories and Daily Notes',
-        data: 'Selected memory or Daily Note title and summary; no raw microphone audio or source photos',
+        function: 'Illustrations for saved memories',
+        data: 'Selected memory title and summary; no raw microphone audio or source photos',
       ),
       AiConsentProcessor(id: 'inworld', name: 'Inworld AI', function: 'Voice synthesis', data: 'Response text'),
       AiConsentProcessor(

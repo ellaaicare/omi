@@ -137,7 +137,8 @@ void main() {
     expect(disclosure, contains('Groq'));
     expect(disclosure, contains('xAI Grok'));
     expect(disclosure, contains('xAI image generation'));
-    expect(disclosure, contains('saved memory or Daily Note'));
+    expect(disclosure, contains('saved memory'));
+    expect(disclosure, isNot(contains('Daily Note')));
     expect(disclosure, contains('not your raw microphone audio or source photos'));
     expect(disclosure, contains('ElevenLabs'));
     expect(disclosure, contains('Inworld AI'));

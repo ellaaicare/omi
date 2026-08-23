@@ -8889,7 +8889,7 @@ class AppLocalizationsLt extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory or Daily Note; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
+      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
@@ -8973,7 +8973,7 @@ class AppLocalizationsLt extends AppLocalizations {
 
   @override
   String get aiConsentXaiImagesBody =>
-      'Creates an illustration for a saved memory or Daily Note. It may receive only the selected title and summary, not your raw microphone audio or source photos.';
+      'Creates an illustration for a saved memory. It may receive only that memory’s title and summary, not your raw microphone audio or source photos.';
 
   @override
   String get aiConsentManagedCloudScope =>
