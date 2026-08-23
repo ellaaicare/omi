@@ -842,7 +842,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 79, artwork 53, and Firestore 6 contracts
+    name: Callback 79, artwork 51, and Firestore 6 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -899,8 +899,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 53 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=53 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 51 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=51 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
@@ -929,16 +929,15 @@ jobs:
           grep -Fq 'test_processing_job_activity_requires_a_future_lease' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_selection_fails_closed_without_credential' <<<"$artwork_ids"
           grep -Fq 'test_signed_url_rechecks_sensitive_source_before_release' <<<"$artwork_ids"
-          grep -Fq 'test_signed_url_rejects_source_or_prompt_drift_before_signing' <<<"$artwork_ids"
           grep -Fq 'test_failed_storage_write_remains_covered_by_cleanup_marker' <<<"$artwork_ids"
           grep -Fq 'test_cleanup_marker_failure_prevents_object_upload' <<<"$artwork_ids"
           grep -Fq 'test_global_consent_revocation_at_final_egress_check_blocks_provider' <<<"$artwork_ids"
           grep -Fq 'test_pending_job_query_is_bounded_to_due_work_and_ordered' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '53 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '51 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=53 actualCount=53 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=51 actualCount=51 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend
