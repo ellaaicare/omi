@@ -247,6 +247,36 @@ async def self_hosted_runtime_authority_required(
         raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
 
 
+async def recover_retained_voice_entitlement(
+    uid: str,
+    *,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> bool:
+    """Recover only an invitationless retained account's exact legacy voice row."""
+    if not uid or rollout_enabled(
+        "ELLA_RUNTIME_BINDINGS_ENABLED",
+        "ELLA_RUNTIME_BINDINGS_ENABLED_UIDS",
+        uid,
+    ):
+        return False
+    try:
+        repository = repository or await EllaProvisioningRepository.create()
+        if await repository.has_invitation_owned_self_hosted_runtime(uid):
+            return False
+        if not await repository.has_active_retained_runtime(uid):
+            return False
+        return await repository.seed_voice_entitlement_if_absent(
+            uid=uid,
+            retained_authority_lineage=current_self_hosted_runtime_lineage(),
+        )
+    except ProvisioningSchemaNotReadyError as exc:
+        raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise ProvisioningError("retained_entitlement_recovery_unavailable", retryable=True) from exc
+
+
 def any_provisioning_enabled(
     uid: Optional[str] = None,
     *,

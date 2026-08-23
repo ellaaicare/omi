@@ -919,8 +919,7 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT DISTINCT expected_model, model_policy_version
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
@@ -928,8 +927,7 @@ class EllaProvisioningRepository:
               AND health_state = 'healthy'
               AND active = false
               AND user_id IS NULL
-            """
-        )
+            """)
         if not rows:
             return None
         policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
@@ -1059,16 +1057,14 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT id, runtime_instance_id, status, health_state, expected_model,
                    prompt_pack_version, revision, claimed_at, quarantined_at,
                    quarantine_reason, created_at, updated_at
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
             ORDER BY created_at ASC, id ASC
-            """
-        )
+            """)
         return [dict(row) for row in rows]
 
     async def claim_cloud_pool_binding(
@@ -2988,7 +2984,12 @@ class EllaProvisioningRepository:
             raise RuntimePoolClaimError("honcho_attestation_binding_mismatch")
         return dict(row)
 
-    async def seed_voice_entitlement_if_absent(self, *, uid: str) -> bool:
+    async def seed_voice_entitlement_if_absent(
+        self,
+        *,
+        uid: str,
+        retained_authority_lineage: Optional[RuntimeTargetLineage] = None,
+    ) -> bool:
         """Create or safely recover a self-hosted grok voice entitlement.
 
         Fresh self-hosted hermes user provisioning should carry a working
@@ -3001,9 +3002,13 @@ class EllaProvisioningRepository:
         No-clobber / row precedence: every existing entitlement is left
         untouched except the exact invitationless auto-provision shape tied to
         the content-free recovery receipt for a previous
-        ``managed_cloud_consent_grant_changed`` quarantine. Returns True when a
-        row was newly inserted or safely recovered.
+        ``managed_cloud_consent_grant_changed`` quarantine. A current lineage
+        additionally permits an active retained account to recover that exact
+        row when its retained cluster and current consent authority are both
+        proven in the same locked transaction. Returns True when a row was newly
+        inserted or safely recovered.
         """
+        lineage = retained_authority_lineage.validate() if retained_authority_lineage is not None else None
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -3020,66 +3025,126 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
-                row = await connection.fetchrow(
-                    """
-                    INSERT INTO voice_entitlements (
-                        uid, status, plan, daily_limit_s, monthly_limit_s,
-                        max_session_s, max_concurrent,
-                        provider_allowlist, model_allowlist, mode_allowlist,
-                        fallback_policy, operator_note
-                    ) VALUES (
-                        $1, 'active', 'canary', $2, $3, $4, $5,
-                        $6::text[], $7::text[], $8::text[], $9::jsonb, $10
+                if lineage is None:
+                    row = await connection.fetchrow(
+                        """
+                        INSERT INTO voice_entitlements (
+                            uid, status, plan, daily_limit_s, monthly_limit_s,
+                            max_session_s, max_concurrent,
+                            provider_allowlist, model_allowlist, mode_allowlist,
+                            fallback_policy, operator_note
+                        ) VALUES (
+                            $1, 'active', 'canary', $2, $3, $4, $5,
+                            $6::text[], $7::text[], $8::text[], $9::jsonb, $10
+                        )
+                        ON CONFLICT (uid) DO NOTHING
+                        RETURNING revision
+                        """,
+                        uid,
+                        2700,
+                        43200,
+                        1200,
+                        1,
+                        ["grok-voice"],
+                        [],
+                        ["v4"],
+                        json.dumps({"enabled": False, "order": []}),
+                        "auto-provision self-hosted grok voice",
                     )
-                    ON CONFLICT (uid) DO NOTHING
-                    RETURNING revision
-                    """,
-                    uid,
-                    2700,
-                    43200,
-                    1200,
-                    1,
-                    ["grok-voice"],
-                    [],
-                    ["v4"],
-                    json.dumps({"enabled": False, "order": []}),
-                    "auto-provision self-hosted grok voice",
-                )
-                if row is not None:
-                    return True
+                    if row is not None:
+                        return True
 
-                recovery_candidates = await connection.fetch(
-                    """
-                    SELECT job.id AS job_id, binding.id AS binding_id
-                    FROM users account
-                    JOIN ella_provisioning_jobs job
-                      ON job.user_id = account.id
-                    JOIN ella_runtime_bindings binding
-                      ON binding.user_id = account.id
-                     AND binding.provider = 'hermes'
-                     AND binding.role = 'user'
-                     AND binding.template_version = job.target_schema_version
-                    WHERE account.omi_uid = $1
-                      AND account.status = 'PENDING'
-                      AND job.state = 'provisioning'
-                      AND job.stage = 'smoke_passed'
-                      AND job.retryable = TRUE
-                      AND job.error_code IS NULL
-                      AND job.receipts @> '[{"type":"fresh_consent_regrant_rearmed","content_free":true}]'::jsonb
-                      AND binding.status = 'shadow'
-                      AND binding.active = FALSE
-                      AND binding.health_state = 'healthy'
-                      AND binding.runtime_target_mode = 'hermes-chat'
-                      AND binding.quarantine_reason IS NULL
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM ella_invitation_redemptions redemption
-                          WHERE redemption.user_id = account.id
-                      )
-                    FOR UPDATE OF job, binding
-                    """,
-                    uid,
-                )
+                if lineage is None:
+                    recovery_candidates = await connection.fetch(
+                        """
+                        SELECT job.id AS job_id, binding.id AS binding_id
+                        FROM users account
+                        JOIN ella_provisioning_jobs job
+                          ON job.user_id = account.id
+                        JOIN ella_runtime_bindings binding
+                          ON binding.user_id = account.id
+                         AND binding.provider = 'hermes'
+                         AND binding.role = 'user'
+                         AND binding.template_version = job.target_schema_version
+                        WHERE account.omi_uid = $1
+                          AND account.status = 'PENDING'
+                          AND job.state = 'provisioning'
+                          AND job.stage = 'smoke_passed'
+                          AND job.retryable = TRUE
+                          AND job.error_code IS NULL
+                          AND job.receipts @> '[{"type":"fresh_consent_regrant_rearmed","content_free":true}]'::jsonb
+                          AND binding.status = 'shadow'
+                          AND binding.active = FALSE
+                          AND binding.health_state = 'healthy'
+                          AND binding.runtime_target_mode = 'hermes-chat'
+                          AND binding.quarantine_reason IS NULL
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM ella_invitation_redemptions redemption
+                              WHERE redemption.user_id = account.id
+                          )
+                        FOR UPDATE OF job, binding
+                        """,
+                        uid,
+                    )
+                else:
+                    recovery_candidates = await connection.fetch(
+                        """
+                        SELECT job.id AS job_id, binding.id AS binding_id
+                        FROM users account
+                        JOIN ella_provisioning_jobs job
+                          ON job.user_id = account.id
+                        JOIN ella_runtime_bindings binding
+                          ON binding.user_id = account.id
+                         AND binding.provider = 'hermes'
+                         AND binding.role = 'user'
+                         AND binding.template_version = job.target_schema_version
+                        JOIN agent_clusters cluster
+                          ON cluster.user_id = account.id
+                         AND cluster.status = 'ACTIVE'
+                         AND jsonb_typeof(cluster.agents) = 'object'
+                         AND NULLIF(BTRIM(cluster.agents->>'userAgentId'), '') IS NOT NULL
+                        JOIN ella_managed_cloud_consent_authority authority
+                          ON authority.user_id = account.id
+                         AND authority.decision = 'granted'
+                         AND authority.consent_receipt_ref IS NOT NULL
+                         AND authority.profile_binding_id IS NOT NULL
+                         AND authority.policy_version = $2
+                         AND authority.processor_set_hash = $3
+                         AND authority.scope_version = $4
+                         AND authority.scope_hash = $5
+                        WHERE account.omi_uid = $1
+                          AND account.status = 'ACTIVE'
+                          AND account.profile_class = 'real'
+                          AND job.state = 'blocked'
+                          AND job.stage = 'runtime_ready'
+                          AND job.retryable = FALSE
+                          AND job.error_code = 'invitation_authority_revoked'
+                          AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
+                          AND binding.status = 'disabled'
+                          AND binding.active = FALSE
+                          AND binding.health_state = 'unhealthy'
+                          AND binding.runtime_target_mode = 'hermes-chat'
+                          AND binding.quarantine_reason = 'managed_cloud_consent_grant_changed'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM ella_invitation_redemptions redemption
+                              WHERE redemption.user_id = account.id
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM ella_runtime_bindings active_binding
+                              WHERE active_binding.user_id = account.id
+                                AND active_binding.active = TRUE
+                          )
+                        FOR UPDATE OF job, binding, cluster, authority
+                        """,
+                        uid,
+                        lineage.policy_version,
+                        lineage.processor_set_hash,
+                        lineage.scope_version,
+                        lineage.scope_hash,
+                    )
                 if len(recovery_candidates) != 1:
                     return False
 
