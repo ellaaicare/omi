@@ -840,7 +840,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 79, artwork 16, and Firestore CAS 5 contracts
+    name: Callback 79, artwork 36, and Firestore 6 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -896,8 +896,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 39 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=39 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 45 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=45 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
@@ -905,23 +905,30 @@ jobs:
           grep -Fq 'test_firestore_transaction_contract_rejects_source_and_lease_drift' <<<"$artwork_ids"
           grep -Fq 'test_sensitive_classification_drift_at_egress_recheck_blocks_provider' <<<"$artwork_ids"
           grep -Fq 'test_signed_url_requires_current_bound_consent' <<<"$artwork_ids"
+          grep -Fq 'test_signed_url_rereads_consent_after_awaited_authority_resolution' <<<"$artwork_ids"
+          grep -Fq 'test_release_off_is_a_signed_url_kill_switch' <<<"$artwork_ids"
+          grep -Fq 'test_process_requires_current_durable_job_claim_before_provider' <<<"$artwork_ids"
+          grep -Fq 'test_mounted_internal_process_route_uses_durable_worker_job_claim' <<<"$artwork_ids"
           grep -Fq 'test_durable_worker_recovers_retryable_job_after_restart' <<<"$artwork_ids"
+          grep -Fq 'test_account_deletion_marker_drains_claimed_worker_before_storage_write' <<<"$artwork_ids"
           grep -Fq 'test_firestore_reservation_writes_generation_and_dispatch_in_one_transaction' <<<"$artwork_ids"
           grep -Fq 'test_firestore_retry_reservation_preserves_attempt_history' <<<"$artwork_ids"
           grep -Fq 'test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven' <<<"$artwork_ids"
+          grep -Fq 'test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active' <<<"$artwork_ids"
           grep -Fq 'test_terminal_enrichment_hook_runs_idempotent_processor_without_raising' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_rejects_vendor_url_only_response' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_selection_fails_closed_without_credential' <<<"$artwork_ids"
           grep -Fq 'test_signed_url_rechecks_sensitive_source_before_release' <<<"$artwork_ids"
-          grep -Fq 'test_failed_storage_write_does_not_set_cleanup_latch' <<<"$artwork_ids"
+          grep -Fq 'test_failed_storage_write_remains_covered_by_cleanup_marker' <<<"$artwork_ids"
+          grep -Fq 'test_cleanup_marker_failure_prevents_object_upload' <<<"$artwork_ids"
           grep -Fq 'test_global_consent_revocation_at_final_egress_check_blocks_provider' <<<"$artwork_ids"
           grep -Fq 'test_pending_job_query_is_bounded_and_ordered_by_availability' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '39 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '45 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=39 actualCount=39 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=45 actualCount=45 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend

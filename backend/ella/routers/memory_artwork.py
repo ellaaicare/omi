@@ -13,6 +13,7 @@ from ella.services.memory_artwork import (
     DEFAULT_STYLE_VERSION,
     MemoryArtworkError,
     MemoryArtworkService,
+    MemoryArtworkWorker,
 )
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
@@ -116,6 +117,9 @@ async def process_memory_artwork(
 ):
     bound_uid = service.require_uid(uid, feature="Memory artwork worker")
     try:
-        return await MemoryArtworkService().process(bound_uid, memory_id)
+        worker = MemoryArtworkWorker()
+        conversation = worker.repository.get_conversation(bound_uid, memory_id) or {}
+        generation_key = str(((conversation.get("artwork") or {}).get("generation_key") or ""))
+        return await worker.run_job(bound_uid, memory_id, generation_key, raise_errors=True)
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
