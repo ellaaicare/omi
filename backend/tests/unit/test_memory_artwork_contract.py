@@ -330,10 +330,22 @@ class FakeRepository:
             {"status": "failed", "failure_code": failure_code},
         )
 
-    def mark_storage_cleanup_required(self, uid, memory_id, generation_key, *, lease_token):
+    def mark_storage_cleanup_required(
+        self,
+        uid,
+        memory_id,
+        generation_key,
+        *,
+        generation_lease_token,
+        job_lease_token,
+    ):
         if uid in self.deletion_pending:
             return False
-        if not self.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token):
+        conversation = self.get_conversation(uid, memory_id) or {}
+        current_artwork = conversation.get("artwork") or {}
+        if current_artwork.get("lease_token") != generation_lease_token:
+            return False
+        if not self.job_claim_is_current(uid, memory_id, generation_key, lease_token=job_lease_token):
             return False
         self.storage_cleanup_required.add(uid)
         return True
@@ -674,7 +686,15 @@ def test_failed_storage_write_remains_covered_by_cleanup_marker():
 
 def test_cleanup_marker_failure_prevents_object_upload():
     class FailingMarkerRepository(FakeRepository):
-        def mark_storage_cleanup_required(self, uid, memory_id, generation_key, *, lease_token):
+        def mark_storage_cleanup_required(
+            self,
+            uid,
+            memory_id,
+            generation_key,
+            *,
+            generation_lease_token,
+            job_lease_token,
+        ):
             return False
 
     repository = FailingMarkerRepository()
@@ -1443,7 +1463,8 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
             reference,
             job_reference,
             generation_key="a" * 64,
-            lease_token="lease-a",
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
         )
         is False
     )
@@ -2108,6 +2129,11 @@ def test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions(monke
     assert payload["response_format"] == "b64_json"
     assert payload["aspect_ratio"] == "3:2"
     assert request.headers["Authorization"] == "Bearer test-only-key"
+
+    monkeypatch.setattr(artwork, "_PIL_AVAILABLE", False)
+    with pytest.raises(artwork.MemoryArtworkError) as missing_codec:
+        artwork.XaiMemoryArtworkProvider._normalize_image(source.getvalue())
+    assert missing_codec.value.code == "memory_artwork_image_codec_unavailable"
 
 
 def test_xai_provider_rejects_vendor_url_only_response(monkeypatch):

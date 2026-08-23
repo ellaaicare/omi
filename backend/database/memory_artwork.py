@@ -398,7 +398,8 @@ def _mark_storage_cleanup_required_transaction(
     job_ref,
     *,
     generation_key: str,
-    lease_token: str,
+    generation_lease_token: str,
+    job_lease_token: str,
 ) -> bool:
     user_snapshot = user_ref.get(transaction=transaction)
     conversation_snapshot = conversation_ref.get(transaction=transaction)
@@ -413,12 +414,12 @@ def _mark_storage_cleanup_required_transaction(
         or not conversation_snapshot.exists
         or not isinstance(artwork, dict)
         or artwork.get("generation_key") != generation_key
-        or artwork.get("lease_token") != lease_token
+        or artwork.get("lease_token") != generation_lease_token
         or artwork.get("status") != "generating"
         or not _terminal_enrichment_matches(conversation, str(artwork.get("enrichment_revision") or ""))
         or not job_snapshot.exists
         or job.get("generation_key") != generation_key
-        or job.get("lease_token") != lease_token
+        or job.get("lease_token") != job_lease_token
         or not _processing_job_is_active(job, now=datetime.now(timezone.utc))
     ):
         return False
@@ -427,8 +428,8 @@ def _mark_storage_cleanup_required_transaction(
 
 
 @transactional
-def _mark_storage_cleanup_required(transaction, user_ref, job_ref, **kwargs) -> bool:
-    return _mark_storage_cleanup_required_transaction(transaction, user_ref, job_ref, **kwargs)
+def _mark_storage_cleanup_required(transaction, user_ref, conversation_ref, job_ref, **kwargs) -> bool:
+    return _mark_storage_cleanup_required_transaction(transaction, user_ref, conversation_ref, job_ref, **kwargs)
 
 
 def mark_storage_cleanup_required(
@@ -436,7 +437,8 @@ def mark_storage_cleanup_required(
     memory_id: str,
     generation_key: str,
     *,
-    lease_token: str,
+    generation_lease_token: str,
+    job_lease_token: str,
 ) -> bool:
     return _mark_storage_cleanup_required(
         db.transaction(),
@@ -444,7 +446,8 @@ def mark_storage_cleanup_required(
         _conversation_ref(uid, memory_id),
         _job_ref(uid, memory_id, generation_key),
         generation_key=generation_key,
-        lease_token=lease_token,
+        generation_lease_token=generation_lease_token,
+        job_lease_token=job_lease_token,
     )
 
 

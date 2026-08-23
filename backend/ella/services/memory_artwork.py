@@ -18,7 +18,17 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 from urllib.parse import urlparse
 
 import httpx
-from PIL import Image, ImageOps, UnidentifiedImageError
+
+try:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    _PIL_AVAILABLE = True
+    _IMAGE_DECODE_ERRORS = (Image.DecompressionBombError, OSError, UnidentifiedImageError)
+except ModuleNotFoundError:
+    Image = None
+    ImageOps = None
+    _PIL_AVAILABLE = False
+    _IMAGE_DECODE_ERRORS = (OSError,)
 
 import database.memory_artwork as artwork_db
 from ella.services.ai_consent import CURRENT_POLICY_VERSION, get_ai_consent_service
@@ -287,6 +297,8 @@ class XaiMemoryArtworkProvider:
 
     @staticmethod
     def _normalize_image(image_bytes: bytes) -> bytes:
+        if not _PIL_AVAILABLE:
+            raise MemoryArtworkError("memory_artwork_image_codec_unavailable", retryable=False)
         if not image_bytes or len(image_bytes) > MAX_ARTWORK_BYTES:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
         try:
@@ -302,7 +314,7 @@ class XaiMemoryArtworkProvider:
                 output = io.BytesIO()
                 normalized.save(output, format="JPEG", quality=88, optimize=True)
                 result = output.getvalue()
-        except (Image.DecompressionBombError, OSError, UnidentifiedImageError) as exc:
+        except _IMAGE_DECODE_ERRORS as exc:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
         if not result or len(result) > MAX_ARTWORK_BYTES:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
@@ -945,7 +957,8 @@ class MemoryArtworkService:
             uid,
             memory_id,
             generation_key,
-            lease_token=job_lease_token,
+            generation_lease_token=lease_token,
+            job_lease_token=job_lease_token,
         ):
             self.repository.mark_generation_unavailable(
                 uid,
