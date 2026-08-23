@@ -56,6 +56,7 @@ from utils.llm.followup import followup_question_prompt
 from utils.notifications import send_notification, send_training_data_submitted_notification
 from utils.llm.external_integrations import generate_comprehensive_daily_summary
 from models.notification_message import NotificationMessage
+from utils.ella.memory_artwork_storage import MemoryArtworkStorageError, prepare_account_artwork_deletion
 from utils.other import endpoints as auth
 from utils.other.storage import (
     delete_all_conversation_recordings,
@@ -94,10 +95,16 @@ def get_user_profile_endpoint(uid: str = Depends(auth.get_current_user_uid)):
 @router.delete('/v1/users/delete-account', tags=['v1'])
 def delete_account(uid: str = Depends(auth.get_current_user_uid)):
     try:
+        prepare_account_artwork_deletion(uid)
         delete_user_data(uid)
         # delete user from firebase auth
         auth.delete_account(uid)
         return {'status': 'ok', 'message': 'Account deleted successfully'}
+    except MemoryArtworkStorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": str(exc), "retryable": True},
+        ) from exc
     except Exception as e:
         print('delete_account', str(e))
         raise HTTPException(status_code=500, detail=str(e))

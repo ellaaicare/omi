@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 sys.modules.setdefault("database._client", MagicMock())
@@ -116,6 +116,35 @@ def test_update_conversation_summary_clears_stale_app_results(monkeypatch):
     assert captured["update_data"]["plugins_results"] == []
     assert captured["update_data"]["summary_writeback_receipt"] is None
     assert result["sanitizer_warnings"] == []
+
+
+def test_terminal_summary_schedules_artwork_without_blocking_text_writeback(monkeypatch):
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation", lambda *args, **kwargs: None)
+
+    async def enqueue(uid, conversation_id):
+        raise RuntimeError("artwork processing must not affect text enrichment")
+
+    monkeypatch.setattr(callbacks, "enqueue_after_terminal_enrichment", enqueue)
+    background_tasks = BackgroundTasks()
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-artwork",
+            callbacks.ConversationSummaryUpdate(
+                title="Updated title",
+                overview="[Ella] Terminal enriched summary remains successful independently of artwork.",
+                emoji="🧠",
+                category="personal",
+            ),
+            background_tasks=background_tasks,
+            uid="user-artwork",
+            service=_service_authority("user-artwork"),
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert len(background_tasks.tasks) == 1
+    assert background_tasks.tasks[0].func is enqueue
+    assert background_tasks.tasks[0].args == ("user-artwork", "conv-artwork")
 
 
 def test_update_conversation_summary_adds_missing_ella_prefix(monkeypatch):
