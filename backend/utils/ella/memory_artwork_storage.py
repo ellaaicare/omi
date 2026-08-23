@@ -147,10 +147,9 @@ class GCSMemoryArtworkStore:
         if not memory_id or len(memory_id) > 256 or re.fullmatch(r"[A-Za-z0-9_.:-]+", memory_id) is None:
             raise MemoryArtworkStorageError("memory_artwork_id_invalid")
         owner_prefix = f"users/{_sha256(uid)}/"
-        if profile_binding_id:
-            prefix = f"{owner_prefix}profiles/{_sha256(profile_binding_id)}/memories/" f"{memory_id}/"
-        else:
-            prefix = owner_prefix
+        if not profile_binding_id:
+            raise MemoryArtworkStorageError("memory_artwork_binding_required")
+        prefix = f"{owner_prefix}profiles/{_sha256(profile_binding_id)}/memories/" f"{memory_id}/"
         deleted = 0
         for blob in self.client.bucket(self.bucket_name).list_blobs(prefix=prefix):
             match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or ""))
@@ -177,6 +176,7 @@ def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversatio
     store = GCSMemoryArtworkStore()
     if object_key:
         store.delete(uid=uid, memory_id=memory_id, object_key=object_key)
+        return
     store.delete_memory_prefix(
         uid=uid,
         memory_id=memory_id,

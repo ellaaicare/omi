@@ -8862,7 +8862,7 @@ class AppLocalizationsDa extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
+      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory or Daily Note; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
@@ -8940,6 +8940,13 @@ class AppLocalizationsDa extends AppLocalizations {
   @override
   String get aiConsentPhotonBody =>
       'Sends iMessage content and basic delivery details only to one person you choose for testing.';
+
+  @override
+  String get aiConsentXaiImagesTitle => 'xAI image generation';
+
+  @override
+  String get aiConsentXaiImagesBody =>
+      'Creates an illustration for a saved memory or Daily Note. It may receive only the selected title and summary, not your raw microphone audio or source photos.';
 
   @override
   String get aiConsentManagedCloudScope =>
@@ -9422,4 +9429,56 @@ class AppLocalizationsDa extends AppLocalizations {
   @override
   String get scopedTalkRetryableBody =>
       'Ella couldn\'t open this item in Talk just now. Try again, or close this window and keep browsing.';
+
+  @override
+  String get memoriesInProgress => 'In progress…';
+
+  @override
+  String get memoriesEmpty => 'Your memories will appear here. 🪽';
+
+  @override
+  String get memoriesToday => 'TODAY';
+
+  @override
+  String get memoriesYesterday => 'YESTERDAY';
+
+  @override
+  String get memoryGalleryView => 'Memory layout';
+
+  @override
+  String get memoryGalleryJournal => 'Large images';
+
+  @override
+  String get memoryGalleryGrid => 'Cards';
+
+  @override
+  String get memoryGalleryList => 'Compact list';
+
+  @override
+  String get memoryArtworkStyle => 'Illustration style';
+
+  @override
+  String get memoryArtworkSoftGouache => 'Soft gouache';
+
+  @override
+  String get memoryArtworkPaperCollage => 'Paper collage';
+
+  @override
+  String get memoryArtworkGraphicLandscape => 'Graphic landscape';
+
+  @override
+  String get memoryArtworkStyleUpdated =>
+      'New memories will use this illustration style. Recent memories are being refreshed.';
+
+  @override
+  String get memoryArtworkStyleUnavailable => 'Ella couldn\'t update the illustration style right now.';
+
+  @override
+  String get memoryGeneratedArtworkLabel => 'Illustration created for this memory';
+
+  @override
+  String get memoryBackToRecent => 'Back to recent';
+
+  @override
+  String get memoryLoadingMore => 'Loading earlier memories';
 }

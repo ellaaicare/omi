@@ -27,8 +27,8 @@ backfill.
   credentials, authority digests, and binding identifiers remain private.
 - Ready images are fetched through
   `GET /v1/ella/memories/{memory_id}/artwork`, which revalidates the owner and
-  exact current consent, style, binding, profile, and authority before issuing a
-  five-minute signed first-party URL.
+  exact current consent, style, binding, profile, authority, and sensitive-source
+  exclusion before issuing a five-minute signed first-party URL.
 
 ## API
 
@@ -96,9 +96,10 @@ additional work. It performs no provider call in the request.
 
 Rollback is configuration-only while no objects have been generated: set all
 four gates false. After controlled generation, memory deletion removes the exact
-object and deterministic memory prefix before deleting the conversation. The
-service records a durable owner-level cleanup requirement before every upload,
-so account deletion removes the owner's private prefix before Firestore/Firebase
+object or the binding-scoped deterministic memory prefix before deleting the
+conversation; it never falls back to an owner-wide listing for a missing binding.
+The service records a durable owner-level cleanup requirement only after a
+storage write succeeds, so account deletion removes the owner's private prefix before Firestore/Firebase
 cleanup and returns typed HTTP 503 when bucket configuration is absent but
 storage use cannot be disproved. Exact-UID dispatch records are removed only
 after storage cleanup succeeds. A storage deletion failure aborts deletion

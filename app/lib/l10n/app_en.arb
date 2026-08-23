@@ -10483,7 +10483,7 @@
   "todayReadMore": "Read more",
   "voiceModalEndAction": "End",
   "ellaAuthDataDisclosure": "Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.",
-  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
+  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory or Daily Note; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
   "aiConsentProcessorDetailsLink": "Full processor details in Privacy Policy",
   "aiConsentNoSharingBeforeAllow": "Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.",
   "aiConsentRevokeAction": "Revoke AI permission",
@@ -10532,6 +10532,14 @@
   "aiConsentPhotonBody": "Sends iMessage content and basic delivery details only to one person you choose for testing.",
   "@aiConsentPhotonBody": {
     "description": "Data categories and purpose for Photon"
+  },
+  "aiConsentXaiImagesTitle": "xAI image generation",
+  "@aiConsentXaiImagesTitle": {
+    "description": "Legal recipient and purpose for generated memory and Daily Note illustrations"
+  },
+  "aiConsentXaiImagesBody": "Creates an illustration for a saved memory or Daily Note. It may receive only the selected title and summary, not your raw microphone audio or source photos.",
+  "@aiConsentXaiImagesBody": {
+    "description": "Plain-language data categories and purpose for xAI image generation"
   },
   "aiConsentManagedCloudScope": "This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.",
   "@aiConsentManagedCloudScope": {
@@ -10717,5 +10725,22 @@
   "bottomNavSettings": "Settings",
   "scopedTalkUnavailableTitle": "Talk isn't available for this item",
   "scopedTalkUnavailableBody": "Ella can't open this item in Talk right now. Close this window and keep browsing.",
-  "scopedTalkRetryableBody": "Ella couldn't open this item in Talk just now. Try again, or close this window and keep browsing."
+  "scopedTalkRetryableBody": "Ella couldn't open this item in Talk just now. Try again, or close this window and keep browsing.",
+  "memoriesInProgress": "In progress…",
+  "memoriesEmpty": "Your memories will appear here. 🪽",
+  "memoriesToday": "TODAY",
+  "memoriesYesterday": "YESTERDAY",
+  "memoryGalleryView": "Memory layout",
+  "memoryGalleryJournal": "Large images",
+  "memoryGalleryGrid": "Cards",
+  "memoryGalleryList": "Compact list",
+  "memoryArtworkStyle": "Illustration style",
+  "memoryArtworkSoftGouache": "Soft gouache",
+  "memoryArtworkPaperCollage": "Paper collage",
+  "memoryArtworkGraphicLandscape": "Graphic landscape",
+  "memoryArtworkStyleUpdated": "New memories will use this illustration style. Recent memories are being refreshed.",
+  "memoryArtworkStyleUnavailable": "Ella couldn't update the illustration style right now.",
+  "memoryGeneratedArtworkLabel": "Illustration created for this memory",
+  "memoryBackToRecent": "Back to recent",
+  "memoryLoadingMore": "Loading earlier memories"
 }

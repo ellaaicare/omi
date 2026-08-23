@@ -202,6 +202,12 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                       title: context.l10n.aiConsentPhotonTitle,
                       body: context.l10n.aiConsentPhotonBody,
                     ),
+                    const SizedBox(height: 10),
+                    _processorDisclosure(
+                      icon: Icons.image_outlined,
+                      title: context.l10n.aiConsentXaiImagesTitle,
+                      body: context.l10n.aiConsentXaiImagesBody,
+                    ),
                     const SizedBox(height: 12),
                     Container(
                       width: double.infinity,

@@ -35,9 +35,7 @@ def get_preferences(uid: str) -> dict[str, Any]:
         return {}
     payload = snapshot.to_dict() or {}
     preferences = payload.get(PREFERENCES_FIELD)
-    result = dict(preferences) if isinstance(preferences, dict) else {}
-    result[STORAGE_CLEANUP_REQUIRED_FIELD] = bool(payload.get(STORAGE_CLEANUP_REQUIRED_FIELD))
-    return result
+    return dict(preferences) if isinstance(preferences, dict) else {}
 
 
 def set_preferences(uid: str, preferences: dict[str, Any]) -> None:
@@ -146,15 +144,19 @@ def reserve_generation(
 
 def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
-    snapshots = db.collection(JOB_COLLECTION).where("status", "==", "pending").limit(max(1, limit) * 10).stream()
+    snapshots = (
+        db.collection(JOB_COLLECTION)
+        .where("status", "==", "pending")
+        .where("available_at", "<=", current_time)
+        .order_by("available_at", direction=firestore.Query.ASCENDING)
+        .limit(max(1, limit))
+        .stream()
+    )
     pending: list[dict[str, Any]] = []
     for snapshot in snapshots:
         payload = snapshot.to_dict() or {}
-        available_at = payload.get("available_at")
-        if isinstance(available_at, datetime) and available_at > current_time:
-            continue
         pending.append({**payload, "job_id": snapshot.id})
-    return pending[: max(1, limit)]
+    return pending
 
 
 def complete_job(uid: str, memory_id: str, generation_key: str) -> None:

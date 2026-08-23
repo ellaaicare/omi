@@ -7,16 +7,16 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 
 void main() {
-  test('v8 fallback manifest matches the managed-cloud processor and scope contract', () {
+  test('v9 fallback manifest matches the managed-cloud and illustration contract', () {
     const policy = AiConsentPolicy.bundled;
     expect(policy.version, SharedPreferencesUtil.currentAiConsentContractVersion);
-    expect(policy.version, 'ai-data-processors-v8');
+    expect(policy.version, 'ai-data-processors-v9');
     expect(policy.processorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
-    expect(policy.processorSetHash, 'sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d');
+    expect(policy.processorSetHash, 'sha256:e0863f109ec60fea723a6b43c0b86b3b3c1f0035b1bff67be5a56d07a4587f3c');
     expect(policy.processorSetHash, 'sha256:${sha256.convert(utf8.encode(policy.canonicalProcessorSet))}');
     expect(policy.scopeVersion, SharedPreferencesUtil.currentAiConsentScopeVersion);
-    expect(policy.scopeVersion, 'managed-cloud-internal-pilot-v2');
-    expect(policy.scopeHash, 'sha256:2878e09958faadb799af99a8975736ce63010dd1d682cf944f60743a4faf92e5');
+    expect(policy.scopeVersion, 'managed-cloud-internal-pilot-v3');
+    expect(policy.scopeHash, 'sha256:aa7822066b482f12f43627a1b41e0b945f0b9199490d9f59be02ef671e82e97d');
     expect(policy.scopeHash, SharedPreferencesUtil.currentAiConsentScopeHash);
     expect(policy.scopeHash, 'sha256:${sha256.convert(utf8.encode(policy.canonicalScope))}');
 
@@ -39,11 +39,15 @@ void main() {
         'OpenAI',
         'Groq',
         'xAI Grok',
+        'xAI',
         'Inworld AI',
         'ElevenLabs',
       }),
     );
-    expect(ids, containsAll({'honcho-self-hosted', 'nous-hermes-cloud', 'hermes-profile-memory', 'openai-codex'}));
+    expect(
+      ids,
+      containsAll({'honcho-self-hosted', 'nous-hermes-cloud', 'hermes-profile-memory', 'openai-codex', 'xai-imagine'}),
+    );
     expect(ids, isNot(contains('honcho-cloud')));
     expect(names, isNot(contains('Honcho / Plastic Labs')));
     expect(policy.processors.every((processor) => processor.function.isNotEmpty), isTrue);
@@ -56,6 +60,9 @@ void main() {
     expect(policy.canonicalScope, contains('allow_all=false'));
     expect(policy.canonicalScope, contains('caregiver=false'));
     expect(policy.canonicalScope, contains('attachments=false'));
+    expect(policy.canonicalScope, contains('artwork_provider=xai/grok-imagine-image-2.0'));
+    expect(policy.canonicalScope, contains('raw_audio=false'));
+    expect(policy.canonicalScope, contains('source_photos=false'));
     expect(policy.isBundledCurrent, isTrue);
   });
 
@@ -73,9 +80,9 @@ void main() {
     expect(policy.isBundledCurrent, isFalse);
   });
 
-  test('a v7 policy cannot authorize the forward-only managed-cloud v8 disclosure', () {
+  test('a v8 policy cannot authorize the forward-only image-purpose v9 disclosure', () {
     final policy = AiConsentPolicy.fromJson({
-      'version': 'ai-data-processors-v7',
+      'version': 'ai-data-processors-v8',
       'processor_set_hash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
       'canonical_processor_set': AiConsentPolicy.bundled.canonicalProcessorSet,
       'scope_version': AiConsentPolicy.bundled.scopeVersion,

@@ -19,25 +19,27 @@ from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
-# V7 is immutable historical consent. Cloud memory changed from a Honcho Cloud
-# processor to Hermes Cloud built-in profile-scoped memory, so v8 is a
-# forward-only consent version and cannot accept stale v7 receipts.
+# Prior consent versions are immutable history. V9 adds a distinct xAI image
+# purpose and selected-summary scope, so stale v8 receipts cannot authorize it.
 LEGACY_POLICY_VERSION_V7 = "ai-data-processors-v7"
-CURRENT_POLICY_VERSION = "ai-data-processors-v8"
+LEGACY_POLICY_VERSION_V8 = "ai-data-processors-v8"
+CURRENT_POLICY_VERSION = "ai-data-processors-v9"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
     "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
     "openai-codex:managed-agent-model|photon:messaging-delivery|"
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
-    "groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback"
+    "groq:language|xai-grok:language-live-voice|xai-imagine:memory-daily-note-illustration|"
+    "inworld:tts|elevenlabs:tts-fallback"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
-CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v2"
+CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v3"
 CANONICAL_SCOPE = (
     "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|"
     "model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|"
-    "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
+    "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false|"
+    "artwork_provider=xai/grok-imagine-image-2.0;source=selected_summary_only;raw_audio=false;source_photos=false"
 )
 CURRENT_SCOPE_HASH = f"sha256:{hashlib.sha256(CANONICAL_SCOPE.encode()).hexdigest()}"
 MANAGED_CLOUD_RUNTIME_PROVIDER = "hermes_cloud"
@@ -175,6 +177,14 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "function": "Language processing and live voice",
         "data": "Text, selected context, or live microphone audio",
         "provider_aliases": ["grok", "grok-voice", "xai", "xai-grok", "xai-tts"],
+        "third_party": True,
+    },
+    {
+        "id": "xai-imagine",
+        "legal_recipient": "xAI",
+        "function": "Illustrations for saved memories and Daily Notes",
+        "data": "Selected memory or Daily Note title and summary; no raw microphone audio or source photos",
+        "provider_aliases": ["xai-imagine", "grok-imagine-image-2.0"],
         "third_party": True,
     },
     {

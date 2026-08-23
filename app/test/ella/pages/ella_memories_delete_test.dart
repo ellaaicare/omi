@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -29,6 +30,38 @@ class _MutableAuthority implements AccountCommitAuthority {
 
   @override
   bool isExactCurrent() => current;
+}
+
+class _FakeArtworkApi extends MemoryArtworkApi {
+  _FakeArtworkApi()
+      : super(
+          baseUrl: 'https://api.example.test',
+          authorityProvider: () => null,
+        );
+
+  String selectedStyle = memoryArtworkDefaultStyle;
+  int backfillCalls = 0;
+
+  @override
+  Future<MemoryArtworkPreferences?> preferences() async => MemoryArtworkPreferences(
+        consent: 'accepted',
+        consentVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        styleVersion: selectedStyle,
+        releaseEnabled: true,
+      );
+
+  @override
+  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+    expect(consentVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
+    selectedStyle = styleVersion;
+    return true;
+  }
+
+  @override
+  Future<bool> backfillRecent() async {
+    backfillCalls += 1;
+    return true;
+  }
 }
 
 void main() {
@@ -56,7 +89,11 @@ void main() {
     );
   }
 
-  Future<void> pumpPage(WidgetTester tester, ConversationProvider provider) async {
+  Future<void> pumpPage(
+    WidgetTester tester,
+    ConversationProvider provider, {
+    MemoryArtworkApi? artworkApi,
+  }) async {
     await tester.pumpWidget(
       MultiProvider(
         providers: [
@@ -67,7 +104,7 @@ void main() {
           theme: ellaThemeData(),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
-          home: const EllaMemoriesPage(),
+          home: EllaMemoriesPage(artworkApi: artworkApi),
         ),
       ),
     );
@@ -163,5 +200,50 @@ void main() {
 
     expect(find.text('Memory Deleted.'), findsNothing);
     expect(find.text('An error occurred. Please try again.'), findsOneWidget);
+  });
+
+  testWidgets('layout and illustration style controls remain editable and queue a bounded refresh', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-layout')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true;
+    final artworkApi = _FakeArtworkApi();
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(find.byKey(const Key('memory-layout-journal-memory-layout')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Compact list'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-layout-list-memory-layout')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+    expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
+    expect(artworkApi.backfillCalls, 1);
+    expect(find.textContaining('Recent memories are being refreshed'), findsOneWidget);
+  });
+
+  testWidgets('a long memory journal exposes an accessible return to recent memories', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = List.generate(16, (index) => memory('memory-$index'))
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: _FakeArtworkApi());
+    expect(find.byKey(const Key('memory-back-to-recent')), findsNothing);
+
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -1000));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-back-to-recent')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-back-to-recent')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-back-to-recent')), findsNothing);
   });
 }

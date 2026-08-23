@@ -37,12 +37,12 @@ class SharedPreferencesUtil {
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
   static const bool isTodayDesignPreviewEnabled = !isPublicBuild && isTodayDesignPreviewConfigured;
-  static const String currentAiConsentContractVersion = 'ai-data-processors-v8';
+  static const String currentAiConsentContractVersion = 'ai-data-processors-v9';
   static const String currentAiConsentProcessorSetHash =
-      'sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d';
-  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v2';
+      'sha256:e0863f109ec60fea723a6b43c0b86b3b3c1f0035b1bff67be5a56d07a4587f3c';
+  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v3';
   static const String currentAiConsentScopeHash =
-      'sha256:2878e09958faadb799af99a8975736ce63010dd1d682cf944f60743a4faf92e5';
+      'sha256:aa7822066b482f12f43627a1b41e0b945f0b9199490d9f59be02ef671e82e97d';
   static const String currentAiConsentReceiptPrefix = 'aicr_';
 
   factory SharedPreferencesUtil() {

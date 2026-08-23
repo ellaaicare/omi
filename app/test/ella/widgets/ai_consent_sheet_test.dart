@@ -38,7 +38,9 @@ void main() {
                 scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
                 scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
               );
-              return AiConsentGrantOutcome.accepted('${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a');
+              return const AiConsentGrantOutcome.accepted(
+                '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+              );
             },
           ),
         ),
@@ -134,6 +136,9 @@ void main() {
     expect(disclosure, contains('OpenAI'));
     expect(disclosure, contains('Groq'));
     expect(disclosure, contains('xAI Grok'));
+    expect(disclosure, contains('xAI image generation'));
+    expect(disclosure, contains('saved memory or Daily Note'));
+    expect(disclosure, contains('not your raw microphone audio or source photos'));
     expect(disclosure, contains('ElevenLabs'));
     expect(disclosure, contains('Inworld AI'));
     expect(disclosure, contains('Kokoro'));
@@ -175,10 +180,14 @@ void main() {
   });
 
   testWidgets('server-unavailable grant failure stays open with typed message and support code', (tester) async {
-    await tester.pumpWidget(buildFailingApp(const AiConsentGrantOutcome.failed(
-      AiConsentGrantFailureKind.serverUnavailable,
-      supportCode: 'managed_cloud_consent_authority_unavailable',
-    )));
+    await tester.pumpWidget(
+      buildFailingApp(
+        const AiConsentGrantOutcome.failed(
+          AiConsentGrantFailureKind.serverUnavailable,
+          supportCode: 'managed_cloud_consent_authority_unavailable',
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.ensureVisible(find.text('Allow and continue'));
@@ -188,8 +197,10 @@ void main() {
 
     expect(find.byType(AiConsentSheet), findsOneWidget);
     expect(
-      find.text("Ella couldn't confirm your choice with the server, so nothing has been shared yet. "
-          'Please try again in a few minutes.'),
+      find.text(
+        "Ella couldn't confirm your choice with the server, so nothing has been shared yet. "
+        'Please try again in a few minutes.',
+      ),
       findsOneWidget,
     );
     expect(find.text('managed_cloud_consent_authority_unavailable'), findsOneWidget);
@@ -198,10 +209,14 @@ void main() {
   });
 
   testWidgets('policy-mismatch grant failure asks for an app update', (tester) async {
-    await tester.pumpWidget(buildFailingApp(const AiConsentGrantOutcome.failed(
-      AiConsentGrantFailureKind.policyMismatch,
-      supportCode: 'consent_policy_mismatch',
-    )));
+    await tester.pumpWidget(
+      buildFailingApp(
+        const AiConsentGrantOutcome.failed(
+          AiConsentGrantFailureKind.policyMismatch,
+          supportCode: 'consent_policy_mismatch',
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.ensureVisible(find.text('Allow and continue'));
@@ -210,8 +225,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('This version of Ella no longer matches the current privacy policy. '
-          'Please update the app, then try again.'),
+      find.text(
+        'This version of Ella no longer matches the current privacy policy. '
+        'Please update the app, then try again.',
+      ),
       findsOneWidget,
     );
     expect(find.text('consent_policy_mismatch'), findsOneWidget);
