@@ -3171,7 +3171,10 @@ class EllaProvisioningRepository:
                       AND model_allowlist = ARRAY[]::text[]
                       AND mode_allowlist = ARRAY['v4']::text[]
                       AND fallback_policy = '{"enabled":false,"order":[]}'::jsonb
-                      AND operator_note = 'auto-provision self-hosted grok voice'
+                      AND operator_note IN (
+                          'auto-provision self-hosted grok voice',
+                          'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31'
+                      )
                       AND consent_authority_epoch IS NULL
                       AND invitation_consent_pending = FALSE
                     RETURNING revision

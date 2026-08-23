@@ -2496,7 +2496,9 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             await conn.execute(
                 """
                 UPDATE voice_entitlements
-                SET status = 'revoked', revision = revision + 1
+                SET status = 'revoked',
+                    operator_note = 'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31',
+                    revision = revision + 1
                 WHERE uid = $1
                 """,
                 uid,
