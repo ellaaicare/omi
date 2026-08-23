@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import stat
@@ -35,6 +36,8 @@ PROVIDER_TIMEOUT_SECONDS = 45.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
 PROVIDER_ALLOWED_HOST_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST"
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryArtworkError(RuntimeError):
@@ -322,8 +325,6 @@ class MemoryArtworkService:
         if style_version not in SUPPORTED_STYLE_VERSIONS:
             raise MemoryArtworkError("memory_artwork_style_version_invalid")
         authority = await self.authority_resolver(uid)
-        existing = self.repository.get_preferences(uid)
-        storage_cleanup_required = existing.get("storage_cleanup_required") is True
         self.repository.set_preferences(
             uid,
             {
@@ -334,7 +335,6 @@ class MemoryArtworkService:
                 "binding_id": authority.binding_id,
                 "profile_id": authority.profile_id,
                 "authority_digest": authority.authority_digest,
-                "storage_cleanup_required": storage_cleanup_required,
                 "updated_at": datetime.now(timezone.utc),
             },
         )
@@ -524,7 +524,7 @@ class MemoryArtworkService:
                 uid,
                 memory_id,
                 generation_key=generation_key,
-                failure_code="pre_egress_authority_changed",
+                failure_code="memory_artwork_authority_changed",
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_authority_changed")
@@ -773,8 +773,19 @@ async def enqueue_after_terminal_enrichment(uid: str, memory_id: str) -> None:
 async def process_queued_artwork(uid: str, memory_ids: list[str]) -> None:
     """Best-effort drain of durable reservations; retrying reclaims expired leases."""
     service = MemoryArtworkService()
+    attempted = 0
+    failed = 0
     for memory_id in memory_ids[:MAX_BACKFILL_MEMORIES]:
+        attempted += 1
         try:
             await service.process(uid, memory_id)
         except Exception:
+            failed += 1
             continue
+    if attempted and failed == attempted:
+        logger.error("Memory artwork background batch failed for every queued item (count=%d)", attempted)
+        raise MemoryArtworkError("memory_artwork_background_batch_failed", retryable=True)
+    if failed:
+        logger.warning(
+            "Memory artwork background batch completed with failures (failed=%d attempted=%d)", failed, attempted
+        )

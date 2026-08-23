@@ -27,8 +27,24 @@ def get_preferences(uid: str) -> dict[str, Any]:
     return dict(preferences) if isinstance(preferences, dict) else {}
 
 
+def _set_preferences_transaction(transaction, user_ref, preferences: dict[str, Any]) -> None:
+    snapshot = user_ref.get(transaction=transaction)
+    payload = snapshot.to_dict() or {} if snapshot.exists else {}
+    current = payload.get(PREFERENCES_FIELD)
+    merged = dict(preferences)
+    if isinstance(current, dict) and current.get("storage_cleanup_required") is True:
+        merged["storage_cleanup_required"] = True
+    transaction.set(user_ref, {PREFERENCES_FIELD: merged}, merge=True)
+
+
+@transactional
+def _set_preferences(transaction, user_ref, preferences: dict[str, Any]) -> None:
+    _set_preferences_transaction(transaction, user_ref, preferences)
+
+
 def set_preferences(uid: str, preferences: dict[str, Any]) -> None:
-    db.collection("users").document(uid).set({PREFERENCES_FIELD: preferences}, merge=True)
+    user_ref = db.collection("users").document(uid)
+    _set_preferences(db.transaction(), user_ref, preferences)
 
 
 def mark_storage_cleanup_required(uid: str) -> None:

@@ -107,7 +107,11 @@ class FakeRepository:
         return copy.deepcopy(self.preferences_by_uid.get(uid, {}))
 
     def set_preferences(self, uid, preferences):
-        self.preferences_by_uid[uid] = copy.deepcopy(preferences)
+        existing = self.preferences_by_uid.get(uid, {})
+        merged = copy.deepcopy(preferences)
+        if existing.get("storage_cleanup_required") is True:
+            merged["storage_cleanup_required"] = True
+        self.preferences_by_uid[uid] = merged
 
     def mark_storage_cleanup_required(self, uid):
         self.preferences_by_uid.setdefault(uid, {})["storage_cleanup_required"] = True
@@ -920,3 +924,17 @@ def test_bounded_processor_continues_after_one_memory_fails(monkeypatch):
     asyncio.run(artwork.process_queued_artwork("owner-a", ["memory-1", "memory-2"]))
 
     assert calls == [("owner-a", "memory-1"), ("owner-a", "memory-2")]
+
+
+def test_bounded_processor_surfaces_typed_failure_when_every_memory_fails(monkeypatch):
+    class Service:
+        async def process(self, uid, memory_id):
+            raise artwork.MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True)
+
+    monkeypatch.setattr(artwork, "MemoryArtworkService", Service)
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(artwork.process_queued_artwork("owner-a", ["memory-1", "memory-2"]))
+
+    assert failure.value.code == "memory_artwork_background_batch_failed"
+    assert failure.value.retryable is True
