@@ -2,7 +2,7 @@ import importlib.util
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,7 +98,9 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
             lease_seconds=120,
         )
         assert claimed["status"] == "processing"
-        assert module.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token) is True
+        assert module.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token, now=now) is True
+        assert module.has_processing_jobs(uid, now=now) is True
+        assert module.has_processing_jobs(uid, now=now + timedelta(seconds=121)) is False
         assert (
             module.mark_storage_cleanup_required(
                 uid,
@@ -110,6 +112,7 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
         )
         assert module.begin_account_deletion(uid) is True
         assert module.has_processing_jobs(uid) is True
+        assert module.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token) is False
         assert (
             module.mark_storage_cleanup_required(
                 uid,

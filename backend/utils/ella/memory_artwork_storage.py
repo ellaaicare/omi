@@ -176,7 +176,6 @@ def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversatio
     store = GCSMemoryArtworkStore()
     if object_key:
         store.delete(uid=uid, memory_id=memory_id, object_key=object_key)
-        return
     store.delete_memory_prefix(
         uid=uid,
         memory_id=memory_id,

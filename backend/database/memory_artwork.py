@@ -252,12 +252,52 @@ def claim_job(
     )
 
 
-def job_claim_is_current(uid: str, memory_id: str, generation_key: str, *, lease_token: str) -> bool:
-    snapshot = _job_ref(uid, memory_id, generation_key).get()
-    if not snapshot.exists:
-        return False
-    job = snapshot.to_dict() or {}
-    return bool(job.get("status") == "processing" and job.get("lease_token") == lease_token)
+def _processing_job_is_active(job: dict[str, Any], *, now: datetime) -> bool:
+    lease_expires_at = job.get("lease_expires_at")
+    return bool(job.get("status") == "processing" and isinstance(lease_expires_at, datetime) and lease_expires_at > now)
+
+
+def _job_claim_is_current_transaction(
+    transaction,
+    user_ref,
+    job_ref,
+    *,
+    lease_token: str,
+    now: datetime,
+) -> bool:
+    user_snapshot = user_ref.get(transaction=transaction)
+    job_snapshot = job_ref.get(transaction=transaction)
+    user = user_snapshot.to_dict() if user_snapshot.exists else {}
+    job = job_snapshot.to_dict() if job_snapshot.exists else {}
+    return bool(
+        user_snapshot.exists
+        and not user.get(DELETION_PENDING_FIELD)
+        and job_snapshot.exists
+        and job.get("lease_token") == lease_token
+        and _processing_job_is_active(job, now=now)
+    )
+
+
+@transactional
+def _job_claim_is_current(transaction, user_ref, job_ref, **kwargs):
+    return _job_claim_is_current_transaction(transaction, user_ref, job_ref, **kwargs)
+
+
+def job_claim_is_current(
+    uid: str,
+    memory_id: str,
+    generation_key: str,
+    *,
+    lease_token: str,
+    now: Optional[datetime] = None,
+) -> bool:
+    return _job_claim_is_current(
+        db.transaction(),
+        _user_ref(uid),
+        _job_ref(uid, memory_id, generation_key),
+        lease_token=lease_token,
+        now=now or datetime.now(timezone.utc),
+    )
 
 
 def _finish_job_transaction(
@@ -348,8 +388,8 @@ def _mark_storage_cleanup_required_transaction(transaction, user_ref, job_ref, *
         not user_snapshot.exists
         or bool(user.get(DELETION_PENDING_FIELD))
         or not job_snapshot.exists
-        or job.get("status") != "processing"
         or job.get("lease_token") != lease_token
+        or not _processing_job_is_active(job, now=datetime.now(timezone.utc))
     ):
         return False
     transaction.update(user_ref, {STORAGE_CLEANUP_REQUIRED_FIELD: True})
@@ -398,15 +438,43 @@ def begin_account_deletion(uid: str) -> bool:
     return _begin_account_deletion(db.transaction(), _user_ref(uid))
 
 
-def has_processing_jobs(uid: str) -> bool:
+def has_processing_jobs(uid: str, *, now: Optional[datetime] = None) -> bool:
+    current_time = now or datetime.now(timezone.utc)
     snapshots = db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
-    return any((snapshot.to_dict() or {}).get("status") == "processing" for snapshot in snapshots)
+    return any(_processing_job_is_active(snapshot.to_dict() or {}, now=current_time) for snapshot in snapshots)
+
+
+def has_processing_jobs_for_memory(uid: str, memory_id: str, *, now: Optional[datetime] = None) -> bool:
+    current_time = now or datetime.now(timezone.utc)
+    snapshots = db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
+    return any(
+        (snapshot.to_dict() or {}).get("memory_id") == memory_id
+        and _processing_job_is_active(snapshot.to_dict() or {}, now=current_time)
+        for snapshot in snapshots
+    )
 
 
 def delete_jobs_for_uid(uid: str, *, batch_size: int = 450) -> int:
     deleted = 0
     while True:
         snapshots = list(db.collection(JOB_COLLECTION).where("uid", "==", uid).limit(max(1, batch_size)).stream())
+        if not snapshots:
+            return deleted
+        batch = db.batch()
+        for snapshot in snapshots:
+            batch.delete(snapshot.reference)
+        batch.commit()
+        deleted += len(snapshots)
+
+
+def delete_jobs_for_memory(uid: str, memory_id: str, *, batch_size: int = 450) -> int:
+    deleted = 0
+    while True:
+        snapshots = [
+            snapshot
+            for snapshot in db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
+            if (snapshot.to_dict() or {}).get("memory_id") == memory_id
+        ][: max(1, batch_size)]
         if not snapshots:
             return deleted
         batch = db.batch()

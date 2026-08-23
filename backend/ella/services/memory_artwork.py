@@ -55,6 +55,7 @@ XAI_IMAGE_MODEL_ENV = "ELLA_MEMORY_ARTWORK_XAI_MODEL"
 XAI_IMAGE_ENDPOINT = "https://api.x.ai/v1/images/generations"
 DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image-2.0"
 MAX_PROVIDER_RESPONSE_BYTES = 20 * 1024 * 1024
+MAX_BASE64_ARTWORK_CHARS = ((MAX_ARTWORK_BYTES + 2) // 3) * 4
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,29 @@ class MemoryArtworkStore(Protocol):
     def delete_memory_prefix(self, **kwargs) -> int: ...
 
 
+async def _bounded_provider_post(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_response_bytes: int,
+    **kwargs,
+) -> tuple[int, dict[str, str], bytes]:
+    async with client.stream("POST", url, **kwargs) as response:
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > max_response_bytes:
+                    raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+            except ValueError as exc:
+                raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > max_response_bytes:
+                raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+            body.extend(chunk)
+        return response.status_code, dict(response.headers), bytes(body)
+
+
 def _read_protected_token(path_value: str) -> str:
     path = Path(path_value)
     try:
@@ -210,8 +234,10 @@ class FirstPartyHTTPArtworkProvider:
             trust_env=False,
         )
         try:
-            response = await client.post(
+            status_code, headers, image_bytes = await _bounded_provider_post(
+                client,
                 self.url,
+                max_response_bytes=MAX_ARTWORK_BYTES,
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Idempotency-Key": idempotency_key,
@@ -229,18 +255,18 @@ class FirstPartyHTTPArtworkProvider:
         finally:
             if owns_client:
                 await client.aclose()
-        if response.status_code != 200:
-            raise MemoryArtworkError("memory_artwork_provider_rejected", retryable=response.status_code >= 500)
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if status_code != 200:
+            raise MemoryArtworkError("memory_artwork_provider_rejected", retryable=status_code >= 500)
+        content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
         try:
-            width = int(response.headers.get("x-ella-image-width", "0"))
-            height = int(response.headers.get("x-ella-image-height", "0"))
+            width = int(headers.get("x-ella-image-width", "0"))
+            height = int(headers.get("x-ella-image-height", "0"))
         except ValueError as exc:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
         if content_type not in {"image/png", "image/webp", "image/jpeg"} or width <= 0 or height <= 0:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
         return GeneratedArtwork(
-            image_bytes=response.content,
+            image_bytes=image_bytes,
             content_type=content_type,
             pixel_width=width,
             pixel_height=height,
@@ -290,8 +316,10 @@ class XaiMemoryArtworkProvider:
             trust_env=False,
         )
         try:
-            response = await client.post(
+            status_code, _, response_body = await _bounded_provider_post(
+                client,
                 XAI_IMAGE_ENDPOINT,
+                max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -312,15 +340,13 @@ class XaiMemoryArtworkProvider:
         finally:
             if owns_client:
                 await client.aclose()
-        if response.status_code != 200:
-            raise MemoryArtworkError("memory_artwork_provider_rejected", retryable=response.status_code >= 500)
-        if len(response.content) > MAX_PROVIDER_RESPONSE_BYTES:
-            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+        if status_code != 200:
+            raise MemoryArtworkError("memory_artwork_provider_rejected", retryable=status_code >= 500)
         try:
-            payload = response.json()
+            payload = json.loads(response_body)
             item = payload["data"][0]
             encoded = item["b64_json"]
-            if not isinstance(encoded, str):
+            if not isinstance(encoded, str) or len(encoded) > MAX_BASE64_ARTWORK_CHARS:
                 raise TypeError("invalid image payload")
             raw_image = base64.b64decode(encoded, validate=True)
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -368,7 +394,8 @@ def _terminal_enrichment(conversation: dict[str, Any]) -> Optional[str]:
     if not revision or not isinstance(enrichment, dict):
         return None
     if (
-        conversation.get("status") == "completed"
+        not conversation.get("deletion_pending")
+        and conversation.get("status") == "completed"
         and enrichment.get("status") == "writeback_applied"
         and enrichment.get("kind")
         in {"observer_enriched", "corrected_enriched", "hermes_enriched", "recovered_enriched"}
@@ -437,6 +464,26 @@ def _preferences_match_authority(
         and preferences.get("profile_id") == authority.profile_id
         and preferences.get("authority_digest") == authority.authority_digest
         and (style_version is None or preferences.get("style_version") == style_version)
+    )
+
+
+def _generation_claim_is_current(
+    conversation: dict[str, Any],
+    *,
+    generation_key: str,
+    lease_token: str,
+    now: datetime,
+) -> bool:
+    artwork = conversation.get("artwork") or {}
+    lease_expires_at = artwork.get("lease_expires_at") if isinstance(artwork, dict) else None
+    return bool(
+        not conversation.get("deletion_pending")
+        and isinstance(artwork, dict)
+        and artwork.get("status") == "generating"
+        and artwork.get("generation_key") == generation_key
+        and artwork.get("lease_token") == lease_token
+        and isinstance(lease_expires_at, datetime)
+        and lease_expires_at > now
     )
 
 
@@ -621,6 +668,7 @@ class MemoryArtworkService:
             memory_id,
             generation_key,
             lease_token=job_lease_token,
+            now=datetime.now(timezone.utc),
         ):
             raise MemoryArtworkError("memory_artwork_job_claim_invalid")
         lease_token = secrets.token_hex(24)
@@ -634,6 +682,30 @@ class MemoryArtworkService:
         )
         if claimed is None:
             return {"outcome": "not_claimed", "status": str(artwork.get("status") or "unavailable")}
+
+        def reject_claim_drift(conversation: dict[str, Any]) -> None:
+            now = datetime.now(timezone.utc)
+            if self.repository.job_claim_is_current(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=job_lease_token,
+                now=now,
+            ) and _generation_claim_is_current(
+                conversation,
+                generation_key=generation_key,
+                lease_token=lease_token,
+                now=now,
+            ):
+                return
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="job_claim_invalid",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_job_claim_invalid", retryable=True)
 
         def reject_deletion_pending(preferences: dict[str, Any]) -> None:
             if not preferences.get(artwork_db.DELETION_PENDING_FIELD):
@@ -784,6 +856,7 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_prompt_changed")
+        reject_claim_drift(egress_conversation)
         provider = self.provider_factory()
         try:
             generated = await provider.generate(
@@ -832,6 +905,7 @@ class MemoryArtworkService:
                 raise
             raise MemoryArtworkError("memory_artwork_runtime_authority_unavailable", retryable=True) from exc
         latest_preferences = self.repository.get_preferences(uid)
+        latest_conversation = self.repository.get_conversation(uid, memory_id) or {}
         reject_deletion_pending(latest_preferences)
         if (
             not self.global_consent_checker(uid)
@@ -850,6 +924,18 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_authority_changed")
+        reject_claim_drift(latest_conversation)
+        if _terminal_enrichment(latest_conversation) != claimed.get("enrichment_revision") or _source_is_sensitive(
+            latest_conversation
+        ):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="source_changed",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_source_changed")
         # Persist cleanup intent before the deterministic upload. If the upload
         # succeeds but its acknowledgement is lost, deletion still fails closed
         # unless it can remove the owner's private prefix.
@@ -895,9 +981,13 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
+        generated_width = generated.pixel_width
+        generated_height = generated.pixel_height
+        del generated
         try:
             final_authority = await self.authority_resolver(uid)
             final_preferences = self.repository.get_preferences(uid)
+            final_conversation = self.repository.get_conversation(uid, memory_id) or {}
         except Exception as exc:
             store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
             self.repository.mark_generation_unavailable(
@@ -910,9 +1000,27 @@ class MemoryArtworkService:
             if isinstance(exc, MemoryArtworkError):
                 raise
             raise MemoryArtworkError("memory_artwork_runtime_authority_unavailable", retryable=True) from exc
+        final_now = datetime.now(timezone.utc)
+        final_claim_is_current = self.repository.job_claim_is_current(
+            uid,
+            memory_id,
+            generation_key,
+            lease_token=job_lease_token,
+            now=final_now,
+        ) and _generation_claim_is_current(
+            final_conversation,
+            generation_key=generation_key,
+            lease_token=lease_token,
+            now=final_now,
+        )
+        final_source_is_current = _terminal_enrichment(final_conversation) == claimed.get(
+            "enrichment_revision"
+        ) and not _source_is_sensitive(final_conversation)
         if (
             not self.global_consent_checker(uid)
             or final_authority != authority
+            or not final_claim_is_current
+            or not final_source_is_current
             or not _preferences_match_authority(
                 final_preferences,
                 final_authority,
@@ -927,14 +1035,26 @@ class MemoryArtworkService:
                 failure_code=(
                     "deletion_pending"
                     if final_preferences.get(artwork_db.DELETION_PENDING_FIELD)
-                    else "authority_changed"
+                    else (
+                        "job_claim_invalid"
+                        if not final_claim_is_current
+                        else "source_changed" if not final_source_is_current else "authority_changed"
+                    )
                 ),
                 lease_token=lease_token,
             )
             raise MemoryArtworkError(
                 "memory_artwork_deletion_pending"
                 if final_preferences.get(artwork_db.DELETION_PENDING_FIELD)
-                else "memory_artwork_authority_changed"
+                else (
+                    "memory_artwork_job_claim_invalid"
+                    if not final_claim_is_current
+                    else (
+                        "memory_artwork_source_changed"
+                        if not final_source_is_current
+                        else "memory_artwork_authority_changed"
+                    )
+                )
             )
         ready_state = {
             **claimed,
@@ -943,8 +1063,8 @@ class MemoryArtworkService:
             "object_generation": stored.object_generation,
             "content_type": stored.content_type,
             "byte_size": stored.byte_size,
-            "pixel_width": generated.pixel_width,
-            "pixel_height": generated.pixel_height,
+            "pixel_width": generated_width,
+            "pixel_height": generated_height,
             "updated_at": datetime.now(timezone.utc),
         }
         ready_state.pop("lease_token", None)

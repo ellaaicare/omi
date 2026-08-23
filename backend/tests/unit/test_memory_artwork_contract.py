@@ -3,12 +3,14 @@ import base64
 import copy
 import importlib.util
 import io
+import json
 import sys
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -184,7 +186,13 @@ class FakeRepository:
             return None
         if current.get("lease_token"):
             return None
-        current.update({"lease_token": lease_token, "lease_expires_at": now, "updated_at": now})
+        current.update(
+            {
+                "lease_token": lease_token,
+                "lease_expires_at": now + timedelta(seconds=lease_seconds),
+                "updated_at": now,
+            }
+        )
         return copy.deepcopy(current)
 
     def finalize_generation(
@@ -273,9 +281,18 @@ class FakeRepository:
         job.pop("lease_expires_at", None)
         return True
 
-    def job_claim_is_current(self, uid, memory_id, generation_key, *, lease_token):
+    def job_claim_is_current(self, uid, memory_id, generation_key, *, lease_token, now=None):
         job = self.jobs.get((uid, memory_id, generation_key))
-        return bool(job and job.get("status") == "processing" and job.get("lease_token") == lease_token)
+        current_time = now or datetime.now(timezone.utc)
+        lease_expires_at = (job or {}).get("lease_expires_at")
+        return bool(
+            uid not in self.deletion_pending
+            and job
+            and job.get("status") == "processing"
+            and job.get("lease_token") == lease_token
+            and isinstance(lease_expires_at, datetime)
+            and lease_expires_at > current_time
+        )
 
     def complete_job(self, uid, memory_id, generation_key, *, lease_token):
         return self._finish_job(uid, memory_id, generation_key, lease_token, {"status": "completed"})
@@ -720,6 +737,63 @@ def test_authority_drift_after_provider_output_prevents_object_write():
     assert store.puts == []
 
 
+def test_expired_job_claim_immediately_before_provider_has_zero_egress():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = FakeProvider()
+    resolver_calls = 0
+
+    async def expiring_resolver(uid):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 2:
+            next(iter(repository.jobs.values()))["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=expiring_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_job_claim_invalid"
+    assert provider.calls == 0
+
+
+def test_expired_job_claim_after_provider_prevents_storage_egress():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+
+    def expire_job_claim():
+        next(iter(repository.jobs.values()))["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    provider = FakeProvider(after_generate=expire_job_claim)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_job_claim_invalid"
+    assert provider.calls == 1
+    assert store.puts == []
+
+
 def test_sensitive_source_is_excluded_without_provider_egress():
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
@@ -1103,6 +1177,59 @@ def test_account_deletion_marker_drains_claimed_worker_before_storage_write():
     assert repository.conversations[("owner-a", "memory-1")]["artwork"]["status"] == "unavailable"
 
 
+def test_memory_deletion_marker_drains_claimed_worker_before_storage_write():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    store = FakeStore()
+
+    class HeldProvider(FakeProvider):
+        async def generate(self, **kwargs):
+            self.calls += 1
+            entered.set()
+            await release.wait()
+            return artwork.GeneratedArtwork(
+                image_bytes=b"private-image",
+                content_type="image/png",
+                pixel_width=1536,
+                pixel_height=1024,
+            )
+
+    provider = HeldProvider()
+
+    def service_factory():
+        return artwork.MemoryArtworkService(
+            repository=repository,
+            authority_resolver=_resolver,
+            provider_factory=lambda: provider,
+            store_factory=lambda: store,
+            config=_enabled_config(),
+        )
+
+    async def scenario():
+        await service_factory().enqueue("owner-a", "memory-1")
+        worker = artwork.MemoryArtworkWorker(
+            repository=repository,
+            service_factory=service_factory,
+            config=_enabled_config(),
+        )
+        task = asyncio.create_task(worker.run_once())
+        await entered.wait()
+        repository.conversations[("owner-a", "memory-1")]["deletion_pending"] = True
+        release.set()
+        assert await task == 1
+
+    asyncio.run(scenario())
+
+    assert provider.calls == 1
+    assert store.puts == []
+    job = next(iter(repository.jobs.values()))
+    assert job["status"] == "pending"
+    assert job["failure_code"] == "memory_artwork_job_claim_invalid"
+
+
 def test_firestore_transaction_contract_rejects_source_and_lease_drift():
     class Snapshot:
         exists = True
@@ -1374,6 +1501,20 @@ def test_pending_job_query_is_bounded_and_ordered_by_availability(monkeypatch):
     ]
 
 
+def test_processing_job_activity_requires_a_future_lease():
+    now = datetime.now(timezone.utc)
+    assert (
+        artwork_database._processing_job_is_active(
+            {"status": "processing", "lease_expires_at": now + timedelta(seconds=1)}, now=now
+        )
+        is True
+    )
+    assert (
+        artwork_database._processing_job_is_active({"status": "processing", "lease_expires_at": now}, now=now) is False
+    )
+    assert artwork_database._processing_job_is_active({"status": "processing"}, now=now) is False
+
+
 def test_conversation_deletion_marker_fences_inflight_artwork_finalize():
     class Snapshot:
         exists = True
@@ -1493,7 +1634,13 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
         {"artwork": {"object_key": object_key, "binding_id": "binding-owner-a"}},
     )
     assert deleted == [{"uid": "owner-a", "memory_id": "memory-1", "object_key": object_key}]
-    assert prefix_deleted == []
+    assert prefix_deleted == [
+        {
+            "uid": "owner-a",
+            "memory_id": "memory-1",
+            "profile_binding_id": "binding-owner-a",
+        }
+    ]
 
     memory_artwork_storage.delete_conversation_artwork_if_present(
         "owner-a",
@@ -1513,8 +1660,15 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
 
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
+    delete_start = conversations_source.index("def delete_conversation(uid, conversation_id)")
+    assert conversations_source.index("has_processing_jobs_for_memory", delete_start) < conversations_source.index(
+        "delete_conversation_artwork_if_present", delete_start
+    )
     assert conversations_source.index("delete_conversation_artwork_if_present") < conversations_source.index(
-        "conversation_ref.delete()", conversations_source.index("def delete_conversation(uid, conversation_id)")
+        "delete_jobs_for_memory", delete_start
+    )
+    assert conversations_source.index("delete_jobs_for_memory", delete_start) < conversations_source.index(
+        "conversation_ref.delete()", delete_start
     )
     assert account_route_source.index("prepare_account_artwork_deletion(uid)") < account_route_source.index(
         "delete_user_data(uid)", account_route_source.index("def delete_account")
@@ -1721,70 +1875,100 @@ def test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions(monke
     Image.new("RGB", (900, 600), color=(84, 132, 118)).save(source, format="PNG")
     encoded = base64.b64encode(source.getvalue()).decode("ascii")
 
-    class Response:
-        status_code = 200
-        content = b"bounded-json"
-
-        def json(self):
-            return {"data": [{"b64_json": encoded}]}
-
-    class Client:
-        def __init__(self):
-            self.calls = []
-
-        async def post(self, url, **kwargs):
-            self.calls.append((url, kwargs))
-            return Response()
-
     monkeypatch.setenv(artwork.XAI_API_KEY_ENV, "test-only-key")
-    client = Client()
-    provider = artwork.XaiMemoryArtworkProvider(client=client)
+    calls = []
 
-    generated = asyncio.run(
-        provider.generate(
-            prompt="A calm abstract garden with no text or identifiable people.",
-            style_version=artwork.DEFAULT_STYLE_VERSION,
-            idempotency_key="a" * 64,
-        )
-    )
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"data": [{"b64_json": encoded}]})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.XaiMemoryArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="A calm abstract garden with no text or identifiable people.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="a" * 64,
+            )
+
+    generated = asyncio.run(scenario())
 
     assert generated.content_type == "image/jpeg"
     assert (generated.pixel_width, generated.pixel_height) == (artwork.TARGET_WIDTH, artwork.TARGET_HEIGHT)
     with Image.open(io.BytesIO(generated.image_bytes)) as normalized:
         assert normalized.size == (artwork.TARGET_WIDTH, artwork.TARGET_HEIGHT)
         assert normalized.mode == "RGB"
-    assert len(client.calls) == 1
-    url, request = client.calls[0]
-    assert url == artwork.XAI_IMAGE_ENDPOINT
-    assert request["json"]["model"] == artwork.DEFAULT_XAI_IMAGE_MODEL
-    assert request["json"]["response_format"] == "b64_json"
-    assert request["json"]["aspect_ratio"] == "3:2"
-    assert request["headers"]["Authorization"] == "Bearer test-only-key"
+    assert len(calls) == 1
+    request = calls[0]
+    payload = json.loads(request.content)
+    assert str(request.url) == artwork.XAI_IMAGE_ENDPOINT
+    assert payload["model"] == artwork.DEFAULT_XAI_IMAGE_MODEL
+    assert payload["response_format"] == "b64_json"
+    assert payload["aspect_ratio"] == "3:2"
+    assert request.headers["Authorization"] == "Bearer test-only-key"
 
 
 def test_xai_provider_rejects_vendor_url_only_response(monkeypatch):
-    class Response:
-        status_code = 200
-        content = b"bounded-json"
-
-        def json(self):
-            return {"data": [{"url": "https://vendor.invalid/temporary.jpg"}]}
-
-    class Client:
-        async def post(self, url, **kwargs):
-            return Response()
-
     monkeypatch.setenv(artwork.XAI_API_KEY_ENV, "test-only-key")
-    provider = artwork.XaiMemoryArtworkProvider(client=Client())
 
-    with pytest.raises(artwork.MemoryArtworkError) as failure:
-        asyncio.run(
-            provider.generate(
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"url": "https://vendor.invalid/temporary.jpg"}]})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.XaiMemoryArtworkProvider(client=client)
+            return await provider.generate(
                 prompt="Synthetic test prompt.",
                 style_version=artwork.DEFAULT_STYLE_VERSION,
                 idempotency_key="a" * 64,
             )
-        )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(scenario())
+
+    assert failure.value.code == "memory_artwork_provider_response_invalid"
+
+
+def test_xai_provider_rejects_oversized_response_before_buffering(monkeypatch):
+    monkeypatch.setenv(artwork.XAI_API_KEY_ENV, "test-only-key")
+    monkeypatch.setattr(artwork, "MAX_PROVIDER_RESPONSE_BYTES", 32)
+
+    def handler(request):
+        return httpx.Response(200, content=b"x" * 33, headers={"content-length": "33"})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.XaiMemoryArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="a" * 64,
+            )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(scenario())
+
+    assert failure.value.code == "memory_artwork_provider_response_invalid"
+
+
+def test_xai_provider_rejects_encoded_image_before_decode_allocation(monkeypatch):
+    monkeypatch.setenv(artwork.XAI_API_KEY_ENV, "test-only-key")
+    monkeypatch.setattr(artwork, "MAX_BASE64_ARTWORK_CHARS", 4)
+
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"b64_json": "AAAAAA=="}]})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.XaiMemoryArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="a" * 64,
+            )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(scenario())
 
     assert failure.value.code == "memory_artwork_provider_response_invalid"
 

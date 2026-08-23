@@ -842,7 +842,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 79, artwork 45, and Firestore 6 contracts
+    name: Callback 79, artwork 51, and Firestore 6 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -899,8 +899,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 45 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=45 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 51 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=51 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
@@ -921,6 +921,12 @@ jobs:
           grep -Fq 'test_terminal_enrichment_hook_runs_idempotent_processor_without_raising' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_rejects_vendor_url_only_response' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_rejects_oversized_response_before_buffering' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_rejects_encoded_image_before_decode_allocation' <<<"$artwork_ids"
+          grep -Fq 'test_expired_job_claim_immediately_before_provider_has_zero_egress' <<<"$artwork_ids"
+          grep -Fq 'test_expired_job_claim_after_provider_prevents_storage_egress' <<<"$artwork_ids"
+          grep -Fq 'test_memory_deletion_marker_drains_claimed_worker_before_storage_write' <<<"$artwork_ids"
+          grep -Fq 'test_processing_job_activity_requires_a_future_lease' <<<"$artwork_ids"
           grep -Fq 'test_xai_provider_selection_fails_closed_without_credential' <<<"$artwork_ids"
           grep -Fq 'test_signed_url_rechecks_sensitive_source_before_release' <<<"$artwork_ids"
           grep -Fq 'test_failed_storage_write_remains_covered_by_cleanup_marker' <<<"$artwork_ids"
@@ -929,9 +935,9 @@ jobs:
           grep -Fq 'test_pending_job_query_is_bounded_and_ordered_by_availability' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '45 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '51 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=45 actualCount=45 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=51 actualCount=51 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend
