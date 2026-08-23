@@ -223,8 +223,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                 ),
               ),
             if (conversationProvider.isLoadingMoreConversations)
-              SliverToBoxAdapter(
-                child: const Padding(
+              const SliverToBoxAdapter(
+                child: Padding(
                   key: Key('memories-loading-more'),
                   padding: EdgeInsets.symmetric(vertical: 24),
                   child: Center(
