@@ -162,8 +162,21 @@ def reserve_generation(
 def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
     collection = db.collection(JOB_COLLECTION)
-    snapshots = list(collection.where("status", "==", "pending").limit(max(1, limit) * 10).stream())
-    snapshots.extend(collection.where("status", "==", "processing").limit(max(1, limit) * 10).stream())
+    query_limit = max(1, limit)
+    snapshots = list(
+        collection.where("status", "==", "pending")
+        .where("available_at", "<=", current_time)
+        .order_by("available_at", direction=firestore.Query.ASCENDING)
+        .limit(query_limit)
+        .stream()
+    )
+    snapshots.extend(
+        collection.where("status", "==", "processing")
+        .where("lease_expires_at", "<=", current_time)
+        .order_by("lease_expires_at", direction=firestore.Query.ASCENDING)
+        .limit(query_limit)
+        .stream()
+    )
     pending: list[dict[str, Any]] = []
     seen: set[str] = set()
     for snapshot in snapshots:
@@ -171,18 +184,15 @@ def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> lis
             continue
         seen.add(snapshot.id)
         payload = snapshot.to_dict() or {}
-        if payload.get("status") == "processing":
-            lease_expires_at = payload.get("lease_expires_at")
-            if not isinstance(lease_expires_at, datetime) or lease_expires_at > current_time:
-                continue
-        else:
-            available_at = payload.get("available_at")
-            if isinstance(available_at, datetime) and available_at > current_time:
-                continue
+        due_at = (
+            payload.get("lease_expires_at") if payload.get("status") == "processing" else payload.get("available_at")
+        )
+        if not isinstance(due_at, datetime) or due_at > current_time:
+            continue
         pending.append({**payload, "job_id": snapshot.id})
     pending.sort(
         key=lambda job: (
-            job.get("available_at") if isinstance(job.get("available_at"), datetime) else current_time,
+            (job.get("lease_expires_at") if job.get("status") == "processing" else job.get("available_at")),
             str(job.get("job_id") or ""),
         )
     )

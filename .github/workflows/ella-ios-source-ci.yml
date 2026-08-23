@@ -592,7 +592,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=47
+          expected_issue_test_count=48
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -600,7 +600,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=75
+          expected_app_test_count=76
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -932,7 +932,7 @@ jobs:
           grep -Fq 'test_failed_storage_write_remains_covered_by_cleanup_marker' <<<"$artwork_ids"
           grep -Fq 'test_cleanup_marker_failure_prevents_object_upload' <<<"$artwork_ids"
           grep -Fq 'test_global_consent_revocation_at_final_egress_check_blocks_provider' <<<"$artwork_ids"
-          grep -Fq 'test_pending_job_query_is_bounded_and_ordered_by_availability' <<<"$artwork_ids"
+          grep -Fq 'test_pending_job_query_is_bounded_to_due_work_and_ordered' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
           grep -Eq '51 passed' /tmp/memory-artwork-pytest.log

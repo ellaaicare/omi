@@ -1446,7 +1446,7 @@ def test_firestore_retry_reservation_preserves_attempt_history():
     assert job_ref.state["attempt_count"] == 0
 
 
-def test_pending_job_query_is_bounded_and_ordered_by_availability(monkeypatch):
+def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
     now = datetime.now(timezone.utc)
 
     class Snapshot:
@@ -1458,8 +1458,9 @@ def test_pending_job_query_is_bounded_and_ordered_by_availability(monkeypatch):
             return copy.deepcopy(self._payload)
 
     class Query:
-        def __init__(self):
+        def __init__(self, payloads):
             self.operations = []
+            self.payloads = payloads
 
         def where(self, field, operator, value):
             self.operations.append(("where", field, operator, value))
@@ -1474,31 +1475,70 @@ def test_pending_job_query_is_bounded_and_ordered_by_availability(monkeypatch):
             return self
 
         def stream(self):
-            return iter(
-                [
-                    Snapshot("first", {"memory_id": "memory-1", "available_at": now}),
-                    Snapshot("second", {"memory_id": "memory-2", "available_at": now - timedelta(minutes=1)}),
-                ]
-            )
+            return iter(self.payloads)
 
-    query = Query()
+    pending_query = Query(
+        [
+            Snapshot(
+                "pending-first",
+                {"status": "pending", "memory_id": "memory-1", "available_at": now - timedelta(minutes=2)},
+            )
+        ]
+    )
+    processing_query = Query(
+        [
+            Snapshot(
+                "processing-first",
+                {
+                    "status": "processing",
+                    "memory_id": "memory-2",
+                    "lease_expires_at": now - timedelta(minutes=1),
+                },
+            )
+        ]
+    )
 
     class Database:
         def collection(self, name):
             assert name == artwork_database.JOB_COLLECTION
-            return query
+            return Collection()
+
+    class Collection:
+        def where(self, field, operator, value):
+            query = pending_query if value == "pending" else processing_query
+            return query.where(field, operator, value)
 
     monkeypatch.setattr(artwork_database, "db", Database())
 
     jobs = artwork_database.list_pending_jobs(limit=2, now=now)
 
-    assert [job["job_id"] for job in jobs] == ["second", "first"]
-    assert query.operations == [
+    assert [job["job_id"] for job in jobs] == ["pending-first", "processing-first"]
+    assert pending_query.operations == [
         ("where", "status", "==", "pending"),
-        ("limit", 20),
-        ("where", "status", "==", "processing"),
-        ("limit", 20),
+        ("where", "available_at", "<=", now),
+        ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
+        ("limit", 2),
     ]
+    assert processing_query.operations == [
+        ("where", "status", "==", "processing"),
+        ("where", "lease_expires_at", "<=", now),
+        ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
+        ("limit", 2),
+    ]
+    indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
+    artwork_indexes = {
+        tuple((field["fieldPath"], field["order"]) for field in index["fields"])
+        for index in indexes
+        if index.get("collectionGroup") == artwork_database.JOB_COLLECTION
+    }
+    assert (
+        ("status", "ASCENDING"),
+        ("available_at", "ASCENDING"),
+    ) in artwork_indexes
+    assert (
+        ("status", "ASCENDING"),
+        ("lease_expires_at", "ASCENDING"),
+    ) in artwork_indexes
 
 
 def test_processing_job_activity_requires_a_future_lease():
