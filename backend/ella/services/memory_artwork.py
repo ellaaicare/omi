@@ -395,6 +395,7 @@ def _terminal_enrichment(conversation: dict[str, Any]) -> Optional[str]:
         return None
     if (
         not conversation.get("deletion_pending")
+        and not conversation.get("discarded")
         and conversation.get("status") == "completed"
         and enrichment.get("status") == "writeback_applied"
         and enrichment.get("kind")
@@ -478,6 +479,7 @@ def _generation_claim_is_current(
     lease_expires_at = artwork.get("lease_expires_at") if isinstance(artwork, dict) else None
     return bool(
         not conversation.get("deletion_pending")
+        and not conversation.get("discarded")
         and isinstance(artwork, dict)
         and artwork.get("status") == "generating"
         and artwork.get("generation_key") == generation_key
@@ -1092,6 +1094,12 @@ class MemoryArtworkService:
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
+        if conversation.get("discarded"):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_discarded",
+            }
         artwork = conversation.get("artwork") or {}
         status = str(artwork.get("status") or "unavailable") if isinstance(artwork, dict) else "unavailable"
         if status != "ready":
@@ -1113,6 +1121,12 @@ class MemoryArtworkService:
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
+        if conversation.get("discarded"):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_discarded",
+            }
         current_artwork = conversation.get("artwork") or {}
         if preferences.get(artwork_db.DELETION_PENDING_FIELD):
             raise MemoryArtworkError("memory_artwork_deletion_pending")
