@@ -3248,6 +3248,12 @@ class AppLocalizationsEt extends AppLocalizations {
   String get chat => 'Vestlus';
 
   @override
+  String get backToRecentMemories => 'Back to recent';
+
+  @override
+  String get couldntLoadMoreMemories => 'Ella couldn\'t load older memories.';
+
+  @override
   String get actions => 'Toimingud';
 
   @override

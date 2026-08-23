@@ -65,7 +65,7 @@ enum GuardianCredentialError: Error {
 /// is checked before and after token refresh, and the lease is checked again
 /// after the await before the credential can be released to transport code.
 final class GuardianFirebaseTokenBridge: @unchecked Sendable {
-    typealias Provider = (String) async throws -> GuardianBearerCredential
+    typealias Provider = (String, Bool) async throws -> GuardianBearerCredential
 
     private let provider: Provider
 
@@ -74,7 +74,14 @@ final class GuardianFirebaseTokenBridge: @unchecked Sendable {
     }
 
     func credential(for lease: GuardianWorkLease) async throws -> GuardianBearerCredential {
-        let credential = try await provider(lease.uid)
+        try await credential(for: lease, forcingRefresh: false)
+    }
+
+    func credential(
+        for lease: GuardianWorkLease,
+        forcingRefresh: Bool
+    ) async throws -> GuardianBearerCredential {
+        let credential = try await provider(lease.uid, forcingRefresh)
         guard credential.uid == lease.uid,
               !credential.token.isEmpty,
               GuardianModeAvailability.shared.isCurrent(lease) else {
@@ -84,18 +91,18 @@ final class GuardianFirebaseTokenBridge: @unchecked Sendable {
     }
 
 #if canImport(FirebaseAuth) && !GUARDIAN_NATIVE_POLICY_TESTS
-    static let shared = GuardianFirebaseTokenBridge { expectedUID in
+    static let shared = GuardianFirebaseTokenBridge { expectedUID, forcingRefresh in
         guard let user = Auth.auth().currentUser, user.uid == expectedUID else {
             throw GuardianCredentialError.ownerChanged
         }
-        let token = try await user.getIDToken(forcingRefresh: false)
+        let token = try await user.getIDToken(forcingRefresh: forcingRefresh)
         guard Auth.auth().currentUser?.uid == expectedUID else {
             throw GuardianCredentialError.ownerChanged
         }
         return GuardianBearerCredential(uid: expectedUID, token: token)
     }
 #else
-    static let shared = GuardianFirebaseTokenBridge { _ in
+    static let shared = GuardianFirebaseTokenBridge { _, _ in
         throw GuardianCredentialError.unavailable
     }
 #endif

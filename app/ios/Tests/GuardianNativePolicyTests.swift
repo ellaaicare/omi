@@ -130,6 +130,57 @@ private final class ControlledPollTransport: @unchecked Sendable {
     }
 }
 
+private final class ImmediateSequencePollTransport: @unchecked Sendable {
+    private let lock = NSLock()
+    private var responses: [(statusCode: Int, json: String)]
+    private var requests: [URLRequest] = []
+
+    init(responses: [(statusCode: Int, json: String)]) {
+        self.responses = responses
+    }
+
+    func send(
+        _ request: URLRequest,
+        completion: @escaping GuardianModePollingService.PollTransportCompletion
+    ) -> (() -> Void) {
+        lock.lock()
+        requests.append(request)
+        let next = responses.removeFirst()
+        lock.unlock()
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: next.statusCode,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        completion(.success((Data(next.json.utf8), response)))
+        return {}
+    }
+
+    var recordedRequests: [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+}
+
+private final class TokenRefreshRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Bool] = []
+
+    func record(_ forcingRefresh: Bool) {
+        lock.lock()
+        values.append(forcingRefresh)
+        lock.unlock()
+    }
+
+    var calls: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 private final class TaskBox: @unchecked Sendable {
     private let lock = NSLock()
     private var task: Task<Void, Never>?
@@ -154,19 +205,19 @@ private func tokenBridge(
     uid: String = "uid-a",
     token: String = "firebase-token-a"
 ) -> GuardianFirebaseTokenBridge {
-    GuardianFirebaseTokenBridge { _ in
+    GuardianFirebaseTokenBridge { _, _ in
         GuardianBearerCredential(uid: uid, token: token)
     }
 }
 
 private func failingTokenBridge() -> GuardianFirebaseTokenBridge {
-    GuardianFirebaseTokenBridge { _ in
+    GuardianFirebaseTokenBridge { _, _ in
         throw GuardianCredentialError.unavailable
     }
 }
 
 private func expiredTokenBridge() -> GuardianFirebaseTokenBridge {
-    GuardianFirebaseTokenBridge { _ in
+    GuardianFirebaseTokenBridge { _, _ in
         throw TestFailure.failed("expired Firebase credential")
     }
 }
@@ -197,7 +248,9 @@ private func makePollingService(
     let bridge = bridge ?? tokenBridge()
     return GuardianModePollingService(
         transport: transport.send,
-        tokenProvider: bridge.credential,
+        tokenProvider: { lease, forcingRefresh in
+            try await bridge.credential(for: lease, forcingRefresh: forcingRefresh)
+        },
         effects: makeEffects(recorder: recorder, injection: injection)
     )
 }
@@ -219,6 +272,86 @@ private func testAuthenticatedCurrentPollExecutesProductionInjectionBranch() asy
     let request = try require(transport.lastRequest, "poll request was not recorded")
     try expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a", "GET bearer missing")
     try expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value == "uid-a", "GET UID mismatch")
+    service.stopPolling()
+}
+
+private func testUnauthorizedPollRefreshesTokenOnceUnderSameLease() async throws {
+    configure(nil)
+    configure("uid-a")
+    let transport = ImmediateSequencePollTransport(responses: [
+        (401, #"{"detail":"expired"}"#),
+        (200, #"{"url":"https://audio.example/a.mp3","id":"guardian-a"}"#),
+    ])
+    let tokenCalls = TokenRefreshRecorder()
+    let bridge = GuardianFirebaseTokenBridge { uid, forcingRefresh in
+        tokenCalls.record(forcingRefresh)
+        return GuardianBearerCredential(
+            uid: uid,
+            token: forcingRefresh ? "fresh-token" : "stale-token"
+        )
+    }
+    let recorder = EffectRecorder()
+    let service = GuardianModePollingService(
+        transport: transport.send,
+        tokenProvider: { lease, forcingRefresh in
+            try await bridge.credential(for: lease, forcingRefresh: forcingRefresh)
+        },
+        effects: makeEffects(recorder: recorder)
+    )
+    service.startPolling()
+    await service.executePoll()
+
+    let requests = transport.recordedRequests
+    try expect(requests.count == 2, "401 did not trigger exactly one authenticated retry")
+    try expect(tokenCalls.calls == [false, true], "poll did not force-refresh exactly once")
+    try expect(
+        requests[0].value(forHTTPHeaderField: "Authorization") == "Bearer stale-token",
+        "initial poll did not use the cached credential"
+    )
+    try expect(
+        requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer fresh-token",
+        "retry did not use the refreshed credential"
+    )
+    try expect(recorder.count("injection") == 1, "refreshed response did not reach injection")
+    service.stopPolling()
+}
+
+private func testUnauthorizedPollCannotRefreshAfterOwnerDrift() async throws {
+    configure(nil)
+    configure("uid-a")
+    let recorder = EffectRecorder()
+    let tokenCalls = TokenRefreshRecorder()
+    let bridge = GuardianFirebaseTokenBridge { uid, forcingRefresh in
+        tokenCalls.record(forcingRefresh)
+        return GuardianBearerCredential(uid: uid, token: "token-a")
+    }
+    let transportRecorder = EffectRecorder()
+    let service = GuardianModePollingService(
+        transport: { request, completion in
+            transportRecorder.record(request: request)
+            DispatchQueue.global().async {
+                _ = GuardianModeAvailability.shared.invalidateIfUIDChanged("uid-b")
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 401,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                completion(.success((Data(), response)))
+            }
+            return {}
+        },
+        tokenProvider: { lease, forcingRefresh in
+            try await bridge.credential(for: lease, forcingRefresh: forcingRefresh)
+        },
+        effects: makeEffects(recorder: recorder)
+    )
+    service.startPolling()
+    await service.executePoll()
+
+    try expect(transportRecorder.requestCount == 1, "owner-drifted 401 retried transport")
+    try expect(tokenCalls.calls == [false], "owner-drifted 401 refreshed a credential")
+    try expect(recorder.count("injection") == 0, "owner-drifted 401 released audio")
     service.stopPolling()
 }
 
@@ -511,6 +644,8 @@ private func testProductionNotificationBoundary() throws {
 private enum GuardianNativePolicyTests {
     static func main() async throws {
         try await testAuthenticatedCurrentPollExecutesProductionInjectionBranch()
+        try await testUnauthorizedPollRefreshesTokenOnceUnderSameLease()
+        try await testUnauthorizedPollCannotRefreshAfterOwnerDrift()
         try await testAccountADisabledThenAccountBCannotReleaseOldResponse()
         try await testUIDDriftBeforeReleaseProducesZeroDebugOrTTSEffects()
         try await testUIDOnlyDriftAfterResponseReleaseFencesQueuedManagerEffects()

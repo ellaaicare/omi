@@ -6243,6 +6243,18 @@ abstract class AppLocalizations {
   /// **'Chat'**
   String get chat;
 
+  /// Action that scrolls the memories list back to the newest memories
+  ///
+  /// In en, this message translates to:
+  /// **'Back to recent'**
+  String get backToRecentMemories;
+
+  /// Non-destructive pagination error shown below already loaded memories
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t load older memories.'**
+  String get couldntLoadMoreMemories;
+
   /// Navigation label for actions page
   ///
   /// In en, this message translates to:

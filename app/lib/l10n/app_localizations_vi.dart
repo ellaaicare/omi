@@ -3252,6 +3252,12 @@ class AppLocalizationsVi extends AppLocalizations {
   String get chat => 'Trò chuyện';
 
   @override
+  String get backToRecentMemories => 'Back to recent';
+
+  @override
+  String get couldntLoadMoreMemories => 'Ella couldn\'t load older memories.';
+
+  @override
   String get actions => 'Hành động';
 
   @override

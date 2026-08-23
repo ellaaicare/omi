@@ -33,14 +33,12 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   late final MemoryArtworkApi _artworkApi = widget.artworkApi ?? MemoryArtworkApi();
   MemoryArtworkPreferences? _artworkPreferences;
   MemoryGalleryLayout _layout = MemoryGalleryLayout.journal;
-  bool _loadingMore = false;
-  bool _endReached = false;
   bool _showBackToRecent = false;
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
+    _scrollController.addListener(_handleScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       unawaited(context.read<ConversationProvider>().ensureFreshConversations());
@@ -51,32 +49,39 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   @override
   void dispose() {
     _scrollController
-      ..removeListener(_onScroll)
+      ..removeListener(_handleScroll)
       ..dispose();
     super.dispose();
   }
 
-  void _onScroll() {
-    final shouldShow = _scrollController.hasClients && _scrollController.offset > 720;
-    if (shouldShow != _showBackToRecent && mounted) setState(() => _showBackToRecent = shouldShow);
-    if (_scrollController.hasClients && _scrollController.position.extentAfter < 520) unawaited(_loadMore());
+  void _handleScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final shouldShowBackToRecent = position.pixels > 640;
+    if (shouldShowBackToRecent != _showBackToRecent && mounted) {
+      setState(() => _showBackToRecent = shouldShowBackToRecent);
+    }
+    _loadMoreIfNeeded(context.read<ConversationProvider>());
   }
 
-  Future<void> _loadMore() async {
-    if (_loadingMore || _endReached || !mounted) return;
-    final provider = context.read<ConversationProvider>();
-    final before = provider.conversations.length;
-    setState(() => _loadingMore = true);
-    await provider.getMoreConversationsFromServer();
-    if (!mounted) return;
-    setState(() {
-      _loadingMore = false;
-      _endReached = provider.conversations.length == before;
-    });
+  void _loadMoreIfNeeded(ConversationProvider provider) {
+    if (!mounted || !_scrollController.hasClients || !provider.hasLoadedConversations) return;
+    if (provider.loadMoreConversationsFailed) return;
+    if (_scrollController.position.extentAfter < 720) {
+      unawaited(provider.getMoreConversationsFromServer());
+    }
+  }
+
+  void _checkPaginationAfterLayout(ConversationProvider provider) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadMoreIfNeeded(provider));
+  }
+
+  void _scrollBackToRecent() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(0, duration: const Duration(milliseconds: 320), curve: Curves.easeOutCubic);
   }
 
   Future<void> _refresh() async {
-    setState(() => _endReached = false);
     await context.read<ConversationProvider>().getInitialConversations();
     await _loadArtworkPreferences();
   }
@@ -123,6 +128,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final groups = _group(context, conversationProvider.visibleConversations);
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
+    _checkPaginationAfterLayout(conversationProvider);
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -160,24 +166,11 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           ),
         ],
       ),
-      floatingActionButton: _showBackToRecent
-          ? FloatingActionButton.extended(
-              key: const Key('memory-back-to-recent'),
-              onPressed: () => _scrollController.animateTo(
-                0,
-                duration: const Duration(milliseconds: 420),
-                curve: Curves.easeOutCubic,
-              ),
-              backgroundColor: EllaColors.tealDeep,
-              foregroundColor: EllaColors.paper,
-              icon: const Icon(Icons.arrow_upward_rounded),
-              label: Text(context.l10n.memoryBackToRecent),
-            )
-          : null,
       body: RefreshIndicator(
         color: EllaColors.tealDeep,
         onRefresh: _refresh,
         child: CustomScrollView(
+          key: const Key('ella-memories-list'),
           controller: _scrollController,
           slivers: [
             SliverToBoxAdapter(
@@ -229,19 +222,36 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                   child: Text(context.l10n.memoriesEmpty, textAlign: TextAlign.center, style: EllaTextStyles.body),
                 ),
               ),
-            if (_loadingMore)
+            if (conversationProvider.isLoadingMoreConversations)
               SliverToBoxAdapter(
-                child: Semantics(
-                  label: context.l10n.memoryLoadingMore,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: Center(
-                      child: SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                      ),
+                child: const Padding(
+                  key: Key('memories-loading-more'),
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Center(
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
                     ),
+                  ),
+                ),
+              )
+            else if (conversationProvider.loadMoreConversationsFailed)
+              SliverToBoxAdapter(
+                child: Padding(
+                  key: const Key('memories-load-more-failed'),
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Column(
+                    children: [
+                      Text(context.l10n.couldntLoadMoreMemories, style: EllaTextStyles.secondary),
+                      const SizedBox(height: 4),
+                      TextButton.icon(
+                        key: const Key('retry-load-more-memories'),
+                        onPressed: conversationProvider.getMoreConversationsFromServer,
+                        icon: const Icon(Icons.refresh_rounded),
+                        label: Text(context.l10n.tryAgain),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -249,6 +259,16 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           ],
         ),
       ),
+      floatingActionButton: _showBackToRecent
+          ? FloatingActionButton.extended(
+              key: const Key('back-to-recent-memories'),
+              onPressed: _scrollBackToRecent,
+              backgroundColor: EllaColors.tealDeep,
+              foregroundColor: EllaColors.paper,
+              icon: const Icon(Icons.arrow_upward_rounded),
+              label: Text(context.l10n.backToRecentMemories),
+            )
+          : null,
     );
   }
 
@@ -351,7 +371,7 @@ class _LiveMemoryCard extends StatelessWidget {
               children: [
                 const EllaBreathingDot(live: true),
                 const SizedBox(width: 16),
-                Expanded(child: Text(context.l10n.memoriesInProgress, style: EllaTextStyles.display)),
+                Expanded(child: Text(context.l10n.inProgress, style: EllaTextStyles.display)),
                 const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
               ],
             ),

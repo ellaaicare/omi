@@ -138,7 +138,9 @@ void main() {
     expect(polling, contains('private var inFlightPoll: InFlightPoll?'));
     expect(polling, contains('inFlightPoll?.task.cancel()'));
     expect(polling, contains('let lease = GuardianModeAvailability.shared.captureLease()'));
-    expect(polling, contains('let credential = try await tokenProvider(lease)'));
+    expect(polling, contains('var credential = try await tokenProvider(lease, false)'));
+    expect(polling, contains('credential = try await tokenProvider(lease, true)'));
+    expect(polling, contains('statusCode == 401'));
     expect(polling, contains('URLQueryItem(name: "uid", value: lease.uid)'));
     expect(polling, contains('request.setValue("Bearer \\(credential.token)"'));
     expect(polling, contains('GuardianModeAvailability.shared.performIfCurrent(lease)'));
