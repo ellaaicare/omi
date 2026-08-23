@@ -137,6 +137,29 @@ class GCSMemoryArtworkStore:
         except NotFound:
             return
 
+    def delete_memory_prefix(
+        self,
+        *,
+        uid: str,
+        memory_id: str,
+        profile_binding_id: Optional[str] = None,
+    ) -> int:
+        if not memory_id or len(memory_id) > 256 or re.fullmatch(r"[A-Za-z0-9_.:-]+", memory_id) is None:
+            raise MemoryArtworkStorageError("memory_artwork_id_invalid")
+        owner_prefix = f"users/{_sha256(uid)}/"
+        if profile_binding_id:
+            prefix = f"{owner_prefix}profiles/{_sha256(profile_binding_id)}/memories/" f"{memory_id}/"
+        else:
+            prefix = owner_prefix
+        deleted = 0
+        for blob in self.client.bucket(self.bucket_name).list_blobs(prefix=prefix):
+            match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or ""))
+            if match is None or match.group("owner") != _sha256(uid) or match.group("memory") != memory_id:
+                continue
+            blob.delete()
+            deleted += 1
+        return deleted
+
     def delete_user_prefix(self, *, uid: str) -> int:
         prefix = f"users/{_sha256(uid)}/"
         deleted = 0
@@ -149,12 +172,33 @@ class GCSMemoryArtworkStore:
 def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversation: dict) -> None:
     artwork = conversation.get("artwork") if isinstance(conversation, dict) else None
     object_key = str((artwork or {}).get("object_key") or "") if isinstance(artwork, dict) else ""
-    if not object_key:
+    if not isinstance(artwork, dict) or not artwork:
         return
-    GCSMemoryArtworkStore().delete(uid=uid, memory_id=memory_id, object_key=object_key)
+    store = GCSMemoryArtworkStore()
+    if object_key:
+        store.delete(uid=uid, memory_id=memory_id, object_key=object_key)
+    store.delete_memory_prefix(
+        uid=uid,
+        memory_id=memory_id,
+        profile_binding_id=str(artwork.get("binding_id") or "") or None,
+    )
 
 
-def delete_all_user_artwork(uid: str) -> int:
+def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:
     if not os.getenv("ELLA_MEMORY_ARTWORK_BUCKET", "").strip():
+        if cleanup_required:
+            raise MemoryArtworkStorageError("memory_artwork_storage_cleanup_unavailable")
         return 0
     return GCSMemoryArtworkStore().delete_user_prefix(uid=uid)
+
+
+def prepare_account_artwork_deletion(uid: str, *, repository=None) -> int:
+    if repository is None:
+        from database import memory_artwork as repository
+
+    deleted = delete_all_user_artwork(
+        uid,
+        cleanup_required=repository.storage_cleanup_required(uid),
+    )
+    repository.delete_jobs_for_uid(uid)
+    return deleted

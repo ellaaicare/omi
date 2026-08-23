@@ -13,9 +13,10 @@ backfill.
   id, active enriched-summary revision, style version, and prompt hash.
 - A conversation is eligible only after terminal text enrichment
   (`writeback_applied` with an enriched summary kind). Artwork failure never
-  changes the text-enrichment result. The post-response task idempotently queues,
-  claims, and processes the generation; an interrupted claim can be reclaimed by
-  the same internal process route after its bounded lease expires.
+  changes the text-enrichment result. Reservation atomically writes both the
+  conversation generation state and a content-free durable dispatch record.
+  The default-off startup worker consumes pending records, and an interrupted
+  process can reclaim the generation after its bounded lease expires.
 - Provider calls require current image-specific consent and matching runtime
   authority immediately before egress. Consent, style, source, and authority are
   checked again before object storage and final writeback.
@@ -26,7 +27,8 @@ backfill.
   credentials, authority digests, and binding identifiers remain private.
 - Ready images are fetched through
   `GET /v1/ella/memories/{memory_id}/artwork`, which revalidates the owner and
-  current binding before issuing a five-minute signed first-party URL.
+  exact current consent, style, binding, profile, and authority before issuing a
+  five-minute signed first-party URL.
 
 ## API
 
@@ -63,6 +65,7 @@ ELLA_MEMORY_ARTWORK_PROVIDER_URL=<fixed first-party adapter URL>
 ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST=<exact adapter host>
 ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE=<root/service-owned 0600 token path>
 ELLA_MEMORY_ARTWORK_SERVICE_KEY=<dedicated worker service credential>
+ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS=5
 ```
 
 The provider URL cannot be selected by a request or memory payload. Plain HTTP
@@ -79,10 +82,13 @@ additional work. It performs no provider call in the request.
 
 Rollback is configuration-only while no objects have been generated: set all
 four gates false. After controlled generation, memory deletion removes the exact
-object before deleting the conversation, and account deletion removes the
-owner's private prefix before Firestore/Firebase cleanup. A storage deletion
-failure aborts deletion instead of leaving an object behind while reporting
-success.
+object and deterministic memory prefix before deleting the conversation. The
+service records a durable owner-level cleanup requirement before every upload,
+so account deletion removes the owner's private prefix before Firestore/Firebase
+cleanup and returns typed HTTP 503 when bucket configuration is absent but
+storage use cannot be disproved. Exact-UID dispatch records are removed only
+after storage cleanup succeeds. A storage deletion failure aborts deletion
+instead of leaving an object behind while reporting success.
 
 Before a real release, record evidence for:
 

@@ -368,8 +368,11 @@ def _register_routers(app) -> None:
     # Owner-scoped generated artwork for enriched memory cards
     try:
         from ella.routers.memory_artwork import router as memory_artwork_router
+        from ella.services.memory_artwork import start_memory_artwork_worker, stop_memory_artwork_worker
 
         app.include_router(memory_artwork_router, tags=["Ella Memory Artwork"])
+        app.add_event_handler("startup", start_memory_artwork_worker)
+        app.add_event_handler("shutdown", stop_memory_artwork_worker)
         print("  🌐 /v1/ella/memory-artwork/* - Private generated memory artwork", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella memory artwork not available: {e}", flush=True)

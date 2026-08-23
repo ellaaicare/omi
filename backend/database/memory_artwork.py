@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -12,10 +13,20 @@ from ._client import db
 
 ARTWORK_FIELD = "artwork"
 PREFERENCES_FIELD = "memory_artwork_preferences"
+STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
+JOB_COLLECTION = "ella_memory_artwork_jobs"
 
 
 def _conversation_ref(uid: str, memory_id: str):
     return db.collection("users").document(uid).collection("conversations").document(memory_id)
+
+
+def _job_id(uid: str, memory_id: str, generation_key: str) -> str:
+    return hashlib.sha256(f"{uid}\0{memory_id}\0{generation_key}".encode("utf-8")).hexdigest()
+
+
+def _job_ref(uid: str, memory_id: str, generation_key: str):
+    return db.collection(JOB_COLLECTION).document(_job_id(uid, memory_id, generation_key))
 
 
 def get_preferences(uid: str) -> dict[str, Any]:
@@ -24,7 +35,9 @@ def get_preferences(uid: str) -> dict[str, Any]:
         return {}
     payload = snapshot.to_dict() or {}
     preferences = payload.get(PREFERENCES_FIELD)
-    return dict(preferences) if isinstance(preferences, dict) else {}
+    result = dict(preferences) if isinstance(preferences, dict) else {}
+    result[STORAGE_CLEANUP_REQUIRED_FIELD] = bool(payload.get(STORAGE_CLEANUP_REQUIRED_FIELD))
+    return result
 
 
 def set_preferences(uid: str, preferences: dict[str, Any]) -> None:
@@ -67,6 +80,9 @@ def _reserve_generation_transaction(
     enrichment_revision: str,
     generation_key: str,
     artwork_state: dict[str, Any],
+    job_ref=None,
+    job_state: Optional[dict[str, Any]] = None,
+    preserve_job_attempts: bool = False,
 ) -> dict[str, Any]:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
@@ -74,11 +90,30 @@ def _reserve_generation_transaction(
     conversation = snapshot.to_dict() or {}
     if not _terminal_enrichment_matches(conversation, enrichment_revision):
         return {"outcome": "source_changed"}
+    current_job: dict[str, Any] = {}
+    effective_job_state = job_state
+    if job_ref is not None and job_state is not None:
+        job_snapshot = job_ref.get(transaction=transaction)
+        current_job = job_snapshot.to_dict() if job_snapshot.exists else {}
+        effective_job_state = {
+            **job_state,
+            "attempt_count": (
+                int(current_job.get("attempt_count") or 0)
+                if preserve_job_attempts
+                else int(job_state.get("attempt_count") or 0)
+            ),
+            "created_at": current_job.get("created_at") or job_state.get("created_at"),
+        }
     current = conversation.get(ARTWORK_FIELD) or {}
     if isinstance(current, dict) and current.get("generation_key") == generation_key:
         if current.get("status") in {"generating", "ready"}:
+            if current.get("status") == "generating" and job_ref is not None and job_state is not None:
+                if current_job.get("status") not in {"pending", "processing"}:
+                    transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
     transaction.update(conversation_ref, {ARTWORK_FIELD: artwork_state})
+    if job_ref is not None and job_state is not None:
+        transaction.set(job_ref, effective_job_state)
     return {"outcome": "reserved", "artwork": dict(artwork_state)}
 
 
@@ -94,6 +129,8 @@ def reserve_generation(
     enrichment_revision: str,
     generation_key: str,
     artwork_state: dict[str, Any],
+    job_state: dict[str, Any],
+    preserve_job_attempts: bool = False,
 ) -> dict[str, Any]:
     return _reserve_generation(
         db.transaction(),
@@ -101,7 +138,85 @@ def reserve_generation(
         enrichment_revision=enrichment_revision,
         generation_key=generation_key,
         artwork_state=artwork_state,
+        job_ref=_job_ref(uid, memory_id, generation_key),
+        job_state=job_state,
+        preserve_job_attempts=preserve_job_attempts,
     )
+
+
+def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> list[dict[str, Any]]:
+    current_time = now or datetime.now(timezone.utc)
+    snapshots = db.collection(JOB_COLLECTION).where("status", "==", "pending").limit(max(1, limit) * 10).stream()
+    pending: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        payload = snapshot.to_dict() or {}
+        available_at = payload.get("available_at")
+        if isinstance(available_at, datetime) and available_at > current_time:
+            continue
+        pending.append({**payload, "job_id": snapshot.id})
+    return pending[: max(1, limit)]
+
+
+def complete_job(uid: str, memory_id: str, generation_key: str) -> None:
+    _job_ref(uid, memory_id, generation_key).set(
+        {"status": "completed", "updated_at": datetime.now(timezone.utc)},
+        merge=True,
+    )
+
+
+def retry_job(
+    uid: str,
+    memory_id: str,
+    generation_key: str,
+    *,
+    attempt_count: int,
+    delay_seconds: int,
+    failure_code: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    _job_ref(uid, memory_id, generation_key).set(
+        {
+            "status": "pending",
+            "attempt_count": attempt_count,
+            "available_at": now + timedelta(seconds=max(1, delay_seconds)),
+            "failure_code": failure_code,
+            "updated_at": now,
+        },
+        merge=True,
+    )
+
+
+def fail_job(uid: str, memory_id: str, generation_key: str, *, failure_code: str) -> None:
+    _job_ref(uid, memory_id, generation_key).set(
+        {
+            "status": "failed",
+            "failure_code": failure_code,
+            "updated_at": datetime.now(timezone.utc),
+        },
+        merge=True,
+    )
+
+
+def mark_storage_cleanup_required(uid: str) -> None:
+    db.collection("users").document(uid).set({STORAGE_CLEANUP_REQUIRED_FIELD: True}, merge=True)
+
+
+def storage_cleanup_required(uid: str) -> bool:
+    snapshot = db.collection("users").document(uid).get()
+    return bool(snapshot.exists and (snapshot.to_dict() or {}).get(STORAGE_CLEANUP_REQUIRED_FIELD))
+
+
+def delete_jobs_for_uid(uid: str, *, batch_size: int = 450) -> int:
+    deleted = 0
+    while True:
+        snapshots = list(db.collection(JOB_COLLECTION).where("uid", "==", uid).limit(max(1, batch_size)).stream())
+        if not snapshots:
+            return deleted
+        batch = db.batch()
+        for snapshot in snapshots:
+            batch.delete(snapshot.reference)
+        batch.commit()
+        deleted += len(snapshots)
 
 
 def _claim_generation_transaction(

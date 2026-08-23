@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -35,6 +36,9 @@ PROVIDER_TIMEOUT_SECONDS = 45.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
 PROVIDER_ALLOWED_HOST_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST"
+WORKER_INTERVAL_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS"
+WORKER_BATCH_SIZE = 10
+WORKER_MAX_ATTEMPTS = 5
 
 
 class MemoryArtworkError(RuntimeError):
@@ -95,6 +99,16 @@ class MemoryArtworkRepository(Protocol):
 
     def mark_generation_unavailable(self, uid: str, memory_id: str, **kwargs) -> bool: ...
 
+    def list_pending_jobs(self, **kwargs) -> list[dict[str, Any]]: ...
+
+    def complete_job(self, uid: str, memory_id: str, generation_key: str) -> None: ...
+
+    def retry_job(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> None: ...
+
+    def fail_job(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> None: ...
+
+    def mark_storage_cleanup_required(self, uid: str) -> None: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
@@ -105,6 +119,11 @@ class FirestoreMemoryArtworkRepository:
     claim_generation = staticmethod(artwork_db.claim_generation)
     finalize_generation = staticmethod(artwork_db.finalize_generation)
     mark_generation_unavailable = staticmethod(artwork_db.mark_generation_unavailable)
+    list_pending_jobs = staticmethod(artwork_db.list_pending_jobs)
+    complete_job = staticmethod(artwork_db.complete_job)
+    retry_job = staticmethod(artwork_db.retry_job)
+    fail_job = staticmethod(artwork_db.fail_job)
+    mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -117,6 +136,8 @@ class MemoryArtworkStore(Protocol):
     def signed_get_url(self, **kwargs) -> str: ...
 
     def delete(self, **kwargs) -> None: ...
+
+    def delete_memory_prefix(self, **kwargs) -> int: ...
 
 
 def _read_protected_token(path_value: str) -> str:
@@ -282,6 +303,22 @@ def _generation_key(
     return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _preferences_match_authority(
+    preferences: dict[str, Any],
+    authority: ArtworkRuntimeAuthority,
+    *,
+    style_version: Optional[str] = None,
+) -> bool:
+    return bool(
+        preferences.get("consent") == "accepted"
+        and preferences.get("consent_version") == ARTWORK_CONSENT_VERSION
+        and preferences.get("binding_id") == authority.binding_id
+        and preferences.get("profile_id") == authority.profile_id
+        and preferences.get("authority_digest") == authority.authority_digest
+        and (style_version is None or preferences.get("style_version") == style_version)
+    )
+
+
 class MemoryArtworkService:
     def __init__(
         self,
@@ -334,7 +371,13 @@ class MemoryArtworkService:
         )
         return await self.preferences(uid)
 
-    async def enqueue(self, uid: str, memory_id: str) -> dict[str, Any]:
+    async def enqueue(
+        self,
+        uid: str,
+        memory_id: str,
+        *,
+        preserve_job_attempts: bool = False,
+    ) -> dict[str, Any]:
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
@@ -383,12 +426,25 @@ class MemoryArtworkService:
             "created_at": now,
             "updated_at": now,
         }
+        job_state = {
+            "schema_version": ARTWORK_SCHEMA_VERSION,
+            "uid": uid,
+            "memory_id": memory_id,
+            "generation_key": generation_key,
+            "status": "pending",
+            "attempt_count": 0,
+            "available_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
         reservation = self.repository.reserve_generation(
             uid,
             memory_id,
             enrichment_revision=enrichment_revision,
             generation_key=generation_key,
             artwork_state=artwork_state,
+            job_state=job_state,
+            preserve_job_attempts=preserve_job_attempts,
         )
         return {
             "outcome": reservation.get("outcome"),
@@ -437,13 +493,10 @@ class MemoryArtworkService:
             )
             raise MemoryArtworkError("memory_artwork_authority_changed")
         preferences = self.repository.get_preferences(uid)
-        if (
-            preferences.get("consent") != "accepted"
-            or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
-            or preferences.get("style_version") != claimed.get("style_version")
-            or preferences.get("binding_id") != authority.binding_id
-            or preferences.get("profile_id") != authority.profile_id
-            or preferences.get("authority_digest") != authority.authority_digest
+        if not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=str(claimed.get("style_version") or ""),
         ):
             self.repository.mark_generation_unavailable(
                 uid,
@@ -463,8 +516,74 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_source_changed")
+        if _source_is_sensitive(conversation):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="sensitive_source_excluded",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_sensitive_source_excluded")
         prompt, prompt_sha256 = _prompt_for(conversation, str(claimed.get("style_version") or ""))
         if prompt_sha256 != claimed.get("prompt_sha256"):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="prompt_changed",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_prompt_changed")
+        try:
+            egress_authority = await self.authority_resolver(uid)
+        except Exception as exc:
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="authority_unavailable",
+                lease_token=lease_token,
+            )
+            if isinstance(exc, MemoryArtworkError):
+                raise
+            raise MemoryArtworkError("memory_artwork_runtime_authority_unavailable", retryable=True) from exc
+        egress_preferences = self.repository.get_preferences(uid)
+        if egress_authority != authority or not _preferences_match_authority(
+            egress_preferences,
+            egress_authority,
+            style_version=str(claimed.get("style_version") or ""),
+        ):
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="authority_changed",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_authority_changed")
+        # Re-read at the final synchronous boundary before provider egress.
+        # Classification can change independently of the summary or prompt.
+        egress_conversation = self.repository.get_conversation(uid, memory_id) or {}
+        if _terminal_enrichment(egress_conversation) != claimed.get("enrichment_revision") or _source_is_sensitive(
+            egress_conversation
+        ):
+            failure_code = (
+                "sensitive_source_excluded" if _source_is_sensitive(egress_conversation) else "source_changed"
+            )
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code=failure_code,
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError(f"memory_artwork_{failure_code}")
+        _, egress_prompt_sha256 = _prompt_for(
+            egress_conversation,
+            str(claimed.get("style_version") or ""),
+        )
+        if egress_prompt_sha256 != claimed.get("prompt_sha256"):
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -521,12 +640,10 @@ class MemoryArtworkService:
                 raise
             raise MemoryArtworkError("memory_artwork_runtime_authority_unavailable", retryable=True) from exc
         latest_preferences = self.repository.get_preferences(uid)
-        if (
-            latest_authority.authority_digest != authority.authority_digest
-            or latest_preferences.get("consent") != "accepted"
-            or latest_preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
-            or latest_preferences.get("style_version") != claimed.get("style_version")
-            or latest_preferences.get("authority_digest") != authority.authority_digest
+        if latest_authority != authority or not _preferences_match_authority(
+            latest_preferences,
+            latest_authority,
+            style_version=str(claimed.get("style_version") or ""),
         ):
             self.repository.mark_generation_unavailable(
                 uid,
@@ -536,6 +653,10 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_authority_changed")
+        # Persist cleanup intent before the deterministic upload. If the upload
+        # succeeds but its acknowledgement is lost, deletion still fails closed
+        # unless it can remove the owner's private prefix.
+        self.repository.mark_storage_cleanup_required(uid)
         store = self.store_factory()
         try:
             stored = store.put(
@@ -579,12 +700,10 @@ class MemoryArtworkService:
             if isinstance(exc, MemoryArtworkError):
                 raise
             raise MemoryArtworkError("memory_artwork_runtime_authority_unavailable", retryable=True) from exc
-        if (
-            final_authority.authority_digest != authority.authority_digest
-            or final_preferences.get("consent") != "accepted"
-            or final_preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
-            or final_preferences.get("style_version") != claimed.get("style_version")
-            or final_preferences.get("authority_digest") != authority.authority_digest
+        if final_authority != authority or not _preferences_match_authority(
+            final_preferences,
+            final_authority,
+            style_version=str(claimed.get("style_version") or ""),
         ):
             store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
             self.repository.mark_generation_unavailable(
@@ -628,6 +747,12 @@ class MemoryArtworkService:
         preferences = self.repository.get_preferences(uid)
         if preferences.get("consent") == "declined":
             return {"schema_version": ARTWORK_SCHEMA_VERSION, "status": "declined"}
+        if preferences.get("consent") != "accepted" or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_consent_required",
+            }
         artwork = conversation.get("artwork") or {}
         status = str(artwork.get("status") or "unavailable") if isinstance(artwork, dict) else "unavailable"
         if status != "ready":
@@ -641,8 +766,13 @@ class MemoryArtworkService:
             artwork.get("authority_digest") != authority.authority_digest
             or artwork.get("binding_id") != authority.binding_id
             or artwork.get("profile_id") != authority.profile_id
+            or not _preferences_match_authority(
+                preferences,
+                authority,
+                style_version=str(artwork.get("style_version") or ""),
+            )
         ):
-            raise MemoryArtworkError("memory_artwork_authority_changed")
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
         object_key = str(artwork.get("object_key") or "")
         if not object_key:
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True)
@@ -691,12 +821,145 @@ class MemoryArtworkService:
         }
 
 
+class MemoryArtworkWorker:
+    """Restart-safe consumer for content-free generation dispatch records."""
+
+    def __init__(
+        self,
+        *,
+        repository: Optional[MemoryArtworkRepository] = None,
+        service_factory: Callable[[], MemoryArtworkService] = MemoryArtworkService,
+        config: Optional[MemoryArtworkConfig] = None,
+    ):
+        self.repository = repository or FirestoreMemoryArtworkRepository()
+        self.service_factory = service_factory
+        self.config = config or MemoryArtworkConfig.from_env()
+
+    async def run_once(self) -> int:
+        if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
+            return 0
+        processed = 0
+        for job in self.repository.list_pending_jobs(limit=WORKER_BATCH_SIZE, now=datetime.now(timezone.utc)):
+            uid = str(job.get("uid") or "")
+            memory_id = str(job.get("memory_id") or "")
+            generation_key = str(job.get("generation_key") or "")
+            if not uid or not memory_id or len(generation_key) != 64:
+                if uid and memory_id and generation_key:
+                    self.repository.fail_job(
+                        uid,
+                        memory_id,
+                        generation_key,
+                        failure_code="memory_artwork_dispatch_invalid",
+                    )
+                continue
+            service = self.service_factory()
+            try:
+                reservation = await service.enqueue(uid, memory_id, preserve_job_attempts=True)
+                if reservation.get("status") == "ready":
+                    self.repository.complete_job(uid, memory_id, generation_key)
+                    processed += 1
+                    continue
+                if reservation.get("status") != "generating":
+                    self.repository.fail_job(
+                        uid,
+                        memory_id,
+                        generation_key,
+                        failure_code=f"memory_artwork_{reservation.get('outcome') or 'dispatch_unavailable'}",
+                    )
+                    processed += 1
+                    continue
+                current = service.repository.get_conversation(uid, memory_id) or {}
+                current_generation_key = str(((current.get("artwork") or {}).get("generation_key") or ""))
+                if current_generation_key != generation_key:
+                    # A correction reserved a newer generation. The newer
+                    # transaction owns its own durable job.
+                    self.repository.complete_job(uid, memory_id, generation_key)
+                    processed += 1
+                    continue
+                result = await service.process(uid, memory_id)
+                if result.get("status") == "ready":
+                    self.repository.complete_job(uid, memory_id, generation_key)
+                    processed += 1
+            except MemoryArtworkError as exc:
+                attempts = int(job.get("attempt_count") or 0) + 1
+                if exc.retryable and attempts < WORKER_MAX_ATTEMPTS:
+                    self.repository.retry_job(
+                        uid,
+                        memory_id,
+                        generation_key,
+                        attempt_count=attempts,
+                        delay_seconds=min(300, 2**attempts),
+                        failure_code=exc.code,
+                    )
+                else:
+                    self.repository.fail_job(uid, memory_id, generation_key, failure_code=exc.code)
+                processed += 1
+            except Exception:
+                attempts = int(job.get("attempt_count") or 0) + 1
+                if attempts < WORKER_MAX_ATTEMPTS:
+                    self.repository.retry_job(
+                        uid,
+                        memory_id,
+                        generation_key,
+                        attempt_count=attempts,
+                        delay_seconds=min(300, 2**attempts),
+                        failure_code="memory_artwork_worker_failed",
+                    )
+                else:
+                    self.repository.fail_job(
+                        uid,
+                        memory_id,
+                        generation_key,
+                        failure_code="memory_artwork_worker_failed",
+                    )
+                processed += 1
+        return processed
+
+
+_worker_task: Optional[asyncio.Task] = None
+_worker_stop: Optional[asyncio.Event] = None
+
+
+async def _memory_artwork_worker_loop() -> None:
+    assert _worker_stop is not None
+    interval = max(1.0, float(os.getenv(WORKER_INTERVAL_SECONDS_ENV, "5")))
+    worker = MemoryArtworkWorker()
+    while not _worker_stop.is_set():
+        try:
+            processed = await worker.run_once()
+        except Exception:
+            processed = 0
+        try:
+            await asyncio.wait_for(_worker_stop.wait(), timeout=0.1 if processed else interval)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def start_memory_artwork_worker() -> None:
+    global _worker_stop, _worker_task
+    config = MemoryArtworkConfig.from_env()
+    if not (config.enabled and config.release_enabled and config.provider_enabled):
+        return
+    if _worker_task is not None and not _worker_task.done():
+        return
+    _worker_stop = asyncio.Event()
+    _worker_task = asyncio.create_task(_memory_artwork_worker_loop(), name="ella-memory-artwork-worker")
+
+
+async def stop_memory_artwork_worker() -> None:
+    global _worker_stop, _worker_task
+    if _worker_task is None:
+        return
+    assert _worker_stop is not None
+    _worker_stop.set()
+    await _worker_task
+    _worker_task = None
+    _worker_stop = None
+
+
 async def enqueue_after_terminal_enrichment(uid: str, memory_id: str) -> None:
-    """Best-effort queue hook; image failures never change terminal text enrichment."""
+    """Durably queue work; image failures never change terminal text enrichment."""
     try:
-        service = MemoryArtworkService()
-        result = await service.enqueue(uid, memory_id)
-        if result.get("status") == "generating" and result.get("outcome") in {"reserved", "existing"}:
-            await service.process(uid, memory_id)
+        await MemoryArtworkService().enqueue(uid, memory_id)
     except Exception:
         return
