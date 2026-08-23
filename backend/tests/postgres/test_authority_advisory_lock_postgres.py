@@ -15,6 +15,7 @@ from database import authority_advisory_lock, managed_cloud_consent, voice_canar
 from database.ella_provisioning import EllaProvisioningRepository
 from database.runtime_targets import RuntimeTargetLineage
 from ella.routers import guardian
+from ella.services.provisioning import current_self_hosted_runtime_lineage
 from utils.ella import exact_firebase_auth
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
@@ -44,6 +45,13 @@ CREATE TABLE users (
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
     guardian_mode TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE agent_clusters (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    agents JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'ACTIVE'
 );
 
 CREATE TABLE ella_provisioning_jobs (
@@ -2449,6 +2457,118 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
         async with pool.acquire() as observer:
             assert await observer.fetchval("SELECT status FROM users WHERE id = $1", user_id) == "ACTIVE"
             assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "active"
+
+        # Returning pre-invitation accounts can retain a valid legacy Hermes
+        # cluster after a consent-change quarantine. Recovery must still require
+        # the exact current lineage and exact stale quarantine shape.
+        current_lineage = current_self_hosted_runtime_lineage()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_clusters (user_id, agents, status)
+                VALUES ($1, '{"userAgentId":"retained-user-agent"}'::jsonb, 'ACTIVE')
+                """,
+                user_id,
+            )
+            await conn.execute(
+                """
+                UPDATE ella_provisioning_jobs
+                SET state = 'blocked',
+                    stage = 'runtime_ready',
+                    retryable = FALSE,
+                    error_code = 'invitation_authority_revoked',
+                    error_detail = '{"content_free":true,"reason":"managed_cloud_consent_grant_changed"}'::jsonb
+                WHERE id = $1
+                """,
+                job_id,
+            )
+            await conn.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET status = 'disabled',
+                    active = FALSE,
+                    health_state = 'unhealthy',
+                    quarantine_reason = 'managed_cloud_consent_grant_changed'
+                WHERE id = $1
+                """,
+                binding_id,
+            )
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET status = 'revoked', revision = revision + 1
+                WHERE uid = $1
+                """,
+                uid,
+            )
+
+        # The retained cluster alone is insufficient while consent authority is
+        # stale. No entitlement mutation is permitted.
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=current_lineage,
+            )
+            is False
+        )
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "revoked"
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_managed_cloud_consent_authority
+                SET policy_version = $2,
+                    processor_set_hash = $3,
+                    scope_version = $4,
+                    scope_hash = $5
+                WHERE user_id = $1
+                """,
+                user_id,
+                current_lineage.policy_version,
+                current_lineage.processor_set_hash,
+                current_lineage.scope_version,
+                current_lineage.scope_hash,
+            )
+
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=current_lineage,
+            )
+            is True
+        )
+        async with pool.acquire() as observer:
+            recovered_entitlement = await observer.fetchrow(
+                "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
+                uid,
+            )
+            recovery_receipts = await observer.fetchval(
+                "SELECT receipts FROM ella_provisioning_jobs WHERE id = $1",
+                job_id,
+            )
+        if isinstance(recovery_receipts, str):
+            recovery_receipts = json.loads(recovery_receipts)
+        assert dict(recovered_entitlement) == {"status": "active", "revision": 5}
+        assert {"type": "retained_entitlement_recovered", "content_free": True} in recovery_receipts
+
+        # A later operator revocation is authoritative. The consumed recovery
+        # receipt prevents the old quarantine marker from rearming it.
+        revoked = await voice_canary.update_entitlement_status(uid=uid, status="revoked")
+        assert revoked is not None and revoked["status"] == "revoked"
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=current_lineage,
+            )
+            is False
+        )
+        async with pool.acquire() as observer:
+            final_entitlement = await observer.fetchrow(
+                "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
+                uid,
+            )
+        assert dict(final_entitlement) == {"status": "revoked", "revision": 6}
 
     asyncio.run(_run_with_database(scenario))
 

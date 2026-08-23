@@ -344,6 +344,30 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
     assert response.json()["support_code"].startswith("ENT-")
     assert len(response.json()["correlation_id"]) == 36
 
+    contracts = [
+        {"status": "revoked", "quota": {}},
+        {"status": "active", "quota": {"daily_limit_s": 2700}},
+    ]
+    recoveries = []
+
+    async def fake_recover(uid):
+        recoveries.append(uid)
+        return True
+
+    async def fake_recovered_contract(uid):
+        captured["recovered_uid"] = uid
+        return contracts.pop(0)
+
+    monkeypatch.setattr(voice, "recover_retained_voice_entitlement", fake_recover)
+    monkeypatch.setattr(voice.voice_canary_db, "get_entitlement_contract", fake_recovered_contract)
+    recovered_response = client.get("/v1/entitlement")
+    assert recovered_response.status_code == 200
+    assert recovered_response.json()["status"] == "active"
+    assert recovered_response.json()["quota"] == {"daily_limit_s": 2700}
+    assert captured["recovered_uid"] == "firebase-subject"
+    assert recoveries == ["firebase-subject"]
+    assert contracts == []
+
 
 def test_typed_failure_shape_is_compatible_with_ios(monkeypatch):
     app = FastAPI()
