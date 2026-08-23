@@ -60,6 +60,7 @@ def list_recent_conversations(uid: str, *, limit: int) -> list[dict[str, Any]]:
         db.collection("users")
         .document(uid)
         .collection("conversations")
+        .where("discarded", "==", False)
         .order_by("created_at", direction=firestore.Query.DESCENDING)
         .limit(limit)
     )
@@ -70,6 +71,7 @@ def _terminal_enrichment_matches(conversation: dict[str, Any], enrichment_revisi
     enrichment = conversation.get("enrichment_state") or {}
     return bool(
         not conversation.get("deletion_pending")
+        and not conversation.get("discarded")
         and conversation.get("status") == "completed"
         and conversation.get("active_summary_version_id") == enrichment_revision
         and isinstance(enrichment, dict)
@@ -389,15 +391,33 @@ def fail_job(
     )
 
 
-def _mark_storage_cleanup_required_transaction(transaction, user_ref, job_ref, *, lease_token: str) -> bool:
+def _mark_storage_cleanup_required_transaction(
+    transaction,
+    user_ref,
+    conversation_ref,
+    job_ref,
+    *,
+    generation_key: str,
+    lease_token: str,
+) -> bool:
     user_snapshot = user_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
     job_snapshot = job_ref.get(transaction=transaction)
     user = user_snapshot.to_dict() if user_snapshot.exists else {}
+    conversation = conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
     job = job_snapshot.to_dict() if job_snapshot.exists else {}
+    artwork = conversation.get(ARTWORK_FIELD) or {}
     if (
         not user_snapshot.exists
         or bool(user.get(DELETION_PENDING_FIELD))
+        or not conversation_snapshot.exists
+        or not isinstance(artwork, dict)
+        or artwork.get("generation_key") != generation_key
+        or artwork.get("lease_token") != lease_token
+        or artwork.get("status") != "generating"
+        or not _terminal_enrichment_matches(conversation, str(artwork.get("enrichment_revision") or ""))
         or not job_snapshot.exists
+        or job.get("generation_key") != generation_key
         or job.get("lease_token") != lease_token
         or not _processing_job_is_active(job, now=datetime.now(timezone.utc))
     ):
@@ -421,7 +441,9 @@ def mark_storage_cleanup_required(
     return _mark_storage_cleanup_required(
         db.transaction(),
         _user_ref(uid),
+        _conversation_ref(uid, memory_id),
         _job_ref(uid, memory_id, generation_key),
+        generation_key=generation_key,
         lease_token=lease_token,
     )
 
@@ -509,6 +531,8 @@ def _claim_generation_transaction(
     conversation = snapshot.to_dict() or {}
     artwork = conversation.get(ARTWORK_FIELD) or {}
     if not isinstance(artwork, dict) or artwork.get("generation_key") != generation_key:
+        return None
+    if not _terminal_enrichment_matches(conversation, str(artwork.get("enrichment_revision") or "")):
         return None
     if artwork.get("status") != "generating":
         return None

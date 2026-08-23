@@ -549,6 +549,28 @@ def test_stale_source_or_style_fails_before_provider_egress(drift):
     assert provider.calls == 0
     assert repository.conversations[("owner-a", "memory-1")]["artwork"]["status"] == "unavailable"
 
+    if drift == "source":
+        discarded_repository = FakeRepository()
+        discarded_repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+        discarded_repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+        discarded_provider = FakeProvider()
+        discarded_service = artwork.MemoryArtworkService(
+            repository=discarded_repository,
+            authority_resolver=_resolver,
+            provider_factory=lambda: discarded_provider,
+            store_factory=FakeStore,
+            config=_enabled_config(),
+        )
+        asyncio.run(discarded_service.enqueue("owner-a", "memory-1"))
+        discarded_repository.conversations[("owner-a", "memory-1")]["discarded"] = True
+        with pytest.raises(artwork.MemoryArtworkError) as discarded_failure:
+            _run_claimed_process(discarded_service, discarded_repository)
+        assert discarded_failure.value.code in {
+            "memory_artwork_job_claim_invalid",
+            "memory_artwork_source_changed",
+        }
+        assert discarded_provider.calls == 0
+
 
 def test_global_consent_revocation_at_final_egress_check_blocks_provider():
     repository = FakeRepository()
@@ -931,7 +953,7 @@ def test_signed_url_rechecks_sensitive_source_before_release():
     }
     assert store.signed == []
 
-    for drift in ("enrichment_revision", "prompt"):
+    for drift in ("enrichment_revision", "prompt", "discarded"):
         repository = FakeRepository()
         repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
         repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
@@ -949,14 +971,16 @@ def test_signed_url_rechecks_sensitive_source_before_release():
         conversation = repository.conversations[("owner-a", "memory-1")]
         if drift == "enrichment_revision":
             conversation["active_summary_version_id"] = "summary-corrected"
-        else:
+        elif drift == "prompt":
             conversation["structured"]["title"] = "A corrected memory title"
+        else:
+            conversation["discarded"] = True
 
         result = asyncio.run(service.signed_url("owner-a", "memory-1"))
         assert result == {
             "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
             "status": "unavailable",
-            "failure_code": "memory_artwork_source_stale",
+            "failure_code": "memory_artwork_discarded" if drift == "discarded" else "memory_artwork_source_stale",
         }
         assert store.signed == []
 
@@ -1031,13 +1055,14 @@ def test_release_off_is_a_signed_url_kill_switch():
     assert store.signed == []
 
 
-def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent():
+def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
     for index in range(14):
         created_at = datetime(2026, 8, 22, 12, index, tzinfo=timezone.utc)
         memory_id = f"memory-{index:02d}"
         repository.conversations[("owner-a", memory_id)] = _terminal_memory(memory_id, created_at=created_at)
+    repository.conversations[("owner-a", "memory-13")]["discarded"] = True
     service = artwork.MemoryArtworkService(
         repository=repository,
         authority_resolver=_resolver,
@@ -1051,9 +1076,59 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent():
     assert first["existing"] == 0
     assert second["queued"] == 0
     assert second["existing"] == 10
-    assert first["memory_ids"] == [f"memory-{index:02d}" for index in range(13, 3, -1)]
+    assert first["memory_ids"] == [f"memory-{index:02d}" for index in range(12, 2, -1)]
     assert repository.reserve_writes == 10
     assert len(repository.jobs) == 10
+
+    class Snapshot:
+        def to_dict(self):
+            return {"id": "memory-visible", "discarded": False}
+
+    class Query:
+        def __init__(self):
+            self.operations = []
+
+        def where(self, field, operator, value):
+            self.operations.append(("where", field, operator, value))
+            return self
+
+        def order_by(self, field, direction):
+            self.operations.append(("order_by", field, direction))
+            return self
+
+        def limit(self, value):
+            self.operations.append(("limit", value))
+            return self
+
+        def stream(self):
+            return iter([Snapshot()])
+
+    query = Query()
+
+    class Conversations:
+        def collection(self, name):
+            assert name == "conversations"
+            return query
+
+    class Users:
+        def document(self, uid):
+            assert uid == "owner-a"
+            return Conversations()
+
+    class Database:
+        def collection(self, name):
+            assert name == "users"
+            return Users()
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+    assert artwork_database.list_recent_conversations("owner-a", limit=10) == [
+        {"id": "memory-visible", "discarded": False}
+    ]
+    assert query.operations == [
+        ("where", "discarded", "==", False),
+        ("order_by", "created_at", artwork_database.firestore.Query.DESCENDING),
+        ("limit", 10),
+    ]
 
 
 def test_durable_worker_recovers_retryable_job_after_restart():
@@ -1285,6 +1360,19 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
             for key, value in payload.items():
                 reference.state[key] = copy.deepcopy(value)
 
+    discarded_reference = Reference({**_terminal_memory("discarded-memory"), "discarded": True})
+    discarded_transaction = Transaction()
+    discarded_reservation = artwork_database._reserve_generation_transaction(
+        discarded_transaction,
+        Reference({"id": "owner-a"}),
+        discarded_reference,
+        enrichment_revision="summary-discarded-memory",
+        generation_key="d" * 64,
+        artwork_state={"status": "generating"},
+    )
+    assert discarded_reservation["outcome"] == "source_changed"
+    assert discarded_transaction.updates == 0
+
     state = _terminal_memory("memory-1")
     user_reference = Reference({"id": "owner-a"})
     reference = Reference(state)
@@ -1306,6 +1394,19 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
     assert reserved["outcome"] == "reserved"
     assert transaction.updates == 1
 
+    reference.state["discarded"] = True
+    assert (
+        artwork_database._claim_generation_transaction(
+            transaction,
+            reference,
+            generation_key="a" * 64,
+            lease_token="lease-a",
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        )
+        is None
+    )
+    reference.state["discarded"] = False
     claim = artwork_database._claim_generation_transaction(
         transaction,
         reference,
@@ -1315,6 +1416,38 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
         lease_seconds=120,
     )
     assert claim["lease_token"] == "lease-a"
+    reference.state["discarded"] = True
+    assert (
+        artwork_database._finalize_generation_transaction(
+            transaction,
+            reference,
+            generation_key="a" * 64,
+            authority_digest="digest-a",
+            lease_token="lease-a",
+            ready_state={"status": "ready"},
+        )
+        is False
+    )
+    job_reference = Reference(
+        {
+            "status": "processing",
+            "generation_key": "a" * 64,
+            "lease_token": "lease-a",
+            "lease_expires_at": datetime.now(timezone.utc) + timedelta(minutes=1),
+        }
+    )
+    assert (
+        artwork_database._mark_storage_cleanup_required_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            lease_token="lease-a",
+        )
+        is False
+    )
+    reference.state["discarded"] = False
     assert (
         artwork_database._finalize_generation_transaction(
             transaction,
