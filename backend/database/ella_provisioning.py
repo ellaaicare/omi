@@ -3125,6 +3125,7 @@ class EllaProvisioningRepository:
                           AND job.retryable = FALSE
                           AND job.error_code = 'invitation_authority_revoked'
                           AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
+                          AND NOT job.receipts @> '[{"type":"retained_entitlement_recovered","content_free":true}]'::jsonb
                           AND binding.status = 'disabled'
                           AND binding.active = FALSE
                           AND binding.health_state = 'unhealthy'
@@ -3177,6 +3178,21 @@ class EllaProvisioningRepository:
                     """,
                     uid,
                 )
+                if row is not None and lineage is not None:
+                    consumed = await connection.fetchval(
+                        """
+                        UPDATE ella_provisioning_jobs
+                        SET receipts = receipts || $2::jsonb,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                          AND NOT receipts @> $2::jsonb
+                        RETURNING TRUE
+                        """,
+                        recovery_candidates[0]["job_id"],
+                        json.dumps([{"type": "retained_entitlement_recovered", "content_free": True}]),
+                    )
+                    if not consumed:
+                        raise RuntimeError("retained_entitlement_recovery_receipt_conflict")
                 return row is not None
 
     async def activate_runtime_binding(

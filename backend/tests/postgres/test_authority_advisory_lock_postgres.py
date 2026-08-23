@@ -2543,7 +2543,30 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
                 uid,
             )
+            recovery_receipts = await observer.fetchval(
+                "SELECT receipts FROM ella_provisioning_jobs WHERE id = $1",
+                job_id,
+            )
         assert dict(recovered_entitlement) == {"status": "active", "revision": 5}
+        assert {"type": "retained_entitlement_recovered", "content_free": True} in recovery_receipts
+
+        # A later operator revocation is authoritative. The consumed recovery
+        # receipt prevents the old quarantine marker from rearming it.
+        revoked = await voice_canary.update_entitlement_status(uid=uid, status="revoked")
+        assert revoked is not None and revoked["status"] == "revoked"
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=current_lineage,
+            )
+            is False
+        )
+        async with pool.acquire() as observer:
+            final_entitlement = await observer.fetchrow(
+                "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
+                uid,
+            )
+        assert dict(final_entitlement) == {"status": "revoked", "revision": 6}
 
     asyncio.run(_run_with_database(scenario))
 
