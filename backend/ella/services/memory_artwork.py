@@ -18,7 +18,12 @@ import httpx
 
 import database.memory_artwork as artwork_db
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_authority_identity
-from utils.ella.memory_artwork_storage import GCSMemoryArtworkStore, MemoryArtworkStorageError, StoredArtwork
+from utils.ella.memory_artwork_storage import (
+    MAX_ARTWORK_BYTES,
+    GCSMemoryArtworkStore,
+    MemoryArtworkStorageError,
+    StoredArtwork,
+)
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = "ella.memory_artwork.consent.v1"
@@ -105,13 +110,13 @@ class MemoryArtworkRepository(Protocol):
 
     def job_claim_is_current(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
+    def renew_work_claim(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
+
     def complete_job(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
     def retry_job(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
     def fail_job(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
-
-    def mark_storage_cleanup_required(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
 
 class FirestoreMemoryArtworkRepository:
@@ -126,10 +131,10 @@ class FirestoreMemoryArtworkRepository:
     list_pending_jobs = staticmethod(artwork_db.list_pending_jobs)
     claim_job = staticmethod(artwork_db.claim_job)
     job_claim_is_current = staticmethod(artwork_db.job_claim_is_current)
+    renew_work_claim = staticmethod(artwork_db.renew_work_claim)
     complete_job = staticmethod(artwork_db.complete_job)
     retry_job = staticmethod(artwork_db.retry_job)
     fail_job = staticmethod(artwork_db.fail_job)
-    mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -192,7 +197,8 @@ class FirstPartyHTTPArtworkProvider:
             trust_env=False,
         )
         try:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 self.url,
                 headers={
                     "Authorization": f"Bearer {self.token}",
@@ -205,24 +211,41 @@ class FirstPartyHTTPArtworkProvider:
                     "width": TARGET_WIDTH,
                     "height": TARGET_HEIGHT,
                 },
-            )
+            ) as response:
+                if response.status_code != 200:
+                    raise MemoryArtworkError(
+                        "memory_artwork_provider_rejected",
+                        retryable=response.status_code >= 500,
+                    )
+                content_length = response.headers.get("content-length", "").strip()
+                if content_length:
+                    try:
+                        if int(content_length) > MAX_ARTWORK_BYTES:
+                            raise MemoryArtworkError("memory_artwork_payload_size_invalid")
+                    except ValueError as exc:
+                        raise MemoryArtworkError("memory_artwork_provider_response_invalid") from exc
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_ARTWORK_BYTES:
+                        raise MemoryArtworkError("memory_artwork_payload_size_invalid")
+                image_bytes = bytes(body)
+                del body
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                try:
+                    width = int(response.headers.get("x-ella-image-width", "0"))
+                    height = int(response.headers.get("x-ella-image-height", "0"))
+                except ValueError as exc:
+                    raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
         except httpx.HTTPError as exc:
             raise MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True) from exc
         finally:
             if owns_client:
                 await client.aclose()
-        if response.status_code != 200:
-            raise MemoryArtworkError("memory_artwork_provider_rejected", retryable=response.status_code >= 500)
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        try:
-            width = int(response.headers.get("x-ella-image-width", "0"))
-            height = int(response.headers.get("x-ella-image-height", "0"))
-        except ValueError as exc:
-            raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
         if content_type not in {"image/png", "image/webp", "image/jpeg"} or width <= 0 or height <= 0:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
         return GeneratedArtwork(
-            image_bytes=response.content,
+            image_bytes=image_bytes,
             content_type=content_type,
             pixel_width=width,
             pixel_height=height,
@@ -480,6 +503,7 @@ class MemoryArtworkService:
             memory_id,
             generation_key,
             lease_token=job_lease_token,
+            now=datetime.now(timezone.utc),
         ):
             raise MemoryArtworkError("memory_artwork_job_claim_invalid")
         lease_token = secrets.token_hex(24)
@@ -630,6 +654,16 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_prompt_changed")
+        if not self.repository.renew_work_claim(
+            uid,
+            memory_id,
+            generation_key,
+            job_lease_token=job_lease_token,
+            generation_lease_token=lease_token,
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        ):
+            raise MemoryArtworkError("memory_artwork_job_claim_invalid")
         provider = self.provider_factory()
         try:
             generated = await provider.generate(
@@ -695,11 +729,15 @@ class MemoryArtworkService:
         # Persist cleanup intent before the deterministic upload. If the upload
         # succeeds but its acknowledgement is lost, deletion still fails closed
         # unless it can remove the owner's private prefix.
-        if not self.repository.mark_storage_cleanup_required(
+        if not self.repository.renew_work_claim(
             uid,
             memory_id,
             generation_key,
-            lease_token=job_lease_token,
+            job_lease_token=job_lease_token,
+            generation_lease_token=lease_token,
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+            mark_storage_cleanup=True,
         ):
             self.repository.mark_generation_unavailable(
                 uid,

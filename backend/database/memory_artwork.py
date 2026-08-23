@@ -186,6 +186,7 @@ def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> lis
 def _claim_job_transaction(
     transaction,
     user_ref,
+    conversation_ref,
     job_ref,
     *,
     lease_token: str,
@@ -193,8 +194,15 @@ def _claim_job_transaction(
     lease_seconds: int,
 ) -> Optional[dict[str, Any]]:
     user_snapshot = user_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
     user = user_snapshot.to_dict() if user_snapshot.exists else {}
-    if not user_snapshot.exists or bool(user.get(DELETION_PENDING_FIELD)):
+    conversation = conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
+    if (
+        not user_snapshot.exists
+        or bool(user.get(DELETION_PENDING_FIELD))
+        or not conversation_snapshot.exists
+        or bool(conversation.get("deletion_pending"))
+    ):
         return None
     job_snapshot = job_ref.get(transaction=transaction)
     if not job_snapshot.exists:
@@ -223,8 +231,8 @@ def _claim_job_transaction(
 
 
 @transactional
-def _claim_job(transaction, user_ref, job_ref, **kwargs):
-    return _claim_job_transaction(transaction, user_ref, job_ref, **kwargs)
+def _claim_job(transaction, user_ref, conversation_ref, job_ref, **kwargs):
+    return _claim_job_transaction(transaction, user_ref, conversation_ref, job_ref, **kwargs)
 
 
 def claim_job(
@@ -239,6 +247,7 @@ def claim_job(
     return _claim_job(
         db.transaction(),
         _user_ref(uid),
+        _conversation_ref(uid, memory_id),
         _job_ref(uid, memory_id, generation_key),
         lease_token=lease_token,
         now=now,
@@ -246,12 +255,109 @@ def claim_job(
     )
 
 
-def job_claim_is_current(uid: str, memory_id: str, generation_key: str, *, lease_token: str) -> bool:
+def job_claim_is_current(
+    uid: str,
+    memory_id: str,
+    generation_key: str,
+    *,
+    lease_token: str,
+    now: Optional[datetime] = None,
+) -> bool:
     snapshot = _job_ref(uid, memory_id, generation_key).get()
     if not snapshot.exists:
         return False
     job = snapshot.to_dict() or {}
-    return bool(job.get("status") == "processing" and job.get("lease_token") == lease_token)
+    lease_expires_at = job.get("lease_expires_at")
+    return bool(
+        job.get("status") == "processing"
+        and job.get("lease_token") == lease_token
+        and isinstance(lease_expires_at, datetime)
+        and lease_expires_at > (now or datetime.now(timezone.utc))
+    )
+
+
+def _renew_work_claim_transaction(
+    transaction,
+    user_ref,
+    conversation_ref,
+    job_ref,
+    *,
+    generation_key: str,
+    job_lease_token: str,
+    generation_lease_token: str,
+    now: datetime,
+    lease_seconds: int,
+    mark_storage_cleanup: bool,
+) -> bool:
+    user_snapshot = user_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    job_snapshot = job_ref.get(transaction=transaction)
+    user = user_snapshot.to_dict() if user_snapshot.exists else {}
+    conversation = conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
+    job = job_snapshot.to_dict() if job_snapshot.exists else {}
+    generation = conversation.get(ARTWORK_FIELD) or {}
+    job_expiry = job.get("lease_expires_at")
+    generation_expiry = generation.get("lease_expires_at") if isinstance(generation, dict) else None
+    if (
+        not user_snapshot.exists
+        or bool(user.get(DELETION_PENDING_FIELD))
+        or not conversation_snapshot.exists
+        or bool(conversation.get("deletion_pending"))
+        or not job_snapshot.exists
+        or job.get("status") != "processing"
+        or job.get("lease_token") != job_lease_token
+        or not isinstance(job_expiry, datetime)
+        or job_expiry <= now
+        or not isinstance(generation, dict)
+        or generation.get("status") != "generating"
+        or generation.get("generation_key") != generation_key
+        or generation.get("lease_token") != generation_lease_token
+        or not isinstance(generation_expiry, datetime)
+        or generation_expiry <= now
+    ):
+        return False
+    renewed_until = now + timedelta(seconds=max(1, lease_seconds))
+    transaction.update(job_ref, {"lease_expires_at": renewed_until, "updated_at": now})
+    transaction.update(
+        conversation_ref,
+        {
+            f"{ARTWORK_FIELD}.lease_expires_at": renewed_until,
+            f"{ARTWORK_FIELD}.updated_at": now,
+        },
+    )
+    if mark_storage_cleanup:
+        transaction.update(user_ref, {STORAGE_CLEANUP_REQUIRED_FIELD: True})
+    return True
+
+
+@transactional
+def _renew_work_claim(transaction, user_ref, conversation_ref, job_ref, **kwargs) -> bool:
+    return _renew_work_claim_transaction(transaction, user_ref, conversation_ref, job_ref, **kwargs)
+
+
+def renew_work_claim(
+    uid: str,
+    memory_id: str,
+    generation_key: str,
+    *,
+    job_lease_token: str,
+    generation_lease_token: str,
+    now: datetime,
+    lease_seconds: int = 120,
+    mark_storage_cleanup: bool = False,
+) -> bool:
+    return _renew_work_claim(
+        db.transaction(),
+        _user_ref(uid),
+        _conversation_ref(uid, memory_id),
+        _job_ref(uid, memory_id, generation_key),
+        generation_key=generation_key,
+        job_lease_token=job_lease_token,
+        generation_lease_token=generation_lease_token,
+        now=now,
+        lease_seconds=lease_seconds,
+        mark_storage_cleanup=mark_storage_cleanup,
+    )
 
 
 def _finish_job_transaction(
@@ -333,43 +439,6 @@ def fail_job(
     )
 
 
-def _mark_storage_cleanup_required_transaction(transaction, user_ref, job_ref, *, lease_token: str) -> bool:
-    user_snapshot = user_ref.get(transaction=transaction)
-    job_snapshot = job_ref.get(transaction=transaction)
-    user = user_snapshot.to_dict() if user_snapshot.exists else {}
-    job = job_snapshot.to_dict() if job_snapshot.exists else {}
-    if (
-        not user_snapshot.exists
-        or bool(user.get(DELETION_PENDING_FIELD))
-        or not job_snapshot.exists
-        or job.get("status") != "processing"
-        or job.get("lease_token") != lease_token
-    ):
-        return False
-    transaction.update(user_ref, {STORAGE_CLEANUP_REQUIRED_FIELD: True})
-    return True
-
-
-@transactional
-def _mark_storage_cleanup_required(transaction, user_ref, job_ref, **kwargs) -> bool:
-    return _mark_storage_cleanup_required_transaction(transaction, user_ref, job_ref, **kwargs)
-
-
-def mark_storage_cleanup_required(
-    uid: str,
-    memory_id: str,
-    generation_key: str,
-    *,
-    lease_token: str,
-) -> bool:
-    return _mark_storage_cleanup_required(
-        db.transaction(),
-        _user_ref(uid),
-        _job_ref(uid, memory_id, generation_key),
-        lease_token=lease_token,
-    )
-
-
 def storage_cleanup_required(uid: str) -> bool:
     snapshot = _user_ref(uid).get()
     return bool(snapshot.exists and (snapshot.to_dict() or {}).get(STORAGE_CLEANUP_REQUIRED_FIELD))
@@ -392,9 +461,32 @@ def begin_account_deletion(uid: str) -> bool:
     return _begin_account_deletion(db.transaction(), _user_ref(uid))
 
 
-def has_processing_jobs(uid: str) -> bool:
+def has_processing_jobs(uid: str, *, now: Optional[datetime] = None) -> bool:
+    current_time = now or datetime.now(timezone.utc)
     snapshots = db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
-    return any((snapshot.to_dict() or {}).get("status") == "processing" for snapshot in snapshots)
+    return any(
+        (payload := snapshot.to_dict() or {}).get("status") == "processing"
+        and isinstance(payload.get("lease_expires_at"), datetime)
+        and payload["lease_expires_at"] > current_time
+        for snapshot in snapshots
+    )
+
+
+def has_processing_job(uid: str, memory_id: str, generation_key: str, *, now: Optional[datetime] = None) -> bool:
+    snapshot = _job_ref(uid, memory_id, generation_key).get()
+    if not snapshot.exists:
+        return False
+    job = snapshot.to_dict() or {}
+    lease_expires_at = job.get("lease_expires_at")
+    return bool(
+        job.get("status") == "processing"
+        and isinstance(lease_expires_at, datetime)
+        and lease_expires_at > (now or datetime.now(timezone.utc))
+    )
+
+
+def delete_job(uid: str, memory_id: str, generation_key: str) -> None:
+    _job_ref(uid, memory_id, generation_key).delete()
 
 
 def delete_jobs_for_uid(uid: str, *, batch_size: int = 450) -> int:

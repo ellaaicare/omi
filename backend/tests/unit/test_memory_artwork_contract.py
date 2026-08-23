@@ -6,6 +6,7 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -28,10 +29,10 @@ def _load_service_module():
         "list_pending_jobs",
         "claim_job",
         "job_claim_is_current",
+        "renew_work_claim",
         "complete_job",
         "retry_job",
         "fail_job",
-        "mark_storage_cleanup_required",
     ):
         setattr(database_stub, name, lambda *args, **kwargs: None)
     database_stub.STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
@@ -175,7 +176,13 @@ class FakeRepository:
             return None
         if current.get("lease_token"):
             return None
-        current.update({"lease_token": lease_token, "lease_expires_at": now, "updated_at": now})
+        current.update(
+            {
+                "lease_token": lease_token,
+                "lease_expires_at": now + timedelta(seconds=lease_seconds),
+                "updated_at": now,
+            }
+        )
         return copy.deepcopy(current)
 
     def finalize_generation(
@@ -264,9 +271,51 @@ class FakeRepository:
         job.pop("lease_expires_at", None)
         return True
 
-    def job_claim_is_current(self, uid, memory_id, generation_key, *, lease_token):
+    def job_claim_is_current(self, uid, memory_id, generation_key, *, lease_token, now=None):
         job = self.jobs.get((uid, memory_id, generation_key))
-        return bool(job and job.get("status") == "processing" and job.get("lease_token") == lease_token)
+        current_time = now or datetime.now(timezone.utc)
+        return bool(
+            job
+            and job.get("status") == "processing"
+            and job.get("lease_token") == lease_token
+            and job.get("lease_expires_at") > current_time
+        )
+
+    def renew_work_claim(
+        self,
+        uid,
+        memory_id,
+        generation_key,
+        *,
+        job_lease_token,
+        generation_lease_token,
+        now,
+        lease_seconds,
+        mark_storage_cleanup=False,
+    ):
+        conversation = self.conversations.get((uid, memory_id)) or {}
+        generation = conversation.get("artwork") or {}
+        if (
+            uid in self.deletion_pending
+            or conversation.get("deletion_pending")
+            or not self.job_claim_is_current(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=job_lease_token,
+                now=now,
+            )
+            or generation.get("generation_key") != generation_key
+            or generation.get("lease_token") != generation_lease_token
+            or generation.get("lease_expires_at") <= now
+        ):
+            return False
+        renewed_until = now + timedelta(seconds=lease_seconds)
+        self.jobs[(uid, memory_id, generation_key)]["lease_expires_at"] = renewed_until
+        generation["lease_expires_at"] = renewed_until
+        if mark_storage_cleanup:
+            self.storage_cleanup_required.add(uid)
+        return True
 
     def complete_job(self, uid, memory_id, generation_key, *, lease_token):
         return self._finish_job(uid, memory_id, generation_key, lease_token, {"status": "completed"})
@@ -303,14 +352,6 @@ class FakeRepository:
             lease_token,
             {"status": "failed", "failure_code": failure_code},
         )
-
-    def mark_storage_cleanup_required(self, uid, memory_id, generation_key, *, lease_token):
-        if uid in self.deletion_pending:
-            return False
-        if not self.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token):
-            return False
-        self.storage_cleanup_required.add(uid)
-        return True
 
 
 def _run_claimed_process(service, repository, uid="owner-a", memory_id="memory-1"):
@@ -495,6 +536,69 @@ def test_process_requires_current_durable_job_claim_before_provider():
 
     assert failure.value.code == "memory_artwork_job_claim_invalid"
     assert provider.calls == 0
+
+
+def test_expired_job_lease_is_rejected_at_final_provider_boundary():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = FakeProvider()
+    calls = 0
+
+    async def expiring_resolver(uid):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            next(iter(repository.jobs.values()))["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=expiring_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_job_claim_invalid"
+    assert provider.calls == 0
+
+
+def test_provider_stream_rejects_oversize_content_length_before_buffering(tmp_path, monkeypatch):
+    token_path = tmp_path / "provider.token"
+    token_path.write_text("test-token", encoding="utf-8")
+    token_path.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://provider.invalid/generate")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "provider.invalid")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_path))
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            headers={
+                "content-length": str(artwork.MAX_ARTWORK_BYTES + 1),
+                "content-type": "image/png",
+                "x-ella-image-width": str(artwork.TARGET_WIDTH),
+                "x-ella-image-height": str(artwork.TARGET_HEIGHT),
+            },
+            content=b"not-buffered",
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.FirstPartyHTTPArtworkProvider(client=client)
+            await provider.generate(
+                prompt="content-free", style_version=artwork.DEFAULT_STYLE_VERSION, idempotency_key="a" * 64
+            )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(scenario())
+
+    assert failure.value.code == "memory_artwork_payload_size_invalid"
 
 
 @pytest.mark.parametrize("drift", ["source", "style", "consent"])
@@ -1309,7 +1413,7 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
 
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
-    assert conversations_source.index("delete_conversation_artwork_if_present") < conversations_source.index(
+    assert conversations_source.index("prepare_conversation_artwork_deletion") < conversations_source.index(
         "conversation_ref.delete()", conversations_source.index("def delete_conversation(uid, conversation_id)")
     )
     assert account_route_source.index("prepare_account_artwork_deletion(uid)") < account_route_source.index(
@@ -1362,6 +1466,36 @@ def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(
 
     assert str(failure.value) == "memory_artwork_worker_drain_pending"
     assert calls == [("begin", "owner-a"), ("processing", "owner-a")]
+
+
+def test_conversation_deletion_returns_before_cleanup_while_claimed_worker_is_active(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    class Repository:
+        @staticmethod
+        def has_processing_job(uid, memory_id, generation_key):
+            assert (uid, memory_id, generation_key) == ("owner-a", "memory-1", "a" * 64)
+            return True
+
+        @staticmethod
+        def delete_job(uid, memory_id, generation_key):
+            raise AssertionError("active job must not be deleted")
+
+    monkeypatch.setattr(
+        memory_artwork_storage,
+        "delete_conversation_artwork_if_present",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("storage cleanup must wait for active worker")),
+    )
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+        memory_artwork_storage.prepare_conversation_artwork_deletion(
+            "owner-a",
+            "memory-1",
+            {"artwork": {"generation_key": "a" * 64}},
+            repository=Repository,
+        )
+
+    assert str(failure.value) == "memory_artwork_worker_drain_pending"
 
 
 def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven(monkeypatch):

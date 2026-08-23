@@ -20,7 +20,7 @@ from models.conversation import (
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
-from utils.ella.memory_artwork_storage import delete_conversation_artwork_if_present
+from utils.ella.memory_artwork_storage import prepare_conversation_artwork_deletion
 from ._client import db, document_id_from_seed
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
 from utils.other.storage import list_audio_chunks
@@ -2006,7 +2006,7 @@ def delete_conversation(uid, conversation_id):
     conversation_ref = user_ref.collection(conversations_collection).document(conversation_id)
     conversation = memory_artwork_db.claim_deletion(uid, conversation_id)
     if conversation is not None:
-        delete_conversation_artwork_if_present(uid, conversation_id, conversation)
+        prepare_conversation_artwork_deletion(uid, conversation_id, conversation)
 
     # Delete photos subcollection only after private artwork is absent.
     delete_conversation_photos(uid, conversation_id)

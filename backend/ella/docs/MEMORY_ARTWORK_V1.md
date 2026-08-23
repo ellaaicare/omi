@@ -20,6 +20,8 @@ backfill.
   lease expires. Terminal worker updates require the same claim and never
   recreate a removed dispatch record. The internal single-memory processing
   route uses this same claim path; provider/storage execution cannot bypass it.
+  The exact job and generation leases are atomically renewed immediately before
+  provider and storage egress, and expired claims cannot authorize either.
 - Provider calls require current image-specific consent and matching runtime
   authority immediately before egress. Consent, style, source, and authority are
   checked again before object storage and final writeback.
@@ -93,7 +95,10 @@ cleanup and returns typed HTTP 503 when bucket configuration is absent but
 storage use cannot be disproved. Account deletion first writes an owner marker
 that prevents new dispatch claims. A claimed worker keeps deletion at typed
 HTTP 503 until it reaches a durable terminal state; only then are storage and
-exact-UID dispatch records removed. A storage deletion or worker-drain failure
+exact-UID dispatch records removed. Expired claims are safe to reap because all
+later egress requires a live renewed lease. Per-memory deletion uses the same
+conversation marker and exact-job drain before object/document cleanup. A
+storage deletion or worker-drain failure
 aborts deletion instead of leaving an object behind while reporting success.
 
 Before a real release, record evidence for:

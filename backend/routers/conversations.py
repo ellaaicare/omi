@@ -37,6 +37,7 @@ from utils.llm.conversation_processing import generate_summary_with_prompt
 from utils.speaker_identification import extract_speaker_samples
 from utils.other import endpoints as auth
 from utils.other.storage import get_conversation_recording_if_exists
+from utils.ella.memory_artwork_storage import MemoryArtworkStorageError
 from utils.app_integrations import trigger_external_integrations
 from utils.conversations.location import get_google_maps_location
 
@@ -392,7 +393,10 @@ def get_conversation_transcripts_by_models(conversation_id: str, uid: str = Depe
 @router.delete("/v1/conversations/{conversation_id}", status_code=204, tags=['conversations'])
 def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
     print('delete_conversation', conversation_id, uid)
-    conversations_db.delete_conversation(uid, conversation_id)
+    try:
+        conversations_db.delete_conversation(uid, conversation_id)
+    except MemoryArtworkStorageError as exc:
+        raise HTTPException(status_code=503, detail={"code": str(exc), "retryable": True}) from exc
     delete_vector(uid, conversation_id)
     return {"status": "Ok"}
 

@@ -18,6 +18,7 @@ ARTWORK_OBJECT_RE = re.compile(
     r"(?P<memory>[A-Za-z0-9_.:-]{1,256})/(?P<generation>[0-9a-f]{64})\.(?P<extension>png|webp|jpg)$"
 )
 MAX_ARTWORK_BYTES = 12 * 1024 * 1024
+STORAGE_TIMEOUT_SECONDS = 60
 SIGNED_URL_TTL_SECONDS = 300
 
 
@@ -106,12 +107,17 @@ class GCSMemoryArtworkStore:
         blob = self.client.bucket(self.bucket_name).blob(object_key)
         blob.cache_control = "private, max-age=300"
         try:
-            blob.upload_from_string(image_bytes, content_type=content_type, if_generation_match=0)
+            blob.upload_from_string(
+                image_bytes,
+                content_type=content_type,
+                if_generation_match=0,
+                timeout=STORAGE_TIMEOUT_SECONDS,
+            )
         except PreconditionFailed:
             # The deterministic generation key makes an existing object the
             # idempotent result of an earlier outcome-ambiguous upload.
             pass
-        blob.reload()
+        blob.reload(timeout=STORAGE_TIMEOUT_SECONDS)
         if str(blob.content_type or "").split(";", 1)[0].strip().lower() != content_type:
             raise MemoryArtworkStorageError("memory_artwork_object_content_type_mismatch")
         return StoredArtwork(
@@ -204,4 +210,24 @@ def prepare_account_artwork_deletion(uid: str, *, repository=None) -> int:
         cleanup_required=repository.storage_cleanup_required(uid),
     )
     repository.delete_jobs_for_uid(uid)
+    return deleted
+
+
+def prepare_conversation_artwork_deletion(
+    uid: str,
+    memory_id: str,
+    conversation: dict,
+    *,
+    repository=None,
+) -> int:
+    if repository is None:
+        from database import memory_artwork as repository
+
+    artwork = conversation.get("artwork") or {}
+    generation_key = str(artwork.get("generation_key") or "") if isinstance(artwork, dict) else ""
+    if generation_key and repository.has_processing_job(uid, memory_id, generation_key):
+        raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
+    deleted = delete_conversation_artwork_if_present(uid, memory_id, conversation)
+    if generation_key:
+        repository.delete_job(uid, memory_id, generation_key)
     return deleted

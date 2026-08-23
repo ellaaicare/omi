@@ -2,7 +2,7 @@ import importlib.util
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,23 +99,42 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
         )
         assert claimed["status"] == "processing"
         assert module.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token) is True
+        generation_lease_token = "generation-lease-a"
         assert (
-            module.mark_storage_cleanup_required(
+            module.claim_generation(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                lease_token=generation_lease_token,
+                now=now,
+                lease_seconds=120,
+            )
+            is not None
+        )
+        assert (
+            module.renew_work_claim(
                 uid,
                 memory_id,
                 generation_key,
-                lease_token=lease_token,
+                job_lease_token=lease_token,
+                generation_lease_token=generation_lease_token,
+                now=now,
+                mark_storage_cleanup=True,
             )
             is True
         )
         assert module.begin_account_deletion(uid) is True
-        assert module.has_processing_jobs(uid) is True
+        assert module.has_processing_jobs(uid, now=now) is True
+        assert module.has_processing_jobs(uid, now=now + timedelta(seconds=121)) is False
         assert (
-            module.mark_storage_cleanup_required(
+            module.renew_work_claim(
                 uid,
                 memory_id,
                 generation_key,
-                lease_token=lease_token,
+                job_lease_token=lease_token,
+                generation_lease_token=generation_lease_token,
+                now=now,
+                mark_storage_cleanup=True,
             )
             is False
         )
