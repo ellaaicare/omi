@@ -2547,6 +2547,8 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 "SELECT receipts FROM ella_provisioning_jobs WHERE id = $1",
                 job_id,
             )
+        if isinstance(recovery_receipts, str):
+            recovery_receipts = json.loads(recovery_receipts)
         assert dict(recovered_entitlement) == {"status": "active", "revision": 5}
         assert {"type": "retained_entitlement_recovered", "content_free": True} in recovery_receipts
 
