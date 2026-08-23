@@ -27,8 +27,10 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
     uid = f"artwork-owner-{uuid.uuid4()}"
     memory_id = "memory-a"
     generation_key = "a" * 64
-    conversation_ref = client.collection("users").document(uid).collection("conversations").document(memory_id)
+    user_ref = client.collection("users").document(uid)
+    conversation_ref = user_ref.collection("conversations").document(memory_id)
     now = datetime.now(timezone.utc)
+    user_ref.set({"id": uid})
     conversation_ref.set(
         {
             "id": memory_id,
@@ -81,7 +83,58 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
         )
         assert replay["outcome"] == "existing"
         assert job_ref.get().to_dict()["generation_key"] == generation_key
+
+        # A claimed worker is durable before provider work. Account deletion
+        # marks the owner first, sees the processing job, and prevents any new
+        # claim or reservation. Terminal acknowledgement never recreates a job
+        # that cleanup has removed.
+        lease_token = "lease-a"
+        claimed = module.claim_job(
+            uid,
+            memory_id,
+            generation_key,
+            lease_token=lease_token,
+            now=now,
+            lease_seconds=120,
+        )
+        assert claimed["status"] == "processing"
+        assert module.job_claim_is_current(uid, memory_id, generation_key, lease_token=lease_token) is True
+        assert (
+            module.mark_storage_cleanup_required(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=lease_token,
+            )
+            is True
+        )
+        assert module.begin_account_deletion(uid) is True
+        assert module.has_processing_jobs(uid) is True
+        assert (
+            module.mark_storage_cleanup_required(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=lease_token,
+            )
+            is False
+        )
+        assert module.complete_job(uid, memory_id, generation_key, lease_token=lease_token) is True
+        assert module.has_processing_jobs(uid) is False
+        assert module.delete_jobs_for_uid(uid) == 1
+        assert module.complete_job(uid, memory_id, generation_key, lease_token=lease_token) is False
+        assert job_ref.get().exists is False
+        blocked = module.reserve_generation(
+            uid,
+            memory_id,
+            enrichment_revision="summary-a",
+            generation_key=generation_key,
+            artwork_state=artwork_state,
+            job_state=job_state,
+        )
+        assert blocked["outcome"] == "deletion_pending"
+        assert job_ref.get().exists is False
     finally:
         module._job_ref(uid, memory_id, generation_key).delete()
         conversation_ref.delete()
-        client.collection("users").document(uid).delete()
+        user_ref.delete()

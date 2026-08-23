@@ -15,8 +15,11 @@ backfill.
   (`writeback_applied` with an enriched summary kind). Artwork failure never
   changes the text-enrichment result. Reservation atomically writes both the
   conversation generation state and a content-free durable dispatch record.
-  The default-off startup worker consumes pending records, and an interrupted
-  process can reclaim the generation after its bounded lease expires.
+  The default-off startup worker durably claims each record before provider
+  work, and an interrupted process can reclaim the generation after its bounded
+  lease expires. Terminal worker updates require the same claim and never
+  recreate a removed dispatch record. The internal single-memory processing
+  route uses this same claim path; provider/storage execution cannot bypass it.
 - Provider calls require current image-specific consent and matching runtime
   authority immediately before egress. Consent, style, source, and authority are
   checked again before object storage and final writeback.
@@ -28,7 +31,8 @@ backfill.
 - Ready images are fetched through
   `GET /v1/ella/memories/{memory_id}/artwork`, which revalidates the owner and
   exact current consent, style, binding, profile, and authority before issuing a
-  five-minute signed first-party URL.
+  five-minute signed first-party URL. Both the feature and release gates are
+  serving kill switches; release-off never signs an existing object.
 
 ## API
 
@@ -86,9 +90,11 @@ object and deterministic memory prefix before deleting the conversation. The
 service records a durable owner-level cleanup requirement before every upload,
 so account deletion removes the owner's private prefix before Firestore/Firebase
 cleanup and returns typed HTTP 503 when bucket configuration is absent but
-storage use cannot be disproved. Exact-UID dispatch records are removed only
-after storage cleanup succeeds. A storage deletion failure aborts deletion
-instead of leaving an object behind while reporting success.
+storage use cannot be disproved. Account deletion first writes an owner marker
+that prevents new dispatch claims. A claimed worker keeps deletion at typed
+HTTP 503 until it reaches a durable terminal state; only then are storage and
+exact-UID dispatch records removed. A storage deletion or worker-drain failure
+aborts deletion instead of leaving an object behind while reporting success.
 
 Before a real release, record evidence for:
 
