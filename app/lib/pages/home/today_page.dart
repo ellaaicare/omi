@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -26,6 +25,7 @@ import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -515,10 +515,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
-  Future<bool> _finalizeHomeMoment(
-    CaptureProvider capture, {
-    bool Function()? isCurrent,
-  }) async {
+  Future<bool> _finalizeHomeMoment(CaptureProvider capture, {bool Function()? isCurrent}) async {
     final finalized = capture.recordingState == RecordingState.deviceRecord
         ? await capture.finalizeCurrentDeviceConversationAndContinue()
         : await capture.finalizeCurrentConversation();
@@ -1195,10 +1192,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: Text(
                       '$source · ${context.l10n.todayRecordListening}',
                       textAlign: TextAlign.center,
-                      style: EllaTextStyles.caption.copyWith(
-                        color: EllaColors.tealDeep,
-                        fontWeight: FontWeight.w700,
-                      ),
+                      style: EllaTextStyles.caption.copyWith(color: EllaColors.tealDeep, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ],
@@ -1230,10 +1224,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: Text(
                       context.l10n.todayStripReconnecting,
                       textAlign: TextAlign.center,
-                      style: EllaTextStyles.caption.copyWith(
-                        color: EllaColors.tealDeep,
-                        fontWeight: FontWeight.w700,
-                      ),
+                      style: EllaTextStyles.caption.copyWith(color: EllaColors.tealDeep, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ],
@@ -1255,10 +1246,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: Text(
                       context.l10n.todayRecordingUnavailable,
                       textAlign: TextAlign.center,
-                      style: EllaTextStyles.caption.copyWith(
-                        color: EllaColors.error,
-                        fontWeight: FontWeight.w700,
-                      ),
+                      style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ],
@@ -2287,36 +2275,8 @@ class _MemoryArtwork extends StatelessWidget {
 
   final ServerConversation conversation;
 
-  Uint8List? _photoBytes() {
-    for (final photo in conversation.photos) {
-      if (photo.discarded || photo.base64.trim().isEmpty) continue;
-      try {
-        return base64Decode(photo.base64);
-      } on FormatException {
-        continue;
-      }
-    }
-    return null;
-  }
-
   @override
-  Widget build(BuildContext context) {
-    final bytes = _photoBytes();
-    if (bytes != null) {
-      return Semantics(
-        image: true,
-        label: context.l10n.todayMemoryPhotoLabel,
-        child: Image.memory(
-          key: const Key('memory-source-photo'),
-          bytes,
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => const _MemoryFallbackArtwork(),
-        ),
-      );
-    }
-    return const _MemoryFallbackArtwork();
-  }
+  Widget build(BuildContext context) => MemoryArtworkImage(conversation: conversation);
 }
 
 class _MemoryFallbackArtwork extends StatelessWidget {

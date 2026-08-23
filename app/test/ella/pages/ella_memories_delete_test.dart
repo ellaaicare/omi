@@ -12,6 +12,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -32,6 +33,38 @@ class _MutableAuthority implements AccountCommitAuthority {
   bool isExactCurrent() => current;
 }
 
+class _FakeArtworkApi extends MemoryArtworkApi {
+  _FakeArtworkApi()
+      : super(
+          baseUrl: 'https://api.example.test',
+          authorityProvider: () => null,
+        );
+
+  String selectedStyle = memoryArtworkDefaultStyle;
+  int backfillCalls = 0;
+
+  @override
+  Future<MemoryArtworkPreferences?> preferences() async => MemoryArtworkPreferences(
+        consent: 'accepted',
+        consentVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        styleVersion: selectedStyle,
+        releaseEnabled: true,
+      );
+
+  @override
+  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+    expect(consentVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
+    selectedStyle = styleVersion;
+    return true;
+  }
+
+  @override
+  Future<bool> backfillRecent() async {
+    backfillCalls += 1;
+    return true;
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -42,7 +75,10 @@ void main() {
   });
 
   setUp(() async {
-    SharedPreferences.setMockInitialValues({'uid': 'test-user'});
+    SharedPreferences.setMockInitialValues({
+      'uid': 'test-user',
+      'aiConsentProfileBindingId': 'profile-test-user',
+    });
     await SharedPreferencesUtil.init();
   });
 
@@ -57,7 +93,11 @@ void main() {
     );
   }
 
-  Future<void> pumpPage(WidgetTester tester, ConversationProvider provider) async {
+  Future<void> pumpPage(
+    WidgetTester tester,
+    ConversationProvider provider, {
+    MemoryArtworkApi? artworkApi,
+  }) async {
     await tester.pumpWidget(
       MultiProvider(
         providers: [
@@ -68,7 +108,7 @@ void main() {
           theme: ellaThemeData(),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
-          home: const EllaMemoriesPage(),
+          home: EllaMemoriesPage(artworkApi: artworkApi),
         ),
       ),
     );
@@ -169,6 +209,43 @@ void main() {
     expect(find.text('An error occurred. Please try again.'), findsOneWidget);
   });
 
+  testWidgets('layout persists per account profile and illustration style remains editable', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-layout')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi();
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(find.byKey(const Key('memory-layout-journal-memory-layout')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Compact list'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-layout-list-memory-layout')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(find.byKey(const Key('memory-layout-list-memory-layout')), findsOneWidget);
+
+    final preferences = SharedPreferencesUtil()..uid = 'other-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-other-user');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(find.byKey(const Key('memory-layout-journal-memory-layout')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+    expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
+    expect(artworkApi.backfillCalls, 1);
+    expect(find.textContaining('Recent memories are being refreshed'), findsOneWidget);
+  });
+
   testWidgets('scrolling near the end requests the next memory page', (tester) async {
     final authority = _MutableAuthority('test-user');
     var pageRequests = 0;
@@ -188,7 +265,14 @@ void main() {
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
-    await tester.fling(find.byKey(const Key('ella-memories-list')), const Offset(0, -6000), 5000);
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('memory-card-memory-49')),
+      1200,
+      scrollable: find.descendant(
+        of: find.byKey(const Key('ella-memories-list')),
+        matching: find.byType(Scrollable),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(pageRequests, 1);
@@ -244,6 +328,9 @@ void main() {
     expect(pageRequests, 1);
     expect(find.byKey(const Key('memories-load-more-failed')), findsOneWidget);
 
+    await tester.ensureVisible(find.byKey(const Key('retry-load-more-memories')));
+    await tester.drag(find.byKey(const Key('ella-memories-list')), const Offset(0, -120));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('retry-load-more-memories')));
     await tester.pumpAndSettle();
 

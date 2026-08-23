@@ -9,6 +9,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter, transactional
 
 import utils.other.hume as hume
+import database.memory_artwork as memory_artwork_db
 from database import users as users_db
 from models.conversation import (
     ConversationPhoto,
@@ -19,6 +20,7 @@ from models.conversation import (
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
+from utils.ella.memory_artwork_storage import MemoryArtworkStorageError, delete_conversation_artwork_if_present
 from ._client import db, document_id_from_seed
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
 from utils.other.storage import list_audio_chunks
@@ -1692,6 +1694,8 @@ def complete_capture_finalization(
         claim_token,
         datetime.now(timezone.utc),
     )
+
+
 class PendingConversationSummaryReconciliationError(RuntimeError):
     """A summary writer cannot supersede an unfinished canonical publication."""
 
@@ -1998,11 +2002,17 @@ def delete_conversation(uid, conversation_id):
         uid: User ID
         conversation_id: Conversation ID
     """
-    # Delete photos subcollection first
-    delete_conversation_photos(uid, conversation_id)
-
     user_ref = db.collection('users').document(uid)
     conversation_ref = user_ref.collection(conversations_collection).document(conversation_id)
+    conversation = memory_artwork_db.claim_deletion(uid, conversation_id)
+    if conversation is not None:
+        if memory_artwork_db.has_processing_jobs_for_memory(uid, conversation_id):
+            raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
+        delete_conversation_artwork_if_present(uid, conversation_id, conversation)
+        memory_artwork_db.delete_jobs_for_memory(uid, conversation_id)
+
+    # Delete photos subcollection only after private artwork is absent.
+    delete_conversation_photos(uid, conversation_id)
     conversation_ref.delete()
 
 

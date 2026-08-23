@@ -6,6 +6,7 @@ on:
       - codex/815-device-rejection-successor
       - feature/phase-a-testflight
       - main
+      - release/1242-build-824
     paths:
       - app/**
       - backend/main.py
@@ -20,10 +21,12 @@ on:
       - backend/database/action_items.py
       - backend/database/chat.py
       - backend/database/conversations.py
+      - backend/database/memory_artwork.py
       - backend/database/folders.py
       - backend/database/redis_db.py
       - backend/database/task_sync.py
       - backend/database/user_usage.py
+      - backend/ella/__init__.py
       - backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md
       - backend/models/conversation.py
       - backend/models/message_event.py
@@ -31,6 +34,7 @@ on:
       - backend/routers/pusher.py
       - backend/routers/task_integrations.py
       - backend/routers/transcribe.py
+      - backend/routers/users.py
       - backend/utils/conversations/capture_authority.py
       - backend/utils/conversations/process_conversation.py
       - backend/utils/analytics.py
@@ -48,6 +52,7 @@ on:
       - backend/ella/services/correction_honcho_contract.py
       - backend/ella/services/hermes_session.py
       - backend/ella/routers/callbacks.py
+      - backend/ella/routers/memory_artwork.py
       - backend/ella/services/runtime_resolver.py
       - backend/ella/services/ai_consent.py
       - backend/ella/services/consent_authority.py
@@ -55,12 +60,14 @@ on:
       - backend/ella/services/hermes_cloud.py
       - backend/ella/services/hermes_cloud_policy.py
       - backend/ella/services/hermes_cloud_staged_attestation.py
+      - backend/ella/services/memory_artwork.py
       - backend/ella/services/provisioning.py
       - backend/ella/services/runtime_errors.py
       - backend/ella/services/summary_recovery.py
       - backend/ella/services/canonical_summary_source.py
       - backend/ella/services/summary_writeback.py
       - backend/ella/docs/SUMMARY_CAS_ROLLOUT.md
+      - backend/ella/docs/MEMORY_ARTWORK_V1.md
       - backend/ella/utils/provision_authority.py
       - backend/tests/unit/test_ella_correction_startup_contract.py
       - backend/tests/unit/test_ella_conversation_corrections.py
@@ -73,14 +80,18 @@ on:
       - backend/tests/unit/test_ella_v2v_turn_persistence.py
       - backend/tests/unit/test_conversation_summary_cas.py
       - backend/tests/unit/test_ella_callbacks_summary_update.py
+      - backend/tests/unit/test_memory_artwork_contract.py
+      - backend/tests/unit/test_memory_artwork_firestore.py
       - backend/tests/fixtures/ella_canonical_source_v1.json
       - backend/tests/unit/test_ella_chat_temporal_context.py
       - backend/tests/unit/test_ella_correction_honcho_contract.py
       - backend/utils/ella/exact_firebase_auth.py
       - backend/utils/ella/canonical_omi.py
       - backend/utils/ella/scanner.py
+      - backend/utils/ella/memory_artwork_storage.py
       - backend/utils/notifications.py
       - backend/utils/task_sync.py
+      - firestore.indexes.json
       - backend/tests/unit/test_guardian_notification_delivery.py
       - backend/tests/unit/test_capture_task_sync_idempotency.py
       - backend/tests/unit/test_conversation_processing_failures.py
@@ -215,7 +226,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/main.py|backend/database/action_items.py|backend/database/authority_advisory_lock.py|backend/database/chat.py|backend/database/conversations.py|backend/database/ella_provisioning.py|backend/database/folders.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/redis_db.py|backend/database/runtime_targets.py|backend/database/task_sync.py|backend/database/user_usage.py|backend/database/voice_canary.py|backend/ella/docs/SUMMARY_CAS_ROLLOUT.md|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/canonical_summary_source.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_honcho_contract.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/hermes_session.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/task_integrations.py|backend/routers/transcribe.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/canonical_context.py|backend/utils/ella/canonical_omi.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/task_sync.py|backend/utils/webhooks.py|backend/tests/fixtures/ella_canonical_source_v1.json|backend/tests/unit/test_capture_task_sync_idempotency.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_conversation_summary_cas.py|backend/tests/unit/test_ella_callbacks_summary_update.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_canonical_event_version_fence.py|backend/tests/unit/test_ella_canonical_omi.py|backend/tests/unit/test_ella_chat_temporal_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_honcho_contract.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_ella_v2v_turn_persistence.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+            app/*|backend/CAPTURE_PROTOCOL_V2_ROLLOUT.md|backend/main.py|backend/database/action_items.py|backend/database/authority_advisory_lock.py|backend/database/chat.py|backend/database/conversations.py|backend/database/ella_provisioning.py|backend/database/folders.py|backend/database/honcho_attestation.py|backend/database/managed_cloud_consent.py|backend/database/memory_artwork.py|backend/database/redis_db.py|backend/database/runtime_targets.py|backend/database/task_sync.py|backend/database/user_usage.py|backend/database/voice_canary.py|backend/ella/__init__.py|backend/ella/docs/MEMORY_ARTWORK_V1.md|backend/ella/docs/SUMMARY_CAS_ROLLOUT.md|backend/ella/routers/ai_consent.py|backend/ella/routers/callbacks.py|backend/ella/routers/canonical_events.py|backend/ella/routers/chat.py|backend/ella/routers/corrections.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/memory_artwork.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/ella/services/ai_consent.py|backend/ella/services/canonical_summary_source.py|backend/ella/services/consent_authority.py|backend/ella/services/correction_honcho_contract.py|backend/ella/services/correction_propagation.py|backend/ella/services/hermes_cloud.py|backend/ella/services/hermes_cloud_policy.py|backend/ella/services/hermes_cloud_staged_attestation.py|backend/ella/services/hermes_session.py|backend/ella/services/memory_artwork.py|backend/ella/services/provisioning.py|backend/ella/services/runtime_errors.py|backend/ella/services/runtime_resolver.py|backend/ella/services/summary_recovery.py|backend/ella/services/summary_writeback.py|backend/ella/utils/provision_authority.py|backend/models/conversation.py|backend/models/message_event.py|backend/routers/conversations.py|backend/routers/pusher.py|backend/routers/task_integrations.py|backend/routers/transcribe.py|backend/routers/users.py|backend/utils/analytics.py|backend/utils/app_integrations.py|backend/utils/conversations/capture_authority.py|backend/utils/conversations/process_conversation.py|backend/utils/ella/canonical_context.py|backend/utils/ella/canonical_omi.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/memory_artwork_storage.py|backend/utils/ella/postprocess.py|backend/utils/ella/scanner.py|backend/utils/llm/knowledge_graph.py|backend/utils/notifications.py|backend/utils/stt/streaming.py|backend/utils/task_sync.py|backend/utils/webhooks.py|backend/tests/fixtures/ella_canonical_source_v1.json|backend/tests/unit/test_capture_task_sync_idempotency.py|backend/tests/unit/test_conversation_processing_failures.py|backend/tests/unit/test_conversation_summary_cas.py|backend/tests/unit/test_ella_callbacks_summary_update.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_canonical_event_version_fence.py|backend/tests/unit/test_ella_canonical_omi.py|backend/tests/unit/test_ella_chat_temporal_context.py|backend/tests/unit/test_ella_conversation_corrections.py|backend/tests/unit/test_ella_correction_honcho_contract.py|backend/tests/unit/test_ella_correction_runtime_resolver.py|backend/tests/unit/test_ella_correction_startup_contract.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_ella_v2v_turn_persistence.py|backend/tests/unit/test_guardian_notification_delivery.py|backend/tests/unit/test_memory_artwork_contract.py|backend/tests/unit/test_memory_artwork_firestore.py|docs/compliance/ella-managed-cloud-consent-v*.md|firestore.indexes.json|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -581,7 +592,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=47
+          expected_issue_test_count=48
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -589,7 +600,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=75
+          expected_app_test_count=76
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -831,7 +842,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 80 and Firestore CAS 5 contracts
+    name: Callback 79, artwork 51, and Firestore 6 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -866,21 +877,69 @@ jobs:
             firebase-admin==6.5.0 \
             httpx==0.28.0 \
             asyncpg==0.31.0 \
-            python-multipart==0.0.9
+            python-multipart==0.0.9 \
+            pillow==10.4.0
 
           callback_ids="$(python -m pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | sed '/^$/d')"
           callback_count="$(grep -c '::' <<<"$callback_ids")"
-          [[ "$callback_count" -eq 80 ]] || {
-            echo "Callback collection mismatch: expectedCount=80 actualCount=$callback_count" >&2
+          [[ "$callback_count" -eq 79 ]] || {
+            echo "Callback collection mismatch: expectedCount=79 actualCount=$callback_count" >&2
             exit 1
           }
           python -m pytest -q -rA tests/unit/test_ella_callbacks_summary_update.py \
             | tee /tmp/callback-summary-pytest.log
-          grep -Eq '80 passed' /tmp/callback-summary-pytest.log
+          grep -Eq '79 passed' /tmp/callback-summary-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/callback-summary-pytest.log
-          printf 'Callback summary execution receipt: expectedCount=80 actualCount=80 skipped=0 deselected=0\n'
+          printf 'Callback summary execution receipt: expectedCount=79 actualCount=79 skipped=0 deselected=0\n'
 
-      - name: Run real Firestore summary CAS contention inventory
+      - name: Run exact memory artwork contract inventory
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/callback-cas-python/bin/activate"
+          artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
+          artwork_count="$(grep -c '::' <<<"$artwork_ids")"
+          [[ "$artwork_count" -eq 51 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=51 actualCount=$artwork_count" >&2
+            exit 1
+          }
+          grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
+          grep -Fq 'test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent' <<<"$artwork_ids"
+          grep -Fq 'test_firestore_transaction_contract_rejects_source_and_lease_drift' <<<"$artwork_ids"
+          grep -Fq 'test_sensitive_classification_drift_at_egress_recheck_blocks_provider' <<<"$artwork_ids"
+          grep -Fq 'test_signed_url_requires_current_bound_consent' <<<"$artwork_ids"
+          grep -Fq 'test_signed_url_rereads_consent_after_awaited_authority_resolution' <<<"$artwork_ids"
+          grep -Fq 'test_release_off_is_a_signed_url_kill_switch' <<<"$artwork_ids"
+          grep -Fq 'test_process_requires_current_durable_job_claim_before_provider' <<<"$artwork_ids"
+          grep -Fq 'test_mounted_internal_process_route_uses_durable_worker_job_claim' <<<"$artwork_ids"
+          grep -Fq 'test_durable_worker_recovers_retryable_job_after_restart' <<<"$artwork_ids"
+          grep -Fq 'test_account_deletion_marker_drains_claimed_worker_before_storage_write' <<<"$artwork_ids"
+          grep -Fq 'test_firestore_reservation_writes_generation_and_dispatch_in_one_transaction' <<<"$artwork_ids"
+          grep -Fq 'test_firestore_retry_reservation_preserves_attempt_history' <<<"$artwork_ids"
+          grep -Fq 'test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven' <<<"$artwork_ids"
+          grep -Fq 'test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active' <<<"$artwork_ids"
+          grep -Fq 'test_terminal_enrichment_hook_runs_idempotent_processor_without_raising' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_rejects_vendor_url_only_response' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_rejects_oversized_response_before_buffering' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_rejects_encoded_image_before_decode_allocation' <<<"$artwork_ids"
+          grep -Fq 'test_expired_job_claim_immediately_before_provider_has_zero_egress' <<<"$artwork_ids"
+          grep -Fq 'test_expired_job_claim_after_provider_prevents_storage_egress' <<<"$artwork_ids"
+          grep -Fq 'test_memory_deletion_marker_drains_claimed_worker_before_storage_write' <<<"$artwork_ids"
+          grep -Fq 'test_processing_job_activity_requires_a_future_lease' <<<"$artwork_ids"
+          grep -Fq 'test_xai_provider_selection_fails_closed_without_credential' <<<"$artwork_ids"
+          grep -Fq 'test_signed_url_rechecks_sensitive_source_before_release' <<<"$artwork_ids"
+          grep -Fq 'test_failed_storage_write_remains_covered_by_cleanup_marker' <<<"$artwork_ids"
+          grep -Fq 'test_cleanup_marker_failure_prevents_object_upload' <<<"$artwork_ids"
+          grep -Fq 'test_global_consent_revocation_at_final_egress_check_blocks_provider' <<<"$artwork_ids"
+          grep -Fq 'test_pending_job_query_is_bounded_to_due_work_and_ordered' <<<"$artwork_ids"
+          python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
+            | tee /tmp/memory-artwork-pytest.log
+          grep -Eq '51 passed' /tmp/memory-artwork-pytest.log
+          ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
+          printf 'Memory artwork execution receipt: expectedCount=51 actualCount=51 skipped=0 deselected=0\n'
+
+      - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend
         run: |
           set -euo pipefail
@@ -891,6 +950,13 @@ jobs:
             echo "Firestore CAS collection mismatch: expectedCount=5 actualCount=$cas_count" >&2
             exit 1
           }
+          artwork_firestore_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_firestore.py | sed '/^$/d')"
+          artwork_firestore_count="$(grep -c '::' <<<"$artwork_firestore_ids")"
+          [[ "$artwork_firestore_count" -eq 1 ]] || {
+            echo "Firestore artwork collection mismatch: expectedCount=1 actualCount=$artwork_firestore_count" >&2
+            exit 1
+          }
+          grep -Fq 'test_real_firestore_generation_and_dispatch_commit_and_repair_together' <<<"$artwork_firestore_ids"
 
           emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker run --rm -d \
@@ -913,9 +979,11 @@ jobs:
           done
           curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null
           ELLA_FIRESTORE_EMULATOR_TESTS=true \
-            python -m pytest -q -rA tests/unit/test_conversation_summary_cas.py \
+            python -m pytest -q -rA \
+              tests/unit/test_conversation_summary_cas.py \
+              tests/unit/test_memory_artwork_firestore.py \
             | tee /tmp/firestore-summary-cas-pytest.log
-          grep -Eq '5 passed' /tmp/firestore-summary-cas-pytest.log
+          grep -Eq '6 passed' /tmp/firestore-summary-cas-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' \
             /tmp/firestore-summary-cas-pytest.log
-          printf 'Firestore CAS execution receipt: expectedCount=5 actualCount=5 skipped=0 deselected=0\n'
+          printf 'Firestore CAS/artwork execution receipt: expectedCount=6 actualCount=6 skipped=0 deselected=0\n'

@@ -37,12 +37,12 @@ class SharedPreferencesUtil {
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
   static const bool isTodayDesignPreviewEnabled = !isPublicBuild && isTodayDesignPreviewConfigured;
-  static const String currentAiConsentContractVersion = 'ai-data-processors-v8';
+  static const String currentAiConsentContractVersion = 'ai-data-processors-v9';
   static const String currentAiConsentProcessorSetHash =
-      'sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d';
-  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v2';
+      'sha256:43f47e803ef838a0aee802c849e7daf75fa819f3224336311b9fbc32b6835c10';
+  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v3';
   static const String currentAiConsentScopeHash =
-      'sha256:2878e09958faadb799af99a8975736ce63010dd1d682cf944f60743a4faf92e5';
+      'sha256:846b482055aa8241d4f4666925edcdacd02535ebaf997d78ac98fc27f7980c82';
   static const String currentAiConsentReceiptPrefix = 'aicr_';
 
   factory SharedPreferencesUtil() {
@@ -759,6 +759,23 @@ class SharedPreferencesUtil {
   String? _accountScopedKey(String base) {
     final currentUid = uid;
     return currentUid.isEmpty ? null : '$base:$currentUid';
+  }
+
+  String? _accountProfileScopedKey(String base) {
+    final currentUid = uid.trim();
+    final profileBindingId = aiConsentProfileBindingId.trim();
+    if (currentUid.isEmpty || profileBindingId.isEmpty) return null;
+    return '$base:$currentUid:$profileBindingId';
+  }
+
+  String get memoryGalleryLayout {
+    final key = _accountProfileScopedKey('ellaMemoryGalleryLayout');
+    return key == null ? '' : getString(key);
+  }
+
+  Future<bool> saveMemoryGalleryLayout(String layout) async {
+    final key = _accountProfileScopedKey('ellaMemoryGalleryLayout');
+    return key != null && await saveString(key, layout);
   }
 
   Future<void> quarantineLegacyAccountCaches() async {

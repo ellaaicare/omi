@@ -16566,7 +16566,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
+  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16700,6 +16700,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Sends iMessage content and basic delivery details only to one person you choose for testing.'**
   String get aiConsentPhotonBody;
+
+  /// Legal recipient and purpose for generated memory illustrations
+  ///
+  /// In en, this message translates to:
+  /// **'xAI image generation'**
+  String get aiConsentXaiImagesTitle;
+
+  /// Plain-language data categories and purpose for xAI image generation
+  ///
+  /// In en, this message translates to:
+  /// **'Creates an illustration for a saved memory. It may receive only that memory’s title and summary, not your raw microphone audio or source photos.'**
+  String get aiConsentXaiImagesBody;
 
   /// Explains the exact managed-cloud profile and messaging scope
   ///
@@ -17582,6 +17594,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella couldn\'t open this item in Talk just now. Try again, or close this window and keep browsing.'**
   String get scopedTalkRetryableBody;
+
+  /// No description provided for @memoriesInProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'In progress…'**
+  String get memoriesInProgress;
+
+  /// No description provided for @memoriesEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'Your memories will appear here. 🪽'**
+  String get memoriesEmpty;
+
+  /// No description provided for @memoriesToday.
+  ///
+  /// In en, this message translates to:
+  /// **'TODAY'**
+  String get memoriesToday;
+
+  /// No description provided for @memoriesYesterday.
+  ///
+  /// In en, this message translates to:
+  /// **'YESTERDAY'**
+  String get memoriesYesterday;
+
+  /// No description provided for @memoryGalleryView.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory layout'**
+  String get memoryGalleryView;
+
+  /// No description provided for @memoryGalleryJournal.
+  ///
+  /// In en, this message translates to:
+  /// **'Large images'**
+  String get memoryGalleryJournal;
+
+  /// No description provided for @memoryGalleryGrid.
+  ///
+  /// In en, this message translates to:
+  /// **'Cards'**
+  String get memoryGalleryGrid;
+
+  /// No description provided for @memoryGalleryList.
+  ///
+  /// In en, this message translates to:
+  /// **'Compact list'**
+  String get memoryGalleryList;
+
+  /// No description provided for @memoryArtworkStyle.
+  ///
+  /// In en, this message translates to:
+  /// **'Illustration style'**
+  String get memoryArtworkStyle;
+
+  /// No description provided for @memoryArtworkSoftGouache.
+  ///
+  /// In en, this message translates to:
+  /// **'Soft gouache'**
+  String get memoryArtworkSoftGouache;
+
+  /// No description provided for @memoryArtworkPaperCollage.
+  ///
+  /// In en, this message translates to:
+  /// **'Paper collage'**
+  String get memoryArtworkPaperCollage;
+
+  /// No description provided for @memoryArtworkGraphicLandscape.
+  ///
+  /// In en, this message translates to:
+  /// **'Graphic landscape'**
+  String get memoryArtworkGraphicLandscape;
+
+  /// No description provided for @memoryArtworkStyleUpdated.
+  ///
+  /// In en, this message translates to:
+  /// **'New memories will use this illustration style. Recent memories are being refreshed.'**
+  String get memoryArtworkStyleUpdated;
+
+  /// No description provided for @memoryArtworkStyleUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t update the illustration style right now.'**
+  String get memoryArtworkStyleUnavailable;
+
+  /// No description provided for @memoryGeneratedArtworkLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Illustration created for this memory'**
+  String get memoryGeneratedArtworkLabel;
+
+  /// No description provided for @memoryBackToRecent.
+  ///
+  /// In en, this message translates to:
+  /// **'Back to recent'**
+  String get memoryBackToRecent;
+
+  /// No description provided for @memoryLoadingMore.
+  ///
+  /// In en, this message translates to:
+  /// **'Loading earlier memories'**
+  String get memoryLoadingMore;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

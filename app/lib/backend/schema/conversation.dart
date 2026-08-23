@@ -87,8 +87,7 @@ enum ServerProcessingConversationStatus {
   capturing('capturing'),
   processing('processing'),
   done('done'),
-  unknown('unknown'),
-  ;
+  unknown('unknown');
 
   final String value;
 
@@ -107,8 +106,13 @@ class ConversationPhoto {
   final DateTime createdAt;
   bool discarded;
 
-  ConversationPhoto(
-      {required this.id, required this.base64, this.description, required this.createdAt, this.discarded = false});
+  ConversationPhoto({
+    required this.id,
+    required this.base64,
+    this.description,
+    required this.createdAt,
+    this.discarded = false,
+  });
 
   factory ConversationPhoto.fromJson(Map<String, dynamic> json) {
     return ConversationPhoto(
@@ -171,6 +175,62 @@ class AudioFile {
       };
 }
 
+enum MemoryArtworkStatus { generating, ready, unavailable, declined }
+
+class MemoryArtworkState {
+  const MemoryArtworkState({
+    required this.status,
+    this.schemaVersion = '',
+    this.styleVersion = '',
+    this.enrichmentRevision = '',
+    this.contentType = '',
+    this.pixelWidth,
+    this.pixelHeight,
+    this.failureCode = '',
+    this.updatedAt,
+  });
+
+  final MemoryArtworkStatus status;
+  final String schemaVersion;
+  final String styleVersion;
+  final String enrichmentRevision;
+  final String contentType;
+  final int? pixelWidth;
+  final int? pixelHeight;
+  final String failureCode;
+  final DateTime? updatedAt;
+
+  bool get isReady => status == MemoryArtworkStatus.ready;
+
+  factory MemoryArtworkState.fromJson(Map<String, dynamic> json) {
+    final rawStatus = json['status']?.toString().trim() ?? '';
+    final status = MemoryArtworkStatus.values.asNameMap()[rawStatus] ?? MemoryArtworkStatus.unavailable;
+    return MemoryArtworkState(
+      status: status,
+      schemaVersion: json['schema_version']?.toString().trim() ?? '',
+      styleVersion: json['style_version']?.toString().trim() ?? '',
+      enrichmentRevision: json['enrichment_revision']?.toString().trim() ?? '',
+      contentType: json['content_type']?.toString().trim() ?? '',
+      pixelWidth: json['pixel_width'] is num ? (json['pixel_width'] as num).toInt() : null,
+      pixelHeight: json['pixel_height'] is num ? (json['pixel_height'] as num).toInt() : null,
+      failureCode: json['failure_code']?.toString().trim() ?? '',
+      updatedAt: DateTime.tryParse(json['updated_at']?.toString() ?? '')?.toLocal(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'schema_version': schemaVersion,
+        'status': status.name,
+        'style_version': styleVersion,
+        'enrichment_revision': enrichmentRevision,
+        'content_type': contentType,
+        'pixel_width': pixelWidth,
+        'pixel_height': pixelHeight,
+        'failure_code': failureCode,
+        'updated_at': updatedAt?.toUtc().toIso8601String(),
+      };
+}
+
 class ServerConversation {
   final String id;
   final DateTime createdAt;
@@ -197,6 +257,7 @@ class ServerConversation {
   final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
+  final MemoryArtworkState? artwork;
 
   ConversationStatus status;
   bool discarded;
@@ -244,6 +305,7 @@ class ServerConversation {
     this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
+    this.artwork,
     this.status = ConversationStatus.completed,
     this.isLocked = false,
     this.starred = false,
@@ -284,6 +346,9 @@ class ServerConversation {
       processingError: json['processing_error'],
       processingErrorAt:
           json['processing_error_at'] != null ? DateTime.parse(json['processing_error_at']).toLocal() : null,
+      artwork: json['artwork'] is Map
+          ? MemoryArtworkState.fromJson(Map<String, dynamic>.from(json['artwork'] as Map))
+          : null,
       status: json['status'] != null
           ? ConversationStatus.values.asNameMap()[json['status']] ?? ConversationStatus.completed
           : ConversationStatus.completed,
@@ -318,6 +383,7 @@ class ServerConversation {
       'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),
+      'artwork': artwork?.toJson(),
       'status': status.toString().split('.').last,
       'is_locked': isLocked,
       'starred': starred,
@@ -358,8 +424,10 @@ class ServerConversation {
         .map((e) => e.speakerId)
         .toList();
     if (speakers.isEmpty) return -1;
-    var segmentsBySpeakers =
-        groupBy(speakers, (e) => e).entries.reduce((a, b) => a.value.length > b.value.length ? a : b).key;
+    var segmentsBySpeakers = groupBy(
+      speakers,
+      (e) => e,
+    ).entries.reduce((a, b) => a.value.length > b.value.length ? a : b).key;
     return segmentsBySpeakers;
   }
 
@@ -435,10 +503,7 @@ class SyncLocalFilesResponse {
   List<String> newConversationIds = [];
   List<String> updatedConversationIds = [];
 
-  SyncLocalFilesResponse({
-    required this.newConversationIds,
-    required this.updatedConversationIds,
-  });
+  SyncLocalFilesResponse({required this.newConversationIds, required this.updatedConversationIds});
 
   factory SyncLocalFilesResponse.fromJson(Map<String, dynamic> json) {
     return SyncLocalFilesResponse(
@@ -467,8 +532,12 @@ class SyncedConversationPointer {
     );
   }
 
-  SyncedConversationPointer copyWith(
-      {SyncedConversationType? type, int? index, DateTime? key, ServerConversation? conversation}) {
+  SyncedConversationPointer copyWith({
+    SyncedConversationType? type,
+    int? index,
+    DateTime? key,
+    ServerConversation? conversation,
+  }) {
     return SyncedConversationPointer(
       type: type ?? this.type,
       index: index ?? this.index,
