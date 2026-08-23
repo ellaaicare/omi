@@ -128,19 +128,36 @@ def _resolved_voice_mode(uid: str) -> str:
         return ""
 
 
+async def _retained_receipt_for_repository(
+    uid: str,
+    target_schema_version: str,
+    repository: EllaProvisioningRepository,
+) -> Optional[dict[str, Any]]:
+    """Return compatibility only for a usable retained runtime owned by this subject."""
+    if target_schema_version != DEFAULT_TARGET_SCHEMA_VERSION or runtime_bindings_enabled(uid):
+        return None
+    try:
+        if await repository.has_active_retained_runtime(uid):
+            logger.info("Using retained-account onboarding compatibility")
+            return retained_compatibility_receipt(target_schema_version)
+    except Exception as exc:
+        logger.error("Retained-account onboarding lookup failed")
+        raise ProvisioningError("provisioning_unavailable", retryable=True) from exc
+    return None
+
+
 async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[dict[str, Any]]:
     """Return a public receipt only for an already-routed retained account."""
     if target_schema_version != DEFAULT_TARGET_SCHEMA_VERSION or runtime_bindings_enabled(uid):
         return None
     try:
         repository = await EllaProvisioningRepository.create()
-        if await repository.has_active_retained_runtime(uid):
-            logger.info("Using retained-account onboarding compatibility")
-            return retained_compatibility_receipt(target_schema_version)
+        return await _retained_receipt_for_repository(uid, target_schema_version, repository)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code}) from exc
     except Exception as exc:
         logger.error("Retained-account onboarding lookup failed")
         raise HTTPException(status_code=503, detail={"code": "provisioning_unavailable"}) from exc
-    return None
 
 
 def _payload_dict(payload: OnboardingEnsureRequest) -> dict[str, Any]:
@@ -179,6 +196,14 @@ async def ensure_onboarding(
                 uid,
                 repository=coordinator.repository,
             )
+            if not invitation_owned:
+                receipt = await _retained_receipt_for_repository(
+                    uid,
+                    payload.target_schema_version,
+                    coordinator.repository,
+                )
+                if receipt:
+                    return receipt
             if invitation_owned and not self_hosted_configured:
                 raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
             if self_hosted_configured:
@@ -280,6 +305,10 @@ async def onboarding_status(
     if not cloud_required:
         try:
             invitation_owned = await self_hosted_runtime_authority_required(uid, repository=repository)
+            if not invitation_owned:
+                receipt = await _retained_receipt_for_repository(uid, target_schema_version, repository)
+                if receipt:
+                    return receipt
             if invitation_owned and not self_hosted_configured:
                 raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
             if self_hosted_configured:
