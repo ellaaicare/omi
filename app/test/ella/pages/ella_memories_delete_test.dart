@@ -75,7 +75,10 @@ void main() {
   });
 
   setUp(() async {
-    SharedPreferences.setMockInitialValues({'uid': 'test-user'});
+    SharedPreferences.setMockInitialValues({
+      'uid': 'test-user',
+      'aiConsentProfileBindingId': 'profile-test-user',
+    });
     await SharedPreferencesUtil.init();
   });
 
@@ -206,7 +209,7 @@ void main() {
     expect(find.text('An error occurred. Please try again.'), findsOneWidget);
   });
 
-  testWidgets('layout and illustration style controls remain editable and queue a bounded refresh', (tester) async {
+  testWidgets('layout persists per account profile and illustration style remains editable', (tester) async {
     final provider = ConversationProvider()
       ..conversations = [memory('memory-layout')]
       ..hasLoadedConversations = true
@@ -223,6 +226,16 @@ void main() {
     await tester.tap(find.text('Compact list'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('memory-layout-list-memory-layout')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(find.byKey(const Key('memory-layout-list-memory-layout')), findsOneWidget);
+
+    final preferences = SharedPreferencesUtil()..uid = 'other-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-other-user');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(find.byKey(const Key('memory-layout-journal-memory-layout')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
     await tester.pumpAndSettle();

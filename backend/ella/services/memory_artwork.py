@@ -1153,6 +1153,19 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_preference_authority_stale",
             }
+        current_enrichment_revision = _terminal_enrichment(conversation)
+        _, current_prompt_sha256 = _prompt_for(
+            conversation,
+            str(current_artwork.get("style_version") or ""),
+        )
+        if current_enrichment_revision != current_artwork.get(
+            "enrichment_revision"
+        ) or current_prompt_sha256 != current_artwork.get("prompt_sha256"):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_source_stale",
+            }
         object_key = str(current_artwork.get("object_key") or "")
         if not object_key:
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True)

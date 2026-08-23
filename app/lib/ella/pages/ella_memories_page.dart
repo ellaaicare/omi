@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
@@ -42,6 +43,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       unawaited(context.read<ConversationProvider>().ensureFreshConversations());
+      _loadGalleryLayout();
       unawaited(_loadArtworkPreferences());
     });
   }
@@ -115,6 +117,21 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     _showMessage(queued ? context.l10n.memoryArtworkStyleUpdated : context.l10n.memoryArtworkStyleUnavailable);
   }
 
+  void _loadGalleryLayout() {
+    final saved = SharedPreferencesUtil().memoryGalleryLayout;
+    for (final layout in MemoryGalleryLayout.values) {
+      if (layout.name == saved && mounted) {
+        setState(() => _layout = layout);
+        return;
+      }
+    }
+  }
+
+  Future<void> _selectGalleryLayout(MemoryGalleryLayout layout) async {
+    if (mounted) setState(() => _layout = layout);
+    await SharedPreferencesUtil().saveMemoryGalleryLayout(layout.name);
+  }
+
   void _showMessage(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
@@ -142,7 +159,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
             tooltip: context.l10n.memoryGalleryView,
             initialValue: _layout,
             icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
-            onSelected: (value) => setState(() => _layout = value),
+            onSelected: _selectGalleryLayout,
             itemBuilder: (context) => [
               PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
               PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),

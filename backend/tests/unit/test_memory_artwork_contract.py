@@ -494,6 +494,39 @@ def test_idempotent_generation_and_owner_scoped_signed_url():
     assert len(store.signed) == 1
 
 
+@pytest.mark.parametrize("drift", ["enrichment_revision", "prompt"])
+def test_signed_url_rejects_source_or_prompt_drift_before_signing(drift):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    if drift == "enrichment_revision":
+        conversation["active_summary_version_id"] = "summary-corrected"
+    else:
+        conversation["structured"]["title"] = "A corrected memory title"
+
+    result = asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert result == {
+        "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+        "status": "unavailable",
+        "failure_code": "memory_artwork_source_stale",
+    }
+    assert store.signed == []
+
+
 def test_process_requires_current_durable_job_claim_before_provider():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")

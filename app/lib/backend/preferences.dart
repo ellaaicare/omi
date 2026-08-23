@@ -761,6 +761,23 @@ class SharedPreferencesUtil {
     return currentUid.isEmpty ? null : '$base:$currentUid';
   }
 
+  String? _accountProfileScopedKey(String base) {
+    final currentUid = uid.trim();
+    final profileBindingId = aiConsentProfileBindingId.trim();
+    if (currentUid.isEmpty || profileBindingId.isEmpty) return null;
+    return '$base:$currentUid:$profileBindingId';
+  }
+
+  String get memoryGalleryLayout {
+    final key = _accountProfileScopedKey('ellaMemoryGalleryLayout');
+    return key == null ? '' : getString(key);
+  }
+
+  Future<bool> saveMemoryGalleryLayout(String layout) async {
+    final key = _accountProfileScopedKey('ellaMemoryGalleryLayout');
+    return key != null && await saveString(key, layout);
+  }
+
   Future<void> quarantineLegacyAccountCaches() async {
     for (final key in const ['pendingMemories', 'cachedPeople']) {
       final values = getStringList(key);
