@@ -182,8 +182,8 @@ def test_refresh_scanner_keyterms_fetches_provision_file(monkeypatch):
             requests.append((url, headers, self.timeout))
             return FakeResponse()
 
-    monkeypatch.setenv("ELLA_PROVISION_API_URL", "http://provision")
-    monkeypatch.setenv("ELLA_PROVISION_API_TOKEN", "token-1")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-provision")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-token-1")
     monkeypatch.setattr(scanner_keyterms, "_resolve_agent_id", fake_resolve)
     monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", FakeClient)
 
@@ -193,8 +193,11 @@ def test_refresh_scanner_keyterms_fetches_provision_file(monkeypatch):
     assert "metformin" in terms
     assert requests == [
         (
-            "http://provision/workspace/agent-1/files/scanner-tuning.md",
-            {"Authorization": "Bearer token-1"},
+            "http://hermes-provision/workspace/agent-1/files/scanner-tuning.md",
+            {
+                "Authorization": "Bearer hermes-token-1",
+                "X-Ella-Owner-Uid": "uid-1",
+            },
             scanner_keyterms.DEFAULT_TIMEOUT_SECONDS,
         )
     ]
@@ -259,7 +262,10 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
     assert requests == [
         (
             "http://hermes-provision/workspace/omi-isolated/files/scanner-tuning.md",
-            {"Authorization": "Bearer hermes-token"},
+            {
+                "Authorization": "Bearer hermes-token",
+                "X-Ella-Owner-Uid": "uid-isolated",
+            },
         )
     ]
     assert scanner_keyterms._cache["uid-isolated"].source == "isolated:hermes"

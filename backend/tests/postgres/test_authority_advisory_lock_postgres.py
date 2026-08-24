@@ -740,7 +740,7 @@ async def _prepare_writer_case(
             ),
             snapshot=snapshot,
             expected_before=("synthetic-profile", 1, "active"),
-            expected_after=("synthetic-profile-two", 2, "revoked"),
+            expected_after=("synthetic-profile-two", 2, "active"),
         )
 
     if name in {"entitlement_upsert", "entitlement_status", "entitlement_delete"}:
@@ -2131,6 +2131,85 @@ def test_fresh_managed_terminal_decisions_without_email_leave_zero_usable_author
                 )
                 assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "revoked"
                 assert await observer.fetchval("SELECT COUNT(*) FROM voice_active_sessions WHERE uid = $1", uid) == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_granted_contract_rotation_preserves_retained_runtime_without_cloud_lineage():
+    async def scenario(pool):
+        uid = "synthetic-retained-consent-rotation"
+        owner = await _seed_grant(pool, uid)
+        async with pool.acquire() as conn:
+            binding_id = await conn.fetchval(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, role, provider, profile_name, agent_id,
+                    template_version, model_policy_version, voice_policy_version,
+                    health_state, health_receipt, status, active
+                ) VALUES (
+                    $1, 'user', 'hermes', 'retained-profile', 'retained-agent',
+                    'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                    'healthy', '{}'::jsonb, 'active', TRUE
+                )
+                RETURNING id
+                """,
+                owner.account_id,
+            )
+
+        result = await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="two"),
+        )
+        assert result["profile_binding_id"] == "synthetic-profile-two"
+
+        async with pool.acquire() as observer:
+            state = await observer.fetchrow(
+                """
+                SELECT binding.status, binding.active, binding.health_state,
+                       entitlement.status AS entitlement_status
+                FROM ella_runtime_bindings binding
+                JOIN voice_entitlements entitlement ON entitlement.uid = $2
+                WHERE binding.id = $1
+                """,
+                binding_id,
+                uid,
+            )
+        assert tuple(state.values()) == ("active", True, "healthy", "active")
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_granted_contract_rotation_still_revokes_managed_cloud_lineage():
+    async def scenario(pool):
+        uid = "synthetic-cloud-consent-rotation"
+        owner = await _seed_grant(pool, uid)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, role, provider, profile_name, agent_id,
+                    template_version, model_policy_version, voice_policy_version,
+                    health_state, health_receipt, status, active
+                ) VALUES (
+                    $1, 'user', 'hermes_cloud', 'cloud-lineage-profile',
+                    'cloud-lineage-agent', 'hermes-user-v1', 'model-policy-v1',
+                    'voice-policy-v1', 'unhealthy', '{}'::jsonb, 'disabled', FALSE
+                )
+                """,
+                owner.account_id,
+            )
+
+        await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid, revision="two"),
+        )
+
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    "SELECT status FROM voice_entitlements WHERE uid = $1",
+                    uid,
+                )
+                == "revoked"
+            )
 
     asyncio.run(_run_with_database(scenario))
 
