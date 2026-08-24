@@ -1021,7 +1021,9 @@ elif callsite == "scanner-provision":
 
     module.runtime_authority_enabled = authority_enabled
     asyncio.run(module._fetch_scanner_tuning("synthetic-agent", "synthetic-user"))
-    expected_headers = {"Authorization": f"Bearer {expected}"} if expected else {}
+    expected_headers = {"X-Ella-Owner-Uid": "synthetic-user"}
+    if expected:
+        expected_headers["Authorization"] = f"Bearer {expected}"
     assert captured.get("headers") == expected_headers, "outbound header mismatch"
 else:
     raise AssertionError("unknown provider-free authority probe")
@@ -1040,24 +1042,32 @@ else:
             "ELLA_CORRECTION_HONCHO_API_KEY",
             ("HONCHO_API_KEY",),
         ),
+    )
+    exact_callsites = (
         (
             "utils.ella.scanner_keyterms",
             "scanner-provision",
-            "ELLA_PROVISION_API_TOKEN",
-            ("ELLA_PROVISION_API_KEY", "PROVISION_API_TOKEN"),
+            "ELLA_HERMES_PROVISION_API_TOKEN",
+            ("ELLA_PROVISION_API_TOKEN", "ELLA_PROVISION_API_KEY", "PROVISION_API_TOKEN"),
         ),
     )
 
-    for module_name, callsite, primary_name, fallback_names in presence_callsites + truthy_callsites:
+    for module_name, callsite, primary_name, fallback_names in presence_callsites + truthy_callsites + exact_callsites:
         uses_truthiness = (module_name, callsite, primary_name, fallback_names) in truthy_callsites
+        uses_exact_primary = (module_name, callsite, primary_name, fallback_names) in exact_callsites
         scenarios = [
             (
                 "explicit-empty",
                 "",
-                "synthetic-fallback-authority-value" if uses_truthiness else "",
+                "" if uses_exact_primary else "synthetic-fallback-authority-value" if uses_truthiness else "",
                 "synthetic-fallback-authority-value",
             ),
-            ("absent-primary", None, "synthetic-fallback-authority-value", "synthetic-fallback-authority-value"),
+            (
+                "absent-primary",
+                None,
+                "" if uses_exact_primary else "synthetic-fallback-authority-value",
+                "synthetic-fallback-authority-value",
+            ),
             (
                 "nonempty-primary",
                 "synthetic-primary-authority-value",
@@ -1072,7 +1082,7 @@ else:
             ),
             ("whitespace-only", "   ", "   ", "synthetic-fallback-authority-value"),
         ]
-        if len(fallback_names) > 1:
+        if len(fallback_names) > 1 and not uses_exact_primary:
             scenarios.append(("empty-secondary", None, "synthetic-tertiary-authority-value", ""))
         for scenario, primary_value, expected, first_fallback_value in scenarios:
             environment = {

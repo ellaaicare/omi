@@ -322,6 +322,51 @@ async def _quarantine_on_connection(
     )
 
 
+async def _has_managed_cloud_or_invitation_lineage(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    user_id: uuid.UUID,
+) -> bool:
+    """Return whether a grant rotation owns revocable managed authority.
+
+    Retained Hermes accounts also publish their app consent receipt through
+    this historically named table.  A granted-to-granted policy refresh for
+    such an account must not disable its Mac Mini runtime or revoke its normal
+    voice entitlement.  Destructive rotation is reserved for rows that are
+    actually descended from an invitation or managed-cloud allocation.
+    """
+
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM ella_invitation_redemptions redemption
+                WHERE redemption.user_id = $1
+                UNION ALL
+                SELECT 1
+                FROM voice_entitlements entitlement
+                WHERE entitlement.uid = $2
+                  AND entitlement.invitation_id IS NOT NULL
+                UNION ALL
+                SELECT 1
+                FROM ella_runtime_targets target
+                WHERE target.account_user_id = $1
+                  AND target.provider = 'hermes_cloud'
+                UNION ALL
+                SELECT 1
+                FROM ella_runtime_bindings binding
+                WHERE binding.user_id = $1
+                  AND binding.provider = 'hermes_cloud'
+            )
+            """,
+            user_id,
+            uid,
+        )
+    )
+
+
 async def lock_or_bootstrap_grant_on_connection(
     conn: asyncpg.Connection,
     *,
@@ -489,13 +534,18 @@ async def synchronize_grant(
                         grant.scope_version,
                         grant.scope_hash,
                     )
-                    await _quarantine_on_connection(
+                    if await _has_managed_cloud_or_invitation_lineage(
                         conn,
                         uid=grant.account_uid,
                         user_id=user_id,
-                        reason="managed_cloud_consent_grant_changed",
-                        owner_lock=owner_lock,
-                    )
+                    ):
+                        await _quarantine_on_connection(
+                            conn,
+                            uid=grant.account_uid,
+                            user_id=user_id,
+                            reason="managed_cloud_consent_grant_changed",
+                            owner_lock=owner_lock,
+                        )
                 if row is None or not _grant_matches(row, grant):
                     raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_grant_failed")
                 if allow_fresh_uid_bootstrap:

@@ -395,14 +395,20 @@ async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
             "hermes_cloud_scanner_keyterms_unavailable",
             retryable=False,
         )
-    isolated = await runtime_authority_enabled(uid) if uid else False
-    token = _provision_token(uid, isolated=isolated)
+    # Production scanner context is retained by the owner-bound Hermes runtime
+    # on the Mac Mini.  Managed-cloud authority is an invitation experiment and
+    # must not decide whether an ordinary retained user reads port 8210 or the
+    # decommissioned OpenClaw-era port 8200.
+    owner_bound_retained = bool(uid)
+    token = _provision_token(uid, isolated=owner_bound_retained)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    provision_url = _provision_url(uid, isolated=isolated)
+    if owner_bound_retained:
+        headers["X-Ella-Owner-Uid"] = uid
+    provision_url = _provision_url(uid, isolated=owner_bound_retained)
     url = f"{provision_url}/workspace/{agent_id}/files/scanner-tuning.md"
     async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
         response = await client.get(url, headers=headers)
-        if response.status_code == 404 and _allow_shared_fallback(uid, isolated=isolated):
+        if response.status_code == 404 and _allow_shared_fallback(uid, isolated=owner_bound_retained):
             shared = f"{provision_url}/workspace/shared/files/scanner-tuning.md"
             response = await client.get(shared, headers=headers)
         response.raise_for_status()

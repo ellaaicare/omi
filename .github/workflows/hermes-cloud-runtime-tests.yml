@@ -873,7 +873,13 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 78
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_granted_contract_rotation_preserves_retained_runtime_without_cloud_lineage" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_granted_contract_rotation_still_revokes_managed_cloud_lineage" \
+            <<<"$authority_lock_ids"
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 80
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
