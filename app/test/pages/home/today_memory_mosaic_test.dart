@@ -78,8 +78,8 @@ void main() {
         tester.widgetList<Text>(find.byType(Text)).map((widget) => widget.data).whereType<String>().toList();
     expect(find.text('SUNDAY · AUGUST 9'), findsOneWidget, reason: renderedText.join(' | '));
     expect(find.text('Good morning, Margaret'), findsOneWidget);
-    expect(find.text('Record a moment'), findsOneWidget);
-    expect(find.text('Records on this iPhone'), findsOneWidget);
+    expect(find.text('Record'), findsOneWidget);
+    expect(find.text('iPhone · Ready'), findsOneWidget);
     expect(find.text('Recent memories'), findsOneWidget);
     expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
     expect(find.byKey(const Key('memory-fallback-art')), findsOneWidget);
@@ -117,6 +117,9 @@ void main() {
     );
     addTearDown(harness.dispose);
 
+    await tester.ensureVisible(find.byKey(const Key('today-card-read-more')));
+    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -180));
+    await tester.pump();
     await tester.tap(find.byKey(const Key('today-card-read-more')));
     await tester.pumpAndSettle();
 
@@ -131,27 +134,14 @@ void main() {
     expect(find.byKey(const Key('today-card-detail-scroll')), findsNothing);
   });
 
-  testWidgets('Home exposes confirmed permanent deletion on each recent memory', (tester) async {
+  testWidgets('Home browsing has no destructive memory action', (tester) async {
     final conversations = _ConversationFixtures.manyMemories();
     final harness = await _pumpHome(tester, conversations: conversations);
     addTearDown(harness.dispose);
 
-    final deleteTarget = find.byKey(const Key('home-delete-memory-memory-1'));
-    expect(deleteTarget, findsOneWidget);
-    expect(tester.getSize(deleteTarget).height, greaterThanOrEqualTo(48));
-
-    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -300));
-    await tester.pumpAndSettle();
-    await tester.tap(deleteTarget);
-    await tester.pumpAndSettle();
-    expect(find.text('Are you sure you want to delete this memory? This action cannot be undone.'), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('confirm-home-delete-memory')));
-    await tester.pumpAndSettle();
-
-    expect(harness.conversations.permanentDeletes, ['memory-1']);
-    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsNothing);
-    expect(find.text('Memory Deleted.'), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
+    expect(harness.conversations.permanentDeletes, isEmpty);
+    expect(find.byKey(const Key('memories-see-all')), findsOneWidget);
   });
 
   testWidgets('phone capture transforms in place and finishes the moment', (tester) async {
@@ -160,19 +150,19 @@ void main() {
 
     final recordTarget = find.byKey(const Key('today-record-moment'));
     expect(tester.getSize(recordTarget).height, greaterThanOrEqualTo(48));
-    expect(find.text('Records on this iPhone'), findsOneWidget);
+    expect(find.text('iPhone · Ready'), findsOneWidget);
     expect(find.textContaining('Ella is listening'), findsNothing);
 
     await tester.tap(recordTarget);
     await tester.pump();
     expect(harness.capture.phoneStarts, 1);
-    expect(find.text('Listening… tap to finish'), findsOneWidget);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
 
     await tester.tap(recordTarget);
     await tester.pump();
     expect(harness.capture.phoneStops, 1);
     expect(harness.capture.finishes, 1);
-    expect(find.text('Record a moment'), findsOneWidget);
+    expect(find.text('Record'), findsOneWidget);
   });
 
   testWidgets('confirmed phone audio remains visibly identified outside a Home-owned moment', (tester) async {
@@ -183,8 +173,8 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.byKey(const Key('today-confirmed-recording-status')), findsOneWidget);
-    expect(find.text('Records on this iPhone · Listening… tap to finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
   });
 
   testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
@@ -260,7 +250,7 @@ void main() {
     expect(harness.capture.deviceBoundaries, 1);
     expect(harness.capture.deviceStops, 0);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.text('Listening… tap to finish'), findsOneWidget);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
   });
 
   testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {
@@ -271,8 +261,8 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.byKey(const Key('today-recording-error-status')), findsOneWidget);
-    expect(find.text("Recording isn't available right now."), findsOneWidget);
+    expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
+    expect(find.text('Recording needs a moment'), findsOneWidget);
   });
 
   testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {
@@ -484,21 +474,21 @@ void main() {
     final harness = await _pumpHome(tester, conversations: const [], device: device);
     addTearDown(harness.dispose);
 
-    expect(find.text('Records with your necklace'), findsOneWidget);
+    expect(find.text('Necklace · Ready'), findsOneWidget);
     expect(find.text('Phone only'), findsNothing);
     expect(find.textContaining('Headset is off'), findsNothing);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
     expect(harness.capture.deviceStarts, 1);
-    expect(find.text('Listening… tap to finish'), findsOneWidget);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
     expect(harness.capture.deviceStops, 1);
     expect(harness.capture.finishes, 1);
     expect(harness.capture.recordingState, RecordingState.stop);
-    expect(find.text('Record a moment'), findsOneWidget);
+    expect(find.text('Record'), findsOneWidget);
   });
 
   testWidgets('failed Home necklace processing retries without restarting or re-stopping capture', (tester) async {
@@ -558,14 +548,14 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.byKey(const Key('today-recording-error-status')), findsOneWidget);
+    expect(find.text('Recording needs a moment'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.byKey(const Key('today-recording-error-status')), findsNothing);
-    expect(find.text('Listening… tap to finish'), findsOneWidget);
+    expect(find.text('Recording needs a moment'), findsNothing);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
   });
 
   testWidgets('continuous necklace stream gets exact moment boundaries without being stopped', (tester) async {
@@ -582,8 +572,7 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.byKey(const Key('today-necklace-continuous-recording')), findsOneWidget);
-    expect(find.text('Your necklace is recording continuously'), findsOneWidget);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -623,7 +612,7 @@ void main() {
     expect(harness.capture.deviceStops, 0);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.text('No words were captured, so no memory was created.'), findsNothing);
-    expect(find.text('Listening… tap to finish'), findsOneWidget);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
   });
 
   testWidgets('day-one state is useful and reduced motion removes capture transitions', (tester) async {
@@ -641,27 +630,19 @@ void main() {
     expect(find.text('Your first note begins with a moment'), findsOneWidget);
     expect(find.textContaining('note worth returning to'), findsOneWidget);
     expect(find.byKey(const Key('memory-journal-empty')), findsOneWidget);
-    expect(find.text('Your journal begins with one moment'), findsOneWidget);
-    final container = tester.widget<AnimatedContainer>(
-      find.ancestor(of: find.byKey(const Key('today-record-moment')), matching: find.byType(AnimatedContainer)),
-    );
-    expect(container.duration, Duration.zero);
+    expect(find.text('Your memories will appear here'), findsOneWidget);
+    expect(find.byKey(const Key('today-capture-proof-panel')), findsNothing);
+    expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
   });
 
-  testWidgets('Home keeps more than two recent memories in the vertical journal', (tester) async {
+  testWidgets('Home shows one hero and one continuity memory, with archive navigation', (tester) async {
     final harness = await _pumpHome(tester, conversations: _ConversationFixtures.manyMemories());
     addTearDown(harness.dispose);
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('memory-journal-card-memory-4')),
-      350,
-      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
-    );
-
-    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsOneWidget);
-    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
-    expect(find.byKey(const Key('memory-journal-card-memory-3')), findsOneWidget);
-    expect(find.byKey(const Key('memory-journal-card-memory-4')), findsOneWidget);
+    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-journal-card-')), findsOneWidget);
+    expect(
+        find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsOneWidget);
+    expect(find.byKey(const Key('memories-see-all')), findsOneWidget);
   });
 
   testWidgets('200 percent text stays readable and preserves capture semantics at 320 width', (tester) async {
@@ -690,13 +671,14 @@ void main() {
     await tester.pump();
     expect(recordTarget, findsOneWidget);
     expect(tester.getSize(recordTarget).height, greaterThanOrEqualTo(48));
-    expect(find.bySemanticsLabel(RegExp(r'Record a moment.*Records on this iPhone')), findsOneWidget);
+    expect(tester.getSemantics(recordTarget).label, 'Record');
     expect(tester.takeException(), isNull);
 
     await tester.dragFrom(const Offset(160, 400), const Offset(0, -1200));
     await tester.pump();
-    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsOneWidget);
-    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
+    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-journal-card-')), findsOneWidget);
+    expect(
+        find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsOneWidget);
     expect(find.text('Home'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('Talk'), findsOneWidget);

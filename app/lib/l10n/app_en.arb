@@ -10707,24 +10707,40 @@
   "todayGreetingMorning": "Good morning, {name}",
   "@todayGreetingMorning": {
     "description": "Morning greeting on Ella Home",
-    "placeholders": {"name": {"type": "String"}}
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
   },
   "todayGreetingAfternoon": "Good afternoon, {name}",
   "@todayGreetingAfternoon": {
     "description": "Afternoon greeting on Ella Home",
-    "placeholders": {"name": {"type": "String"}}
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
   },
   "todayGreetingEvening": "Good evening, {name}",
   "@todayGreetingEvening": {
     "description": "Evening greeting on Ella Home",
-    "placeholders": {"name": {"type": "String"}}
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
   },
   "todayDateEyebrow": "{weekday} · {monthDay}",
   "@todayDateEyebrow": {
     "description": "Localized date anchor on Ella Home",
     "placeholders": {
-      "weekday": {"type": "String"},
-      "monthDay": {"type": "String"}
+      "weekday": {
+        "type": "String"
+      },
+      "monthDay": {
+        "type": "String"
+      }
     }
   },
   "bottomNavHome": "Home",
@@ -10750,5 +10766,19 @@
   "memoryArtworkStyleUnavailable": "Ella couldn't update the illustration style right now.",
   "memoryGeneratedArtworkLabel": "Illustration created for this memory",
   "memoryBackToRecent": "Back to recent",
-  "memoryLoadingMore": "Loading earlier memories"
+  "memoryLoadingMore": "Loading earlier memories",
+  "todayDockRecord": "Record",
+  "todayDockFinish": "Finish",
+  "todayDockStarting": "Starting recording…",
+  "todayDockRecordingUnavailable": "Recording needs a moment",
+  "todayDockNecklaceConnecting": "Necklace · Connecting…",
+  "todayDockRecordingPhone": "Recording on this iPhone",
+  "todayDockRecordingNecklace": "Recording with your necklace",
+  "todayDockNecklaceReady": "Necklace · Ready",
+  "todayDockNecklaceNotConnected": "Necklace not connected",
+  "todayDockPhoneReady": "iPhone · Ready",
+  "memorySortRecent": "Newest first",
+  "memorySortOldest": "Oldest first",
+  "todayMemoryCanvasEmptyHeadline": "Your memories will appear here",
+  "todayMemoryCanvasEmptyBody": "Record a moment and Ella will gather the memories you choose."
 }

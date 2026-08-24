@@ -528,9 +528,8 @@ void main() {
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
     final expectedNow = previewEnabled ? previewNow : runtimeNow;
     expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
-    expect(find.text('Record a moment'), findsOneWidget);
-    final expectedRecordingSource =
-        deviceProvider.presentationIsConnected ? 'Records with your necklace' : 'Records on this iPhone';
+    expect(find.text('Record'), findsOneWidget);
+    final expectedRecordingSource = deviceProvider.presentationIsConnected ? 'Necklace · Ready' : 'iPhone · Ready';
     expect(find.text(expectedRecordingSource, skipOffstage: false), findsOneWidget);
     expect(find.text('Voice'), findsNothing);
     expect(find.text('Talk'), findsOneWidget);

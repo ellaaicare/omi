@@ -9515,4 +9515,46 @@ class AppLocalizationsUk extends AppLocalizations {
 
   @override
   String get memoryLoadingMore => 'Loading earlier memories';
+
+  @override
+  String get todayDockRecord => 'Record';
+
+  @override
+  String get todayDockFinish => 'Finish';
+
+  @override
+  String get todayDockStarting => 'Starting recording…';
+
+  @override
+  String get todayDockRecordingUnavailable => 'Recording needs a moment';
+
+  @override
+  String get todayDockNecklaceConnecting => 'Necklace · Connecting…';
+
+  @override
+  String get todayDockRecordingPhone => 'Recording on this iPhone';
+
+  @override
+  String get todayDockRecordingNecklace => 'Recording with your necklace';
+
+  @override
+  String get todayDockNecklaceReady => 'Necklace · Ready';
+
+  @override
+  String get todayDockNecklaceNotConnected => 'Necklace not connected';
+
+  @override
+  String get todayDockPhoneReady => 'iPhone · Ready';
+
+  @override
+  String get memorySortRecent => 'Newest first';
+
+  @override
+  String get memorySortOldest => 'Oldest first';
+
+  @override
+  String get todayMemoryCanvasEmptyHeadline => 'Your memories will appear here';
+
+  @override
+  String get todayMemoryCanvasEmptyBody => 'Record a moment and Ella will gather the memories you choose.';
 }

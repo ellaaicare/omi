@@ -346,7 +346,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                 ),
                 Consumer<DeviceProvider>(
                   builder: (context, deviceProvider, child) {
-                    if (!deviceProvider.presentationIsConnected) {
+                    if (!SharedPreferencesUtil.isPublicBuild && deviceProvider.presentationPairedDevice == null) {
                       return const SizedBox.shrink();
                     }
                     return Column(
@@ -627,8 +627,8 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
               child: widget.ellaMode
                   ? _buildEllaAdvancedContent(context)
                   : widget.mode == SettingsMode.omi
-                  ? _buildOmiModeContent(context)
-                  : _buildNoDeviceModeContent(context),
+                      ? _buildOmiModeContent(context)
+                      : _buildNoDeviceModeContent(context),
             ),
           ),
         ],

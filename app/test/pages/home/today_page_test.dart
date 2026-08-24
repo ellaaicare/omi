@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/action_item.dart';
+import 'package:omi/ella/widgets/capture_diagnostics_panel.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/home/today_page.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -41,23 +42,24 @@ void main() {
     expect(item.toJson()['source_label'], 'David');
   });
 
-  testWidgets('record control distinguishes idle, initialising, and reconnecting states', (tester) async {
+  testWidgets('compact dock distinguishes idle, initialising, and reconnecting states', (tester) async {
     await _pumpRecordControl(tester);
     var l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayRecordMoment), findsOneWidget);
-    expect(find.text(l10n.startRecording), findsOneWidget);
+    expect(find.text(l10n.todayDockRecord), findsOneWidget);
+    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
-    expect(find.byKey(const Key('today-capture-proof-panel')), findsOneWidget);
+    expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
+    expect(find.byKey(const Key('today-capture-proof-panel')), findsNothing);
 
     await _pumpRecordControl(tester, recordingState: RecordingState.initialising);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
-    expect(find.text(l10n.initialisingRecorder), findsOneWidget);
+    expect(find.text(l10n.todayDockStarting), findsOneWidget);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
 
     await _pumpRecordControl(tester, necklaceConnecting: true);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
-    expect(find.text(l10n.todayStripReconnecting), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
   });
 
@@ -72,8 +74,8 @@ void main() {
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.liveTranscript), findsOneWidget);
-    expect(find.byKey(const Key('today-view-live-transcript')), findsNothing);
+    expect(find.text(l10n.transcript), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -95,11 +97,9 @@ void main() {
     );
     var l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayRecordMoment), findsOneWidget);
-    expect(find.text(l10n.stopRecording), findsOneWidget);
-    expect(find.text(l10n.liveTranscript), findsOneWidget);
-    expect(find.text(l10n.todayRecordWithNecklace), findsOneWidget);
-    expect(find.byKey(const Key('today-recording-error-status')), findsOneWidget);
+    expect(find.text(l10n.todayDockFinish), findsOneWidget);
+    expect(find.text(l10n.transcript), findsOneWidget);
+    expect(find.text(l10n.todayDockRecordingUnavailable), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.tap(find.byKey(const Key('today-view-live-transcript')));
@@ -116,13 +116,12 @@ void main() {
     );
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.stopRecording), findsOneWidget);
-    expect(find.text(l10n.todayStripReconnecting), findsOneWidget);
-    expect(find.byKey(const Key('today-recording-reconnecting-status')), findsOneWidget);
+    expect(find.text(l10n.todayDockFinish), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
   });
 
-  testWidgets('capture proof reports physical frames, STT delivery, transcript, and finalization', (tester) async {
+  testWidgets('compact dock never exposes numeric capture diagnostics', (tester) async {
     await _pumpRecordControl(
       tester,
       diagnostics: const CaptureDiagnostics(
@@ -138,13 +137,39 @@ void main() {
       ),
     );
 
-    expect(find.byKey(const Key('today-capture-audio-proof')), findsOneWidget);
+    expect(find.byKey(const Key('today-capture-audio-proof')), findsNothing);
+    expect(find.byKey(const Key('today-capture-delivery-proof')), findsNothing);
+    expect(find.byKey(const Key('today-capture-transcript-proof')), findsNothing);
+    expect(find.byKey(const Key('today-capture-memory-proof')), findsNothing);
+    expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
+  });
+
+  testWidgets('technical capture proof remains available in the Device diagnostics panel', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: const Scaffold(
+          body: CaptureDiagnosticsPanel(
+            diagnostics: CaptureDiagnostics(
+              source: CaptureDiagnosticSource.phone,
+              phase: CaptureDiagnosticPhase.receivingTranscript,
+              physicalFrames: 12,
+              physicalBytes: 2400,
+              transmittedFrames: 11,
+              transcriptSegments: 2,
+              latestTranscript: 'A visible test transcript',
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('device-capture-diagnostics-panel')), findsOneWidget);
+    expect(find.byKey(const Key('device-capture-audio-proof')), findsOneWidget);
     expect(find.textContaining('2400'), findsOneWidget);
-    expect(find.byKey(const Key('today-capture-delivery-proof')), findsOneWidget);
-    expect(find.textContaining('11'), findsOneWidget);
-    expect(find.byKey(const Key('today-capture-transcript-proof')), findsOneWidget);
+    expect(find.byKey(const Key('device-capture-delivery-proof')), findsOneWidget);
     expect(find.textContaining('A visible test transcript'), findsOneWidget);
-    expect(find.byKey(const Key('today-capture-memory-proof')), findsOneWidget);
   });
 }
 

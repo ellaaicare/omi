@@ -19,21 +19,24 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 enum MemoryGalleryLayout { journal, grid, list }
 
+enum MemoryGallerySort { recent, oldest }
+
 class EllaMemoriesPage extends StatefulWidget {
-  const EllaMemoriesPage({super.key, this.artworkApi});
+  const EllaMemoriesPage({super.key, this.artworkApi, this.onRecord});
 
   final MemoryArtworkApi? artworkApi;
+  final VoidCallback? onRecord;
 
   @override
   State<EllaMemoriesPage> createState() => _EllaMemoriesPageState();
 }
 
 class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
-  final Set<String> _deletingConversationIds = <String>{};
   final ScrollController _scrollController = ScrollController();
   late final MemoryArtworkApi _artworkApi = widget.artworkApi ?? MemoryArtworkApi();
   MemoryArtworkPreferences? _artworkPreferences;
   MemoryGalleryLayout _layout = MemoryGalleryLayout.journal;
+  MemoryGallerySort _sort = MemoryGallerySort.recent;
   bool _showBackToRecent = false;
 
   @override
@@ -142,15 +145,24 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final conversationProvider = context.watch<ConversationProvider>();
     final capture = context.watch<CaptureProvider>();
     final live = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
-    final groups = _group(context, conversationProvider.visibleConversations);
+    final orderedConversations = List<ServerConversation>.of(conversationProvider.visibleConversations)
+      ..sort((a, b) {
+        final result = (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt);
+        return _sort == MemoryGallerySort.recent ? result : -result;
+      });
+    final groups = _group(context, orderedConversations);
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
     _checkPaginationAfterLayout(conversationProvider);
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: EllaColors.tealDeep),
+        leadingWidth: 92,
+        leading: TextButton.icon(
+          key: const Key('memories-back-home'),
           onPressed: () => Navigator.pop(context),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
+          label: Text(context.l10n.bottomNavHome),
+          style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
         ),
         title: Text(context.l10n.memories),
         actions: [
@@ -164,6 +176,17 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
               PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
               PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
+            ],
+          ),
+          PopupMenuButton<MemoryGallerySort>(
+            key: const Key('memory-sort-menu'),
+            tooltip: context.l10n.sortBy,
+            initialValue: _sort,
+            icon: const Icon(Icons.swap_vert_rounded, color: EllaColors.tealDeep),
+            onSelected: (value) => setState(() => _sort = value),
+            itemBuilder: (context) => [
+              PopupMenuItem(value: MemoryGallerySort.recent, child: Text(context.l10n.memorySortRecent)),
+              PopupMenuItem(value: MemoryGallerySort.oldest, child: Text(context.l10n.memorySortOldest)),
             ],
           ),
           PopupMenuButton<String>(
@@ -231,7 +254,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                 ),
               )
             else
-              for (final entry in groups.entries) ..._memoryGroupSlivers(conversationProvider, entry),
+              for (final entry in groups.entries) ..._memoryGroupSlivers(entry),
             if (!loading && groups.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
@@ -286,10 +309,32 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               label: Text(context.l10n.backToRecentMemories),
             )
           : null,
+      bottomNavigationBar: live || widget.onRecord != null
+          ? _MemoryCaptureShelf(
+              live: live,
+              onTap: () {
+                if (live) {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ConversationCapturingPage(
+                        topConversationId: conversationProvider.conversations.isEmpty
+                            ? null
+                            : conversationProvider.conversations.first.id,
+                      ),
+                    ),
+                  );
+                  return;
+                }
+                final onRecord = widget.onRecord;
+                Navigator.of(context).pop();
+                if (onRecord != null) Future<void>.microtask(onRecord);
+              },
+            )
+          : null,
     );
   }
 
-  List<Widget> _memoryGroupSlivers(ConversationProvider provider, MapEntry<String, List<ServerConversation>> entry) {
+  List<Widget> _memoryGroupSlivers(MapEntry<String, List<ServerConversation>> entry) {
     final children = <Widget>[
       SliverPadding(
         padding: const EdgeInsets.fromLTRB(20, 24, 20, EllaSizes.cardGap),
@@ -308,7 +353,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               childAspectRatio: 0.86,
             ),
             delegate: SliverChildBuilderDelegate(
-              (context, index) => _memoryCard(provider, entry.value[index]),
+              (context, index) => _memoryCard(entry.value[index]),
               childCount: entry.value.length,
             ),
           ),
@@ -321,7 +366,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           sliver: SliverList.separated(
             itemCount: entry.value.length,
             separatorBuilder: (_, __) => const SizedBox(height: EllaSizes.cardGap),
-            itemBuilder: (context, index) => _memoryCard(provider, entry.value[index]),
+            itemBuilder: (context, index) => _memoryCard(entry.value[index]),
           ),
         ),
       );
@@ -329,41 +374,50 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     return children;
   }
 
-  Widget _memoryCard(ConversationProvider provider, ServerConversation conversation) => _MemoryCard(
+  Widget _memoryCard(ServerConversation conversation) => _MemoryCard(
         conversation: conversation,
         layout: _layout,
-        deleting: _deletingConversationIds.contains(conversation.id),
         onTap: () => Navigator.of(
           context,
         ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation))),
-        onDelete: () => _confirmDelete(provider, conversation),
       );
+}
 
-  Future<void> _confirmDelete(ConversationProvider provider, ServerConversation conversation) async {
-    if (_deletingConversationIds.contains(conversation.id)) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(context.l10n.deleteMemory),
-        content: Text(context.l10n.deleteMemoryConfirmation),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(context.l10n.cancel)),
-          FilledButton(
-            key: const Key('confirm-delete-memory'),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: FilledButton.styleFrom(backgroundColor: EllaColors.warning, foregroundColor: Colors.white),
-            child: Text(context.l10n.delete),
+class _MemoryCaptureShelf extends StatelessWidget {
+  const _MemoryCaptureShelf({required this.live, required this.onTap});
+
+  final bool live;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+      child: Material(
+        color: EllaColors.tealDeep,
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          key: const Key('memories-record-shelf'),
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(18),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 54),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(live ? Icons.subject_rounded : Icons.mic_none_rounded, color: EllaColors.paper),
+                const SizedBox(width: 10),
+                Text(
+                  live ? context.l10n.liveTranscript : context.l10n.todayDockRecord,
+                  style: EllaTextStyles.body.copyWith(color: EllaColors.paper, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
           ),
-        ],
+        ),
       ),
     );
-    if (confirmed != true || !mounted) return;
-
-    setState(() => _deletingConversationIds.add(conversation.id));
-    final deleted = await provider.deleteConversationPermanently(conversation);
-    if (!mounted) return;
-    setState(() => _deletingConversationIds.remove(conversation.id));
-    _showMessage(deleted ? context.l10n.memoryDeleted : context.l10n.anErrorOccurredTryAgain);
   }
 }
 
@@ -400,26 +454,18 @@ class _LiveMemoryCard extends StatelessWidget {
 }
 
 class _MemoryCard extends StatelessWidget {
-  const _MemoryCard({
-    required this.conversation,
-    required this.layout,
-    required this.deleting,
-    required this.onTap,
-    required this.onDelete,
-  });
+  const _MemoryCard({required this.conversation, required this.layout, required this.onTap});
 
   final ServerConversation conversation;
   final MemoryGalleryLayout layout;
-  final bool deleting;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
 
   String get _title =>
       conversation.structured.title.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
 
   @override
   Widget build(BuildContext context) {
-    final details = _MemoryDetails(conversation: conversation, title: _title, deleting: deleting, onDelete: onDelete);
+    final details = _MemoryDetails(conversation: conversation, title: _title);
     final child = layout == MemoryGalleryLayout.list
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -457,17 +503,10 @@ class _MemoryCard extends StatelessWidget {
 }
 
 class _MemoryDetails extends StatelessWidget {
-  const _MemoryDetails({
-    required this.conversation,
-    required this.title,
-    required this.deleting,
-    required this.onDelete,
-  });
+  const _MemoryDetails({required this.conversation, required this.title});
 
   final ServerConversation conversation;
   final String title;
-  final bool deleting;
-  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -496,29 +535,7 @@ class _MemoryDetails extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 6),
-        deleting
-            ? const SizedBox(
-                key: Key('deleting-memory-progress'),
-                width: EllaSizes.minTouchTarget,
-                height: EllaSizes.minTouchTarget,
-                child: Center(
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                  ),
-                ),
-              )
-            : IconButton(
-                key: Key('delete-memory-${conversation.id}'),
-                tooltip: context.l10n.deleteMemory,
-                onPressed: onDelete,
-                constraints: const BoxConstraints(
-                  minWidth: EllaSizes.minTouchTarget,
-                  minHeight: EllaSizes.minTouchTarget,
-                ),
-                icon: const Icon(Icons.delete_outline_rounded, color: EllaColors.warning),
-              ),
+        const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
       ],
     );
   }
