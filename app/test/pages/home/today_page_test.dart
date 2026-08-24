@@ -75,7 +75,9 @@ void main() {
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.transcript), findsOneWidget);
-    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+    expect(find.text(l10n.todayDockRecord), findsNothing);
+    expect(find.byIcon(Icons.subject_rounded), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsNothing);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();

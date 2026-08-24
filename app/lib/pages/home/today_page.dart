@@ -1090,7 +1090,16 @@ class TodayRecordMomentControl extends StatelessWidget {
       necklaceRecording: necklaceRecording,
       usesNecklace: usesNecklace,
     );
-    final primaryLabel = homeCaptureOwned ? context.l10n.todayDockFinish : context.l10n.todayDockRecord;
+    final primaryLabel = opensTranscript
+        ? context.l10n.transcript
+        : homeCaptureOwned
+            ? context.l10n.todayDockFinish
+            : context.l10n.todayDockRecord;
+    final primaryIcon = opensTranscript
+        ? Icons.subject_rounded
+        : active
+            ? Icons.stop_rounded
+            : Icons.mic_none_rounded;
     final primaryEnabled = homeCaptureOwned || !initialising;
 
     return Material(
@@ -1150,22 +1159,24 @@ class TodayRecordMomentControl extends StatelessWidget {
                   Expanded(
                     child: _TodayDockAction(
                       actionKey: const Key('today-record-moment'),
-                      icon: active ? Icons.stop_rounded : Icons.mic_none_rounded,
+                      icon: primaryIcon,
                       label: primaryLabel,
                       emphasized: true,
                       enabled: primaryEnabled,
                       onTap: opensTranscript ? onViewTranscript : onTap,
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: _TodayDockAction(
-                      actionKey: const Key('today-view-live-transcript'),
-                      icon: Icons.subject_rounded,
-                      label: context.l10n.transcript,
-                      onTap: onViewTranscript,
+                  if (!opensTranscript) ...[
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _TodayDockAction(
+                        actionKey: const Key('today-view-live-transcript'),
+                        icon: Icons.subject_rounded,
+                        label: context.l10n.transcript,
+                        onTap: onViewTranscript,
+                      ),
                     ),
-                  ),
+                  ],
                   if (showWhispers) ...[
                     const SizedBox(width: 6),
                     Expanded(

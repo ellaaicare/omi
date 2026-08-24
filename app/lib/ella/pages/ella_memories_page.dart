@@ -82,11 +82,17 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   void _scrollBackToRecent() {
+    if (_sort != MemoryGallerySort.recent && mounted) {
+      setState(() => _sort = MemoryGallerySort.recent);
+    }
     if (!_scrollController.hasClients) return;
     _scrollController.animateTo(0, duration: const Duration(milliseconds: 320), curve: Curves.easeOutCubic);
   }
 
   Future<void> _refresh() async {
+    if (_sort != MemoryGallerySort.recent && mounted) {
+      setState(() => _sort = MemoryGallerySort.recent);
+    }
     await context.read<ConversationProvider>().getInitialConversations();
     await _loadArtworkPreferences();
   }
@@ -186,7 +192,11 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
             onSelected: (value) => setState(() => _sort = value),
             itemBuilder: (context) => [
               PopupMenuItem(value: MemoryGallerySort.recent, child: Text(context.l10n.memorySortRecent)),
-              PopupMenuItem(value: MemoryGallerySort.oldest, child: Text(context.l10n.memorySortOldest)),
+              PopupMenuItem(
+                value: MemoryGallerySort.oldest,
+                enabled: !conversationProvider.hasMoreConversations,
+                child: Text(context.l10n.memorySortOldest),
+              ),
             ],
           ),
           PopupMenuButton<String>(

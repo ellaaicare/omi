@@ -28,7 +28,7 @@ class MessageActionMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
-        color: Colors.white.withOpacity(0.95),
+        color: Color(0xF2FFFFFF),
         borderRadius: BorderRadius.vertical(
           top: Radius.circular(20),
         ),

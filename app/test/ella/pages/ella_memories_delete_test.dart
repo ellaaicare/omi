@@ -141,7 +141,7 @@ void main() {
     final provider = ConversationProvider()
       ..conversations = [
         memory('newest', title: 'Newest memory', at: DateTime.parse('2026-08-10T18:00:00Z')),
-        memory('oldest', title: 'Oldest memory', at: DateTime.parse('2026-08-01T18:00:00Z')),
+        memory('oldest', title: 'Oldest memory', at: DateTime.parse('2026-08-10T08:00:00Z')),
       ]
       ..hasLoadedConversations = true
       ..hasFreshConversations = true
@@ -149,14 +149,40 @@ void main() {
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
-    expect(find.text('Newest memory'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byKey(const Key('memory-card-newest'))).dy,
+      lessThan(tester.getTopLeft(find.byKey(const Key('memory-card-oldest'))).dy),
+    );
 
     await tester.tap(find.byKey(const Key('memory-sort-menu')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Oldest first'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Oldest memory'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byKey(const Key('memory-card-oldest'))).dy,
+      lessThan(tester.getTopLeft(find.byKey(const Key('memory-card-newest'))).dy),
+    );
+  });
+
+  testWidgets('oldest-first sorting stays disabled until the full archive is loaded', (tester) async {
+    final provider = ConversationProvider(
+      conversationsPageFetchCall: ({required limit, required offset}) async => const ConversationsFetchResult.failure(),
+    )
+      ..conversations = [memory('recent-page')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = true;
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider);
+    await tester.tap(find.byKey(const Key('memory-sort-menu')));
+    await tester.pumpAndSettle();
+
+    final oldestItem = tester.widget<PopupMenuItem<MemoryGallerySort>>(
+      find.ancestor(of: find.text('Oldest first'), matching: find.byType(PopupMenuItem<MemoryGallerySort>)),
+    );
+    expect(oldestItem.enabled, isFalse);
   });
 
   testWidgets('layout persists per account profile and illustration style remains editable', (tester) async {
@@ -287,13 +313,26 @@ void main() {
 
   testWidgets('Back to recent appears after scrolling and returns to the newest memories', (tester) async {
     final provider = ConversationProvider()
-      ..conversations = List.generate(36, (index) => memory('memory-$index', title: 'Memory $index'))
+      ..conversations = List.generate(
+        36,
+        (index) => memory(
+          'memory-$index',
+          title: 'Memory $index',
+          at: DateTime.parse('2026-08-10T18:00:00Z').subtract(Duration(days: index)),
+        ),
+      )
       ..hasLoadedConversations = true
       ..hasFreshConversations = true
       ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
+    await tester.tap(find.byKey(const Key('memory-sort-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Oldest first'));
+    await tester.pumpAndSettle();
+    expect(find.text('Memory 35'), findsOneWidget);
+
     await tester.fling(find.byKey(const Key('ella-memories-list')), const Offset(0, -3200), 4000);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('back-to-recent-memories')), findsOneWidget);
@@ -305,6 +344,7 @@ void main() {
       find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)).first,
     );
     expect(scrollable.position.pixels, closeTo(0, 0.5));
+    expect(find.text('Memory 0'), findsOneWidget);
     expect(find.byKey(const Key('back-to-recent-memories')), findsNothing);
   });
 }
