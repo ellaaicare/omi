@@ -514,7 +514,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
 
     Future<void> openHomeControls() async {
-      await tester.tap(find.byKey(const Key('today-controls-button')));
+      await tester.tap(find.byKey(const Key('today-dock-status')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 250));
     }
@@ -548,7 +548,7 @@ void main() {
       expect(guardianModeReads, 1);
       expect(find.byKey(const Key('today-whispers-card')), findsOneWidget);
       expect(find.text('Whispers'), findsOneWidget);
-      expect(find.text('See whispers'), findsOneWidget);
+      expect(find.text('See whispers'), findsNothing);
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       await openHomeControls();
       expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);
