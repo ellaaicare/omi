@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
-import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -65,7 +64,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       builder: (context, snapshot) {
         final result = snapshot.data;
         if (result?.isReady != true) {
-          return _fallback(context, loading: snapshot.connectionState != ConnectionState.done);
+          return _fallback(context);
         }
         return Semantics(
           image: true,
@@ -82,7 +81,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     );
   }
 
-  Widget _fallback(BuildContext context, {bool loading = false}) {
+  Widget _fallback(BuildContext context) {
     final bytes = _sourcePhoto();
     if (bytes != null) {
       return Semantics(
@@ -97,62 +96,63 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         ),
       );
     }
-    return _placeholder(loading: loading);
+    return _placeholder();
   }
 
-  Widget _placeholder({bool loading = false}) {
-    return ExcludeSemantics(
-      child: KeyedSubtree(
-        key: const Key('memory-fallback-art'),
-        child: DecoratedBox(
-          key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFFE6F0EA), Color(0xFFF3E7D8), Color(0xFFE7D9C9)],
-            ),
-          ),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Positioned(
-                left: -36,
-                top: -42,
-                width: 160,
-                height: 160,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(color: EllaColors.teal.withValues(alpha: 0.14), shape: BoxShape.circle),
-                ),
-              ),
-              Positioned(
-                right: -48,
-                bottom: -58,
-                width: 190,
-                height: 190,
-                child: Transform.rotate(
-                  angle: -0.24,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: EllaColors.warning.withValues(alpha: 0.10),
-                      borderRadius: BorderRadius.circular(46),
-                    ),
-                  ),
-                ),
-              ),
-              if (loading)
-                const Align(
-                  alignment: Alignment.bottomCenter,
-                  child: LinearProgressIndicator(
-                    minHeight: 2,
-                    color: EllaColors.tealDeep,
-                    backgroundColor: Colors.transparent,
-                  ),
-                ),
-            ],
-          ),
-        ),
+  Widget _placeholder() {
+    final asset = MemoryArtworkTopicLibrary.assetFor(widget.conversation);
+    return Semantics(
+      image: true,
+      label: context.l10n.memoryGeneratedArtworkLabel,
+      child: Image.asset(
+        asset,
+        key: Key('memory-curated-art-${widget.conversation.id}'),
+        fit: widget.fit,
+        gaplessPlayback: true,
       ),
     );
+  }
+}
+
+class MemoryArtworkTopicLibrary {
+  MemoryArtworkTopicLibrary._();
+
+  static const _assetRoot = 'assets/images/ella-memory-topics';
+  static const _fallbackAssets = <String>[
+    'meal',
+    'family',
+    'market',
+    'walk',
+    'phone',
+    'reading',
+    'music',
+    'quiet',
+    'celebration',
+    'garden',
+    'travel',
+    'art',
+  ];
+
+  static const _keywords = <String, List<String>>{
+    'meal': ['dinner', 'lunch', 'breakfast', 'meal', 'restaurant', 'food', 'cook', 'kitchen', 'paella'],
+    'family': ['family', 'friend', 'visit', 'together', 'grandchild', 'daughter', 'son', 'sister', 'brother'],
+    'market': ['market', 'shopping', 'shop', 'store', 'grocer', 'farmers'],
+    'walk': ['walk', 'park', 'outside', 'trail', 'lake', 'river'],
+    'phone': ['phone', 'call', 'spoke', 'conversation'],
+    'reading': ['book', 'read', 'reading', 'library', 'story'],
+    'music': ['music', 'song', 'concert', 'piano', 'record', 'dance'],
+    'celebration': ['holiday', 'birthday', 'celebration', 'party', 'anniversary'],
+    'garden': ['garden', 'flower', 'plant', 'yard'],
+    'travel': ['travel', 'trip', 'train', 'flight', 'vacation', 'journey'],
+    'art': ['art', 'museum', 'gallery', 'paint', 'exhibit'],
+  };
+
+  static String assetFor(ServerConversation conversation) {
+    final source = '${conversation.structured.title} ${conversation.structured.overview}'.toLowerCase();
+    for (final entry in _keywords.entries) {
+      if (entry.value.any(source.contains)) return '$_assetRoot/${entry.key}.webp';
+    }
+    final stableIndex = conversation.id.codeUnits.fold<int>(0, (sum, value) => sum + value) % _fallbackAssets.length;
+    return '$_assetRoot/${_fallbackAssets[stableIndex]}.webp';
   }
 }

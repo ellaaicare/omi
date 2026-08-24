@@ -9,27 +9,6 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/utils/enums.dart';
 
 void main() {
-  test('selects only incomplete upcoming reminders due today', () {
-    final now = DateTime(2026, 7, 19, 10);
-    final items = [
-      ActionItemWithMetadata(id: 'today', description: 'Call Greg', completed: false, dueAt: DateTime(2026, 7, 19, 11)),
-      ActionItemWithMetadata(
-        id: 'completed',
-        description: 'Already done',
-        completed: true,
-        dueAt: DateTime(2026, 7, 19, 12),
-      ),
-      ActionItemWithMetadata(
-        id: 'tomorrow',
-        description: 'Tomorrow',
-        completed: false,
-        dueAt: DateTime(2026, 7, 20, 9),
-      ),
-    ];
-
-    expect(todayUpcomingReminders(items, now).map((item) => item.id), ['today']);
-  });
-
   test('action item source labels survive API parsing', () {
     final item = ActionItemWithMetadata.fromJson({
       'id': 'from-david',
@@ -123,6 +102,30 @@ void main() {
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
   });
 
+  testWidgets('unavailable capture invokes only the gentle unavailable action', (tester) async {
+    var recordTaps = 0;
+    var unavailableTaps = 0;
+    await _pumpRecordControl(
+      tester,
+      recordingState: RecordingState.error,
+      onTap: () => recordTaps += 1,
+      onUnavailable: () => unavailableTaps += 1,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayDockRecordingUnavailable), findsOneWidget);
+    final actionSemantics = tester.widget<Semantics>(
+      find.ancestor(of: find.byKey(const Key('today-record-moment')), matching: find.byType(Semantics)).first,
+    );
+    expect(actionSemantics.properties.enabled, isFalse);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(recordTaps, 0);
+    expect(unavailableTaps, 1);
+  });
+
   testWidgets('compact dock never exposes numeric capture diagnostics', (tester) async {
     await _pumpRecordControl(
       tester,
@@ -148,10 +151,10 @@ void main() {
 
   testWidgets('technical capture proof remains available in the Device diagnostics panel', (tester) async {
     await tester.pumpWidget(
-      MaterialApp(
+      const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: const Scaffold(
+        home: Scaffold(
           body: CaptureDiagnosticsPanel(
             diagnostics: CaptureDiagnostics(
               source: CaptureDiagnosticSource.phone,
@@ -186,6 +189,7 @@ Future<void> _pumpRecordControl(
   CaptureDiagnostics diagnostics = const CaptureDiagnostics(),
   bool necklaceContinuouslyRecording = false,
   VoidCallback? onViewTranscript,
+  VoidCallback? onUnavailable,
   VoidCallback? onTap,
 }) {
   return tester.pumpWidget(
@@ -203,6 +207,7 @@ Future<void> _pumpRecordControl(
           diagnostics: diagnostics,
           necklaceContinuouslyRecording: necklaceContinuouslyRecording,
           onViewTranscript: onViewTranscript ?? () {},
+          onUnavailable: onUnavailable,
           onTap: onTap ?? () {},
         ),
       ),

@@ -68,7 +68,7 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  testWidgets('ready Home matches the selected Memory Mosaic hierarchy', (tester) async {
+  testWidgets('ready Home matches the reviewed Memory Canvas hierarchy', (tester) async {
     final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
     final conversations = _ConversationFixtures.withMemories(photoBase64: base64Encode(photoData.buffer.asUint8List()));
     final harness = await _pumpHome(tester, conversations: conversations, includeBottomNav: true);
@@ -80,9 +80,12 @@ void main() {
     expect(find.text('Good morning, Margaret'), findsOneWidget);
     expect(find.text('Record'), findsOneWidget);
     expect(find.text('iPhone · Ready'), findsOneWidget);
-    expect(find.text('Recent memories'), findsOneWidget);
+    expect(find.text('Recent memories'), findsNothing);
     expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
-    expect(find.byKey(const Key('memory-fallback-art')), findsOneWidget);
+    expect(find.byKey(const Key('memory-curated-art-memory-2')), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Reminders'), findsNothing);
+    expect(find.byIcon(Icons.tune_rounded), findsNothing);
     expect(find.text('Talk'), findsOneWidget);
     expect(find.text('Voice'), findsNothing);
     expect(find.text('Read aloud'), findsNothing);
@@ -141,7 +144,32 @@ void main() {
 
     expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
     expect(harness.conversations.permanentDeletes, isEmpty);
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('memories-see-all')),
+      300,
+      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
     expect(find.byKey(const Key('memories-see-all')), findsOneWidget);
+  });
+
+  testWidgets('Home never renders inherited reminder content', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+      actionItems: [
+        ActionItemWithMetadata(
+          id: 'medical-reminder',
+          description: '[MED] Placeholder dose',
+          completed: false,
+          dueAt: DateTime(2026, 8, 9, 23, 59),
+        ),
+      ],
+    );
+    addTearDown(harness.dispose);
+
+    expect(find.text('Reminders'), findsNothing);
+    expect(find.textContaining('[MED]'), findsNothing);
+    expect(find.textContaining('11:59'), findsNothing);
   });
 
   testWidgets('phone capture transforms in place and finishes the moment', (tester) async {
@@ -263,6 +291,12 @@ void main() {
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
     expect(find.text('Recording needs a moment'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStarts, 0);
+    expect(harness.capture.recordingState, RecordingState.error);
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
   });
 
   testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {
@@ -534,7 +568,7 @@ void main() {
     expect(find.text('Process Now'), findsNothing);
   });
 
-  testWidgets('necklace transport error retries through a fresh Home capture start', (tester) async {
+  testWidgets('necklace transport error stays unavailable and never starts capture', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
       ..pairedDevice = necklace
@@ -552,10 +586,10 @@ void main() {
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
-    expect(harness.capture.deviceStarts, 1);
-    expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.text('Recording needs a moment'), findsNothing);
-    expect(find.text('Recording with your necklace'), findsOneWidget);
+    expect(harness.capture.deviceStarts, 0);
+    expect(harness.capture.recordingState, RecordingState.error);
+    expect(find.text('Recording needs a moment'), findsOneWidget);
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
   });
 
   testWidgets('continuous necklace stream gets exact moment boundaries without being stopped', (tester) async {
@@ -639,9 +673,14 @@ void main() {
     final harness = await _pumpHome(tester, conversations: _ConversationFixtures.manyMemories());
     addTearDown(harness.dispose);
 
-    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-journal-card-')), findsOneWidget);
-    expect(
-        find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
+    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsNothing);
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('memories-see-all')),
+      300,
+      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
     expect(find.byKey(const Key('memories-see-all')), findsOneWidget);
   });
 
@@ -676,9 +715,8 @@ void main() {
 
     await tester.dragFrom(const Offset(160, 400), const Offset(0, -1200));
     await tester.pump();
-    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-journal-card-')), findsOneWidget);
-    expect(
-        find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
+    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsNothing);
     expect(find.text('Home'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('Talk'), findsOneWidget);
@@ -710,7 +748,7 @@ class _HomeHarness {
   });
 
   final _FakeCaptureProvider capture;
-  final _NoActionsProvider actionItems;
+  final _FixtureActionsProvider actionItems;
   final _FixtureConversationProvider conversations;
   final DeviceProvider device;
   final HomeProvider home;
@@ -743,6 +781,7 @@ Future<_HomeHarness> _pumpHome(
   List<bool> finalizationResults = const [],
   Completer<void>? finalizationGate,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
+  List<ActionItemWithMetadata> actionItems = const [],
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -758,7 +797,7 @@ Future<_HomeHarness> _pumpHome(
     finalizationResults: finalizationResults,
     finalizationGate: finalizationGate,
   );
-  final actionItems = _NoActionsProvider();
+  final actionItemsProvider = _FixtureActionsProvider(actionItems);
   final conversationProvider = _FixtureConversationProvider(conversations);
   final deviceProvider = device ?? DeviceProvider();
   final home = HomeProvider();
@@ -782,7 +821,7 @@ Future<_HomeHarness> _pumpHome(
   await tester.pumpWidget(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider<ActionItemsProvider>.value(value: actionItems),
+        ChangeNotifierProvider<ActionItemsProvider>.value(value: actionItemsProvider),
         ChangeNotifierProvider<CaptureProvider>.value(value: capture),
         ChangeNotifierProvider<ConversationProvider>.value(value: conversationProvider),
         ChangeNotifierProvider<DeviceProvider>.value(value: deviceProvider),
@@ -830,7 +869,7 @@ Future<_HomeHarness> _pumpHome(
 
   return _HomeHarness(
     capture: capture,
-    actionItems: actionItems,
+    actionItems: actionItemsProvider,
     conversations: conversationProvider,
     device: deviceProvider,
     home: home,
@@ -838,9 +877,13 @@ Future<_HomeHarness> _pumpHome(
   );
 }
 
-class _NoActionsProvider extends ActionItemsProvider {
+class _FixtureActionsProvider extends ActionItemsProvider {
+  _FixtureActionsProvider(this.values);
+
+  final List<ActionItemWithMetadata> values;
+
   @override
-  List<ActionItemWithMetadata> get actionItems => const [];
+  List<ActionItemWithMetadata> get actionItems => values;
 
   @override
   Future<void> fetchActionItems({bool showShimmer = false}) async {}

@@ -57,12 +57,10 @@ void main() {
     }
   });
 
-  test('memories remain in a loading state until the first fetch completes', () {
-    expect(shouldShowMemoriesLoading(hasLoaded: false, isLoading: false, hasMemories: false), isTrue);
-    expect(shouldShowMemoriesLoading(hasLoaded: false, isLoading: true, hasMemories: false), isTrue);
-    expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: true, hasMemories: false), isTrue);
-    expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: false, hasMemories: false), isFalse);
-    expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: true, hasMemories: true), isFalse);
+  test('Home dock clearance grows with safe area and Dynamic Type', () {
+    final baseline = todayDockScrollClearance(textScale: 1, safeBottom: 0);
+    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), baseline + 34);
+    expect(todayDockScrollClearance(textScale: 2, safeBottom: 0), greaterThan(baseline));
   });
 
   test('read aloud is offered only for a loaded daily note', () {
