@@ -32,7 +32,7 @@ void main() {
     expect(find.byIcon(Icons.phone_iphone_rounded), findsOneWidget);
   });
 
-  testWidgets('phone-only recording keeps the moment heading and explicit start copy', (tester) async {
+  testWidgets('phone-only recording keeps a compact explicit action and source status', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -53,9 +53,9 @@ void main() {
       ),
     );
 
-    expect(find.text('Record a moment'), findsOneWidget);
-    expect(find.text('Start Recording'), findsOneWidget);
-    expect(find.text('Records on this iPhone'), findsOneWidget);
-    expect(find.text('Records with your necklace'), findsNothing);
+    expect(find.text('Record'), findsOneWidget);
+    expect(find.text('Transcript'), findsOneWidget);
+    expect(find.text('iPhone · Ready'), findsOneWidget);
+    expect(find.text('Necklace · Ready'), findsNothing);
   });
 }

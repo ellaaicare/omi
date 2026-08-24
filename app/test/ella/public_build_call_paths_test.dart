@@ -514,7 +514,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
 
     Future<void> openHomeControls() async {
-      await tester.tap(find.byKey(const Key('today-controls-button')));
+      await tester.tap(find.byKey(const Key('today-dock-status')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 250));
     }
@@ -528,9 +528,8 @@ void main() {
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
     final expectedNow = previewEnabled ? previewNow : runtimeNow;
     expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
-    expect(find.text('Record a moment'), findsOneWidget);
-    final expectedRecordingSource =
-        deviceProvider.presentationIsConnected ? 'Records with your necklace' : 'Records on this iPhone';
+    expect(find.text('Record'), findsOneWidget);
+    final expectedRecordingSource = deviceProvider.presentationIsConnected ? 'Necklace · Ready' : 'iPhone · Ready';
     expect(find.text(expectedRecordingSource, skipOffstage: false), findsOneWidget);
     expect(find.text('Voice'), findsNothing);
     expect(find.text('Talk'), findsOneWidget);
@@ -549,7 +548,7 @@ void main() {
       expect(guardianModeReads, 1);
       expect(find.byKey(const Key('today-whispers-card')), findsOneWidget);
       expect(find.text('Whispers'), findsOneWidget);
-      expect(find.text('See whispers'), findsOneWidget);
+      expect(find.text('See whispers'), findsNothing);
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       await openHomeControls();
       expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);

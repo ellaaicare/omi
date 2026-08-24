@@ -101,7 +101,6 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   Widget _placeholder({bool loading = false}) {
-    final emoji = widget.conversation.structured.emoji.trim();
     return ExcludeSemantics(
       child: KeyedSubtree(
         key: const Key('memory-fallback-art'),
@@ -117,10 +116,28 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Center(
-                child: Text(
-                  emoji.isEmpty ? '🪽' : emoji,
-                  style: const TextStyle(fontSize: 34, color: EllaColors.inkSoft),
+              Positioned(
+                left: -36,
+                top: -42,
+                width: 160,
+                height: 160,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(color: EllaColors.teal.withValues(alpha: 0.14), shape: BoxShape.circle),
+                ),
+              ),
+              Positioned(
+                right: -48,
+                bottom: -58,
+                width: 190,
+                height: 190,
+                child: Transform.rotate(
+                  angle: -0.24,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: EllaColors.warning.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(46),
+                    ),
+                  ),
                 ),
               ),
               if (loading)

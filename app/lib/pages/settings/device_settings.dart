@@ -9,8 +9,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/widgets/capture_diagnostics_panel.dart';
 import 'package:omi/pages/conversations/sync_page.dart';
 import 'package:omi/pages/home/firmware_update.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/services.dart';
@@ -18,7 +20,6 @@ import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/ella/ella_theme.dart';
-import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/dialog.dart';
@@ -438,13 +439,19 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                       children: [
                         Text(
                           context.l10n.ledBrightness,
-                          style:
-                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
+                          style: const TextStyle(
+                            color: EllaColors.textPrimary,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                         Text(
                           '${_dimRatio.round()}%',
-                          style:
-                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
+                          style: const TextStyle(
+                            color: EllaColors.textPrimary,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ],
                     ),
@@ -547,19 +554,27 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                       children: [
                         Text(
                           context.l10n.micGain,
-                          style:
-                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
+                          style: const TextStyle(
+                            color: EllaColors.textPrimary,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                         Text(
                           getGainLabel(currentLevel),
-                          style:
-                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
+                          style: const TextStyle(
+                            color: EllaColors.textPrimary,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 8),
-                    Text(getGainDescription(currentLevel),
-                        style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13)),
+                    Text(
+                      getGainDescription(currentLevel),
+                      style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13),
+                    ),
                     const SizedBox(height: 24),
                     SliderTheme(
                       data: SliderThemeData(
@@ -940,6 +955,9 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                   _buildHardwareInfoSection(provider.pairedDevice),
                   const SizedBox(height: 32),
                 ],
+                _buildSectionHeader(context.l10n.transcriptionDiagnostics),
+                CaptureDiagnosticsPanel(diagnostics: context.watch<CaptureProvider>().captureDiagnostics),
+                const SizedBox(height: 32),
                 _buildActionsSection(provider),
                 const SizedBox(height: 48),
               ],

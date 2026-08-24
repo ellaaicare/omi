@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -11,7 +9,6 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
-import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -82,8 +79,8 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  ServerConversation memory(String id, {String title = 'A test memory'}) {
-    final startedAt = DateTime.parse('2026-08-10T18:00:00Z');
+  ServerConversation memory(String id, {String title = 'A test memory', DateTime? at}) {
+    final startedAt = at ?? DateTime.parse('2026-08-10T18:00:00Z');
     return ServerConversation(
       id: id,
       createdAt: startedAt,
@@ -115,13 +112,12 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('memory row exposes a 48-point delete action and confirms permanent deletion', (tester) async {
+  testWidgets('gallery browse cards have no destructive action', (tester) async {
     final requestedIds = <String>[];
     final authority = _MutableAuthority('test-user');
     final provider = ConversationProvider(
       activeAuthority: () => authority,
-      conversationDeleteCall: (id, exactAuthority) async {
-        expect(exactAuthority.uid, 'test-user');
+      conversationDeleteCall: (id, _) async {
         requestedIds.add(id);
         return true;
       },
@@ -134,79 +130,59 @@ void main() {
 
     await pumpPage(tester, provider);
 
-    final deleteAction = find.byKey(const Key('delete-memory-memory-1'));
-    expect(deleteAction, findsOneWidget);
-    expect(tester.getSize(deleteAction).width, greaterThanOrEqualTo(48));
-    expect(tester.getSize(deleteAction).height, greaterThanOrEqualTo(48));
-
-    await tester.tap(deleteAction);
-    await tester.pumpAndSettle();
-    expect(find.text('Delete Memory'), findsOneWidget);
-    expect(find.textContaining('cannot be undone'), findsOneWidget);
+    expect(find.byKey(const Key('memory-card-memory-1')), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
+    expect(find.byKey(const Key('memory-layout-menu')), findsOneWidget);
+    expect(find.byKey(const Key('memory-sort-menu')), findsOneWidget);
     expect(requestedIds, isEmpty);
-
-    await tester.tap(find.byKey(const Key('confirm-delete-memory')));
-    await tester.pumpAndSettle();
-
-    expect(requestedIds, ['memory-1']);
-    expect(find.text('A test memory'), findsNothing);
-    expect(find.text('Memory Deleted.'), findsOneWidget);
   });
 
-  testWidgets('cancelling memory deletion leaves the memory untouched', (tester) async {
-    final requestedIds = <String>[];
-    final authority = _MutableAuthority('test-user');
-    final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationDeleteCall: (id, _) async {
-        requestedIds.add(id);
-        return true;
-      },
-    )
-      ..conversations = [memory('memory-2')]
+  testWidgets('gallery sort switches between newest and oldest memories', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [
+        memory('newest', title: 'Newest memory', at: DateTime.parse('2026-08-10T18:00:00Z')),
+        memory('oldest', title: 'Oldest memory', at: DateTime.parse('2026-08-10T08:00:00Z')),
+      ]
       ..hasLoadedConversations = true
       ..hasFreshConversations = true
       ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
-    await tester.tap(find.byKey(const Key('delete-memory-memory-2')));
+    expect(
+      tester.getTopLeft(find.byKey(const Key('memory-card-newest'))).dy,
+      lessThan(tester.getTopLeft(find.byKey(const Key('memory-card-oldest'))).dy),
+    );
+
+    await tester.tap(find.byKey(const Key('memory-sort-menu')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Cancel'));
+    await tester.tap(find.text('Oldest first'));
     await tester.pumpAndSettle();
 
-    expect(requestedIds, isEmpty);
-    expect(find.text('A test memory'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byKey(const Key('memory-card-oldest'))).dy,
+      lessThan(tester.getTopLeft(find.byKey(const Key('memory-card-newest'))).dy),
+    );
   });
 
-  testWidgets('account transition rejects delayed success and never shows deletion success', (tester) async {
-    final authority = _MutableAuthority('test-user');
-    final response = Completer<bool>();
+  testWidgets('oldest-first sorting stays disabled until the full archive is loaded', (tester) async {
     final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationDeleteCall: (_, __) => response.future,
+      conversationsPageFetchCall: ({required limit, required offset}) async => const ConversationsFetchResult.failure(),
     )
-      ..conversations = [memory('memory-delayed')]
+      ..conversations = [memory('recent-page')]
       ..hasLoadedConversations = true
       ..hasFreshConversations = true
-      ..hasMoreConversations = false;
+      ..hasMoreConversations = true;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
-    await tester.tap(find.byKey(const Key('delete-memory-memory-delayed')));
+    await tester.tap(find.byKey(const Key('memory-sort-menu')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('confirm-delete-memory')));
-    await tester.pump();
-    expect(find.byKey(const Key('deleting-memory-progress')), findsOneWidget);
 
-    authority.current = false;
-    EllaAccountCommitBarrier.quiesceForAccountTransition();
-    response.complete(true);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
-
-    expect(find.text('Memory Deleted.'), findsNothing);
-    expect(find.text('An error occurred. Please try again.'), findsOneWidget);
+    final oldestItem = tester.widget<PopupMenuItem<MemoryGallerySort>>(
+      find.ancestor(of: find.text('Oldest first'), matching: find.byType(PopupMenuItem<MemoryGallerySort>)),
+    );
+    expect(oldestItem.enabled, isFalse);
   });
 
   testWidgets('layout persists per account profile and illustration style remains editable', (tester) async {
@@ -265,14 +241,11 @@ void main() {
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('memory-card-memory-49')),
-      1200,
-      scrollable: find.descendant(
-        of: find.byKey(const Key('ella-memories-list')),
-        matching: find.byType(Scrollable),
-      ),
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)),
     );
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pump();
     await tester.pumpAndSettle();
 
     expect(pageRequests, 1);
@@ -340,13 +313,26 @@ void main() {
 
   testWidgets('Back to recent appears after scrolling and returns to the newest memories', (tester) async {
     final provider = ConversationProvider()
-      ..conversations = List.generate(36, (index) => memory('memory-$index', title: 'Memory $index'))
+      ..conversations = List.generate(
+        36,
+        (index) => memory(
+          'memory-$index',
+          title: 'Memory $index',
+          at: DateTime.parse('2026-08-10T18:00:00Z').subtract(Duration(days: index)),
+        ),
+      )
       ..hasLoadedConversations = true
       ..hasFreshConversations = true
       ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
+    await tester.tap(find.byKey(const Key('memory-sort-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Oldest first'));
+    await tester.pumpAndSettle();
+    expect(find.text('Memory 35'), findsOneWidget);
+
     await tester.fling(find.byKey(const Key('ella-memories-list')), const Offset(0, -3200), 4000);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('back-to-recent-memories')), findsOneWidget);
@@ -358,6 +344,7 @@ void main() {
       find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)).first,
     );
     expect(scrollable.position.pixels, closeTo(0, 0.5));
+    expect(find.text('Memory 0'), findsOneWidget);
     expect(find.byKey(const Key('back-to-recent-memories')), findsNothing);
   });
 }

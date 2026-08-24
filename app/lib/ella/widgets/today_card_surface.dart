@@ -5,11 +5,18 @@ import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class TodayCardSurface extends StatelessWidget {
-  const TodayCardSurface({super.key, required this.state, required this.onReadMore, required this.onTalk});
+  const TodayCardSurface({
+    super.key,
+    required this.state,
+    required this.onReadMore,
+    required this.onTalk,
+    this.compact = false,
+  });
 
   final TodayCardViewState state;
   final VoidCallback? onReadMore;
   final VoidCallback? onTalk;
+  final bool compact;
 
   static const double _botanicalOpacity = 0.18;
 
@@ -17,10 +24,10 @@ class TodayCardSurface extends StatelessWidget {
   Widget build(BuildContext context) {
     final card = state.card;
     final content = card == null ? _fallbackContent(context, state) : _TodayCardContent.fromCard(context, card);
-    final showBotanical = card != null && _showsBotanical(card);
+    final showBotanical = !compact && card != null && _showsBotanical(card);
     final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
-    final headlineLines = card == null ? null : 2;
-    final bodyLines = card == null ? null : (textScale > 1.3 ? 2 : 4);
+    final headlineLines = compact ? 2 : (card == null ? null : 2);
+    final bodyLines = compact ? 2 : (card == null ? null : (textScale > 1.3 ? 2 : 4));
 
     return EllaCardSurface(
       borderRadius: 24,
@@ -50,12 +57,12 @@ class TodayCardSurface extends StatelessWidget {
             container: true,
             explicitChildNodes: true,
             child: Padding(
-              padding: const EdgeInsets.all(EllaSizes.notePadding),
+              padding: EdgeInsets.all(compact ? 16 : EllaSizes.notePadding),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(content.eyebrow, key: const Key('today-card-eyebrow'), style: EllaTextStyles.eyebrow),
-                  const SizedBox(height: 14),
+                  SizedBox(height: compact ? 8 : 14),
                   Semantics(
                     header: true,
                     child: Text(
@@ -63,16 +70,20 @@ class TodayCardSurface extends StatelessWidget {
                       key: const Key('today-card-headline'),
                       maxLines: headlineLines,
                       overflow: headlineLines == null ? null : TextOverflow.ellipsis,
-                      style: EllaTextStyles.noteBody.copyWith(fontSize: 26, height: 1.12),
+                      style: EllaTextStyles.noteBody.copyWith(fontSize: compact ? 20 : 26, height: 1.12),
                     ),
                   ),
-                  const SizedBox(height: 10),
+                  SizedBox(height: compact ? 6 : 10),
                   Text(
                     content.body,
                     key: const Key('today-card-body'),
                     maxLines: bodyLines,
                     overflow: bodyLines == null ? null : TextOverflow.ellipsis,
-                    style: EllaTextStyles.noteBody.copyWith(fontSize: 19, height: 1.35, fontWeight: FontWeight.w400),
+                    style: EllaTextStyles.noteBody.copyWith(
+                      fontSize: compact ? 14 : 19,
+                      height: compact ? 1.3 : 1.35,
+                      fontWeight: FontWeight.w400,
+                    ),
                   ),
                   if (state.isCached) ...[
                     const SizedBox(height: 12),
@@ -94,7 +105,7 @@ class TodayCardSurface extends StatelessWidget {
                     ),
                   ],
                   if (card != null) ...[
-                    const SizedBox(height: 18),
+                    SizedBox(height: compact ? 10 : 18),
                     const Divider(height: 1, color: EllaColors.cardDeep),
                     const SizedBox(height: 6),
                     _TodayCardFooter(provenance: content.provenance, onReadMore: onReadMore, onTalk: onTalk),

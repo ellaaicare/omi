@@ -17696,6 +17696,90 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Loading earlier memories'**
   String get memoryLoadingMore;
+
+  /// No description provided for @todayDockRecord.
+  ///
+  /// In en, this message translates to:
+  /// **'Record'**
+  String get todayDockRecord;
+
+  /// No description provided for @todayDockFinish.
+  ///
+  /// In en, this message translates to:
+  /// **'Finish'**
+  String get todayDockFinish;
+
+  /// No description provided for @todayDockStarting.
+  ///
+  /// In en, this message translates to:
+  /// **'Starting recording…'**
+  String get todayDockStarting;
+
+  /// No description provided for @todayDockRecordingUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording needs a moment'**
+  String get todayDockRecordingUnavailable;
+
+  /// No description provided for @todayDockNecklaceConnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace · Connecting…'**
+  String get todayDockNecklaceConnecting;
+
+  /// No description provided for @todayDockRecordingPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording on this iPhone'**
+  String get todayDockRecordingPhone;
+
+  /// No description provided for @todayDockRecordingNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording with your necklace'**
+  String get todayDockRecordingNecklace;
+
+  /// No description provided for @todayDockNecklaceReady.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace · Ready'**
+  String get todayDockNecklaceReady;
+
+  /// No description provided for @todayDockNecklaceNotConnected.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace not connected'**
+  String get todayDockNecklaceNotConnected;
+
+  /// No description provided for @todayDockPhoneReady.
+  ///
+  /// In en, this message translates to:
+  /// **'iPhone · Ready'**
+  String get todayDockPhoneReady;
+
+  /// No description provided for @memorySortRecent.
+  ///
+  /// In en, this message translates to:
+  /// **'Newest first'**
+  String get memorySortRecent;
+
+  /// No description provided for @memorySortOldest.
+  ///
+  /// In en, this message translates to:
+  /// **'Oldest first'**
+  String get memorySortOldest;
+
+  /// No description provided for @todayMemoryCanvasEmptyHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Your memories will appear here'**
+  String get todayMemoryCanvasEmptyHeadline;
+
+  /// No description provided for @todayMemoryCanvasEmptyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Record a moment and Ella will gather the memories you choose.'**
+  String get todayMemoryCanvasEmptyBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
