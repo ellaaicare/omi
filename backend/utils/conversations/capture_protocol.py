@@ -283,7 +283,12 @@ def _install_authority_transaction(
         if predecessor_is_v2 and not (active_predecessor_can_handoff or drained_predecessor_can_handoff):
             return False
         if not predecessor_is_v2 and authority:
-            return False
+            legacy_authority_is_live = authority.get('state') not in {'drained', 'terminal'} and not _lease_expired(
+                authority,
+                now,
+            )
+            if legacy_authority_is_live:
+                return False
     elif authority and authority.get('state') not in {'drained', 'terminal'} and not _lease_expired(authority, now):
         return False
 

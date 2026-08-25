@@ -279,6 +279,70 @@ def test_expired_predecessor_allows_new_generation_reconnect(capture_protocol):
     assert retry_transaction.sets == []
 
 
+def test_expired_authority_allows_legacy_predecessor_rotation(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(conversation_id='capture-stale', generation='generation-stale', owner='owner-stale')
+    authority['lease_expires_at'] = now - timedelta(days=1)
+    predecessor = {
+        'id': 'capture-legacy',
+        'status': 'in_progress',
+        'capture_owner_id': None,
+    }
+    authority_ref = _Document(authority)
+    predecessor_ref = _Document(predecessor)
+    successor_ref = _Document(
+        {
+            'id': 'capture-current',
+            'status': 'in_progress',
+            'capture_owner_id': 'owner-current',
+        }
+    )
+    transaction = _Transaction()
+
+    installed = capture_protocol._install_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        successor_ref,
+        'capture-current',
+        'generation-current',
+        'owner-current',
+        now,
+        'capture-legacy',
+        predecessor_ref,
+        False,
+    )
+
+    assert installed is True
+    assert _updated(predecessor, transaction, predecessor_ref)['capture_state'] == 'drained'
+    successor = _updated(successor_ref.data, transaction, successor_ref)
+    assert successor['capture_state'] == 'active'
+    current_authority = _updated(authority, transaction, authority_ref)
+    assert current_authority['conversation_id'] == 'capture-current'
+    assert current_authority['generation'] == 'generation-current'
+    assert current_authority['owner_token'] == 'owner-current'
+
+
+def test_live_authority_rejects_legacy_predecessor_rotation_without_writes(capture_protocol):
+    transaction = _Transaction()
+
+    installed = capture_protocol._install_authority_transaction.to_wrap(
+        transaction,
+        _Document(_authority(conversation_id='capture-live', generation='generation-live', owner='owner-live')),
+        _Document({'id': 'capture-current', 'status': 'in_progress', 'capture_owner_id': 'owner-current'}),
+        'capture-current',
+        'generation-current',
+        'owner-current',
+        datetime.now(timezone.utc),
+        'capture-legacy',
+        _Document({'id': 'capture-legacy', 'status': 'in_progress', 'capture_owner_id': None}),
+        False,
+    )
+
+    assert installed is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
 def test_drained_predecessor_allows_exact_new_generation_rotation(capture_protocol):
     now = datetime.now(timezone.utc)
     authority = _authority(generation='generation-a', owner='owner-a', state='drained')

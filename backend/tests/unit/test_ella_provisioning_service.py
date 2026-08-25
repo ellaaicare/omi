@@ -3278,6 +3278,51 @@ def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch)
     monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
 
 
+def test_fresh_uid_relax_preserves_exact_active_retained_runtime(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=True,
+    )
+
+    runtime = asyncio.run(
+        resolve_isolated_runtime(
+            "retained-user",
+            repository=repository,
+            target_mode="hermes-chat",
+        )
+    )
+
+    assert runtime is None
+    assert repository.identity_calls == []
+    assert repository.job_calls == []
+
+
+def test_fresh_uid_relax_still_rejects_missing_isolated_binding(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=False,
+    )
+
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned"):
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-chat",
+            )
+        )
+
+
 def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
