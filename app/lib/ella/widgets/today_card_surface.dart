@@ -11,12 +11,14 @@ class TodayCardSurface extends StatelessWidget {
     required this.onReadMore,
     required this.onTalk,
     this.compact = false,
+    this.surfaceColor = const Color(0xFFF8F1E8),
   });
 
   final TodayCardViewState state;
   final VoidCallback? onReadMore;
   final VoidCallback? onTalk;
   final bool compact;
+  final Color surfaceColor;
 
   static const double _botanicalOpacity = 0.18;
 
@@ -31,7 +33,7 @@ class TodayCardSurface extends StatelessWidget {
 
     return EllaCardSurface(
       borderRadius: 24,
-      color: const Color(0xFFF8F1E8),
+      color: surfaceColor,
       child: Stack(
         children: [
           if (showBotanical)
@@ -93,7 +95,7 @@ class TodayCardSurface extends StatelessWidget {
                       label: context.l10n.todayCardSavedStatus,
                     ),
                   ],
-                  if (state.isLoading && card == null) ...[
+                  if (!compact && state.isLoading && card == null) ...[
                     const SizedBox(height: 20),
                     const Align(
                       alignment: Alignment.centerLeft,

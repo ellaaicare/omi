@@ -533,8 +533,8 @@ void main() {
     expect(find.text(expectedRecordingSource, skipOffstage: false), findsOneWidget);
     expect(find.text('Voice'), findsNothing);
     expect(find.text('Talk'), findsOneWidget);
-    expect(find.text(previewEnabled ? 'Preview reminder' : 'Runtime reminder'), findsOneWidget);
-    expect(find.text(previewEnabled ? 'Runtime reminder' : 'Preview reminder'), findsNothing);
+    expect(find.text('Preview reminder'), findsNothing);
+    expect(find.text('Runtime reminder'), findsNothing);
 
     expect(todayCardCalls, 1);
     expect(find.byKey(const Key('today-card-semantics')), findsOneWidget);

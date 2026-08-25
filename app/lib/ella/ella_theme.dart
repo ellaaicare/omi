@@ -7,6 +7,7 @@ class EllaColors {
   EllaColors._();
 
   static const Color paper = Color(0xFFFAF6F0);
+  static const Color elevatedCard = Color(0xFFFFFCF8);
   static const Color card = Color(0xFFF2EBE1);
   static const Color cardDeep = Color(0xFFE9DFD2);
   static const Color cardEdge = Color(0xFF8A7B66);
@@ -77,11 +78,7 @@ class EllaCardSurface extends StatelessWidget {
     this.borderRadius = EllaSizes.cardRadius,
   });
 
-  static const shadow = BoxShadow(
-    color: Color(0x0F23201C),
-    offset: Offset(0, 1),
-    blurRadius: 2,
-  );
+  static const shadow = BoxShadow(color: Color(0x0F23201C), offset: Offset(0, 1), blurRadius: 2);
 
   final Widget child;
   final Color color;
@@ -97,12 +94,7 @@ class EllaCardSurface extends StatelessWidget {
         border: Border.all(color: EllaColors.cardEdge),
         boxShadow: const [shadow],
       ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: radius,
-        clipBehavior: Clip.antiAlias,
-        child: child,
-      ),
+      child: Material(color: Colors.transparent, borderRadius: radius, clipBehavior: Clip.antiAlias, child: child),
     );
   }
 }
