@@ -446,6 +446,7 @@ def _authority(uid="owner-a", digest="digest-a"):
         uid=uid,
         binding_id=f"binding-{uid}",
         profile_id=f"profile-{uid}",
+        revision=7,
         authority_digest=digest,
     )
 
@@ -2324,3 +2325,97 @@ def test_xai_provider_selection_fails_closed_without_credential(monkeypatch):
         artwork.memory_artwork_provider_factory()
 
     assert failure.value.code == "memory_artwork_provider_credential_unavailable"
+
+
+def test_first_party_provider_sends_bounded_owner_scoped_designer_brief(monkeypatch, tmp_path):
+    token_file = tmp_path / "artwork-service-token"
+    token_file.write_text("test-service-token-value-0000000000000000")
+    token_file.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://artwork.internal/v1/ella/internal/artwork/render")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "artwork.internal")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_file))
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            content=b"private-image",
+            headers={
+                "Content-Type": "image/png",
+                "X-Ella-Image-Width": "1536",
+                "X-Ella-Image-Height": "1024",
+            },
+        )
+
+    context = artwork.ArtworkProviderContext(
+        owner_uid="owner-a",
+        profile_binding="profile-owner-a",
+        authority_generation=7,
+        source_revision="summary-v3",
+        consent_version="ai-data-processors-v10-test",
+        title="A winter walk",
+        summary="Two friends paused beside a frozen lake in blue evening light.",
+    )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.FirstPartyHTTPArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="This provider must not forward an opaque prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="job-123",
+                context=context,
+            )
+
+    generated = asyncio.run(scenario())
+
+    assert generated.image_bytes == b"private-image"
+    assert len(calls) == 1
+    request = calls[0]
+    payload = json.loads(request.content)
+    assert request.headers["X-Ella-Contract"] == artwork.ARTWORK_PROVIDER_CONTRACT_VERSION
+    assert request.headers["Idempotency-Key"] == "job-123"
+    assert payload == {
+        "schemaVersion": "ella.artwork.brief.v1",
+        "jobId": "job-123",
+        "ownerUid": "owner-a",
+        "profileBinding": "profile-owner-a",
+        "authorityGeneration": 7,
+        "sourceRevision": "summary-v3",
+        "consentVersion": "ai-data-processors-v10-test",
+        "synthetic": False,
+        "style": "gouache",
+        "title": "A winter walk",
+        "summary": "Two friends paused beside a frozen lake in blue evening light.",
+    }
+    assert "opaque prompt" not in request.content.decode()
+
+
+def test_first_party_provider_rejects_missing_context_before_egress(monkeypatch, tmp_path):
+    token_file = tmp_path / "artwork-service-token"
+    token_file.write_text("test-service-token-value-0000000000000000")
+    token_file.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://artwork.internal/v1/ella/internal/artwork/render")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "artwork.internal")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_file))
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(500)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.FirstPartyHTTPArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="job-123",
+            )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(scenario())
+
+    assert failure.value.code == "memory_artwork_provider_context_missing"
+    assert calls == []

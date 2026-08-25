@@ -93,6 +93,15 @@ disabled. The adapter must return raw PNG, WebP, or JPEG bytes with
 `X-Ella-Image-Width` and `X-Ella-Image-Height`; vendor-temporary URLs are not
 accepted or persisted.
 
+The request contract is `ella.artwork.service.v1`. The backend sends a bounded
+`ella.artwork.brief.v1` object containing the exact owner UID, opaque profile
+binding, authority generation, enriched-summary revision, consent version,
+selected style, title, and overview. It does not send raw audio, source photos,
+transcripts, a full history, a caller-selected URL, or an opaque instruction
+prompt. The first-party designer may enrich this brief with separately reviewed,
+owner-scoped mood and linked-memory context later, but must never infer or fetch
+those fields through an unbounded agent tool.
+
 ## Backfill and rollback
 
 Backfill scans a bounded recent window and queues at most ten terminal enriched

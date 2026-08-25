@@ -43,6 +43,7 @@ from utils.ella.memory_artwork_storage import (
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
+ARTWORK_PROVIDER_CONTRACT_VERSION = "ella.artwork.service.v1"
 DEFAULT_STYLE_VERSION = "ella.memory_artwork.style.soft-gouache.v1"
 SUPPORTED_STYLE_VERSIONS = {
     DEFAULT_STYLE_VERSION,
@@ -62,6 +63,11 @@ STYLE_PROMPT_BRIEFS = {
         "A bold graphic landscape illustration with simplified architectural or natural forms, clean shapes, "
         "confident negative space, and an editorial travel-poster sensibility."
     ),
+}
+DESIGNER_STYLE_NAMES = {
+    "ella.memory_artwork.style.soft-gouache.v1": "gouache",
+    "ella.memory_artwork.style.paper-collage.v1": "paper-collage",
+    "ella.memory_artwork.style.graphic-landscape.v1": "graphic-landscape",
 }
 COMPOSITION_DIRECTIONS = (
     "Use layered depth led by a concrete subject already named in the memory, adding no new foreground object.",
@@ -119,6 +125,7 @@ class ArtworkRuntimeAuthority:
     uid: str
     binding_id: str
     profile_id: str
+    revision: int
     authority_digest: str
 
 
@@ -128,6 +135,17 @@ class GeneratedArtwork:
     content_type: str
     pixel_width: int
     pixel_height: int
+
+
+@dataclass(frozen=True)
+class ArtworkProviderContext:
+    owner_uid: str
+    profile_binding: str
+    authority_generation: int
+    source_revision: str
+    consent_version: str
+    title: str
+    summary: str
 
 
 @dataclass(frozen=True)
@@ -199,7 +217,14 @@ class FirestoreMemoryArtworkRepository:
 
 
 class MemoryArtworkProvider(Protocol):
-    async def generate(self, *, prompt: str, style_version: str, idempotency_key: str) -> GeneratedArtwork: ...
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        style_version: str,
+        idempotency_key: str,
+        context: Optional[ArtworkProviderContext] = None,
+    ) -> GeneratedArtwork: ...
 
 
 class MemoryArtworkStore(Protocol):
@@ -273,7 +298,19 @@ class FirstPartyHTTPArtworkProvider:
         self.token = _read_protected_token(token_file)
         self.client = client
 
-    async def generate(self, *, prompt: str, style_version: str, idempotency_key: str) -> GeneratedArtwork:
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        style_version: str,
+        idempotency_key: str,
+        context: Optional[ArtworkProviderContext] = None,
+    ) -> GeneratedArtwork:
+        if context is None:
+            raise MemoryArtworkError("memory_artwork_provider_context_missing", retryable=False)
+        designer_style = DESIGNER_STYLE_NAMES.get(style_version)
+        if designer_style is None:
+            raise MemoryArtworkError("memory_artwork_style_version_invalid", retryable=False)
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
             timeout=PROVIDER_TIMEOUT_SECONDS,
@@ -288,13 +325,20 @@ class FirstPartyHTTPArtworkProvider:
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Idempotency-Key": idempotency_key,
-                    "X-Ella-Contract": ARTWORK_SCHEMA_VERSION,
+                    "X-Ella-Contract": ARTWORK_PROVIDER_CONTRACT_VERSION,
                 },
                 json={
-                    "prompt": prompt,
-                    "style_version": style_version,
-                    "width": TARGET_WIDTH,
-                    "height": TARGET_HEIGHT,
+                    "schemaVersion": "ella.artwork.brief.v1",
+                    "jobId": idempotency_key,
+                    "ownerUid": context.owner_uid,
+                    "profileBinding": context.profile_binding,
+                    "authorityGeneration": context.authority_generation,
+                    "sourceRevision": context.source_revision,
+                    "consentVersion": context.consent_version,
+                    "synthetic": False,
+                    "style": designer_style,
+                    "title": context.title,
+                    "summary": context.summary,
                 },
             )
         except httpx.HTTPError as exc:
@@ -357,7 +401,14 @@ class XaiMemoryArtworkProvider:
             raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
         return result
 
-    async def generate(self, *, prompt: str, style_version: str, idempotency_key: str) -> GeneratedArtwork:
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        style_version: str,
+        idempotency_key: str,
+        context: Optional[ArtworkProviderContext] = None,
+    ) -> GeneratedArtwork:
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
             timeout=PROVIDER_TIMEOUT_SECONDS,
@@ -433,6 +484,7 @@ async def resolve_memory_artwork_authority(uid: str) -> ArtworkRuntimeAuthority:
         uid=uid,
         binding_id=runtime.binding_id,
         profile_id=profile_id,
+        revision=runtime.revision,
         authority_digest=identity.digest,
     )
 
@@ -500,6 +552,31 @@ def _prompt_for(conversation: dict[str, Any], style_version: str) -> tuple[str, 
         f"Memory title: {title or 'Untitled memory'}. Memory overview: {overview or title}."
     )
     return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _provider_context(
+    *,
+    uid: str,
+    authority: ArtworkRuntimeAuthority,
+    conversation: dict[str, Any],
+    source_revision: str,
+) -> ArtworkProviderContext:
+    structured = conversation.get("structured") or {}
+    title = " ".join(str(structured.get("title") or "").split())[:240]
+    summary = " ".join(str(structured.get("overview") or title).split())[:1800]
+    if not title and not summary:
+        raise MemoryArtworkError("memory_artwork_summary_missing", retryable=False)
+    if authority.revision < 1:
+        raise MemoryArtworkError("memory_artwork_authority_generation_invalid", retryable=False)
+    return ArtworkProviderContext(
+        owner_uid=uid,
+        profile_binding=authority.profile_id,
+        authority_generation=authority.revision,
+        source_revision=source_revision,
+        consent_version=ARTWORK_CONSENT_VERSION,
+        title=title or "Untitled memory",
+        summary=summary or title,
+    )
 
 
 def _generation_key(
@@ -937,6 +1014,12 @@ class MemoryArtworkService:
                 prompt=prompt,
                 style_version=str(claimed.get("style_version") or ""),
                 idempotency_key=generation_key,
+                context=_provider_context(
+                    uid=uid,
+                    authority=authority,
+                    conversation=egress_conversation,
+                    source_revision=str(claimed.get("enrichment_revision") or ""),
+                ),
             )
         except MemoryArtworkError as exc:
             self.repository.mark_generation_unavailable(
