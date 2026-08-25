@@ -156,7 +156,7 @@ abstract class AppLocalizations {
     Locale('tr'),
     Locale('uk'),
     Locale('vi'),
-    Locale('zh')
+    Locale('zh'),
   ];
 
   /// The app title displayed in various places
@@ -9019,7 +9019,10 @@ abstract class AppLocalizations {
   ///
   /// In en, this message translates to:
   /// **'{accessDescription} and is {triggerDescription}.'**
-  String accessesAndTriggeredBy(String accessDescription, String triggerDescription);
+  String accessesAndTriggeredBy(
+    String accessDescription,
+    String triggerDescription,
+  );
 
   /// Sentence starting with 'Is' for trigger description
   ///
@@ -16566,7 +16569,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
+  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16701,17 +16704,17 @@ abstract class AppLocalizations {
   /// **'Sends iMessage content and basic delivery details only to one person you choose for testing.'**
   String get aiConsentPhotonBody;
 
-  /// Legal recipient and purpose for generated memory illustrations
+  /// Legal recipient and dedicated system purpose for generated memory illustrations
   ///
   /// In en, this message translates to:
-  /// **'xAI image generation'**
-  String get aiConsentXaiImagesTitle;
+  /// **'OpenAI and Ella’s artwork designer'**
+  String get aiConsentOpenAiArtworkTitle;
 
-  /// Plain-language data categories and purpose for xAI image generation
+  /// Plain-language data categories and purpose for OpenAI artwork generation
   ///
   /// In en, this message translates to:
-  /// **'Creates an illustration for a saved memory. It may receive only that memory’s title and summary, not your raw microphone audio or source photos.'**
-  String get aiConsentXaiImagesBody;
+  /// **'Creates an illustration for a saved memory using OpenAI’s Codex and image services. It receives only that memory’s title and summary, plus your chosen artwork style; it does not receive raw microphone audio, source photos, or your full memory history.'**
+  String get aiConsentOpenAiArtworkBody;
 
   /// Explains the exact managed-cloud profile and messaging scope
   ///
@@ -17825,7 +17828,7 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
         'tr',
         'uk',
         'vi',
-        'zh'
+        'zh',
       ].contains(locale.languageCode);
 
   @override
@@ -17905,8 +17908,10 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsZh();
   }
 
-  throw FlutterError('AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-      'an issue with the localizations generation tool. Please file an issue '
-      'on GitHub with a reproducible sample app and the gen-l10n configuration '
-      'that was used.');
+  throw FlutterError(
+    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+    'an issue with the localizations generation tool. Please file an issue '
+    'on GitHub with a reproducible sample app and the gen-l10n configuration '
+    'that was used.',
+  );
 }

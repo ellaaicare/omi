@@ -146,7 +146,7 @@ void main() {
     );
 
     expect(
-      await api.setStyle(consentVersion: 'ai-data-processors-v9', styleVersion: memoryArtworkPaperCollageStyle),
+      await api.setStyle(consentVersion: 'ai-data-processors-v10', styleVersion: memoryArtworkPaperCollageStyle),
       isTrue,
     );
     expect(await api.backfillRecent(), isTrue);
