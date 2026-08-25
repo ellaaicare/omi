@@ -88,6 +88,23 @@ List<ServerConversation> homeMemoryCanvasSelection(List<ServerConversation> conv
   return sorted.take(limit).toList(growable: false);
 }
 
+String homeMemoryDisplayTitle(ServerConversation conversation, String fallback) {
+  var title = conversation.structured.title
+      .replaceFirst(RegExp(r'^🪽\s*'), '')
+      .replaceFirst(RegExp(r'^(?:\[[^\]]+\]\s*)+'), '')
+      .trim();
+  title = title.split(RegExp(r'\s*(?:,|\band\b)\s*', caseSensitive: false)).first.trim();
+  title = title.replaceAll(
+    RegExp(
+      r'\b(?:doctor|medical|clinical|monitoring|emergency|alert|tracking|detecting)(?:[- ]\w+)?\b',
+      caseSensitive: false,
+    ),
+    '',
+  );
+  final words = title.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(4).toList();
+  return words.isEmpty ? fallback : words.join(' ');
+}
+
 class TodayPage extends StatefulWidget {
   const TodayPage({
     super.key,
@@ -949,6 +966,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                         : MemoryGalleryCard(
                             conversation: heroMemory,
                             layout: MemoryGalleryLayout.journal,
+                            displayTitle: homeMemoryDisplayTitle(heroMemory, context.l10n.untitledConversation),
                             onOpen: () => _openMemoryDetail(heroMemory),
                             onDelete: () => _deleteMemory(heroMemory),
                           ),
@@ -1091,6 +1109,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Widget _homeMemoryCard(ServerConversation conversation) => MemoryGalleryCard(
         conversation: conversation,
         layout: _homeMemoryLayout,
+        displayTitle: homeMemoryDisplayTitle(conversation, context.l10n.untitledConversation),
         onOpen: () => _openMemoryDetail(conversation),
         onDelete: () => _deleteMemory(conversation),
       );

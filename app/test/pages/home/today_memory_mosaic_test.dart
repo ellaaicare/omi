@@ -153,6 +153,25 @@ void main() {
     expect(find.byKey(const Key('memory-card-memory-1')), findsNothing);
   });
 
+  testWidgets('Home memory cards preserve sensitive-title sanitization', (tester) async {
+    final sensitiveMemory = ServerConversation(
+      id: 'sensitive-memory',
+      createdAt: DateTime(2026, 8, 8, 9),
+      startedAt: DateTime(2026, 8, 8, 9),
+      structured: Structured(
+        '[MED] Doctor appointment and Emergency monitoring',
+        'A private memory overview.',
+      ),
+    );
+    final harness = await _pumpHome(tester, conversations: [sensitiveMemory]);
+    addTearDown(harness.dispose);
+
+    expect(find.text('Untitled Conversation'), findsOneWidget);
+    expect(find.textContaining('[MED]'), findsNothing);
+    expect(find.textContaining('Doctor'), findsNothing);
+    expect(find.textContaining('Emergency'), findsNothing);
+  });
+
   testWidgets('Home never renders inherited reminder content', (tester) async {
     final harness = await _pumpHome(
       tester,

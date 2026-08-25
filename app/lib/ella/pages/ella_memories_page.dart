@@ -503,15 +503,18 @@ class MemoryGalleryCard extends StatelessWidget {
     required this.conversation,
     required this.layout,
     required this.onOpen,
+    this.displayTitle,
     this.onDelete,
   });
 
   final ServerConversation conversation;
   final MemoryGalleryLayout layout;
   final VoidCallback onOpen;
+  final String? displayTitle;
   final Future<bool> Function()? onDelete;
 
   String get _title =>
+      displayTitle ??
       conversation.structured.title.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
 
   @override
