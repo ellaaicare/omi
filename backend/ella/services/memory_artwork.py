@@ -99,6 +99,7 @@ PROVIDER_TIMEOUT_SECONDS = 45.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
 PROVIDER_ALLOWED_HOST_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST"
+INTERNAL_OWNER_UIDS_ENV = "ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS"
 WORKER_INTERVAL_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS"
 WORKER_BATCH_SIZE = 10
 WORKER_MAX_ATTEMPTS = 5
@@ -154,16 +155,26 @@ class MemoryArtworkConfig:
     release_enabled: bool
     provider_enabled: bool
     backfill_enabled: bool
+    internal_owner_uids: Optional[frozenset[str]] = None
 
     @classmethod
     def from_env(cls) -> "MemoryArtworkConfig":
         enabled = os.getenv("ELLA_MEMORY_ARTWORK_ENABLED", "false").strip().lower() == "true"
+        internal_owner_uids = frozenset(
+            uid.strip() for uid in os.getenv(INTERNAL_OWNER_UIDS_ENV, "").split(",") if uid.strip()
+        )
         return cls(
             enabled=enabled,
             release_enabled=os.getenv("ELLA_MEMORY_ARTWORK_RELEASE_ENABLED", "false").strip().lower() == "true",
             provider_enabled=os.getenv("ELLA_MEMORY_ARTWORK_PROVIDER_ENABLED", "false").strip().lower() == "true",
             backfill_enabled=os.getenv("ELLA_MEMORY_ARTWORK_BACKFILL_ENABLED", "false").strip().lower() == "true",
+            internal_owner_uids=internal_owner_uids,
         )
+
+    def allows_uid(self, uid: str) -> bool:
+        # Injected test configs predate the owner gate; environment-derived
+        # production configs always provide a set and fail closed when empty.
+        return self.internal_owner_uids is None or uid in self.internal_owner_uids
 
 
 class MemoryArtworkRepository(Protocol):
@@ -665,6 +676,15 @@ class MemoryArtworkService:
         self.config = config or MemoryArtworkConfig.from_env()
 
     async def preferences(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "consent_version": ARTWORK_CONSENT_VERSION,
+                "consent": "not_set",
+                "style_version": DEFAULT_STYLE_VERSION,
+                "supported_style_versions": sorted(SUPPORTED_STYLE_VERSIONS),
+                "release_enabled": False,
+            }
         stored = self.repository.get_preferences(uid)
         consent = str(stored.get("consent") or "not_set")
         style = str(stored.get("style_version") or DEFAULT_STYLE_VERSION)
@@ -674,10 +694,12 @@ class MemoryArtworkService:
             "consent": consent if consent in {"accepted", "declined"} else "not_set",
             "style_version": style if style in SUPPORTED_STYLE_VERSIONS else DEFAULT_STYLE_VERSION,
             "supported_style_versions": sorted(SUPPORTED_STYLE_VERSIONS),
-            "release_enabled": self.config.enabled and self.config.release_enabled,
+            "release_enabled": self.config.enabled and self.config.release_enabled and self.config.allows_uid(uid),
         }
 
     async def set_preferences(self, uid: str, *, consent: str, consent_version: str, style_version: str) -> dict:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
         if consent not in {"accepted", "declined"}:
             raise MemoryArtworkError("memory_artwork_consent_invalid")
         if consent_version != ARTWORK_CONSENT_VERSION:
@@ -707,6 +729,8 @@ class MemoryArtworkService:
         *,
         preserve_job_attempts: bool = False,
     ) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            return {"outcome": "disabled", "status": "unavailable"}
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
@@ -807,6 +831,8 @@ class MemoryArtworkService:
         generation_key: str,
         job_lease_token: str,
     ) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
         if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
             raise MemoryArtworkError("memory_artwork_generation_disabled")
         queued = self.repository.get_conversation(uid, memory_id)
@@ -1241,6 +1267,12 @@ class MemoryArtworkService:
         return {"outcome": "ready", "status": "ready"}
 
     async def signed_url(self, uid: str, memory_id: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_internal_owner_required",
+            }
         if not (self.config.enabled and self.config.release_enabled):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -1353,6 +1385,8 @@ class MemoryArtworkService:
         }
 
     async def backfill(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
         if not (self.config.enabled and self.config.release_enabled and self.config.backfill_enabled):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
         recent = self.repository.list_recent_conversations(uid, limit=BACKFILL_SCAN_LIMIT)
@@ -1406,6 +1440,8 @@ class MemoryArtworkWorker:
         *,
         raise_errors: bool = False,
     ) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
         if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
             raise MemoryArtworkError("memory_artwork_generation_disabled")
         if not uid or not memory_id or len(generation_key) != 64:
