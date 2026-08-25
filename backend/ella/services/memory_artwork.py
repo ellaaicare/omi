@@ -51,7 +51,7 @@ SUPPORTED_STYLE_VERSIONS = {
 }
 STYLE_PROMPT_BRIEFS = {
     "ella.memory_artwork.style.soft-gouache.v1": (
-        "A warm soft gouache editorial painting on lightly textured paper, with layered opaque brushwork, "
+        "A soft gouache editorial painting on lightly textured paper, with layered opaque brushwork, "
         "subtle grain, natural proportions, and restrained storybook detail."
     ),
     "ella.memory_artwork.style.paper-collage.v1": (
