@@ -165,6 +165,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   late final TodayCardController _todayCardController;
   late final Listenable _todayCardAuthorityChanges;
   EllaProvisioningProvider? _provisioningProvider;
+  ConversationProvider? _conversationProvider;
   bool _homeCaptureActive = false;
   bool _homeCaptureStarting = false;
   bool _homeCaptureFinalizationPending = false;
@@ -219,6 +220,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _provisioningProvider = nextProvider;
       _provisioningProvider?.addListener(_onProvisioningChanged);
     }
+    final nextConversationProvider = Provider.of<ConversationProvider>(context, listen: false);
+    if (!identical(nextConversationProvider, _conversationProvider)) {
+      _conversationProvider?.removeListener(_onConversationsChanged);
+      _conversationProvider = nextConversationProvider;
+      _conversationProvider?.addListener(_onConversationsChanged);
+    }
     unawaited(_syncTodayCardAuthority());
   }
 
@@ -256,12 +263,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (_guardianAvailable && !_whispersVerified) unawaited(_loadWhisperState());
   }
 
+  void _onConversationsChanged() {
+    if (!mounted || _homeMemorySort == MemoryGallerySort.recent) return;
+    if (_conversationProvider?.hasMoreConversations == true) {
+      setState(() => _homeMemorySort = MemoryGallerySort.recent);
+    }
+  }
+
   void _onTodayCardAuthorityChanged() {
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
     _homeCaptureAuthorityGeneration++;
     _resumeNecklaceAfterPhoneCapture = null;
     _todayCardController.invalidateAuthority();
+    final homeMemoryLayout = _savedHomeMemoryLayout();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -277,6 +292,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         // Never retain a previous account's mode while exact authority changes.
         _whispersOn = false;
         _whispersVerified = false;
+        _homeMemoryLayout = homeMemoryLayout;
+        _homeMemorySort = MemoryGallerySort.recent;
       });
     }
     if (_guardianAvailable) unawaited(_loadWhisperState());
@@ -299,6 +316,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _provisioningProvider?.removeListener(_onProvisioningChanged);
+    _conversationProvider?.removeListener(_onConversationsChanged);
     _todayCardAuthorityChanges.removeListener(_onTodayCardAuthorityChanged);
     _todayCardController
       ..removeListener(_onTodayCardChanged)
@@ -310,13 +328,17 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   void _loadHomeMemoryLayout() {
+    _homeMemoryLayout = _savedHomeMemoryLayout();
+  }
+
+  MemoryGalleryLayout _savedHomeMemoryLayout() {
     final saved = SharedPreferencesUtil().memoryGalleryLayout;
     for (final layout in MemoryGalleryLayout.values) {
       if (layout.name == saved) {
-        _homeMemoryLayout = layout;
-        return;
+        return layout;
       }
     }
+    return MemoryGalleryLayout.journal;
   }
 
   Future<void> _selectHomeMemoryLayout(MemoryGalleryLayout layout) async {

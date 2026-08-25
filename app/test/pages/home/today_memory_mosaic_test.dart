@@ -16,6 +16,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
+import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -715,6 +716,60 @@ void main() {
     expect(harness.conversations.hasMoreConversations, isFalse);
   });
 
+  testWidgets('Home resets oldest sorting when a refresh restores incomplete pagination', (tester) async {
+    final memories = List.generate(
+      16,
+      (index) => _ConversationFixtures.memory('memory-sort-$index', daysAgo: index),
+    );
+    final harness = await _pumpHome(tester, conversations: memories);
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('home-memory-sort-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Oldest first'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<PopupMenuButton<MemoryGallerySort>>(find.byKey(const Key('home-memory-sort-menu'))).initialValue,
+      MemoryGallerySort.oldest,
+    );
+
+    harness.conversations.restoreIncompletePage(memories);
+    await tester.pump();
+
+    expect(
+      tester.widget<PopupMenuButton<MemoryGallerySort>>(find.byKey(const Key('home-memory-sort-menu'))).initialValue,
+      MemoryGallerySort.recent,
+    );
+  });
+
+  testWidgets('Home reloads account-profile memory layout when authority changes', (tester) async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'test-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-test-user');
+    await preferences.saveMemoryGalleryLayout(MemoryGalleryLayout.list.name);
+    await preferences.saveString(
+      'ellaMemoryGalleryLayout:other-user:profile-other-user',
+      MemoryGalleryLayout.grid.name,
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: [
+        _ConversationFixtures.memory('memory-layout-hero', daysAgo: 0),
+        _ConversationFixtures.memory('memory-layout-authority', daysAgo: 1),
+      ],
+    );
+    addTearDown(harness.dispose);
+
+    expect(find.byKey(const Key('memory-layout-list-memory-layout-authority')), findsOneWidget);
+
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-other-user');
+    preferences.uid = 'other-user';
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-layout-grid-memory-layout-authority')), findsOneWidget);
+  });
+
   testWidgets('200 percent text stays readable and preserves capture semantics at 320 width', (tester) async {
     final semantics = tester.ensureSemantics();
     final harness = await _pumpHome(
@@ -936,6 +991,12 @@ class _FixtureConversationProvider extends ConversationProvider {
 
   final List<List<ServerConversation>> _olderConversationPages;
   int pageRequests = 0;
+
+  void restoreIncompletePage(List<ServerConversation> values) {
+    conversations = List<ServerConversation>.of(values);
+    hasMoreConversations = true;
+    notifyListeners();
+  }
 
   @override
   Future<void> ensureFreshConversations() async {}
