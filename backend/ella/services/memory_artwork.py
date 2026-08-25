@@ -64,12 +64,12 @@ STYLE_PROMPT_BRIEFS = {
     ),
 }
 COMPOSITION_DIRECTIONS = (
-    "Use a close foreground anchor with the remembered setting unfolding in layered depth behind it.",
-    "Use an intimate eye-level view, with the most specific remembered object clearly anchoring one third of the frame.",
-    "Use a wide environmental view with a strong path, table edge, shelf, or architectural line guiding the eye.",
-    "Use an asymmetric editorial composition with one concrete object in crisp focus and contextual details around it.",
-    "Use a gently elevated viewpoint that makes the remembered activity and its surrounding objects immediately legible.",
-    "Use a quiet still-life-led composition where the setting is inferred from several specific objects in the summary.",
+    "Use layered depth led by a concrete subject already named in the memory, adding no new foreground object.",
+    "Use an intimate eye-level view, placing the most specific named subject near one third of the frame.",
+    "Use a wide environmental framing that gives the named setting room around the primary remembered subject.",
+    "Use an asymmetric editorial composition with one named subject in crisp focus and only stated context around it.",
+    "Use a gently elevated viewpoint when it suits the stated activity; otherwise preserve the activity's natural viewpoint.",
+    "Use a close observational composition built only from one or more concrete elements named in the summary.",
 )
 LIGHT_AND_PALETTE_DIRECTIONS = (
     "Honor every time, weather, and color cue stated in the memory; if none is stated, use soft neutral illumination "

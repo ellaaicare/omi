@@ -530,6 +530,22 @@ def test_prompt_does_not_invent_time_weather_or_palette():
     assert "botanical greens" not in prompt.lower()
 
 
+def test_prompt_does_not_invent_compositional_objects():
+    memory = _terminal_memory("sea-swim")
+    memory["structured"] = {
+        "title": "Swimming in the sea",
+        "overview": "A long swim through clear water with sunlight moving across the waves.",
+    }
+
+    prompt, _ = artwork._prompt_for(memory, artwork.DEFAULT_STYLE_VERSION)
+
+    assert "swimming in the sea" in prompt.lower()
+    assert "clear water" in prompt.lower()
+    for invented_cue in ("strong path", "table edge", "shelf", "architectural line"):
+        assert invented_cue not in prompt.lower()
+    assert "named" in prompt.lower()
+
+
 def test_disabled_and_declined_states_never_call_provider():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
