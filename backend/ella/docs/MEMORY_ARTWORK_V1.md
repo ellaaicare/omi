@@ -60,21 +60,20 @@ ELLA_MEMORY_ARTWORK_ENABLED=false
 ELLA_MEMORY_ARTWORK_RELEASE_ENABLED=false
 ELLA_MEMORY_ARTWORK_PROVIDER_ENABLED=false
 ELLA_MEMORY_ARTWORK_BACKFILL_ENABLED=false
+ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS=
 ```
 
 When approved, the operator also supplies:
 
 ```text
 ELLA_MEMORY_ARTWORK_BUCKET=<private first-party bucket name>
-ELLA_MEMORY_ARTWORK_PROVIDER=xai
-ELLA_MEMORY_ARTWORK_XAI_MODEL=grok-imagine-image-2.0
-XAI_API_KEY=<existing protected server-side credential>
+ELLA_MEMORY_ARTWORK_PROVIDER=first_party_adapter
+ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS=<exact internal Firebase UID allowlist>
 ```
 
-The xAI adapter requests one 3:2 image as base64, normalizes it to the exact
-1536x1024 JPEG contract, and stores only the normalized first-party object. It
-does not persist a vendor-temporary URL. The model may be pinned with
-`ELLA_MEMORY_ARTWORK_XAI_MODEL`; the default is `grok-imagine-image-2.0`.
+The internal-owner release uses the fixed first-party adapter below. The direct
+xAI adapter remains dormant compatibility code and is not part of consent v10
+or the approved release configuration.
 
 The alternate fixed first-party adapter uses:
 
@@ -92,6 +91,21 @@ is accepted only for loopback. Redirects and ambient proxy variables are
 disabled. The adapter must return raw PNG, WebP, or JPEG bytes with
 `X-Ella-Image-Width` and `X-Ella-Image-Height`; vendor-temporary URLs are not
 accepted or persisted.
+
+The request contract is `ella.artwork.service.v1`. The backend sends a bounded
+`ella.artwork.brief.v1` object containing the exact owner UID, opaque profile
+binding, authority generation, enriched-summary revision, consent version,
+selected style, title, and overview. It does not send raw audio, source photos,
+transcripts, a full history, a caller-selected URL, or an opaque instruction
+prompt. The first-party designer may enrich this brief with separately reviewed,
+owner-scoped mood and linked-memory context later, but must never infer or fetch
+those fields through an unbounded agent tool.
+
+`ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS` is mandatory for environment-derived
+configuration. An empty allowlist or a non-matching Firebase UID disables every
+preference, enqueue, worker, signed-read, and backfill path even when the four
+rollout flags are true. This protects the owner-funded Codex OAuth route from
+external or cross-account use.
 
 ## Backfill and rollback
 

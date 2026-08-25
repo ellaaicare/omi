@@ -71,8 +71,8 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
   closed. Re-provision them through the reviewed provider path; do not
   synthesize or backfill the proof from database values.
 - `ai-data-processors-v7` and `ai-data-processors-v8` are immutable historical
-  consent. Cloud target traffic requires `ai-data-processors-v9`,
-  `managed-cloud-internal-pilot-v3`, and the current processor/scope hashes.
+  consent. Cloud target traffic requires `ai-data-processors-v10`,
+  `managed-cloud-internal-pilot-v4`, and the current processor/scope hashes.
 - Managed-cloud consent mutation and invitation redemption share the same
   PostgreSQL per-UID advisory lock and authority row. Redemption locks the exact
   granted epoch through entitlement insertion. Decline/revocation advances the

@@ -280,13 +280,14 @@ The ensure job also creates or repairs the UID-scoped OMI Firestore identity. Mi
 ### AI processing consent
 
 `/v1/users/ai-consent` is the server authority for the versioned AI/data-sharing
-policy. The current `ai-data-processors-v9` manifest includes Soniox and
+policy. The current `ai-data-processors-v10` manifest includes Soniox and
 Speechmatics STT, Inworld TTS, Ella's self-hosted Kokoro/Fish TTS, Hermes
 Cloud, built-in Hermes profile-scoped memory, OpenAI Codex, Photon, and the xAI
 Grok Imagine memory-artwork image purpose in addition to the remaining model,
 memory, infrastructure, and fallback recipients. V9 requires renewed consent
 because memory artwork sends selected memory title/summary text to xAI for
-`grok-imagine-image-2.0`; raw audio and source photos are not in scope. Retained
+the owner-only `openai-codex/gpt-5.6-luna` artwork designer with
+`gpt-image-2-medium`; raw audio and source photos are not in scope. Retained
 Plato/Honcho memory remains a separate legacy processor path. Authorization still
 requires the exact policy version, processor-set hash, scope version, and scope
 hash together; matching hashes from a v7 or v8 receipt do not authorize v9. The

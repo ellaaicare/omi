@@ -52,7 +52,7 @@ def _load_service_module():
     ella_services_stub = types.ModuleType("ella.services")
     ella_services_stub.__path__ = []
     ai_consent_stub = types.ModuleType("ella.services.ai_consent")
-    ai_consent_stub.CURRENT_POLICY_VERSION = "ai-data-processors-v9"
+    ai_consent_stub.CURRENT_POLICY_VERSION = "ai-data-processors-v10"
     ai_consent_stub.get_ai_consent_service = lambda: None
     runtime_stub = types.ModuleType("ella.services.runtime_resolver")
     runtime_stub.resolve_isolated_runtime = lambda *args, **kwargs: None
@@ -446,6 +446,7 @@ def _authority(uid="owner-a", digest="digest-a"):
         uid=uid,
         binding_id=f"binding-{uid}",
         profile_id=f"profile-{uid}",
+        revision=7,
         authority_digest=digest,
     )
 
@@ -563,6 +564,53 @@ def test_disabled_and_declined_states_never_call_provider():
     repository.preferences_by_uid["owner-a"] = {"consent": "declined"}
     assert asyncio.run(disabled.enqueue("owner-a", "memory-1"))["outcome"] == "declined"
     assert provider.calls == 0
+
+
+def test_environment_owner_gate_fails_closed_before_repository_or_provider(monkeypatch):
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_RELEASE_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_BACKFILL_ENABLED", "true")
+    monkeypatch.setenv(artwork.INTERNAL_OWNER_UIDS_ENV, "owner-a")
+
+    class NeverReadRepository(FakeRepository):
+        def get_preferences(self, uid):
+            raise AssertionError("unauthorized owner must not reach preferences")
+
+        def get_conversation(self, uid, memory_id):
+            raise AssertionError("unauthorized owner must not reach memories")
+
+    repository = NeverReadRepository()
+    provider = FakeProvider()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+    )
+
+    preferences = asyncio.run(service.preferences("owner-b"))
+    enqueue = asyncio.run(service.enqueue("owner-b", "memory-1"))
+    signed = asyncio.run(service.signed_url("owner-b", "memory-1"))
+
+    assert preferences["release_enabled"] is False
+    assert enqueue == {"outcome": "disabled", "status": "unavailable"}
+    assert signed == {
+        "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+        "status": "unavailable",
+        "failure_code": "memory_artwork_internal_owner_required",
+    }
+    assert provider.calls == 0
+
+
+def test_environment_owner_gate_requires_nonempty_allowlist(monkeypatch):
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_RELEASE_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MEMORY_ARTWORK_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv(artwork.INTERNAL_OWNER_UIDS_ENV, "")
+
+    config = artwork.MemoryArtworkConfig.from_env()
+
+    assert config.allows_uid("owner-a") is False
 
 
 def test_idempotent_generation_and_owner_scoped_signed_url():
@@ -2325,3 +2373,97 @@ def test_xai_provider_selection_fails_closed_without_credential(monkeypatch):
         artwork.memory_artwork_provider_factory()
 
     assert failure.value.code == "memory_artwork_provider_credential_unavailable"
+
+
+def test_first_party_provider_sends_bounded_owner_scoped_designer_brief(monkeypatch, tmp_path):
+    token_file = tmp_path / "artwork-service-token"
+    token_file.write_text("test-service-token-value-0000000000000000")
+    token_file.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://artwork.internal/v1/ella/internal/artwork/render")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "artwork.internal")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_file))
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            content=b"private-image",
+            headers={
+                "Content-Type": "image/png",
+                "X-Ella-Image-Width": "1536",
+                "X-Ella-Image-Height": "1024",
+            },
+        )
+
+    context = artwork.ArtworkProviderContext(
+        owner_uid="owner-a",
+        profile_binding="profile-owner-a",
+        authority_generation=7,
+        source_revision="summary-v3",
+        consent_version="ai-data-processors-v10-test",
+        title="A winter walk",
+        summary="Two friends paused beside a frozen lake in blue evening light.",
+    )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.FirstPartyHTTPArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="This provider must not forward an opaque prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="job-123",
+                context=context,
+            )
+
+    generated = asyncio.run(scenario())
+
+    assert generated.image_bytes == b"private-image"
+    assert len(calls) == 1
+    request = calls[0]
+    payload = json.loads(request.content)
+    assert request.headers["X-Ella-Contract"] == artwork.ARTWORK_PROVIDER_CONTRACT_VERSION
+    assert request.headers["Idempotency-Key"] == "job-123"
+    assert payload == {
+        "schemaVersion": "ella.artwork.brief.v1",
+        "jobId": "job-123",
+        "ownerUid": "owner-a",
+        "profileBinding": "profile-owner-a",
+        "authorityGeneration": 7,
+        "sourceRevision": "summary-v3",
+        "consentVersion": "ai-data-processors-v10-test",
+        "synthetic": False,
+        "style": "gouache",
+        "title": "A winter walk",
+        "summary": "Two friends paused beside a frozen lake in blue evening light.",
+    }
+    assert "opaque prompt" not in request.content.decode()
+
+
+def test_first_party_provider_rejects_missing_context_before_egress(monkeypatch, tmp_path):
+    token_file = tmp_path / "artwork-service-token"
+    token_file.write_text("test-service-token-value-0000000000000000")
+    token_file.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://artwork.internal/v1/ella/internal/artwork/render")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "artwork.internal")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_file))
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(500)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = artwork.FirstPartyHTTPArtworkProvider(client=client)
+            return await provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="job-123",
+            )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(scenario())
+
+    assert failure.value.code == "memory_artwork_provider_context_missing"
+    assert calls == []
