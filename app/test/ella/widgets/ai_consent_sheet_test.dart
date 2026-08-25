@@ -136,10 +136,11 @@ void main() {
     expect(disclosure, contains('OpenAI'));
     expect(disclosure, contains('Groq'));
     expect(disclosure, contains('xAI Grok'));
-    expect(disclosure, contains('xAI image generation'));
+    expect(disclosure, contains('OpenAI and Ella’s artwork designer'));
+    expect(disclosure, contains('OpenAI’s Codex and image services'));
     expect(disclosure, contains('saved memory'));
     expect(disclosure, isNot(contains('Daily Note')));
-    expect(disclosure, contains('not your raw microphone audio or source photos'));
+    expect(disclosure, contains('does not receive raw microphone audio, source photos, or your full memory history'));
     expect(disclosure, contains('ElevenLabs'));
     expect(disclosure, contains('Inworld AI'));
     expect(disclosure, contains('Kokoro'));

@@ -124,7 +124,7 @@ void main() {
     _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.isCurrentAiConsentDeferred, isFalse);
-    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v9');
+    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v10');
   });
 
   test('receipt-less acceptance clears stale authority and remains fail closed', () async {

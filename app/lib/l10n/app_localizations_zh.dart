@@ -4662,7 +4662,10 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String accessesAndTriggeredBy(String accessDescription, String triggerDescription) {
+  String accessesAndTriggeredBy(
+    String accessDescription,
+    String triggerDescription,
+  ) {
     return '$accessDescription，$triggerDescription。';
   }
 
@@ -8740,7 +8743,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; xAI to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
+      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
@@ -8820,11 +8823,11 @@ class AppLocalizationsZh extends AppLocalizations {
       'Sends iMessage content and basic delivery details only to one person you choose for testing.';
 
   @override
-  String get aiConsentXaiImagesTitle => 'xAI image generation';
+  String get aiConsentOpenAiArtworkTitle => 'OpenAI and Ella’s artwork designer';
 
   @override
-  String get aiConsentXaiImagesBody =>
-      'Creates an illustration for a saved memory. It may receive only that memory’s title and summary, not your raw microphone audio or source photos.';
+  String get aiConsentOpenAiArtworkBody =>
+      'Creates an illustration for a saved memory using OpenAI’s Codex and image services. It receives only that memory’s title and summary, plus your chosen artwork style; it does not receive raw microphone audio, source photos, or your full memory history.';
 
   @override
   String get aiConsentManagedCloudScope =>
