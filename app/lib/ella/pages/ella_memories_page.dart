@@ -201,10 +201,16 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           ),
           PopupMenuButton<String>(
             key: const Key('memory-artwork-style-menu'),
-            tooltip: context.l10n.memoryArtworkStyle,
+            tooltip: _artworkPreferences?.releaseEnabled == true
+                ? context.l10n.memoryArtworkStyle
+                : context.l10n.memoryArtworkStyleUnavailable,
             initialValue: _artworkPreferences?.styleVersion,
-            icon: const Icon(Icons.palette_outlined, color: EllaColors.tealDeep),
-            onSelected: _selectArtworkStyle,
+            icon: Icon(
+              Icons.palette_outlined,
+              color: _artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+            ),
+            enabled: _artworkPreferences?.releaseEnabled == true,
+            onSelected: _artworkPreferences?.releaseEnabled == true ? _selectArtworkStyle : null,
             itemBuilder: (context) => [
               PopupMenuItem(value: memoryArtworkDefaultStyle, child: Text(context.l10n.memoryArtworkSoftGouache)),
               PopupMenuItem(value: memoryArtworkPaperCollageStyle, child: Text(context.l10n.memoryArtworkPaperCollage)),
@@ -384,13 +390,41 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     return children;
   }
 
-  Widget _memoryCard(ServerConversation conversation) => _MemoryCard(
+  Widget _memoryCard(ServerConversation conversation) => MemoryGalleryCard(
         conversation: conversation,
         layout: _layout,
-        onTap: () => Navigator.of(
-          context,
-        ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation))),
+        onOpen: () => _openMemory(conversation),
+        onDelete: () => _deleteMemory(conversation),
       );
+
+  void _openMemory(ServerConversation conversation) {
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
+  }
+
+  Future<bool> _deleteMemory(ServerConversation conversation) async {
+    final l10n = context.l10n;
+    final provider = context.read<ConversationProvider>();
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Text(l10n.deleteConversationTitle),
+            content: Text(l10n.deleteConversationMessage),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(l10n.cancel)),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                style: FilledButton.styleFrom(backgroundColor: EllaColors.error),
+                child: Text(l10n.delete),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return false;
+    final deleted = await provider.deleteConversationPermanently(conversation);
+    if (!deleted && mounted) _showMessage(l10n.failedToDeleteConversations);
+    return deleted;
+  }
 }
 
 class _MemoryCaptureShelf extends StatelessWidget {
@@ -463,12 +497,19 @@ class _LiveMemoryCard extends StatelessWidget {
   }
 }
 
-class _MemoryCard extends StatelessWidget {
-  const _MemoryCard({required this.conversation, required this.layout, required this.onTap});
+class MemoryGalleryCard extends StatelessWidget {
+  const MemoryGalleryCard({
+    super.key,
+    required this.conversation,
+    required this.layout,
+    required this.onOpen,
+    this.onDelete,
+  });
 
   final ServerConversation conversation;
   final MemoryGalleryLayout layout;
-  final VoidCallback onTap;
+  final VoidCallback onOpen;
+  final Future<bool> Function()? onDelete;
 
   String get _title =>
       conversation.structured.title.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
@@ -496,16 +537,61 @@ class _MemoryCard extends StatelessWidget {
               Padding(padding: const EdgeInsets.all(16), child: details),
             ],
           );
-    return Material(
-      key: Key('memory-card-${conversation.id}'),
+    final card = Material(
       color: EllaColors.card,
       borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: onTap,
+        onTap: onOpen,
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: 112),
           child: KeyedSubtree(key: Key('memory-layout-${layout.name}-${conversation.id}'), child: child),
+        ),
+      ),
+    );
+    return Dismissible(
+      key: Key('memory-card-${conversation.id}'),
+      direction: onDelete == null ? DismissDirection.startToEnd : DismissDirection.horizontal,
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          onOpen();
+          return false;
+        }
+        final delete = onDelete;
+        if (delete == null) return false;
+        return delete();
+      },
+      background: const _MemorySwipeBackground(
+        alignment: Alignment.centerLeft,
+        icon: Icons.edit_outlined,
+        color: EllaColors.tealDeep,
+      ),
+      secondaryBackground: const _MemorySwipeBackground(
+        alignment: Alignment.centerRight,
+        icon: Icons.delete_outline_rounded,
+        color: EllaColors.error,
+      ),
+      child: card,
+    );
+  }
+}
+
+class _MemorySwipeBackground extends StatelessWidget {
+  const _MemorySwipeBackground({required this.alignment, required this.icon, required this.color});
+
+  final Alignment alignment;
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
+      child: Align(
+        alignment: alignment,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Icon(icon, color: EllaColors.paper, semanticLabel: null),
         ),
       ),
     );

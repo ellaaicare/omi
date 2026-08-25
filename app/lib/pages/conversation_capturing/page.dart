@@ -312,6 +312,12 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     return context.l10n.liveTranscript;
   }
 
+  Future<void> _retryPhoneCapture(CaptureProvider provider) async {
+    final result = await provider.streamRecording();
+    if (!mounted || result == PhoneCaptureStartResult.started) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer2<CaptureProvider, DeviceProvider>(
@@ -358,58 +364,66 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                       physics: const NeverScrollableScrollPhysics(),
                       children: [
                         // Transcripts, photos
-                        provider.segments.isEmpty && provider.photos.isEmpty
-                            ? Center(
-                                child: Padding(
-                                  padding: const EdgeInsets.only(top: 50.0),
-                                  child: Text(context.l10n.waitingForTranscriptOrPhotos),
-                                ),
+                        provider.recordingState == RecordingState.error &&
+                                provider.segments.isEmpty &&
+                                provider.photos.isEmpty
+                            ? _CaptureErrorRecovery(
+                                onRetry: () => _retryPhoneCapture(provider),
+                                onClose: () => Navigator.of(context).pop(),
                               )
-                            : provider.photos.isNotEmpty
-                                ? _buildChronologicalTimeline(provider)
-                                : getTranscriptWidget(
-                                    false,
-                                    provider.segments,
-                                    provider.photos,
-                                    deviceProvider.connectedDevice,
-                                    bottomMargin: 150,
-                                    suggestions: provider.suggestionsBySegmentId,
-                                    taggingSegmentIds: provider.taggingSegmentIds,
-                                    onAcceptSuggestion: (suggestion) {
-                                      provider.assignSpeakerToConversation(suggestion.speakerId, suggestion.personId,
-                                          suggestion.personName, [suggestion.segmentId]);
-                                    },
-                                    editSegment: (segmentId, speakerId) {
-                                      final connectivityProvider =
-                                          Provider.of<ConnectivityProvider>(context, listen: false);
-                                      if (!connectivityProvider.isConnected) {
-                                        ConnectivityProvider.showNoInternetDialog(context);
-                                        return;
-                                      }
-                                      showModalBottomSheet(
-                                          context: context,
-                                          isScrollControlled: true,
-                                          backgroundColor: Colors.black,
-                                          shape: const RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                                          ),
-                                          builder: (context) {
-                                            final suggestion = provider.suggestionsBySegmentId.values.firstWhere(
-                                                (s) => s.speakerId == speakerId,
-                                                orElse: () => SpeakerLabelSuggestionEvent.empty());
-                                            return NameSpeakerBottomSheet(
-                                              speakerId: speakerId,
-                                              segmentId: segmentId,
-                                              segments: provider.segments,
-                                              suggestion: suggestion,
-                                              onSpeakerAssigned: (speakerId, personId, personName, segmentIds) async {
-                                                await provider.assignSpeakerToConversation(
-                                                    speakerId, personId, personName, segmentIds);
-                                              },
-                                            );
-                                          });
-                                    },
-                                  ),
+                            : provider.segments.isEmpty && provider.photos.isEmpty
+                                ? Center(
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(top: 50.0),
+                                      child: Text(context.l10n.waitingForTranscriptOrPhotos),
+                                    ),
+                                  )
+                                : provider.photos.isNotEmpty
+                                    ? _buildChronologicalTimeline(provider)
+                                    : getTranscriptWidget(
+                                        false,
+                                        provider.segments,
+                                        provider.photos,
+                                        deviceProvider.connectedDevice,
+                                        bottomMargin: 150,
+                                        suggestions: provider.suggestionsBySegmentId,
+                                        taggingSegmentIds: provider.taggingSegmentIds,
+                                        onAcceptSuggestion: (suggestion) {
+                                          provider.assignSpeakerToConversation(suggestion.speakerId,
+                                              suggestion.personId, suggestion.personName, [suggestion.segmentId]);
+                                        },
+                                        editSegment: (segmentId, speakerId) {
+                                          final connectivityProvider =
+                                              Provider.of<ConnectivityProvider>(context, listen: false);
+                                          if (!connectivityProvider.isConnected) {
+                                            ConnectivityProvider.showNoInternetDialog(context);
+                                            return;
+                                          }
+                                          showModalBottomSheet(
+                                              context: context,
+                                              isScrollControlled: true,
+                                              backgroundColor: Colors.black,
+                                              shape: const RoundedRectangleBorder(
+                                                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                                              ),
+                                              builder: (context) {
+                                                final suggestion = provider.suggestionsBySegmentId.values.firstWhere(
+                                                    (s) => s.speakerId == speakerId,
+                                                    orElse: () => SpeakerLabelSuggestionEvent.empty());
+                                                return NameSpeakerBottomSheet(
+                                                  speakerId: speakerId,
+                                                  segmentId: segmentId,
+                                                  segments: provider.segments,
+                                                  suggestion: suggestion,
+                                                  onSpeakerAssigned:
+                                                      (speakerId, personId, personName, segmentIds) async {
+                                                    await provider.assignSpeakerToConversation(
+                                                        speakerId, personId, personName, segmentIds);
+                                                  },
+                                                );
+                                              });
+                                        },
+                                      ),
                         // Summary Tab
                         Center(
                           child: Padding(
@@ -847,6 +861,52 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       final minutes = timeoutDuration ~/ 60;
       return "${context.l10n.conversationSummarizedAfterMinutes(minutes, minutes == 1 ? '' : 's')} 🤫";
     }
+  }
+}
+
+class _CaptureErrorRecovery extends StatelessWidget {
+  const _CaptureErrorRecovery({required this.onRetry, required this.onClose});
+
+  final VoidCallback onRetry;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: EllaCardSurface(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.mic_off_outlined, color: EllaColors.error, size: 36),
+                const SizedBox(height: 12),
+                Text(
+                  context.l10n.todayRecordingUnavailable,
+                  textAlign: TextAlign.center,
+                  style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  key: const Key('conversation-capture-retry-phone'),
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.mic_none_rounded),
+                  label: Text(context.l10n.tryAgain),
+                ),
+                TextButton(
+                  key: const Key('conversation-capture-error-close'),
+                  onPressed: onClose,
+                  child: Text(context.l10n.close),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

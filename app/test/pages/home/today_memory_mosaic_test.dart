@@ -137,19 +137,20 @@ void main() {
     expect(find.byKey(const Key('today-card-detail-scroll')), findsNothing);
   });
 
-  testWidgets('Home browsing has no destructive memory action', (tester) async {
+  testWidgets('Home memory feed supports confirmed swipe deletion', (tester) async {
     final conversations = _ConversationFixtures.manyMemories();
     final harness = await _pumpHome(tester, conversations: conversations);
     addTearDown(harness.dispose);
 
-    expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
     expect(harness.conversations.permanentDeletes, isEmpty);
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('memories-see-all')),
-      300,
-      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
-    );
-    expect(find.byKey(const Key('memories-see-all')), findsOneWidget);
+    await tester.fling(find.byKey(const Key('memory-card-memory-1')), const Offset(-420, 0), 1600);
+    await tester.pumpAndSettle();
+    expect(find.text('Delete Conversation?'), findsOneWidget);
+
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(harness.conversations.permanentDeletes, ['memory-1']);
+    expect(find.byKey(const Key('memory-card-memory-1')), findsNothing);
   });
 
   testWidgets('Home never renders inherited reminder content', (tester) async {
@@ -253,7 +254,8 @@ void main() {
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
   });
 
-  testWidgets('Home tap rotates a physical continuous necklace before local transcript delivery', (tester) async {
+  testWidgets('Home Record suspends ambient necklace capture for the iPhone and restores it after finish',
+      (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -265,23 +267,27 @@ void main() {
       conversations: const [],
       device: device,
       initialRecordingState: RecordingState.deviceRecord,
-      captureHasContent: false,
-      captureHasFinalContent: true,
-      captureHasDeviceBoundaryEvidence: true,
     );
     addTearDown(harness.dispose);
 
-    expect(harness.capture.segments, isEmpty);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
-    expect(harness.capture.deviceBoundaries, 1);
-    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.text('Recording with your necklace'), findsOneWidget);
   });
 
-  testWidgets('capture transport failure remains visible instead of looking idle', (tester) async {
+  testWidgets('capture transport failure remains actionable and retries with the iPhone microphone', (tester) async {
     final harness = await _pumpHome(
       tester,
       conversations: const [],
@@ -290,13 +296,13 @@ void main() {
     addTearDown(harness.dispose);
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
-    expect(find.text('Recording needs a moment'), findsOneWidget);
+    expect(find.text('iPhone · Ready'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
-    expect(harness.capture.phoneStarts, 0);
-    expect(harness.capture.recordingState, RecordingState.error);
-    expect(find.text("Recording isn't available right now."), findsOneWidget);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
   });
 
   testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {
@@ -498,7 +504,7 @@ void main() {
     expect(find.text('Process Now'), findsOneWidget);
   });
 
-  testWidgets('Home-owned necklace capture stops its stream before finishing', (tester) async {
+  testWidgets('connected necklace does not change Home Record from the iPhone microphone', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
       ..pairedDevice = necklace
@@ -508,67 +514,26 @@ void main() {
     final harness = await _pumpHome(tester, conversations: const [], device: device);
     addTearDown(harness.dispose);
 
-    expect(find.text('Necklace · Ready'), findsOneWidget);
+    expect(find.text('iPhone · Ready'), findsOneWidget);
     expect(find.text('Phone only'), findsNothing);
     expect(find.textContaining('Headset is off'), findsNothing);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
-    expect(harness.capture.deviceStarts, 1);
-    expect(find.text('Recording with your necklace'), findsOneWidget);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.deviceStarts, 0);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
-    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.deviceStops, 0);
     expect(harness.capture.finishes, 1);
     expect(harness.capture.recordingState, RecordingState.stop);
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('failed Home necklace processing retries without restarting or re-stopping capture', (tester) async {
-    SharedPreferencesUtil().showSummarizeConfirmation = false;
-    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
-      ..pairedDevice = necklace
-      ..connectedDevice = necklace
-      ..isConnected = true;
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      device: device,
-      finalizationResults: [false, true],
-    );
-    addTearDown(harness.dispose);
-
-    await tester.tap(find.byKey(const Key('today-record-moment')));
-    await tester.pump();
-    harness.capture.segments = [_liveTranscriptSegment('necklace-retry')];
-    harness.capture.notifyListeners();
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
-    await tester.tap(find.text('Process Now'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
-    expect(harness.capture.deviceStops, 1);
-    expect(harness.capture.finalizationCalls, 1);
-    expect(find.text('Process Now'), findsOneWidget);
-
-    await tester.tap(find.text('Process Now'));
-    await tester.pump();
-    await tester.pumpAndSettle();
-
-    expect(harness.capture.deviceStarts, 1);
-    expect(harness.capture.deviceStops, 1);
-    expect(harness.capture.finalizationCalls, 2);
-    expect(harness.capture.finishes, 1);
-    expect(find.text('Process Now'), findsNothing);
-  });
-
-  testWidgets('necklace transport error stays unavailable and never starts capture', (tester) async {
+  testWidgets('necklace transport error is cleaned before an iPhone retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
       ..pairedDevice = necklace
@@ -582,17 +547,18 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.text('Recording needs a moment'), findsOneWidget);
+    expect(find.text('iPhone · Ready'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
     expect(harness.capture.deviceStarts, 0);
-    expect(harness.capture.recordingState, RecordingState.error);
-    expect(find.text('Recording needs a moment'), findsOneWidget);
-    expect(find.text("Recording isn't available right now."), findsOneWidget);
+    expect(harness.capture.recordingState, RecordingState.record);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
   });
 
-  testWidgets('continuous necklace stream gets exact moment boundaries without being stopped', (tester) async {
+  testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
       ..pairedDevice = necklace
@@ -603,49 +569,17 @@ void main() {
       conversations: const [],
       device: device,
       initialRecordingState: RecordingState.deviceRecord,
-    );
-    addTearDown(harness.dispose);
-
-    expect(find.text('Recording with your necklace'), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('today-record-moment')));
-    await tester.pump();
-    expect(harness.capture.deviceStarts, 0);
-    expect(harness.capture.deviceStops, 0);
-    expect(harness.capture.finishes, 1, reason: 'the start tap must exclude pre-tap necklace audio');
-    expect(harness.capture.deviceBoundaries, 1);
-
-    await tester.tap(find.byKey(const Key('today-record-moment')));
-    await tester.pump();
-    expect(harness.capture.deviceStops, 0, reason: 'Home must preserve a stream it did not start');
-    expect(harness.capture.finishes, 2, reason: 'the finish tap closes only the intentional moment');
-    expect(harness.capture.deviceBoundaries, 2);
-    expect(harness.capture.recordingState, RecordingState.deviceRecord);
-  });
-
-  testWidgets('empty continuous necklace start opens a moment without false finish feedback', (tester) async {
-    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
-      ..pairedDevice = necklace
-      ..connectedDevice = necklace
-      ..isConnected = true;
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      device: device,
-      initialRecordingState: RecordingState.deviceRecord,
-      captureHasContent: false,
+      phoneStartResult: PhoneCaptureStartResult.transcriptionUnavailable,
     );
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
-    expect(harness.capture.finishes, 0);
-    expect(harness.capture.deviceStarts, 0);
-    expect(harness.capture.deviceStops, 0);
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
     expect(find.text('Recording with your necklace'), findsOneWidget);
   });
 
@@ -661,27 +595,55 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.text('Your first note begins with a moment'), findsOneWidget);
-    expect(find.textContaining('note worth returning to'), findsOneWidget);
+    expect(find.text('Your first note begins with a moment'), findsNothing);
+    expect(find.textContaining('note worth returning to'), findsNothing);
     expect(find.byKey(const Key('memory-journal-empty')), findsOneWidget);
     expect(find.text('Your memories will appear here'), findsOneWidget);
     expect(find.byKey(const Key('today-capture-proof-panel')), findsNothing);
     expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
   });
 
-  testWidgets('Home shows one hero and one continuity memory, with archive navigation', (tester) async {
+  testWidgets('Home shows the full lazy memory feed with layout and sort controls', (tester) async {
     final harness = await _pumpHome(tester, conversations: _ConversationFixtures.manyMemories());
     addTearDown(harness.dispose);
 
-    expect(find.byKey(const Key('memory-journal-card-memory-1')), findsOneWidget);
-    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
-    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsNothing);
+    expect(find.byKey(const Key('memory-layout-journal-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('home-memory-layout-menu')), findsOneWidget);
+    expect(find.byKey(const Key('home-memory-sort-menu')), findsOneWidget);
+    expect(find.byKey(const Key('memories-see-all')), findsNothing);
     await tester.scrollUntilVisible(
-      find.byKey(const Key('memories-see-all')),
+      find.byKey(const Key('memory-card-memory-4')),
       300,
       scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
     );
-    expect(find.byKey(const Key('memories-see-all')), findsOneWidget);
+    expect(find.byKey(const Key('memory-card-memory-4')), findsOneWidget);
+  });
+
+  testWidgets('Home requests the next memory page only when the lazy feed nears its end', (tester) async {
+    final initial = List.generate(
+      16,
+      (index) => _ConversationFixtures.memory('memory-$index', daysAgo: index),
+    );
+    final older = _ConversationFixtures.memory('memory-older', daysAgo: 30);
+    final harness = await _pumpHome(
+      tester,
+      conversations: initial,
+      olderConversationPages: [
+        [older],
+      ],
+    );
+    addTearDown(harness.dispose);
+
+    expect(harness.conversations.pageRequests, 0);
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+
+    expect(harness.conversations.pageRequests, 1);
+    expect(harness.conversations.conversations.map((item) => item.id), contains('memory-older'));
+    expect(harness.conversations.hasMoreConversations, isFalse);
   });
 
   testWidgets('200 percent text stays readable and preserves capture semantics at 320 width', (tester) async {
@@ -715,8 +677,7 @@ void main() {
 
     await tester.dragFrom(const Offset(160, 400), const Offset(0, -1200));
     await tester.pump();
-    expect(find.byKey(const Key('memory-journal-card-memory-2')), findsOneWidget);
-    expect(find.byWidgetPredicate((widget) => widget.key.toString().contains('memory-continuity-card-')), findsNothing);
+    expect(find.byKey(const Key('memory-card-memory-2')), findsOneWidget);
     expect(find.text('Home'), findsOneWidget);
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('Talk'), findsOneWidget);
@@ -782,6 +743,7 @@ Future<_HomeHarness> _pumpHome(
   Completer<void>? finalizationGate,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
   List<ActionItemWithMetadata> actionItems = const [],
+  List<List<ServerConversation>> olderConversationPages = const [],
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -798,7 +760,10 @@ Future<_HomeHarness> _pumpHome(
     finalizationGate: finalizationGate,
   );
   final actionItemsProvider = _FixtureActionsProvider(actionItems);
-  final conversationProvider = _FixtureConversationProvider(conversations);
+  final conversationProvider = _FixtureConversationProvider(
+    conversations,
+    olderConversationPages: olderConversationPages,
+  );
   final deviceProvider = device ?? DeviceProvider();
   final home = HomeProvider();
   final authorityChanges = ValueNotifier<int>(0);
@@ -890,14 +855,35 @@ class _FixtureActionsProvider extends ActionItemsProvider {
 }
 
 class _FixtureConversationProvider extends ConversationProvider {
-  _FixtureConversationProvider(List<ServerConversation> values) {
+  _FixtureConversationProvider(
+    List<ServerConversation> values, {
+    List<List<ServerConversation>> olderConversationPages = const [],
+  }) : _olderConversationPages = olderConversationPages.map(List<ServerConversation>.of).toList() {
     conversations = values;
     hasLoadedConversations = true;
     hasFreshConversations = true;
+    hasMoreConversations = _olderConversationPages.isNotEmpty;
   }
+
+  final List<List<ServerConversation>> _olderConversationPages;
+  int pageRequests = 0;
 
   @override
   Future<void> ensureFreshConversations() async {}
+
+  @override
+  Future<void> getMoreConversationsFromServer() async {
+    if (!hasMoreConversations || isLoadingMoreConversations) return;
+    pageRequests += 1;
+    isLoadingMoreConversations = true;
+    notifyListeners();
+    await Future<void>.delayed(Duration.zero);
+    final page = _olderConversationPages.removeAt(0);
+    conversations.addAll(page);
+    hasMoreConversations = _olderConversationPages.isNotEmpty;
+    isLoadingMoreConversations = false;
+    notifyListeners();
+  }
 
   final List<String> permanentDeletes = [];
 
@@ -1056,6 +1042,13 @@ class _MemoryTodayCardCache implements TodayCardCache {
 }
 
 class _ConversationFixtures {
+  static ServerConversation memory(String id, {required int daysAgo}) => ServerConversation(
+        id: id,
+        createdAt: DateTime(2026, 8, 8).subtract(Duration(days: daysAgo)),
+        startedAt: DateTime(2026, 8, 8).subtract(Duration(days: daysAgo)),
+        structured: Structured('Memory $id', 'A readable memory overview for $id.'),
+      );
+
   static List<ServerConversation> manyMemories() => List.generate(
         4,
         (index) => ServerConversation(

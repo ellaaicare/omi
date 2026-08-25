@@ -52,6 +52,23 @@ void main() {
     expect(_captureStatus(tester), 'Error');
   });
 
+  testWidgets('empty transport error offers an in-place iPhone retry instead of a blank page', (tester) async {
+    final capture = _FakeCaptureProvider(RecordingState.error, transcriptReady: false);
+    await _pumpCapturePage(tester, capture);
+
+    expect(find.byKey(const Key('conversation-capture-retry-phone')), findsOneWidget);
+    expect(find.byKey(const Key('conversation-capture-error-close')), findsOneWidget);
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('conversation-capture-retry-phone')));
+    await tester.pump();
+
+    expect(capture.phoneStarts, 1);
+    expect(capture.recordingState, RecordingState.record);
+    expect(find.byKey(const Key('conversation-capture-retry-phone')), findsNothing);
+    expect(_captureStatus(tester), 'Recording Active');
+  });
+
   testWidgets('empty active capture keeps Stop Recording visible before transcript segments', (tester) async {
     final capture = _FakeCaptureProvider(RecordingState.stop, transcriptReady: false);
     await _pumpCapturePage(tester, capture);
@@ -251,6 +268,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   bool _transcriptReady;
   bool _phoneOwnsMobileAudio;
   int phoneStops = 0;
+  int phoneStarts = 0;
   int phoneFinalizeCalls = 0;
   int deviceStops = 0;
   int devicePauses = 0;
@@ -272,6 +290,15 @@ class _FakeCaptureProvider extends CaptureProvider {
     _transcriptReady = transcriptReady;
     _phoneOwnsMobileAudio = phoneOwnsMobileAudio;
     notifyListeners();
+  }
+
+  @override
+  Future<PhoneCaptureStartResult> streamRecording() async {
+    phoneStarts++;
+    _phoneOwnsMobileAudio = true;
+    _transcriptReady = true;
+    updateRecordingState(RecordingState.record);
+    return PhoneCaptureStartResult.started;
   }
 
   @override
