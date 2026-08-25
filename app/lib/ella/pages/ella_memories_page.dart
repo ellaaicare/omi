@@ -565,12 +565,12 @@ class MemoryGalleryCard extends StatelessWidget {
         return delete();
       },
       background: const _MemorySwipeBackground(
-        alignment: Alignment.centerLeft,
+        alignment: AlignmentDirectional.centerStart,
         icon: Icons.edit_outlined,
         color: EllaColors.tealDeep,
       ),
       secondaryBackground: const _MemorySwipeBackground(
-        alignment: Alignment.centerRight,
+        alignment: AlignmentDirectional.centerEnd,
         icon: Icons.delete_outline_rounded,
         color: EllaColors.error,
       ),
@@ -582,7 +582,7 @@ class MemoryGalleryCard extends StatelessWidget {
 class _MemorySwipeBackground extends StatelessWidget {
   const _MemorySwipeBackground({required this.alignment, required this.icon, required this.color});
 
-  final Alignment alignment;
+  final AlignmentGeometry alignment;
   final IconData icon;
   final Color color;
 

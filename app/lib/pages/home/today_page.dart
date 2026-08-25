@@ -260,6 +260,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
     _homeCaptureAuthorityGeneration++;
+    _resumeNecklaceAfterPhoneCapture = null;
     _todayCardController.invalidateAuthority();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
@@ -628,8 +629,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _homeCaptureFinalizationInFlight = null;
       if (_abandonHomeCaptureAfterFinalization) {
         _abandonHomeCaptureAfterFinalization = false;
-        _homeCaptureFinalizationPending = false;
-        _homeCaptureSource = null;
       }
       if (mounted) setState(() {});
     }
@@ -644,12 +643,17 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<bool> _finishHomeCaptureOnce(CaptureProvider capture) async {
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     if (_homeCaptureFinalizationPending) {
+      final source = _homeCaptureSource;
       final finalized = await _finalizeHomeMoment(
         capture,
         isCurrent: () => authorityGeneration == _homeCaptureAuthorityGeneration,
       );
       final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
       if (finalized && isCurrent && mounted) {
+        if (source == _HomeCaptureSource.phone) {
+          await _resumeAmbientNecklace(capture);
+        }
+        if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return false;
         setState(() {
           _homeCaptureFinalizationPending = false;
           _homeCaptureSource = null;
@@ -662,11 +666,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     bool? transportFinalized;
     switch (source) {
       case _HomeCaptureSource.phone:
-        try {
-          transportFinalized = await capture.stopStreamRecordingAndFinalize();
-        } finally {
-          await _resumeAmbientNecklace(capture);
-        }
+        transportFinalized = await capture.stopStreamRecordingAndFinalize();
         break;
       case _HomeCaptureSource.necklaceOwned:
         transportFinalized = await capture.stopStreamDeviceRecordingAndFinalize();
@@ -704,6 +704,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     if (transportFinalized != null) {
       if (transportFinalized) {
+        if (source == _HomeCaptureSource.phone) {
+          await _resumeAmbientNecklace(capture);
+        }
+        if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return false;
         if (mounted) {
           setState(() {
             _homeCaptureFinalizationPending = false;
@@ -769,13 +773,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
       await _joinHomeCaptureFinalization(finalization);
-      return;
-    }
-    if (_homeCaptureFinalizationPending && mounted) {
-      setState(() {
-        _homeCaptureFinalizationPending = false;
-        _homeCaptureSource = null;
-      });
     }
   }
 

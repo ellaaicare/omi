@@ -176,6 +176,48 @@ void main() {
     expect(find.byKey(const Key('memory-card-memory-gesture')), findsOneWidget);
   });
 
+  testWidgets('gallery swipe affordances follow start and end in right-to-left layouts', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(
+            body: MemoryGalleryCard(
+              conversation: memory('memory-rtl'),
+              layout: MemoryGalleryLayout.list,
+              onOpen: () {},
+              onDelete: () async => false,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final card = find.byKey(const Key('memory-card-memory-rtl'));
+    final dismissible = tester.widget<Dismissible>(card);
+    final openBackground = dismissible.background!;
+    final deleteBackground = dismissible.secondaryBackground!;
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.rtl,
+        child: SizedBox(width: 400, height: 120, child: openBackground),
+      ),
+    );
+    expect(tester.getCenter(find.byIcon(Icons.edit_outlined)).dx, greaterThan(200));
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.rtl,
+        child: SizedBox(width: 400, height: 120, child: deleteBackground),
+      ),
+    );
+    expect(tester.getCenter(find.byIcon(Icons.delete_outline_rounded)).dx, lessThan(200));
+  });
+
   testWidgets('gallery sort switches between newest and oldest memories', (tester) async {
     final provider = ConversationProvider()
       ..conversations = [

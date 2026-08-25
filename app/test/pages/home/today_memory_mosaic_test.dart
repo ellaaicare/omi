@@ -306,6 +306,54 @@ void main() {
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
+  testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds',
+      (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+      finalizationResults: [true, false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    harness.capture.segments = [_liveTranscriptSegment('phone-retry-before-necklace')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.deviceStarts, 0, reason: 'necklace must remain stopped while the phone moment is pending');
+    expect(harness.capture.recordingState, RecordingState.stop);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStarts, 1, reason: 'retry must not create a replacement phone capture');
+    expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
+    expect(harness.capture.finalizationCalls, 3);
+    expect(harness.capture.deviceStarts, 1, reason: 'ambient necklace resumes only after the phone moment succeeds');
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+  });
+
   testWidgets('capture transport failure remains actionable and retries with the iPhone microphone', (tester) async {
     final harness = await _pumpHome(
       tester,
@@ -485,7 +533,9 @@ void main() {
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
-    expect(harness.capture.phoneStarts, 2, reason: 'a later tap may start only after the old operation settles');
+    expect(harness.capture.phoneStarts, 1,
+        reason: 'a failed routed moment must be retried before a new capture starts');
+    expect(harness.capture.finalizationCalls, 2);
   });
 
   testWidgets('account authority change invalidates a pending Home finalization retry', (tester) async {
