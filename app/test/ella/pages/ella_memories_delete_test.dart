@@ -31,12 +31,13 @@ class _MutableAuthority implements AccountCommitAuthority {
 }
 
 class _FakeArtworkApi extends MemoryArtworkApi {
-  _FakeArtworkApi()
+  _FakeArtworkApi({this.releaseEnabled = true})
       : super(
           baseUrl: 'https://api.example.test',
           authorityProvider: () => null,
         );
 
+  final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
   int backfillCalls = 0;
 
@@ -45,7 +46,7 @@ class _FakeArtworkApi extends MemoryArtworkApi {
         consent: 'accepted',
         consentVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
         styleVersion: selectedStyle,
-        releaseEnabled: true,
+        releaseEnabled: releaseEnabled,
       );
 
   @override
@@ -112,7 +113,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('gallery browse cards have no destructive action', (tester) async {
+  testWidgets('gallery swipe-left confirms and permanently deletes the selected memory', (tester) async {
     final requestedIds = <String>[];
     final authority = _MutableAuthority('test-user');
     final provider = ConversationProvider(
@@ -131,10 +132,90 @@ void main() {
     await pumpPage(tester, provider);
 
     expect(find.byKey(const Key('memory-card-memory-1')), findsOneWidget);
-    expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
     expect(find.byKey(const Key('memory-layout-menu')), findsOneWidget);
     expect(find.byKey(const Key('memory-sort-menu')), findsOneWidget);
     expect(requestedIds, isEmpty);
+
+    await tester.fling(find.byKey(const Key('memory-card-memory-1')), const Offset(-420, 0), 1600);
+    await tester.pumpAndSettle();
+    expect(find.text('Delete Conversation?'), findsOneWidget);
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+
+    expect(requestedIds, ['memory-1']);
+    expect(find.byKey(const Key('memory-card-memory-1')), findsNothing);
+  });
+
+  testWidgets('gallery swipe-right opens the read and edit surface without deleting', (tester) async {
+    var opens = 0;
+    var deletes = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryGalleryCard(
+            conversation: memory('memory-gesture'),
+            layout: MemoryGalleryLayout.list,
+            onOpen: () => opens += 1,
+            onDelete: () async {
+              deletes += 1;
+              return false;
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.fling(find.byKey(const Key('memory-card-memory-gesture')), const Offset(420, 0), 1600);
+    await tester.pumpAndSettle();
+
+    expect(opens, 1);
+    expect(deletes, 0);
+    expect(find.byKey(const Key('memory-card-memory-gesture')), findsOneWidget);
+  });
+
+  testWidgets('gallery swipe affordances follow start and end in right-to-left layouts', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(
+            body: MemoryGalleryCard(
+              conversation: memory('memory-rtl'),
+              layout: MemoryGalleryLayout.list,
+              onOpen: () {},
+              onDelete: () async => false,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final card = find.byKey(const Key('memory-card-memory-rtl'));
+    final dismissible = tester.widget<Dismissible>(card);
+    final openBackground = dismissible.background!;
+    final deleteBackground = dismissible.secondaryBackground!;
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.rtl,
+        child: SizedBox(width: 400, height: 120, child: openBackground),
+      ),
+    );
+    expect(tester.getCenter(find.byIcon(Icons.edit_outlined)).dx, greaterThan(200));
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.rtl,
+        child: SizedBox(width: 400, height: 120, child: deleteBackground),
+      ),
+    );
+    expect(tester.getCenter(find.byIcon(Icons.delete_outline_rounded)).dx, lessThan(200));
   });
 
   testWidgets('gallery sort switches between newest and oldest memories', (tester) async {
@@ -220,6 +301,22 @@ void main() {
     expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
     expect(artworkApi.backfillCalls, 1);
     expect(find.textContaining('Recent memories are being refreshed'), findsOneWidget);
+  });
+
+  testWidgets('Painter style control is disabled while real generation is unavailable', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-style-disabled')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi(releaseEnabled: false);
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+
+    final menu = tester.widget<PopupMenuButton<String>>(find.byKey(const Key('memory-artwork-style-menu')));
+    expect(menu.enabled, isFalse);
+    expect(artworkApi.backfillCalls, 0);
   });
 
   testWidgets('scrolling near the end requests the next memory page', (tester) async {

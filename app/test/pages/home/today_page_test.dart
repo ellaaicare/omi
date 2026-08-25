@@ -65,7 +65,7 @@ void main() {
     expect(transcriptTaps, 1);
   });
 
-  testWidgets('interrupted Home necklace ownership keeps process and transcript actions', (tester) async {
+  testWidgets('interrupted Home necklace ownership keeps recovery and transcript actions', (tester) async {
     var processTaps = 0;
     var transcriptTaps = 0;
     await _pumpRecordControl(
@@ -80,7 +80,7 @@ void main() {
 
     expect(find.text(l10n.todayDockFinish), findsOneWidget);
     expect(find.text(l10n.transcript), findsOneWidget);
-    expect(find.text(l10n.todayDockRecordingUnavailable), findsOneWidget);
+    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.tap(find.byKey(const Key('today-view-live-transcript')));
@@ -102,7 +102,7 @@ void main() {
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
   });
 
-  testWidgets('unavailable capture invokes only the gentle unavailable action', (tester) async {
+  testWidgets('capture error keeps the iPhone recorder available for recovery', (tester) async {
     var recordTaps = 0;
     var unavailableTaps = 0;
     await _pumpRecordControl(
@@ -113,17 +113,17 @@ void main() {
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockRecordingUnavailable), findsOneWidget);
+    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
     final actionSemantics = tester.widget<Semantics>(
       find.ancestor(of: find.byKey(const Key('today-record-moment')), matching: find.byType(Semantics)).first,
     );
-    expect(actionSemantics.properties.enabled, isFalse);
+    expect(actionSemantics.properties.enabled, isTrue);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
-    expect(recordTaps, 0);
-    expect(unavailableTaps, 1);
+    expect(recordTaps, 1);
+    expect(unavailableTaps, 0);
   });
 
   testWidgets('compact dock never exposes numeric capture diagnostics', (tester) async {
