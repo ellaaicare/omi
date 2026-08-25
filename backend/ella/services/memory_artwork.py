@@ -72,12 +72,18 @@ COMPOSITION_DIRECTIONS = (
     "Use a quiet still-life-led composition where the setting is inferred from several specific objects in the summary.",
 )
 LIGHT_AND_PALETTE_DIRECTIONS = (
-    "Use clear morning light with fresh botanical greens, pale blue accents, and warm natural neutrals.",
-    "Use soft afternoon window light with muted terracotta, ochre, teal, and cream.",
-    "Use cool gallery-like light with one saturated accent color supported by stone, charcoal, and parchment tones.",
-    "Use warm late-day light with honey, olive, rust, and dusty blue, without turning the scene into a generic sunset.",
-    "Use bright overcast light with calm mineral colors, natural wood, and one summary-derived accent color.",
-    "Use focused indoor lamplight with deep green, amber, linen, and subdued red accents.",
+    "Honor every time, weather, and color cue stated in the memory; if none is stated, use soft neutral illumination "
+    "and a restrained natural palette.",
+    "Let the most specific named object supply the principal accent color; keep supporting colors quiet and do not "
+    "invent a season, weather condition, or time of day.",
+    "Match light direction and intensity to the stated setting and time; when either is absent, use diffuse neutral "
+    "light and derive color only from named objects and places.",
+    "Preserve every explicit warm, cool, indoor, outdoor, day, and night cue; when unspecified, avoid implying one "
+    "and use balanced editorial color.",
+    "Build the palette from concrete materials, objects, and surroundings in the memory, preserving any stated "
+    "colors exactly and introducing no competing narrative color cue.",
+    "Use contrast to clarify the remembered subject, while deriving illumination, atmosphere, and accent colors "
+    "strictly from the supplied title and overview.",
 )
 TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024

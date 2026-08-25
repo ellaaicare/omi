@@ -512,6 +512,24 @@ def test_prompt_contract_is_deterministic_and_style_specific():
     assert "quiet walk near a garden" in first_prompt.lower()
 
 
+def test_prompt_does_not_invent_time_weather_or_palette():
+    memory = _terminal_memory("snowy-night")
+    memory["structured"] = {
+        "title": "Walking home on a snowy night",
+        "overview": "Blue streetlights reflected on fresh snow beside a red scarf.",
+    }
+
+    prompt, _ = artwork._prompt_for(memory, artwork.DEFAULT_STYLE_VERSION)
+
+    assert "snowy night" in prompt.lower()
+    assert "blue streetlights" in prompt.lower()
+    assert "red scarf" in prompt.lower()
+    assert "morning light" not in prompt.lower()
+    assert "afternoon" not in prompt.lower()
+    assert "late-day" not in prompt.lower()
+    assert "botanical greens" not in prompt.lower()
+
+
 def test_disabled_and_declined_states_never_call_provider():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
