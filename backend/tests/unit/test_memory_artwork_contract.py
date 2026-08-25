@@ -529,6 +529,7 @@ def test_prompt_does_not_invent_time_weather_or_palette():
     assert "afternoon" not in prompt.lower()
     assert "late-day" not in prompt.lower()
     assert "botanical greens" not in prompt.lower()
+    assert "warm soft gouache" not in prompt.lower()
 
 
 def test_prompt_does_not_invent_compositional_objects():
