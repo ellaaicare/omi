@@ -189,6 +189,10 @@ class $AssetsImagesGen {
   $AssetsImagesEllaHardwareGen get ellaHardware =>
       const $AssetsImagesEllaHardwareGen();
 
+  /// Directory path: assets/images/ella-memory-topics
+  $AssetsImagesEllaMemoryTopicsGen get ellaMemoryTopics =>
+      const $AssetsImagesEllaMemoryTopicsGen();
+
   /// File path: assets/images/ella-memory-watercolor-fallback.png
   AssetGenImage get ellaMemoryWatercolorFallback =>
       const AssetGenImage('assets/images/ella-memory-watercolor-fallback.png');
@@ -580,6 +584,74 @@ class $AssetsImagesEllaHardwareGen {
   /// Directory path: assets/images/ella-hardware/png
   $AssetsImagesEllaHardwarePngGen get png =>
       const $AssetsImagesEllaHardwarePngGen();
+}
+
+class $AssetsImagesEllaMemoryTopicsGen {
+  const $AssetsImagesEllaMemoryTopicsGen();
+
+  /// File path: assets/images/ella-memory-topics/art.webp
+  AssetGenImage get art =>
+      const AssetGenImage('assets/images/ella-memory-topics/art.webp');
+
+  /// File path: assets/images/ella-memory-topics/celebration.webp
+  AssetGenImage get celebration =>
+      const AssetGenImage('assets/images/ella-memory-topics/celebration.webp');
+
+  /// File path: assets/images/ella-memory-topics/family.webp
+  AssetGenImage get family =>
+      const AssetGenImage('assets/images/ella-memory-topics/family.webp');
+
+  /// File path: assets/images/ella-memory-topics/garden.webp
+  AssetGenImage get garden =>
+      const AssetGenImage('assets/images/ella-memory-topics/garden.webp');
+
+  /// File path: assets/images/ella-memory-topics/market.webp
+  AssetGenImage get market =>
+      const AssetGenImage('assets/images/ella-memory-topics/market.webp');
+
+  /// File path: assets/images/ella-memory-topics/meal.webp
+  AssetGenImage get meal =>
+      const AssetGenImage('assets/images/ella-memory-topics/meal.webp');
+
+  /// File path: assets/images/ella-memory-topics/music.webp
+  AssetGenImage get music =>
+      const AssetGenImage('assets/images/ella-memory-topics/music.webp');
+
+  /// File path: assets/images/ella-memory-topics/phone.webp
+  AssetGenImage get phone =>
+      const AssetGenImage('assets/images/ella-memory-topics/phone.webp');
+
+  /// File path: assets/images/ella-memory-topics/quiet.webp
+  AssetGenImage get quiet =>
+      const AssetGenImage('assets/images/ella-memory-topics/quiet.webp');
+
+  /// File path: assets/images/ella-memory-topics/reading.webp
+  AssetGenImage get reading =>
+      const AssetGenImage('assets/images/ella-memory-topics/reading.webp');
+
+  /// File path: assets/images/ella-memory-topics/travel.webp
+  AssetGenImage get travel =>
+      const AssetGenImage('assets/images/ella-memory-topics/travel.webp');
+
+  /// File path: assets/images/ella-memory-topics/walk.webp
+  AssetGenImage get walk =>
+      const AssetGenImage('assets/images/ella-memory-topics/walk.webp');
+
+  /// List of all assets
+  List<AssetGenImage> get values => [
+    art,
+    celebration,
+    family,
+    garden,
+    market,
+    meal,
+    music,
+    phone,
+    quiet,
+    reading,
+    travel,
+    walk,
+  ];
 }
 
 class $AssetsImagesEllaHardwarePngGen {
