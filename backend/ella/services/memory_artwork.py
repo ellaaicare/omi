@@ -42,12 +42,49 @@ from utils.ella.memory_artwork_storage import (
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
+ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
 DEFAULT_STYLE_VERSION = "ella.memory_artwork.style.soft-gouache.v1"
 SUPPORTED_STYLE_VERSIONS = {
     DEFAULT_STYLE_VERSION,
     "ella.memory_artwork.style.paper-collage.v1",
     "ella.memory_artwork.style.graphic-landscape.v1",
 }
+STYLE_PROMPT_BRIEFS = {
+    "ella.memory_artwork.style.soft-gouache.v1": (
+        "A soft gouache editorial painting on lightly textured paper, with layered opaque brushwork, "
+        "subtle grain, natural proportions, and restrained storybook detail."
+    ),
+    "ella.memory_artwork.style.paper-collage.v1": (
+        "A refined cut-paper collage with visibly layered matte paper, crisp hand-cut silhouettes, gentle "
+        "overlap shadows, and a limited tactile color palette."
+    ),
+    "ella.memory_artwork.style.graphic-landscape.v1": (
+        "A bold graphic landscape illustration with simplified architectural or natural forms, clean shapes, "
+        "confident negative space, and an editorial travel-poster sensibility."
+    ),
+}
+COMPOSITION_DIRECTIONS = (
+    "Use layered depth led by a concrete subject already named in the memory, adding no new foreground object.",
+    "Use an intimate eye-level view, placing the most specific named subject near one third of the frame.",
+    "Use a wide environmental framing that gives the named setting room around the primary remembered subject.",
+    "Use an asymmetric editorial composition with one named subject in crisp focus and only stated context around it.",
+    "Use a gently elevated viewpoint when it suits the stated activity; otherwise preserve the activity's natural viewpoint.",
+    "Use a close observational composition built only from one or more concrete elements named in the summary.",
+)
+LIGHT_AND_PALETTE_DIRECTIONS = (
+    "Honor every time, weather, and color cue stated in the memory; if none is stated, use soft neutral illumination "
+    "and a restrained natural palette.",
+    "Let the most specific named object supply the principal accent color; keep supporting colors quiet and do not "
+    "invent a season, weather condition, or time of day.",
+    "Match light direction and intensity to the stated setting and time; when either is absent, use diffuse neutral "
+    "light and derive color only from named objects and places.",
+    "Preserve every explicit warm, cool, indoor, outdoor, day, and night cue; when unspecified, avoid implying one "
+    "and use balanced editorial color.",
+    "Build the palette from concrete materials, objects, and surroundings in the memory, preserving any stated "
+    "colors exactly and introducing no competing narrative color cue.",
+    "Use contrast to clarify the remembered subject, while deriving illumination, atmosphere, and accent colors "
+    "strictly from the supplied title and overview.",
+)
 TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024
 MAX_BACKFILL_MEMORIES = 10
@@ -428,16 +465,39 @@ def _source_is_sensitive(conversation: dict[str, Any]) -> bool:
 
 
 def _prompt_for(conversation: dict[str, Any], style_version: str) -> tuple[str, str]:
+    style_brief = STYLE_PROMPT_BRIEFS.get(style_version)
+    if style_brief is None:
+        raise MemoryArtworkError("memory_artwork_style_version_invalid", retryable=False)
     structured = conversation.get("structured") or {}
     title = " ".join(str(structured.get("title") or "").split())[:240]
     overview = " ".join(str(structured.get("overview") or "").split())[:1200]
     if not title and not overview:
         raise MemoryArtworkError("memory_artwork_summary_missing", retryable=False)
+
+    variation_material = "\n".join(
+        (
+            str(conversation.get("id") or conversation.get("conversation_id") or ""),
+            style_version,
+            title,
+            overview,
+        )
+    )
+    variation_digest = hashlib.sha256(variation_material.encode("utf-8")).digest()
+    composition = COMPOSITION_DIRECTIONS[variation_digest[0] % len(COMPOSITION_DIRECTIONS)]
+    light_and_palette = LIGHT_AND_PALETTE_DIRECTIONS[variation_digest[1] % len(LIGHT_AND_PALETTE_DIRECTIONS)]
     prompt = (
-        "Create a calm 3:2 editorial illustration inspired only by this memory summary. "
-        "Use symbolic places, objects, color, and light. Do not depict identifiable faces, names, readable text, "
-        "logos, medical conditions, or facts not present in the summary. "
-        f"Style contract: {style_version}. Summary title: {title}. Summary overview: {overview}."
+        f"Prompt contract: {ARTWORK_PROMPT_CONTRACT_VERSION}. "
+        "Create a semantically specific 3:2 editorial illustration based only on the supplied memory title and overview. "
+        "Make the concrete place, activity, objects, time, weather, and colors actually named in the memory the primary "
+        "visual evidence. Fill the full frame edge to edge with a complete scene rather than a small icon or centered vignette. "
+        "Do not default to a generic family gathering, generic living room, generic sunset, generic skyline, or repeated stock "
+        "composition unless the memory explicitly supports it. If people are needed, keep them unidentifiable and secondary "
+        "to the remembered action and setting. Do not show identifiable faces, names, readable text, logos, medical conditions, "
+        "or any fact not present in the memory. "
+        f"Style contract: {style_version}. Style direction: {style_brief} "
+        f"Composition direction: {composition} "
+        f"Light and palette direction: {light_and_palette} "
+        f"Memory title: {title or 'Untitled memory'}. Memory overview: {overview or title}."
     )
     return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
