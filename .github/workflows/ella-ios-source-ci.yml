@@ -538,6 +538,7 @@ jobs:
           changed_dart_files=()
           while IFS= read -r changed_path; do
             case "$changed_path" in
+              app/*.gen.dart|app/**/*.gen.dart|app/*.g.dart|app/**/*.g.dart) continue ;;
               app/*.dart|app/**/*.dart) changed_dart_files+=("${changed_path#app/}") ;;
             esac
           done < /tmp/ella-ios-source-ci-changed-files.txt
