@@ -274,9 +274,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
     _homeCaptureAuthorityGeneration++;
+    final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
     _todayCardController.invalidateAuthority();
-    final homeMemoryLayout = _savedHomeMemoryLayout();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -292,10 +292,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         // Never retain a previous account's mode while exact authority changes.
         _whispersOn = false;
         _whispersVerified = false;
-        _homeMemoryLayout = homeMemoryLayout;
+        _homeMemoryLayout = MemoryGalleryLayout.journal;
         _homeMemorySort = MemoryGallerySort.recent;
       });
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return;
+      final layout = _savedHomeMemoryLayout();
+      if (layout != _homeMemoryLayout) setState(() => _homeMemoryLayout = layout);
+    });
     if (_guardianAvailable) unawaited(_loadWhisperState());
     unawaited(_syncTodayCardAuthority(forceReload: true));
   }

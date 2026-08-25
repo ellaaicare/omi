@@ -763,8 +763,9 @@ void main() {
     expect(find.byKey(const Key('memory-layout-list-memory-layout-authority')), findsOneWidget);
 
     await preferences.saveString('aiConsentProfileBindingId', 'profile-other-user');
-    preferences.uid = 'other-user';
     harness.authorityChanges.value += 1;
+    preferences.uid = 'other-user';
+    await tester.pump();
     await tester.pump();
 
     expect(find.byKey(const Key('memory-layout-grid-memory-layout-authority')), findsOneWidget);
