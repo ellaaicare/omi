@@ -30,6 +30,7 @@ void main() {
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
     expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
     expect(find.byKey(const Key('today-capture-proof-panel')), findsNothing);
+    expect(_recordActionSemantics(tester).properties.selected, isFalse);
 
     await _pumpRecordControl(tester, recordingState: RecordingState.initialising);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
@@ -38,7 +39,8 @@ void main() {
 
     await _pumpRecordControl(tester, necklaceConnecting: true);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
-    expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceConnecting), findsNothing);
+    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
   });
 
@@ -57,6 +59,7 @@ void main() {
     expect(find.text(l10n.todayDockRecord), findsNothing);
     expect(find.byIcon(Icons.subject_rounded), findsOneWidget);
     expect(find.byKey(const Key('today-view-live-transcript')), findsNothing);
+    expect(_recordActionSemantics(tester).properties.selected, isTrue);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -80,7 +83,8 @@ void main() {
 
     expect(find.text(l10n.todayDockFinish), findsOneWidget);
     expect(find.text(l10n.transcript), findsOneWidget);
-    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
+    expect(find.text(l10n.todayDockRecordingNeedsAttention), findsOneWidget);
+    expect(_recordActionSemantics(tester).properties.selected, isFalse);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.tap(find.byKey(const Key('today-view-live-transcript')));
@@ -177,6 +181,10 @@ void main() {
     expect(find.textContaining('A visible test transcript'), findsOneWidget);
   });
 }
+
+Semantics _recordActionSemantics(WidgetTester tester) => tester.widget<Semantics>(
+      find.ancestor(of: find.byKey(const Key('today-record-moment')), matching: find.byType(Semantics)).first,
+    );
 
 Future<void> _pumpRecordControl(
   WidgetTester tester, {

@@ -175,12 +175,42 @@ void main() {
     )..updateRecordingDevice(necklace);
     await _pumpCapturePage(tester, capture);
 
+    final unmutedSurface = tester.widget<Container>(
+      find.byKey(const Key('conversation-capture-mute-surface')),
+    );
+    final unmutedDecoration = unmutedSurface.decoration! as BoxDecoration;
+    expect(unmutedDecoration.color, EllaColors.elevatedCard);
+    expect(find.byIcon(Icons.mic_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.mic_off_rounded), findsNothing);
+
     await tester.tap(find.byKey(const Key('conversation-capture-mute')));
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(capture.phoneStops, 1);
     expect(capture.devicePauses, 0);
     expect(capture.recordingState, RecordingState.stop);
+  });
+
+  testWidgets('capture actions use explicit active and destructive colors', (tester) async {
+    final emptyCapture = _FakeCaptureProvider(RecordingState.record, transcriptReady: true, phoneOwnsMobileAudio: true);
+    await _pumpCapturePage(tester, emptyCapture);
+
+    final stopSurface = tester.widget<Container>(find.byKey(const Key('conversation-process-now-surface')));
+    expect((stopSurface.decoration! as BoxDecoration).color, EllaColors.error);
+    expect(find.text('Stop Recording'), findsOneWidget);
+    Navigator.of(tester.element(find.byType(ConversationCapturingPage))).pop();
+    await tester.pumpAndSettle();
+
+    final contentCapture = _FakeCaptureProvider(
+      RecordingState.record,
+      transcriptReady: true,
+      phoneOwnsMobileAudio: true,
+    )..segments = [_transcriptSegment()];
+    await _pumpCapturePage(tester, contentCapture);
+
+    final processSurface = tester.widget<Container>(find.byKey(const Key('conversation-process-now-surface')));
+    expect((processSurface.decoration! as BoxDecoration).color, EllaColors.tealDeep);
+    expect(find.text('Process Now'), findsOneWidget);
   });
 
   testWidgets('empty initializing necklace action targets necklace transport and exits', (tester) async {

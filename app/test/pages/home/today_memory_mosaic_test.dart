@@ -83,7 +83,7 @@ void main() {
     expect(find.text('iPhone · Ready'), findsOneWidget);
     expect(find.text('Recent memories'), findsNothing);
     expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
-    expect(find.byKey(const Key('memory-curated-art-memory-2')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-2')), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Reminders'), findsNothing);
     expect(find.byIcon(Icons.tune_rounded), findsNothing);

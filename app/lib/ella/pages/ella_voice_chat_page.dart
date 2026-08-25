@@ -14,6 +14,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
@@ -158,7 +159,7 @@ class EllaVoiceChatPage extends StatefulWidget {
 
   @visibleForTesting
   static bool shouldResumeAfterStandardTurn(StandardVoiceTurnResult result) =>
-      result.reply.isEmpty || result.usedOnDeviceTts;
+      result.failure == null && (result.reply.isEmpty || result.usedOnDeviceTts);
 
   @visibleForTesting
   static bool shouldInitializeSpeech(EllaVoiceDemoState? demoState) => demoState == null;
@@ -210,6 +211,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   StreamSubscription? _playerSub;
   final SpeechToText _speech = SpeechToText();
   final StandardVoiceTurnCoordinator _standardVoiceTurn = const StandardVoiceTurnCoordinator();
+  bool _standardTurnInFlight = false;
   final VoicePhoneCaptureTakeoverCoordinator _phoneCaptureTakeover = VoicePhoneCaptureTakeoverCoordinator();
   bool _speechAvailable = false;
   String _currentWords = '';
@@ -1305,7 +1307,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     _currentWords = result.recognizedWords;
 
-    if (result.finalResult && _currentWords.isNotEmpty) {
+    if (result.finalResult && _currentWords.isNotEmpty && !_standardTurnInFlight) {
       _processTranscript(_currentWords);
     } else {
       setState(() {
@@ -1316,17 +1318,23 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _processTranscript(String transcript) async {
+    transcript = transcript.trim();
+    if (transcript.isEmpty || _standardTurnInFlight) return;
+    _standardTurnInFlight = true;
     debugPrint('[VoiceChat] Processing transcript: "$transcript"');
     _currentWords = '';
 
-    if (!mounted) return;
+    if (!mounted) {
+      _standardTurnInFlight = false;
+      return;
+    }
     final messageProvider = Provider.of<MessageProvider>(context, listen: false);
     try {
       await messageProvider.runProtectedOperationAtEntry((operation) async {
         if (!mounted || !operation.isCurrent) return;
         setState(() {
           _orbState = VoiceOrbState.processing;
-          _statusText = 'Ella is thinking...';
+          _statusText = context.l10n.voiceEllaThinking;
           _audioLevel = 0.0;
           _lastUserText = transcript;
         });
@@ -1356,7 +1364,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             _lastEllaText = fullReply;
             _startTypewriter(fullReply);
             setState(() {
-              _statusText = 'Ella is speaking...';
+              _statusText = context.l10n.voiceEllaSpeaking;
               _orbState = VoiceOrbState.speaking;
             });
           },
@@ -1381,6 +1389,17 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         );
 
         if (!mounted || !operation.isCurrent || result.discarded) return;
+        if (result.failure != null) {
+          _voiceModeActive = false;
+          setState(() {
+            _statusText = result.failure!.kind == ClientApiFailureKind.workspaceRequired
+                ? context.l10n.voiceWorkspaceNotReady
+                : context.l10n.voiceError;
+            _orbState = VoiceOrbState.idle;
+            _audioLevel = 0.0;
+          });
+          return;
+        }
         if (EllaVoiceChatPage.shouldResumeAfterStandardTurn(result)) {
           if (_voiceModeActive) {
             await _startListening();
@@ -1392,16 +1411,15 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     } catch (e, st) {
       debugPrint('[VoiceChat] Error in voice flow: $e\n$st');
       if (mounted) {
-        if (_voiceModeActive) {
-          debugPrint('[VoiceChat] Error, but restarting listening');
-          _startListening();
-        } else {
-          setState(() {
-            _statusText = 'Something went wrong. Tap to try again.';
-            _orbState = VoiceOrbState.idle;
-          });
-        }
+        _voiceModeActive = false;
+        setState(() {
+          _statusText = context.l10n.voiceError;
+          _orbState = VoiceOrbState.idle;
+          _audioLevel = 0.0;
+        });
       }
+    } finally {
+      _standardTurnInFlight = false;
     }
   }
 
@@ -1418,7 +1436,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _lastEllaText = '';
         _ellaDisplayText = '';
         _orbState = VoiceOrbState.idle;
-        _statusText = 'Tap to Start';
+        _statusText = context.l10n.voiceTapToTalk;
       });
     }
   }

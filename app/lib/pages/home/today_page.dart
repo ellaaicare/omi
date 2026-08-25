@@ -47,7 +47,7 @@ typedef GuardianAvailability = bool Function();
 
 enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
 
-enum TodayCaptureDockMode { ready, starting, recording, unavailable }
+enum TodayCaptureDockMode { ready, starting, recording, finishing, unavailable }
 
 class TodayCaptureDockPresentation {
   const TodayCaptureDockPresentation({
@@ -66,7 +66,7 @@ class TodayCaptureDockPresentation {
   final bool opensTranscript;
   final bool primaryEnabled;
 
-  bool get emphasized => mode == TodayCaptureDockMode.ready || mode == TodayCaptureDockMode.recording;
+  bool get emphasized => mode == TodayCaptureDockMode.recording;
 }
 
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
@@ -1299,10 +1299,7 @@ class _HomeMemoryToolbar extends StatelessWidget {
     return Row(
       children: [
         Expanded(
-          child: Semantics(
-            header: true,
-            child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow),
-          ),
+          child: Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow)),
         ),
         PopupMenuButton<MemoryGalleryLayout>(
           key: const Key('home-memory-layout-menu'),
@@ -1421,7 +1418,11 @@ class TodayRecordMomentControl extends StatelessWidget {
                     padding: const EdgeInsets.symmetric(horizontal: 8),
                     child: Row(
                       children: [
-                        EllaBreathingDot(active: active || necklaceContinuouslyRecording, live: active),
+                        EllaBreathingDot(
+                          active: active || necklaceContinuouslyRecording,
+                          live: active,
+                          activeColor: active ? EllaColors.error : EllaColors.teal,
+                        ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Semantics(
@@ -1499,8 +1500,10 @@ class TodayRecordMomentControl extends StatelessWidget {
     final status = initialising
         ? context.l10n.todayDockStarting
         : recordingState == RecordingState.error
-            ? context.l10n.todayDockPhoneReady
-            : necklaceConnecting
+            ? homeCaptureOwned
+                ? context.l10n.todayDockRecordingNeedsAttention
+                : context.l10n.todayDockPhoneReady
+            : homeCaptureOwned && usesNecklace && necklaceConnecting
                 ? context.l10n.todayDockNecklaceConnecting
                 : phoneRecording
                     ? context.l10n.todayDockRecordingPhone
@@ -1531,7 +1534,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     }
     if (homeCaptureOwned) {
       return TodayCaptureDockPresentation(
-        mode: TodayCaptureDockMode.recording,
+        mode: phoneRecording || necklaceRecording ? TodayCaptureDockMode.recording : TodayCaptureDockMode.finishing,
         status: status,
         primaryLabel: context.l10n.todayDockFinish,
         primaryIcon: Icons.stop_rounded,
@@ -1550,7 +1553,7 @@ class TodayRecordMomentControl extends StatelessWidget {
   }
 }
 
-class _TodayDockAction extends StatelessWidget {
+class _TodayDockAction extends StatefulWidget {
   const _TodayDockAction({
     required this.actionKey,
     required this.icon,
@@ -1572,50 +1575,101 @@ class _TodayDockAction extends StatelessWidget {
   final VoidCallback? onDisabledTap;
 
   @override
+  State<_TodayDockAction> createState() => _TodayDockActionState();
+}
+
+class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerProviderStateMixin {
+  late final AnimationController _recordingPulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _recordingPulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500));
+    if (widget.emphasized) _recordingPulse.repeat(reverse: true);
+  }
+
+  @override
+  void didUpdateWidget(_TodayDockAction oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.emphasized == widget.emphasized) return;
+    if (widget.emphasized) {
+      _recordingPulse.repeat(reverse: true);
+    } else {
+      _recordingPulse
+        ..stop()
+        ..reset();
+    }
+  }
+
+  @override
+  void dispose() {
+    _recordingPulse.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final foreground = emphasized
+    final foreground = widget.emphasized
         ? EllaColors.paper
-        : selected
+        : widget.selected
             ? EllaColors.tealDeep
             : EllaColors.inkSoft;
     return Semantics(
       button: true,
-      enabled: enabled,
-      selected: selected,
-      label: label,
+      enabled: widget.enabled,
+      selected: widget.selected || widget.emphasized,
+      label: widget.label,
       excludeSemantics: true,
-      child: Material(
-        color: emphasized
-            ? EllaColors.tealDeep
-            : selected
-                ? const Color(0xFFD0E4DE)
-                : EllaColors.paper,
-        borderRadius: BorderRadius.circular(16),
-        child: InkWell(
-          key: actionKey,
-          onTap: enabled ? onTap : onDisabledTap,
-          borderRadius: BorderRadius.circular(16),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 58),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 7),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon, size: 22, color: enabled ? foreground : EllaColors.cardEdge),
-                  const SizedBox(height: 3),
-                  Text(
-                    label,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: EllaTextStyles.caption.copyWith(
-                      color: enabled ? foreground : EllaColors.cardEdge,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+      child: AnimatedBuilder(
+        animation: _recordingPulse,
+        builder: (context, child) => DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: widget.emphasized && !MediaQuery.disableAnimationsOf(context)
+                ? [
+                    BoxShadow(
+                      color: EllaColors.error.withValues(alpha: 0.18 + (_recordingPulse.value * 0.16)),
+                      blurRadius: 8 + (_recordingPulse.value * 8),
+                      spreadRadius: _recordingPulse.value * 2,
                     ),
-                  ),
-                ],
+                  ]
+                : const [],
+          ),
+          child: child,
+        ),
+        child: Material(
+          color: widget.emphasized
+              ? EllaColors.error
+              : widget.selected
+                  ? const Color(0xFFD0E4DE)
+                  : EllaColors.paper,
+          borderRadius: BorderRadius.circular(16),
+          child: InkWell(
+            key: widget.actionKey,
+            onTap: widget.enabled ? widget.onTap : widget.onDisabledTap,
+            borderRadius: BorderRadius.circular(16),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 58),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 7),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(widget.icon, size: 22, color: widget.enabled ? foreground : EllaColors.cardEdge),
+                    const SizedBox(height: 3),
+                    Text(
+                      widget.label,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: widget.enabled ? foreground : EllaColors.cardEdge,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
