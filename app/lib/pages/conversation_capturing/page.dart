@@ -44,11 +44,7 @@ class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
   final Future<bool> Function()? onProcessNow;
 
-  const ConversationCapturingPage({
-    super.key,
-    this.topConversationId,
-    this.onProcessNow,
-  });
+  const ConversationCapturingPage({super.key, this.topConversationId, this.onProcessNow});
 
   @override
   State<ConversationCapturingPage> createState() => _ConversationCapturingPageState();
@@ -81,10 +77,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     _controller = TabController(length: 2, vsync: this, initialIndex: 0);
     _controller!.addListener(() => setState(() {}));
     showSummarizeConfirmation = SharedPreferencesUtil().showSummarizeConfirmation;
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1000),
-    )..repeat(reverse: true);
+    _animationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))
+      ..repeat(reverse: true);
     super.initState();
   }
 
@@ -345,12 +339,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                   const SizedBox(width: 4),
                   Text(provider.photos.isNotEmpty ? "📸" : (_isMuted ? "🔇" : "🎙️")),
                   const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      _captureStatusLabel(provider),
-                      key: const Key('conversation-capture-status'),
-                    ),
-                  ),
+                  Expanded(child: Text(_captureStatusLabel(provider), key: const Key('conversation-capture-status'))),
                 ],
               ),
             ),
@@ -389,46 +378,58 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                                         suggestions: provider.suggestionsBySegmentId,
                                         taggingSegmentIds: provider.taggingSegmentIds,
                                         onAcceptSuggestion: (suggestion) {
-                                          provider.assignSpeakerToConversation(suggestion.speakerId,
-                                              suggestion.personId, suggestion.personName, [suggestion.segmentId]);
+                                          provider.assignSpeakerToConversation(
+                                            suggestion.speakerId,
+                                            suggestion.personId,
+                                            suggestion.personName,
+                                            [suggestion.segmentId],
+                                          );
                                         },
                                         editSegment: (segmentId, speakerId) {
-                                          final connectivityProvider =
-                                              Provider.of<ConnectivityProvider>(context, listen: false);
+                                          final connectivityProvider = Provider.of<ConnectivityProvider>(
+                                            context,
+                                            listen: false,
+                                          );
                                           if (!connectivityProvider.isConnected) {
                                             ConnectivityProvider.showNoInternetDialog(context);
                                             return;
                                           }
                                           showModalBottomSheet(
-                                              context: context,
-                                              isScrollControlled: true,
-                                              backgroundColor: Colors.black,
-                                              shape: const RoundedRectangleBorder(
-                                                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                                              ),
-                                              builder: (context) {
-                                                final suggestion = provider.suggestionsBySegmentId.values.firstWhere(
-                                                    (s) => s.speakerId == speakerId,
-                                                    orElse: () => SpeakerLabelSuggestionEvent.empty());
-                                                return NameSpeakerBottomSheet(
-                                                  speakerId: speakerId,
-                                                  segmentId: segmentId,
-                                                  segments: provider.segments,
-                                                  suggestion: suggestion,
-                                                  onSpeakerAssigned:
-                                                      (speakerId, personId, personName, segmentIds) async {
-                                                    await provider.assignSpeakerToConversation(
-                                                        speakerId, personId, personName, segmentIds);
-                                                  },
-                                                );
-                                              });
+                                            context: context,
+                                            isScrollControlled: true,
+                                            backgroundColor: Colors.black,
+                                            shape: const RoundedRectangleBorder(
+                                              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                                            ),
+                                            builder: (context) {
+                                              final suggestion = provider.suggestionsBySegmentId.values.firstWhere(
+                                                (s) => s.speakerId == speakerId,
+                                                orElse: () => SpeakerLabelSuggestionEvent.empty(),
+                                              );
+                                              return NameSpeakerBottomSheet(
+                                                speakerId: speakerId,
+                                                segmentId: segmentId,
+                                                segments: provider.segments,
+                                                suggestion: suggestion,
+                                                onSpeakerAssigned: (speakerId, personId, personName, segmentIds) async {
+                                                  await provider.assignSpeakerToConversation(
+                                                    speakerId,
+                                                    personId,
+                                                    personName,
+                                                    segmentIds,
+                                                  );
+                                                },
+                                              );
+                                            },
+                                          );
                                         },
                                       ),
                         // Summary Tab
                         Center(
                           child: Padding(
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 32.0).copyWith(bottom: 50.0), // Adjust padding
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 32.0,
+                            ).copyWith(bottom: 50.0), // Adjust padding
                             child: Text(
                               provider.segments.isEmpty && provider.photos.isEmpty
                                   ? context.l10n.noSummaryYet
@@ -460,16 +461,21 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                             ? () => _stopConversation(provider)
                             : null,
                         child: Container(
+                          key: const Key('conversation-process-now-surface'),
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                           decoration: BoxDecoration(
-                            color: EllaColors.warning,
+                            color: provider.segments.isEmpty && provider.photos.isEmpty
+                                ? EllaColors.error
+                                : EllaColors.tealDeep,
                             borderRadius: BorderRadius.circular(28),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.25),
-                                spreadRadius: 2,
-                                blurRadius: 8,
-                                offset: const Offset(0, 4),
+                                color: (provider.segments.isEmpty && provider.photos.isEmpty
+                                        ? EllaColors.error
+                                        : EllaColors.tealDeep)
+                                    .withValues(alpha: 0.2),
+                                blurRadius: 12,
+                                offset: const Offset(0, 3),
                               ),
                             ],
                           ),
@@ -477,20 +483,13 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               if (_processNowInFlight == null)
-                                const FaIcon(
-                                  FontAwesomeIcons.stop,
-                                  color: Colors.black,
-                                  size: 16.0,
-                                )
+                                const FaIcon(FontAwesomeIcons.stop, color: EllaColors.paper, size: 16.0)
                               else
                                 const SizedBox(
                                   key: Key('conversation-process-now-progress'),
                                   width: 16,
                                   height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.black,
-                                  ),
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.paper),
                                 ),
                               const SizedBox(width: 10),
                               Text(
@@ -500,7 +499,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                                         ? context.l10n.stopRecording
                                         : context.l10n.processNow,
                                 style: const TextStyle(
-                                  color: Colors.black,
+                                  color: EllaColors.paper,
                                   fontSize: 16,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -515,23 +514,24 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                         key: const Key('conversation-capture-mute'),
                         onTap: () => _toggleMute(provider),
                         child: Container(
+                          key: const Key('conversation-capture-mute-surface'),
                           width: 52,
                           height: 52,
                           decoration: BoxDecoration(
-                            color: _isMuted ? EllaColors.error : EllaColors.bgTertiary,
+                            color: _isMuted ? EllaColors.error : EllaColors.elevatedCard,
                             shape: BoxShape.circle,
+                            border: Border.all(color: _isMuted ? EllaColors.error : EllaColors.cardEdge),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.25),
-                                spreadRadius: 2,
+                                color: Colors.black.withValues(alpha: 0.12),
                                 blurRadius: 8,
-                                offset: const Offset(0, 4),
+                                offset: const Offset(0, 3),
                               ),
                             ],
                           ),
-                          child: const Icon(
-                            Icons.mic_off,
-                            color: Colors.white,
+                          child: Icon(
+                            _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                            color: _isMuted ? EllaColors.paper : EllaColors.tealDeep,
                             size: 24,
                           ),
                         ),
@@ -614,18 +614,12 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
           // Photo group bubble
           Flexible(
             child: Container(
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.7,
-              ),
+              constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.7),
               decoration: BoxDecoration(
                 color: EllaColors.primary.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(18),
                 boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.15),
-                    blurRadius: 4,
-                    offset: const Offset(0, 1),
-                  ),
+                  BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 4, offset: const Offset(0, 1)),
                 ],
               ),
               child: Column(
@@ -633,10 +627,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 children: [
                   // Grid of photos in this group
                   ClipRRect(
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(18),
-                      topRight: Radius.circular(18),
-                    ),
+                    borderRadius: const BorderRadius.only(topLeft: Radius.circular(18), topRight: Radius.circular(18)),
                     child: group.length == 1
                         ? GestureDetector(
                             onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(group.first)),
@@ -676,19 +667,17 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     if (group.length == 2) {
       return Row(
         children: group
-            .map((photo) => Expanded(
-                  child: GestureDetector(
-                    onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(photo)),
-                    child: AspectRatio(
-                      aspectRatio: 1,
-                      child: Image.memory(
-                        base64Decode(photo.base64),
-                        fit: BoxFit.cover,
-                        gaplessPlayback: true,
-                      ),
-                    ),
+            .map(
+              (photo) => Expanded(
+                child: GestureDetector(
+                  onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(photo)),
+                  child: AspectRatio(
+                    aspectRatio: 1,
+                    child: Image.memory(base64Decode(photo.base64), fit: BoxFit.cover, gaplessPlayback: true),
                   ),
-                ))
+                ),
+              ),
+            )
             .toList(),
       );
     }
@@ -699,37 +688,33 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       children: [
         Row(
           children: firstRow
-              .map((photo) => Expanded(
-                    child: GestureDetector(
-                      onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(photo)),
-                      child: AspectRatio(
-                        aspectRatio: 1,
-                        child: Image.memory(
-                          base64Decode(photo.base64),
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                        ),
-                      ),
+              .map(
+                (photo) => Expanded(
+                  child: GestureDetector(
+                    onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(photo)),
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: Image.memory(base64Decode(photo.base64), fit: BoxFit.cover, gaplessPlayback: true),
                     ),
-                  ))
+                  ),
+                ),
+              )
               .toList(),
         ),
         if (secondRow.isNotEmpty)
           Row(
             children: [
-              ...secondRow.map((photo) => Expanded(
-                    child: GestureDetector(
-                      onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(photo)),
-                      child: AspectRatio(
-                        aspectRatio: 1,
-                        child: Image.memory(
-                          base64Decode(photo.base64),
-                          fit: BoxFit.cover,
-                          gaplessPlayback: true,
-                        ),
-                      ),
+              ...secondRow.map(
+                (photo) => Expanded(
+                  child: GestureDetector(
+                    onTap: () => _openPhotoViewer(allPhotos, allPhotos.indexOf(photo)),
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: Image.memory(base64Decode(photo.base64), fit: BoxFit.cover, gaplessPlayback: true),
                     ),
-                  )),
+                  ),
+                ),
+              ),
               // Fill remaining space if odd number
               if (secondRow.length < 2) const Expanded(child: SizedBox()),
             ],
@@ -741,10 +726,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   void _openPhotoViewer(List<ConversationPhoto> allPhotos, int index) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (context) => PhotoViewerPage(
-          photos: allPhotos,
-          initialIndex: index >= 0 ? index : 0,
-        ),
+        builder: (context) => PhotoViewerPage(photos: allPhotos, initialIndex: index >= 0 ? index : 0),
       ),
     );
   }
@@ -759,12 +741,12 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.black,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (context) {
-        final suggestion = provider.suggestionsBySegmentId.values
-            .firstWhere((s) => s.speakerId == segment.speakerId, orElse: () => SpeakerLabelSuggestionEvent.empty());
+        final suggestion = provider.suggestionsBySegmentId.values.firstWhere(
+          (s) => s.speakerId == segment.speakerId,
+          orElse: () => SpeakerLabelSuggestionEvent.empty(),
+        );
         return NameSpeakerBottomSheet(
           speakerId: segment.speakerId,
           segmentId: segment.id,
@@ -806,28 +788,18 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
             child: GestureDetector(
               onTap: () => _editSegmentSpeaker(segment, provider),
               child: Container(
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.75,
-                ),
+                constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
                   color: isUser ? EllaColors.primary : EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(18),
                   boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.15),
-                      blurRadius: 4,
-                      offset: const Offset(0, 1),
-                    ),
+                    BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 4, offset: const Offset(0, 1)),
                   ],
                 ),
                 child: Text(
                   segment.text,
-                  style: TextStyle(
-                    color: isUser ? Colors.white : EllaColors.textPrimary,
-                    fontSize: 15,
-                    height: 1.4,
-                  ),
+                  style: TextStyle(color: isUser ? Colors.white : EllaColors.textPrimary, fontSize: 15, height: 1.4),
                 ),
               ),
             ),

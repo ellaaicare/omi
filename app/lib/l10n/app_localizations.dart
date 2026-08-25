@@ -156,7 +156,7 @@ abstract class AppLocalizations {
     Locale('tr'),
     Locale('uk'),
     Locale('vi'),
-    Locale('zh'),
+    Locale('zh')
   ];
 
   /// The app title displayed in various places
@@ -9019,10 +9019,7 @@ abstract class AppLocalizations {
   ///
   /// In en, this message translates to:
   /// **'{accessDescription} and is {triggerDescription}.'**
-  String accessesAndTriggeredBy(
-    String accessDescription,
-    String triggerDescription,
-  );
+  String accessesAndTriggeredBy(String accessDescription, String triggerDescription);
 
   /// Sentence starting with 'Is' for trigger description
   ///
@@ -15732,6 +15729,12 @@ abstract class AppLocalizations {
   /// **'Something went wrong. Tap to try again.'**
   String get voiceError;
 
+  /// Voice chat status when the authenticated private workspace has not finished setup
+  ///
+  /// In en, this message translates to:
+  /// **'Ella\'s private workspace isn\'t ready yet. Tap to retry.'**
+  String get voiceWorkspaceNotReady;
+
   /// Voice chat page title
   ///
   /// In en, this message translates to:
@@ -17688,6 +17691,12 @@ abstract class AppLocalizations {
   /// **'Illustration created for this memory'**
   String get memoryGeneratedArtworkLabel;
 
+  /// No description provided for @memoryArtworkPreparingLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is preparing an illustration for this memory'**
+  String get memoryArtworkPreparingLabel;
+
   /// No description provided for @memoryBackToRecent.
   ///
   /// In en, this message translates to:
@@ -17741,6 +17750,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Recording with your necklace'**
   String get todayDockRecordingNecklace;
+
+  /// No description provided for @todayDockRecordingNeedsAttention.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording needs attention'**
+  String get todayDockRecordingNeedsAttention;
 
   /// No description provided for @todayDockNecklaceReady.
   ///
@@ -17828,7 +17843,7 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
         'tr',
         'uk',
         'vi',
-        'zh',
+        'zh'
       ].contains(locale.languageCode);
 
   @override
@@ -17908,10 +17923,8 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsZh();
   }
 
-  throw FlutterError(
-    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-    'an issue with the localizations generation tool. Please file an issue '
-    'on GitHub with a reproducible sample app and the gen-l10n configuration '
-    'that was used.',
-  );
+  throw FlutterError('AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+      'an issue with the localizations generation tool. Please file an issue '
+      'on GitHub with a reproducible sample app and the gen-l10n configuration '
+      'that was used.');
 }

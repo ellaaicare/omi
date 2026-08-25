@@ -4750,10 +4750,7 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
-  String accessesAndTriggeredBy(
-    String accessDescription,
-    String triggerDescription,
-  ) {
+  String accessesAndTriggeredBy(String accessDescription, String triggerDescription) {
     return '$accessDescription y es $triggerDescription.';
   }
 
@@ -8451,6 +8448,9 @@ class AppLocalizationsEs extends AppLocalizations {
   String get voiceError => 'Something went wrong. Tap to try again.';
 
   @override
+  String get voiceWorkspaceNotReady => 'Ella\'s private workspace isn\'t ready yet. Tap to retry.';
+
+  @override
   String get voiceChatTitle => 'Voice Chat';
 
   @override
@@ -9518,6 +9518,9 @@ class AppLocalizationsEs extends AppLocalizations {
   String get memoryGeneratedArtworkLabel => 'Illustration created for this memory';
 
   @override
+  String get memoryArtworkPreparingLabel => 'Ella is preparing an illustration for this memory';
+
+  @override
   String get memoryBackToRecent => 'Back to recent';
 
   @override
@@ -9543,6 +9546,9 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get todayDockRecordingNecklace => 'Recording with your necklace';
+
+  @override
+  String get todayDockRecordingNeedsAttention => 'Recording needs attention';
 
   @override
   String get todayDockNecklaceReady => 'Necklace · Ready';

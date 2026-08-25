@@ -1561,6 +1561,15 @@ void main() {
     expect(EllaVoiceChatPage.shouldResumeAfterStandardTurn(result), isTrue);
   });
 
+  test('standard voice backend failure stops instead of reopening the microphone loop', () {
+    const result = StandardVoiceTurnResult(
+      reply: '',
+      failure: ClientApiFailure(ClientApiFailureKind.workspaceRequired),
+    );
+
+    expect(EllaVoiceChatPage.shouldResumeAfterStandardTurn(result), isFalse);
+  });
+
   test('missing synthesized file prepares playback before on-device fallback', () async {
     final playbackOrder = <String>[];
     final coordinator = StandardVoiceTurnCoordinator(

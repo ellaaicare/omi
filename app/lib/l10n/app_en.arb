@@ -10109,6 +10109,10 @@
   "@voiceError": {
     "description": "Voice chat error status"
   },
+  "voiceWorkspaceNotReady": "Ella's private workspace isn't ready yet. Tap to retry.",
+  "@voiceWorkspaceNotReady": {
+    "description": "Voice chat status when the authenticated private workspace has not finished setup"
+  },
   "voiceChatTitle": "Voice Chat",
   "@voiceChatTitle": {
     "description": "Voice chat page title"
@@ -10765,6 +10769,7 @@
   "memoryArtworkStyleUpdated": "New memories will use this illustration style. Recent memories are being refreshed.",
   "memoryArtworkStyleUnavailable": "Ella couldn't update the illustration style right now.",
   "memoryGeneratedArtworkLabel": "Illustration created for this memory",
+  "memoryArtworkPreparingLabel": "Ella is preparing an illustration for this memory",
   "memoryBackToRecent": "Back to recent",
   "memoryLoadingMore": "Loading earlier memories",
   "todayDockRecord": "Record",
@@ -10774,6 +10779,7 @@
   "todayDockNecklaceConnecting": "Necklace · Connecting…",
   "todayDockRecordingPhone": "Recording on this iPhone",
   "todayDockRecordingNecklace": "Recording with your necklace",
+  "todayDockRecordingNeedsAttention": "Recording needs attention",
   "todayDockNecklaceReady": "Necklace · Ready",
   "todayDockNecklaceNotConnected": "Necklace not connected",
   "todayDockPhoneReady": "iPhone · Ready",

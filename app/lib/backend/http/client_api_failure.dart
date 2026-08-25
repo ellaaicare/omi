@@ -94,6 +94,7 @@ String? _normalizeCode(String value) {
   const allowed = {
     'hermes_runtime_required',
     'workspace_required',
+    'self_hosted_invitation_runtime_not_provisioned',
     'upgrade_required',
     'update_required',
     'client_update_required',
@@ -111,7 +112,11 @@ ClientApiFailureKind _kindFor({required int? statusCode, required String? backen
       const {'upgrade_required', 'update_required', 'client_update_required'}.contains(backendCode)) {
     return ClientApiFailureKind.updateRequired;
   }
-  if (const {'hermes_runtime_required', 'workspace_required'}.contains(backendCode)) {
+  if (const {
+    'hermes_runtime_required',
+    'workspace_required',
+    'self_hosted_invitation_runtime_not_provisioned',
+  }.contains(backendCode)) {
     return ClientApiFailureKind.workspaceRequired;
   }
   if (const {'consent_required', 'ai_consent_required'}.contains(backendCode)) {

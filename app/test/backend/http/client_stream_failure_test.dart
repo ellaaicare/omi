@@ -88,6 +88,16 @@ void main() {
     );
   });
 
+  test('self-hosted provisioning failure is a typed workspace failure', () {
+    final failure = ClientApiFailure.fromHttp(
+      statusCode: 409,
+      body: '{"detail":{"code":"self_hosted_invitation_runtime_not_provisioned"}}',
+    );
+
+    expect(failure.kind, ClientApiFailureKind.workspaceRequired);
+    expect(failure.backendCode, 'self_hosted_invitation_runtime_not_provisioned');
+  });
+
   test('unknown JSON SSE error is sanitized instead of becoming assistant content', () {
     expect(
       () => parseMessageChunk('data: {"error":"provider included private diagnostic text"}', 'message-a'),

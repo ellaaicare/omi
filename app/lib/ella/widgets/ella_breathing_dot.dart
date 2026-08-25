@@ -8,11 +8,15 @@ class EllaBreathingDot extends StatefulWidget {
     this.active = true,
     this.live = false,
     this.size = 10,
+    this.activeColor = EllaColors.teal,
+    this.inactiveColor = EllaColors.inkSoft,
   });
 
   final bool active;
   final bool live;
   final double size;
+  final Color activeColor;
+  final Color inactiveColor;
 
   @override
   State<EllaBreathingDot> createState() => _EllaBreathingDotState();
@@ -61,7 +65,7 @@ class _EllaBreathingDotState extends State<EllaBreathingDot> with SingleTickerPr
       height: widget.size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: widget.active ? EllaColors.teal : EllaColors.inkSoft,
+        color: widget.active ? widget.activeColor : widget.inactiveColor,
       ),
     );
     if (!widget.active || reduceMotion) return dot;
