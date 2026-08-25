@@ -262,6 +262,22 @@ ROUTE_GROUPS = (
         ("GET", "/.well-known/oauth-authorization-server", "get_oauth_authorization_server"),
     ),
     _group(
+        "memory_artwork",
+        "firebase_exact_owner",
+        "staged_public",
+        ("GET", "/v1/ella/memory-artwork/preferences", "get_memory_artwork_preferences"),
+        ("PUT", "/v1/ella/memory-artwork/preferences", "put_memory_artwork_preferences"),
+        ("GET", "/v1/ella/memories/{memory_id}/artwork", "get_memory_artwork"),
+        ("POST", "/v1/ella/memories/{memory_id}/artwork", "retry_memory_artwork"),
+        ("POST", "/v1/ella/memory-artwork/backfill", "backfill_memory_artwork"),
+    ),
+    _group(
+        "memory_artwork",
+        "memory_artwork_service_exact_subject",
+        "internal_only",
+        ("POST", "/v1/ella/internal/memory-artwork/{memory_id}/process", "process_memory_artwork"),
+    ),
+    _group(
         "memory_reinterpretation",
         "firebase_exact_owner",
         "public",

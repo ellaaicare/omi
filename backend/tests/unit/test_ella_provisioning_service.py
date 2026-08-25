@@ -220,6 +220,7 @@ class FakeRepository:
         schema_error=None,
         self_hosted_admission=None,
         self_hosted_owned=None,
+        active_retained=False,
     ):
         self.job = _job()
         self.binding = binding
@@ -236,8 +237,10 @@ class FakeRepository:
         self.self_hosted_owned = (
             self_hosted_admission is not None if self_hosted_owned is None else bool(self_hosted_owned)
         )
+        self.active_retained = active_retained
         self.job_calls = []
         self.voice_seed_calls = []
+        self.voice_seed_lineages = []
         self.voice_seed_result = False
         self.last_activation_arguments = None
 
@@ -262,6 +265,9 @@ class FakeRepository:
 
     async def has_invitation_owned_self_hosted_runtime(self, _uid):
         return self.self_hosted_owned
+
+    async def has_active_retained_runtime(self, _uid):
+        return self.active_retained
 
     async def ensure_omi_user_document(self, **kwargs):
         if self.omi_identity_error:
@@ -298,8 +304,9 @@ class FakeRepository:
         del uid, provider, role
         return "44444444-4444-4444-4444-444444444444"
 
-    async def seed_voice_entitlement_if_absent(self, *, uid):
+    async def seed_voice_entitlement_if_absent(self, *, uid, retained_authority_lineage=None):
         self.voice_seed_calls.append(uid)
+        self.voice_seed_lineages.append(retained_authority_lineage)
         return self.voice_seed_result
 
     async def stage_runtime_binding(self, *, uid, binding):
@@ -484,6 +491,25 @@ def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch)
     assert provisioning_enabled("runtime-user") is False
     assert runtime_bindings_enabled("runtime-user") is True
     assert runtime_bindings_enabled("provision-user") is False
+
+    retained = FakeRepository(self_hosted_owned=False, active_retained=True)
+    retained.voice_seed_result = True
+    assert asyncio.run(provisioning_service.recover_retained_voice_entitlement("retained-user", repository=retained))
+    assert retained.voice_seed_calls == ["retained-user"]
+    assert retained.voice_seed_lineages == [current_self_hosted_runtime_lineage()]
+
+    invitation_owned = FakeRepository(self_hosted_owned=True, active_retained=True)
+    assert not asyncio.run(
+        provisioning_service.recover_retained_voice_entitlement("invitation-user", repository=invitation_owned)
+    )
+    assert invitation_owned.voice_seed_calls == []
+
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "runtime-user,retained-runtime-user")
+    runtime_bound = FakeRepository(self_hosted_owned=False, active_retained=True)
+    assert not asyncio.run(
+        provisioning_service.recover_retained_voice_entitlement("retained-runtime-user", repository=runtime_bound)
+    )
+    assert runtime_bound.voice_seed_calls == []
 
 
 @pytest.mark.parametrize(
@@ -3250,6 +3276,51 @@ def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch)
 
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
+
+
+def test_fresh_uid_relax_preserves_exact_active_retained_runtime(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=True,
+    )
+
+    runtime = asyncio.run(
+        resolve_isolated_runtime(
+            "retained-user",
+            repository=repository,
+            target_mode="hermes-chat",
+        )
+    )
+
+    assert runtime is None
+    assert repository.identity_calls == []
+    assert repository.job_calls == []
+
+
+def test_fresh_uid_relax_still_rejects_missing_isolated_binding(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=False,
+    )
+
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned"):
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-chat",
+            )
+        )
 
 
 def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):

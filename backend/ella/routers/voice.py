@@ -52,6 +52,7 @@ from ella.services.ai_consent import (
 from ella.services.provisioning import (
     ProvisioningError,
     cloud_provisioning_enabled,
+    recover_retained_voice_entitlement,
     self_hosted_runtime_authority_required,
 )
 from ella.services.runtime_resolver import (
@@ -1431,6 +1432,13 @@ async def get_voice_entitlement(
 ):
     """Return the stable frontend contract without exposing operator notes."""
     contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)
+    if contract.get("status") == "revoked":
+        try:
+            recovered = await recover_retained_voice_entitlement(authenticated_uid)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.code}) from exc
+        if recovered:
+            contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)
     correlation_id = str(uuid.uuid4())
     return {
         **contract,

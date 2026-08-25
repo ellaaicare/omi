@@ -201,6 +201,15 @@ def _install_authority_transaction(
 
     authority_snapshot = authority_ref.get(transaction=transaction)
     authority = authority_snapshot.to_dict() if authority_snapshot.exists else {}
+    already_installed = bool(
+        authority.get('state') == 'active'
+        and conversation.get('capture_state') == 'active'
+        and _authority_tuple_matches(authority, conversation_id, generation, owner_token)
+        and _conversation_tuple_matches(conversation, conversation_id, generation, owner_token)
+    )
+    if already_installed:
+        return True
+
     predecessor = None
     if adopt:
         if str(conversation.get('id') or '') != conversation_id:
@@ -274,7 +283,12 @@ def _install_authority_transaction(
         if predecessor_is_v2 and not (active_predecessor_can_handoff or drained_predecessor_can_handoff):
             return False
         if not predecessor_is_v2 and authority:
-            return False
+            legacy_authority_is_live = authority.get('state') not in {'drained', 'terminal'} and not _lease_expired(
+                authority,
+                now,
+            )
+            if legacy_authority_is_live:
+                return False
     elif authority and authority.get('state') not in {'drained', 'terminal'} and not _lease_expired(authority, now):
         return False
 

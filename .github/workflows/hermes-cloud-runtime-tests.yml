@@ -678,13 +678,15 @@ jobs:
             "tests/unit/test_capture_protocol_v2_live.py::test_live_predecessor_rejects_new_generation_reconnect"
             "tests/unit/test_capture_protocol_v2_live.py::test_missing_or_malformed_lease_rejects_new_generation_reconnect"
             "tests/unit/test_capture_protocol_v2_live.py::test_drain_and_finalization_require_exact_tuple_and_reach_terminal"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_authority_allows_legacy_predecessor_rotation"
+            "tests/unit/test_capture_protocol_v2_live.py::test_live_authority_rejects_legacy_predecessor_rotation_without_writes"
             "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_explicit_terminal_failure_completes_without_provider_retry"
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 56
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 58
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
@@ -883,6 +885,8 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_preserves_exact_active_retained_runtime"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_still_rejects_missing_isolated_binding"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
@@ -931,7 +935,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 20
-          test "$collected" -eq 567
+          test "$collected" -eq 569
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1040,7 +1044,7 @@ jobs:
               exit 1
             fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 229
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 231
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
@@ -1143,7 +1147,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py \
               -k "$callback_contract_selector" |
               grep -c '::'
-          )" -eq 80
+          )" -eq 81
           pytest tests/unit/test_ella_callbacks_summary_update.py -k "$callback_contract_selector" -v
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           baseline_summary_cas_selector='not (conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source)'

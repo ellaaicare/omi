@@ -524,13 +524,25 @@ async def resolve_isolated_runtime(
         raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
     invitation_admission = None
     self_hosted_owned = False
+    retained_compatible = False
     if not cloud_required:
         self_hosted_owned = await self_hosted_runtime_authority_required(uid, repository=repository)
         if self_hosted_owned and not self_hosted_configured:
             raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
         if self_hosted_configured:
             invitation_admission = await self_hosted_invitation_admission(uid, repository=repository)
-    self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
+            if not self_hosted_owned and invitation_admission is None:
+                try:
+                    retained_compatible = await repository.has_active_retained_runtime(uid)
+                except Exception as exc:
+                    raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+    self_hosted_required = (
+        self_hosted_provisioning_enabled(
+            uid,
+            admission=invitation_admission,
+        )
+        and not retained_compatible
+    )
     if self_hosted_owned and not self_hosted_required:
         raise ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False)
     if not cloud_required and not self_hosted_required and not retained_required:

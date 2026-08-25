@@ -984,6 +984,7 @@ def test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task
             ("voice", "_resolve_voice_memory_scope", "asyncio.to_thread"): 1,
             ("voice", "heartbeat_voice_canary_session", "asyncio.create_task"): 1,
             ("voice", "get_voice_context", "asyncio.create_task"): 6,
+            ("callbacks", "update_conversation_summary", "background_tasks.add_task"): 1,
         }
     )
     chat_source = (_BACKEND / "ella" / "routers" / "chat.py").read_text(encoding="utf-8")

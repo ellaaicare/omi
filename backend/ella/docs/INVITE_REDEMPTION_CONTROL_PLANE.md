@@ -13,7 +13,7 @@ Issue: `ellaaicare/ella-ai#1126`. Product and security contract:
   rows. Redemption derives both identities from the authenticated first-party
   profile binding and must match one target before entitlement or capacity
   changes.
-- Redemption requires an exact current `ai-data-processors-v8` grant, presence
+- Redemption requires an exact current `ai-data-processors-v10` grant, presence
   in the runtime-binding, Hermes Cloud provisioning, Hermes Cloud synthetic,
   and AI-consent exact UID allowlists, and a persisted
   `users.profile_class = 'synthetic'`. Global rollout flags must remain false.
