@@ -474,6 +474,44 @@ def _accepted_preferences(authority):
     }
 
 
+def test_prompt_is_semantically_specific_and_varies_composition_by_memory():
+    garden = _terminal_memory("garden-walk")
+    garden["structured"] = {
+        "title": "Morning at the community garden",
+        "overview": "We planted rosemary beside the blue watering can and talked about next spring.",
+    }
+    museum = _terminal_memory("museum-visit")
+    museum["structured"] = {
+        "title": "Looking at Calder sculptures",
+        "overview": "A quiet afternoon studying a red mobile in the sculpture gallery.",
+    }
+
+    garden_prompt, garden_hash = artwork._prompt_for(garden, artwork.DEFAULT_STYLE_VERSION)
+    museum_prompt, museum_hash = artwork._prompt_for(museum, artwork.DEFAULT_STYLE_VERSION)
+
+    assert artwork.ARTWORK_PROMPT_CONTRACT_VERSION in garden_prompt
+    assert "community garden" in garden_prompt
+    assert "blue watering can" in garden_prompt
+    assert "soft gouache" in garden_prompt.lower()
+    assert "Do not default to a generic family gathering" in garden_prompt
+    assert "Composition direction:" in garden_prompt
+    assert "Light and palette direction:" in garden_prompt
+    assert garden_hash != museum_hash
+    assert garden_prompt != museum_prompt
+
+
+def test_prompt_contract_is_deterministic_and_style_specific():
+    memory = _terminal_memory("style-memory")
+
+    first_prompt, first_hash = artwork._prompt_for(memory, "ella.memory_artwork.style.paper-collage.v1")
+    second_prompt, second_hash = artwork._prompt_for(memory, "ella.memory_artwork.style.paper-collage.v1")
+
+    assert first_prompt == second_prompt
+    assert first_hash == second_hash
+    assert "cut-paper collage" in first_prompt.lower()
+    assert "quiet walk near a garden" in first_prompt.lower()
+
+
 def test_disabled_and_declined_states_never_call_provider():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
