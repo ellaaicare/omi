@@ -113,9 +113,10 @@ psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/010
 psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/011_create_invitation_redemption.sql
 psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/012_create_account_profile_runtime_targets.sql
 psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/013_create_managed_cloud_consent_authority.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/017_add_voice_entitlement_consent_revision.sql
 ```
 
-Migrations 011, 012, and 013 contain their own `BEGIN`/`COMMIT` boundary. The
+Migrations 011, 012, 013, and 017 contain their own `BEGIN`/`COMMIT` boundary. The
 `ON_ERROR_STOP` setting is mandatory: any statement failure must exit nonzero
 and roll the whole migration back.
 
