@@ -616,10 +616,10 @@ def test_environment_owner_gate_requires_nonempty_allowlist(monkeypatch):
 @pytest.mark.parametrize(
     ("configured_timeout", "expected_timeout", "expected_lease"),
     [
-        ("15", 60.0, 120),
-        ("300", 300.0, 360),
-        ("1200", 900.0, 960),
-        ("not-a-number", 600.0, 660),
+        ("15", 60.0, 360),
+        ("300", 300.0, 600),
+        ("1200", 900.0, 1200),
+        ("not-a-number", 600.0, 900),
     ],
 )
 def test_provider_timeout_is_bounded_and_lease_includes_completion_margin(
@@ -693,8 +693,8 @@ def test_delayed_provider_uses_job_and_generation_leases_longer_than_request_dea
 
     assert reservation["status"] == "generating"
     assert result == {"outcome": "ready", "status": "ready"}
-    assert repository.job_lease_seconds == [360]
-    assert repository.generation_lease_seconds == [360]
+    assert repository.job_lease_seconds == [600]
+    assert repository.generation_lease_seconds == [600]
     assert provider.calls == 1
 
 
@@ -1059,6 +1059,35 @@ def test_expired_job_claim_after_provider_prevents_storage_egress():
     assert failure.value.code == "memory_artwork_job_claim_invalid"
     assert provider.calls == 1
     assert store.puts == []
+
+
+def test_expired_claim_after_object_write_never_deletes_shared_idempotent_object():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+
+    class ClaimExpiringStore(FakeStore):
+        def put(self, **kwargs):
+            stored = super().put(**kwargs)
+            next(iter(repository.jobs.values()))["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+            return stored
+
+    store = ClaimExpiringStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_job_claim_invalid"
+    assert len(store.puts) == 1
+    assert store.deletes == []
 
 
 def test_sensitive_source_is_excluded_without_provider_egress():
@@ -2135,6 +2164,40 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
         real_store.delete_memory_prefix(uid="owner-a", memory_id="memory-3")
     assert str(unbound.value) == "memory_artwork_binding_required"
 
+    delete_calls = []
+
+    class Blob:
+        def delete(self, **kwargs):
+            delete_calls.append(kwargs)
+
+    class Bucket:
+        def blob(self, name):
+            assert name == object_key
+            return Blob()
+
+    class Client:
+        def bucket(self, name):
+            assert name == "private-artwork"
+            return Bucket()
+
+    real_store.bucket_name = "private-artwork"
+    real_store.client = Client()
+    real_store.delete(
+        uid="owner-a",
+        memory_id="memory-1",
+        object_key=object_key,
+        object_generation="7",
+    )
+    assert delete_calls == [{"if_generation_match": 7}]
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as invalid_generation:
+        real_store.delete(
+            uid="owner-a",
+            memory_id="memory-1",
+            object_key=object_key,
+            object_generation="not-a-generation",
+        )
+    assert str(invalid_generation.value) == "memory_artwork_object_generation_invalid"
+
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
     delete_start = conversations_source.index("def delete_conversation(uid, conversation_id)")
@@ -2552,6 +2615,45 @@ def test_first_party_provider_sends_bounded_owner_scoped_designer_brief(monkeypa
         "summary": "Two friends paused beside a frozen lake in blue evening light.",
     }
     assert "opaque prompt" not in request.content.decode()
+
+
+def test_first_party_provider_enforces_wall_clock_deadline(monkeypatch, tmp_path):
+    token_file = tmp_path / "artwork-service-token"
+    token_file.write_text("test-service-token-value-0000000000000000")
+    token_file.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://artwork.internal/v1/ella/internal/artwork/render")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "artwork.internal")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_file))
+
+    async def never_finishes(*args, **kwargs):
+        await asyncio.sleep(1)
+        raise AssertionError("wall-clock timeout did not cancel provider request")
+
+    monkeypatch.setattr(artwork, "_bounded_provider_post", never_finishes)
+    context = artwork.ArtworkProviderContext(
+        owner_uid="owner-a",
+        profile_binding="profile-owner-a",
+        authority_generation=7,
+        source_revision="summary-v3",
+        consent_version="ai-data-processors-v10-test",
+        title="A winter walk",
+        summary="Two friends paused beside a frozen lake in blue evening light.",
+    )
+    provider = artwork.FirstPartyHTTPArtworkProvider(client=object())
+    provider.timeout_seconds = 0.01
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(
+            provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="job-123",
+                context=context,
+            )
+        )
+
+    assert failure.value.code == "memory_artwork_provider_unavailable"
+    assert failure.value.retryable is True
 
 
 def test_first_party_provider_rejects_missing_context_before_egress(monkeypatch, tmp_path):

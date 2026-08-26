@@ -144,11 +144,22 @@ class GCSMemoryArtworkStore:
             method="GET",
         )
 
-    def delete(self, *, uid: str, memory_id: str, object_key: str) -> None:
+    def delete(
+        self,
+        *,
+        uid: str,
+        memory_id: str,
+        object_key: str,
+        object_generation: Optional[str] = None,
+    ) -> None:
         _validated_owner_key(uid, memory_id, object_key)
+        if object_generation is not None and (not object_generation.isdigit() or int(object_generation) <= 0):
+            raise MemoryArtworkStorageError("memory_artwork_object_generation_invalid")
         try:
-            self.client.bucket(self.bucket_name).blob(object_key).delete()
-        except NotFound:
+            self.client.bucket(self.bucket_name).blob(object_key).delete(
+                if_generation_match=int(object_generation) if object_generation is not None else None
+            )
+        except (NotFound, PreconditionFailed):
             return
 
     def delete_memory_prefix(

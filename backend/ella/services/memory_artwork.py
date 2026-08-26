@@ -100,7 +100,7 @@ PROVIDER_TIMEOUT_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TIMEOUT_SECONDS"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
 MIN_PROVIDER_TIMEOUT_SECONDS = 60.0
 MAX_PROVIDER_TIMEOUT_SECONDS = 900.0
-PROVIDER_LEASE_MARGIN_SECONDS = 60
+PROVIDER_LEASE_MARGIN_SECONDS = 300
 PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
@@ -351,30 +351,31 @@ class FirstPartyHTTPArtworkProvider:
             trust_env=False,
         )
         try:
-            status_code, headers, image_bytes = await _bounded_provider_post(
-                client,
-                self.url,
-                max_response_bytes=MAX_ARTWORK_BYTES,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Idempotency-Key": idempotency_key,
-                    "X-Ella-Contract": ARTWORK_PROVIDER_CONTRACT_VERSION,
-                },
-                json={
-                    "schemaVersion": "ella.artwork.brief.v1",
-                    "jobId": idempotency_key,
-                    "ownerUid": context.owner_uid,
-                    "profileBinding": context.profile_binding,
-                    "authorityGeneration": context.authority_generation,
-                    "sourceRevision": context.source_revision,
-                    "consentVersion": context.consent_version,
-                    "synthetic": False,
-                    "style": designer_style,
-                    "title": context.title,
-                    "summary": context.summary,
-                },
-            )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(self.timeout_seconds):
+                status_code, headers, image_bytes = await _bounded_provider_post(
+                    client,
+                    self.url,
+                    max_response_bytes=MAX_ARTWORK_BYTES,
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Idempotency-Key": idempotency_key,
+                        "X-Ella-Contract": ARTWORK_PROVIDER_CONTRACT_VERSION,
+                    },
+                    json={
+                        "schemaVersion": "ella.artwork.brief.v1",
+                        "jobId": idempotency_key,
+                        "ownerUid": context.owner_uid,
+                        "profileBinding": context.profile_binding,
+                        "authorityGeneration": context.authority_generation,
+                        "sourceRevision": context.source_revision,
+                        "consentVersion": context.consent_version,
+                        "synthetic": False,
+                        "style": designer_style,
+                        "title": context.title,
+                        "summary": context.summary,
+                    },
+                )
+        except (httpx.HTTPError, TimeoutError) as exc:
             raise MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True) from exc
         finally:
             if owns_client:
@@ -450,26 +451,27 @@ class XaiMemoryArtworkProvider:
             trust_env=False,
         )
         try:
-            status_code, _, response_body = await _bounded_provider_post(
-                client,
-                XAI_IMAGE_ENDPOINT,
-                max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Idempotency-Key": idempotency_key,
-                },
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "n": 1,
-                    "aspect_ratio": "3:2",
-                    "resolution": "2k",
-                    "quality": "low",
-                    "response_format": "b64_json",
-                },
-            )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(self.timeout_seconds):
+                status_code, _, response_body = await _bounded_provider_post(
+                    client,
+                    XAI_IMAGE_ENDPOINT,
+                    max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": idempotency_key,
+                    },
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "n": 1,
+                        "aspect_ratio": "3:2",
+                        "resolution": "2k",
+                        "quality": "low",
+                        "response_format": "b64_json",
+                    },
+                )
+        except (httpx.HTTPError, TimeoutError) as exc:
             raise MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True) from exc
         finally:
             if owns_client:
@@ -1191,12 +1193,41 @@ class MemoryArtworkService:
         generated_width = generated.pixel_width
         generated_height = generated.pixel_height
         del generated
+
+        def delete_stored_if_claim_current(conversation: Optional[dict[str, Any]] = None) -> bool:
+            try:
+                current_conversation = conversation or self.repository.get_conversation(uid, memory_id) or {}
+            except Exception:
+                return False
+            current_now = datetime.now(timezone.utc)
+            current_claim_is_valid = self.repository.job_claim_is_current(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=job_lease_token,
+                now=current_now,
+            ) and _generation_claim_is_current(
+                current_conversation,
+                generation_key=generation_key,
+                lease_token=lease_token,
+                now=current_now,
+            )
+            if not current_claim_is_valid:
+                return False
+            store.delete(
+                uid=uid,
+                memory_id=memory_id,
+                object_key=stored.object_key,
+                object_generation=stored.object_generation,
+            )
+            return True
+
         try:
             final_authority = await self.authority_resolver(uid)
             final_preferences = self.repository.get_preferences(uid)
             final_conversation = self.repository.get_conversation(uid, memory_id) or {}
         except Exception as exc:
-            store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
+            delete_stored_if_claim_current()
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -1234,7 +1265,7 @@ class MemoryArtworkService:
                 style_version=str(claimed.get("style_version") or ""),
             )
         ):
-            store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
+            delete_stored_if_claim_current(final_conversation)
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -1285,7 +1316,6 @@ class MemoryArtworkService:
             ready_state=ready_state,
         )
         if not finalized:
-            store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
             raise MemoryArtworkError("memory_artwork_finalize_conflict", retryable=True)
         return {"outcome": "ready", "status": "ready"}
 
