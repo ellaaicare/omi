@@ -3596,6 +3596,12 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
+                # A manifest identifies one migration globally, so serialize its
+                # consumption in addition to the account-scoped authority lock.
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                    f"retained_profile_capabilities_migrated:{migration_hash}",
+                )
                 candidates = await connection.fetch(
                     """
                     SELECT job.id AS job_id,

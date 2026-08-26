@@ -2900,6 +2900,29 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
         } in receipts
 
         migration_receipt_sha256 = "a" * 64
+        migration_lock_key = f"retained_profile_capabilities_migrated:{migration_receipt_sha256}"
+        async with pool.acquire() as lock_holder, pool.acquire() as contender:
+            async with lock_holder.transaction():
+                await lock_holder.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                    migration_lock_key,
+                )
+                async with contender.transaction():
+                    assert (
+                        await contender.fetchval(
+                            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))",
+                            migration_lock_key,
+                        )
+                        is False
+                    )
+            async with contender.transaction():
+                assert (
+                    await contender.fetchval(
+                        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))",
+                        migration_lock_key,
+                    )
+                    is True
+                )
         with pytest.raises(ValueError, match="retained_profile_migration_receipt_invalid"):
             await repository.retry_retained_runtime_after_capability_migration(
                 uid=uid,
