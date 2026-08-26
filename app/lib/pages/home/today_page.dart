@@ -55,7 +55,7 @@ class TodayCaptureDockPresentation {
     required this.status,
     required this.primaryLabel,
     required this.primaryIcon,
-    required this.opensTranscript,
+    required this.finishesExternalCapture,
     required this.primaryEnabled,
   });
 
@@ -63,7 +63,7 @@ class TodayCaptureDockPresentation {
   final String status;
   final String primaryLabel;
   final IconData primaryIcon;
-  final bool opensTranscript;
+  final bool finishesExternalCapture;
   final bool primaryEnabled;
 
   bool get emphasized => mode == TodayCaptureDockMode.recording;
@@ -803,6 +803,26 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _finishExternalCapture(CaptureProvider capture) async {
+    if (_homeCaptureStarting) return;
+    setState(() => _homeCaptureStarting = true);
+    try {
+      final finished = switch (capture.recordingState) {
+        RecordingState.record => await capture.stopStreamRecordingAndFinalize(),
+        RecordingState.deviceRecord => await capture.stopStreamDeviceRecordingAndFinalize(),
+        _ => true,
+      };
+      if (!finished && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+    } finally {
+      if (mounted) setState(() => _homeCaptureStarting = false);
+    }
+  }
+
   Future<void> _toggleHomeCapture({
     required CaptureProvider capture,
     required bool isActive,
@@ -1077,6 +1097,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               onOpenWhispers: () =>
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
               onViewTranscript: () => _openLiveTranscript(capture),
+              onFinishExternalCapture: () => _finishExternalCapture(capture),
               onUnavailable: () => ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
@@ -1351,6 +1372,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     this.onOpenControls,
     this.onOpenWhispers,
     required this.onViewTranscript,
+    required this.onFinishExternalCapture,
     this.onUnavailable,
     required this.onTap,
   });
@@ -1370,6 +1392,7 @@ class TodayRecordMomentControl extends StatelessWidget {
   final VoidCallback? onOpenControls;
   final VoidCallback? onOpenWhispers;
   final VoidCallback onViewTranscript;
+  final VoidCallback onFinishExternalCapture;
   final VoidCallback? onUnavailable;
   final VoidCallback onTap;
 
@@ -1455,20 +1478,18 @@ class TodayRecordMomentControl extends StatelessWidget {
                       emphasized: presentation.emphasized,
                       enabled: presentation.primaryEnabled,
                       onDisabledTap: presentation.mode == TodayCaptureDockMode.unavailable ? onUnavailable : null,
-                      onTap: presentation.opensTranscript ? onViewTranscript : onTap,
+                      onTap: presentation.finishesExternalCapture ? onFinishExternalCapture : onTap,
                     ),
                   ),
-                  if (!presentation.opensTranscript) ...[
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: _TodayDockAction(
-                        actionKey: const Key('today-view-live-transcript'),
-                        icon: Icons.subject_rounded,
-                        label: context.l10n.transcript,
-                        onTap: onViewTranscript,
-                      ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: _TodayDockAction(
+                      actionKey: const Key('today-view-live-transcript'),
+                      icon: Icons.subject_rounded,
+                      label: context.l10n.transcript,
+                      onTap: onViewTranscript,
                     ),
-                  ],
+                  ),
                   if (showWhispers) ...[
                     const SizedBox(width: 6),
                     Expanded(
@@ -1510,7 +1531,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                     : necklaceRecording || (homeCaptureOwned && usesNecklace)
                         ? context.l10n.todayDockRecordingNecklace
                         : context.l10n.todayDockPhoneReady;
-    final opensTranscript =
+    final externalCaptureActive =
         !homeCaptureOwned && (phoneRecording || (necklaceRecording && !necklaceContinuouslyRecording));
     if (initialising) {
       return TodayCaptureDockPresentation(
@@ -1518,17 +1539,17 @@ class TodayRecordMomentControl extends StatelessWidget {
         status: status,
         primaryLabel: context.l10n.todayDockRecord,
         primaryIcon: Icons.mic_none_rounded,
-        opensTranscript: false,
+        finishesExternalCapture: false,
         primaryEnabled: false,
       );
     }
-    if (opensTranscript) {
+    if (externalCaptureActive) {
       return TodayCaptureDockPresentation(
         mode: TodayCaptureDockMode.recording,
         status: status,
-        primaryLabel: context.l10n.transcript,
-        primaryIcon: Icons.subject_rounded,
-        opensTranscript: true,
+        primaryLabel: context.l10n.todayDockFinish,
+        primaryIcon: Icons.stop_rounded,
+        finishesExternalCapture: true,
         primaryEnabled: true,
       );
     }
@@ -1538,7 +1559,7 @@ class TodayRecordMomentControl extends StatelessWidget {
         status: status,
         primaryLabel: context.l10n.todayDockFinish,
         primaryIcon: Icons.stop_rounded,
-        opensTranscript: false,
+        finishesExternalCapture: false,
         primaryEnabled: true,
       );
     }
@@ -1547,7 +1568,7 @@ class TodayRecordMomentControl extends StatelessWidget {
       status: status,
       primaryLabel: context.l10n.todayDockRecord,
       primaryIcon: Icons.mic_none_rounded,
-      opensTranscript: false,
+      finishesExternalCapture: false,
       primaryEnabled: true,
     );
   }

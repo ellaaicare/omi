@@ -214,7 +214,8 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('confirmed phone audio remains visibly identified outside a Home-owned moment', (tester) async {
+  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation',
+      (tester) async {
     final harness = await _pumpHome(
       tester,
       conversations: const [],
@@ -224,6 +225,29 @@ void main() {
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+
+    final transcriptContext = tester.element(find.byType(ConversationCapturingPage));
+    final navigator = Navigator.of(transcriptContext);
+    navigator.removeRoute(ModalRoute.of(transcriptContext)!);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ConversationCapturingPage), findsNothing);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Record'), findsOneWidget);
   });
 
   testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
