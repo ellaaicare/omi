@@ -288,6 +288,46 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
+  testWidgets('first phone finalization failure from Transcript preserves the exact retry target', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      finalizationResults: const [false, true],
+    );
+    addTearDown(harness.dispose);
+    harness.capture.segments = [_liveTranscriptSegment('transcript-owned-retry')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Process Now'), findsOneWidget, reason: 'the transcript route must stay open after failure');
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
+    expect(harness.capture.finalizationCalls, 2);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
   testWidgets('account authority change discards a failed external finalization target', (tester) async {
     final harness = await _pumpHome(
       tester,
