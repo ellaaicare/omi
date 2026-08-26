@@ -1432,7 +1432,7 @@ async def get_voice_entitlement(
 ):
     """Return the stable frontend contract without exposing operator notes."""
     contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)
-    if contract.get("status") == "revoked":
+    if contract.get("status") in {"active", "revoked"}:
         try:
             recovered = await recover_retained_voice_entitlement(authenticated_uid)
         except ProvisioningError as exc:

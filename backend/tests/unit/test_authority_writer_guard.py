@@ -32,6 +32,7 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"),
     ("database/ella_provisioning.py", "promote_cloud_binding"),
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"),
+    ("database/ella_provisioning.py", "rearm_retained_runtime_after_consent"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/ella_provisioning.py", "seed_voice_entitlement_if_absent"),
     ("database/ella_provisioning.py", "stage_runtime_binding"),
@@ -128,6 +129,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"cloud_quarantine"',
+    ),
+    ("database/ella_provisioning.py", "rearm_retained_runtime_after_consent"): (
+        "tests/postgres/test_authority_advisory_lock_postgres.py",
+        "test_current_retained_consent_rearms_only_exact_quarantine",
     ),
     ("database/ella_provisioning.py", "seed_voice_entitlement_if_absent"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",

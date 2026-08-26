@@ -243,6 +243,9 @@ class FakeRepository:
         self.voice_seed_calls = []
         self.voice_seed_lineages = []
         self.voice_seed_result = False
+        self.runtime_rearm_calls = []
+        self.runtime_rearm_lineages = []
+        self.runtime_rearm_result = False
         self.last_activation_arguments = None
 
     async def assert_schema_ready(self):
@@ -309,6 +312,11 @@ class FakeRepository:
         self.voice_seed_calls.append(uid)
         self.voice_seed_lineages.append(retained_authority_lineage)
         return self.voice_seed_result
+
+    async def rearm_retained_runtime_after_consent(self, *, uid, authority_lineage):
+        self.runtime_rearm_calls.append(uid)
+        self.runtime_rearm_lineages.append(authority_lineage)
+        return self.runtime_rearm_result
 
     async def stage_runtime_binding(self, *, uid, binding):
         self.staged = dict(
@@ -498,12 +506,23 @@ def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch)
     assert asyncio.run(provisioning_service.recover_retained_voice_entitlement("retained-user", repository=retained))
     assert retained.voice_seed_calls == ["retained-user"]
     assert retained.voice_seed_lineages == [current_self_hosted_runtime_lineage()]
+    assert retained.runtime_rearm_calls == ["retained-user"]
+    assert retained.runtime_rearm_lineages == [current_self_hosted_runtime_lineage()]
+
+    already_active = FakeRepository(self_hosted_owned=False, active_retained=True)
+    already_active.runtime_rearm_result = True
+    assert asyncio.run(
+        provisioning_service.recover_retained_voice_entitlement("active-retained-user", repository=already_active)
+    )
+    assert already_active.voice_seed_calls == ["active-retained-user"]
+    assert already_active.runtime_rearm_calls == ["active-retained-user"]
 
     invitation_owned = FakeRepository(self_hosted_owned=True, active_retained=True)
     assert not asyncio.run(
         provisioning_service.recover_retained_voice_entitlement("invitation-user", repository=invitation_owned)
     )
     assert invitation_owned.voice_seed_calls == []
+    assert invitation_owned.runtime_rearm_calls == []
 
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "runtime-user,retained-runtime-user")
     runtime_bound = FakeRepository(self_hosted_owned=False, active_retained=True)
@@ -511,6 +530,7 @@ def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch)
         provisioning_service.recover_retained_voice_entitlement("retained-runtime-user", repository=runtime_bound)
     )
     assert runtime_bound.voice_seed_calls == []
+    assert runtime_bound.runtime_rearm_calls == []
 
 
 @pytest.mark.parametrize(

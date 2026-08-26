@@ -265,10 +265,16 @@ async def recover_retained_voice_entitlement(
             return False
         if not await repository.has_active_retained_runtime(uid):
             return False
-        return await repository.seed_voice_entitlement_if_absent(
+        lineage = current_self_hosted_runtime_lineage()
+        entitlement_recovered = await repository.seed_voice_entitlement_if_absent(
             uid=uid,
-            retained_authority_lineage=current_self_hosted_runtime_lineage(),
+            retained_authority_lineage=lineage,
         )
+        runtime_rearmed = await repository.rearm_retained_runtime_after_consent(
+            uid=uid,
+            authority_lineage=lineage,
+        )
+        return entitlement_recovered or runtime_rearmed
     except ProvisioningSchemaNotReadyError as exc:
         raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
     except ProvisioningError:
