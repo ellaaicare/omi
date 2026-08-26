@@ -51,6 +51,7 @@ class EllaSourceText extends StatelessWidget {
   final int? maxLines;
   final TextOverflow overflow;
   final TextAlign? textAlign;
+  final bool? isEllaGenerated;
 
   const EllaSourceText(
     this.value, {
@@ -59,15 +60,17 @@ class EllaSourceText extends StatelessWidget {
     this.maxLines,
     this.overflow = TextOverflow.clip,
     this.textAlign,
+    this.isEllaGenerated,
   });
 
   @override
   Widget build(BuildContext context) {
     final displayValue = parseEllaDisplayValue(value);
+    final showSource = isEllaGenerated ?? displayValue.isEllaGenerated;
     return Text.rich(
       TextSpan(
         children: [
-          if (displayValue.isEllaGenerated) ...[
+          if (showSource) ...[
             const WidgetSpan(
               alignment: PlaceholderAlignment.middle,
               child: EllaSourceIndicator(),

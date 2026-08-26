@@ -118,16 +118,23 @@ class EllaProvisioningProvider extends ChangeNotifier {
     await _ensure(generation);
   }
 
-  Future<void> retry() async {
+  Future<void> retry({bool preserveOperationalReceipt = true}) async {
     if (_activeUid.isEmpty || _requestContext == null) return;
+    if (!preserveOperationalReceipt && _revalidatingOperationalReceipt) {
+      _revalidatingOperationalReceipt = false;
+      state = EllaProvisioningState.checking;
+      errorCode = '';
+      notifyListeners();
+    }
     if (_requestInFlight) {
       _retryEnsureAfterCurrentRequest = true;
       return;
     }
+    final wasOperational = isOperational;
     final generation = ++_generation;
     _cancelPoll();
     _pollAttempts = 0;
-    _revalidatingOperationalReceipt = isOperational;
+    _revalidatingOperationalReceipt = preserveOperationalReceipt && wasOperational;
     state = EllaProvisioningState.checking;
     errorCode = '';
     notifyListeners();
@@ -139,7 +146,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
     _requestContext = context.copyWithConsentReceiptId(receiptId);
     _requestContextEpoch++;
-    unawaited(retry());
+    unawaited(retry(preserveOperationalReceipt: false));
   }
 
   void setForeground(bool value) {

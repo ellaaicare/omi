@@ -167,6 +167,46 @@ void main() {
     expect(find.byKey(const Key('ready-child')), findsOneWidget);
   });
 
+  testWidgets('replacement consent receipt closes Home until provisioning recaptures authority', (tester) async {
+    final transport = _DelayedResumeTransport();
+    final provider = EllaProvisioningProvider(transport: transport);
+    addTearDown(provider.dispose);
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.552+831',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        consentReceiptId: 'receipt-a',
+      ),
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaProvisioningGatePage(
+            readyChild: SizedBox(key: Key('ready-child')),
+            startOnMount: false,
+          ),
+        ),
+      ),
+    );
+
+    provider.setConsentReceiptId('receipt-b');
+    await tester.pump();
+
+    expect(provider.isRevalidatingOperational, isFalse);
+    expect(find.byKey(const Key('ready-child')), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    transport.revalidation.complete(_readyResponse());
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+  });
+
   testWidgets('foreground revalidation cannot provision after the authenticated account changes', (tester) async {
     final transport = _CountingReadyTransport();
     final provider = EllaProvisioningProvider(transport: transport);

@@ -202,6 +202,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   Widget _placeholder(_MemoryArtworkFallbackKind kind) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
+    final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
     final semanticsLabel =
         isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel;
     final visibleLabel =
@@ -223,8 +224,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.brush_outlined, color: Color(0xFF57736A), size: 30),
-                const SizedBox(height: 8),
+                if (!useCompactLayout) ...[
+                  const Icon(Icons.brush_outlined, color: Color(0xFF57736A), size: 30),
+                  const SizedBox(height: 8),
+                ],
                 Text(
                   visibleLabel,
                   maxLines: 2,

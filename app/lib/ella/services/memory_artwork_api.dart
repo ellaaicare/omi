@@ -114,6 +114,7 @@ class MemoryArtworkApi {
         return result;
       }
     }
+    if (result.status != MemoryArtworkResultStatus.generating) return result;
 
     for (var attempt = 0; attempt < pollAttempts && authority.isExactCurrent(); attempt++) {
       await Future<void>.delayed(pollInterval);

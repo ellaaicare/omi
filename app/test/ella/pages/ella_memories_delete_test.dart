@@ -198,6 +198,33 @@ void main() {
     expect(find.textContaining('A grounded summary'), findsOneWidget);
   });
 
+  testWidgets('shortened Home title preserves Ella enrichment provenance', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryGalleryCard(
+            conversation: memory(
+              'memory-enriched-home',
+              title: '[Ella] Family dinner and plans',
+              overview: 'A grounded summary of the evening.',
+            ),
+            displayTitle: 'Family dinner',
+            layout: MemoryGalleryLayout.list,
+            onOpen: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('[Ella]'), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome_rounded), findsOneWidget);
+    expect(find.textContaining('Family dinner'), findsOneWidget);
+  });
+
   testWidgets('gallery swipe affordances follow start and end in right-to-left layouts', (tester) async {
     await tester.pumpWidget(
       MaterialApp(

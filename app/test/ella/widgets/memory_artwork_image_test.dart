@@ -188,4 +188,40 @@ void main() {
     await tester.pump();
     expect(find.text('Preparing illustration…'), findsOneWidget);
   });
+
+  testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {
+    final api = _DelayedArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-generating-compact',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: Center(
+            child: SizedBox(
+              width: 112,
+              height: 112,
+              child: MemoryArtworkImage(
+                conversation: conversation,
+                api: api,
+                cachedFileLookup: (_) async => null,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byIcon(Icons.brush_outlined), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }

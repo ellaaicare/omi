@@ -209,6 +209,45 @@ void main() {
     expect(result.cacheKey, hasLength(64));
   });
 
+  test('terminal policy response returns immediately without retaining the polling window', () async {
+    var calls = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        calls++;
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'unavailable',
+            'failure_code': 'memory_artwork_release_disabled',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay(
+      'memory-policy-blocked',
+      pollAttempts: 10,
+      pollInterval: const Duration(days: 1),
+    );
+
+    expect(calls, 1);
+    expect(result.status, MemoryArtworkResultStatus.unavailable);
+    expect(result.failureCode, 'memory_artwork_release_disabled');
+  });
+
   test('fetch rejects vendor or malformed URLs and never exposes them', () async {
     final api = MemoryArtworkApi(
       baseUrl: 'https://api.example/',

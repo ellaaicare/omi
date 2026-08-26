@@ -15,6 +15,7 @@ import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -608,6 +609,7 @@ class _MemoryDetails extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final titleIsEllaGenerated = parseEllaDisplayValue(conversation.structured.title).isEllaGenerated;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -618,6 +620,7 @@ class _MemoryDetails extends StatelessWidget {
             children: [
               EllaSourceText(
                 title,
+                isEllaGenerated: titleIsEllaGenerated,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
