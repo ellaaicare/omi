@@ -933,35 +933,36 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   Future<void> _presentV2VFailure(String provider, V2VConnectionReceipt receipt) async {
     if (!mounted || _v2vFallbackPromptActive) return;
     _v2vFallbackPromptActive = true;
+    late final V2VFailureChoice choice;
     try {
-      final choice = await showV2VFallbackDialog(context, receipt, allowStandardFallback: _sessionScope == null);
-      if (!mounted) return;
-      switch (choice) {
-        case V2VFailureChoice.retry:
-          final retryGeneration = _beginV2VStartup(provider);
-          await _startV2V(provider, startupGeneration: retryGeneration);
-          break;
-        case V2VFailureChoice.useElevenLabs:
-          if (_sessionScope != null) break;
-          _usingElevenLabsFallback = true;
-          _startStandardVoiceConsentLease();
-          setState(() {
-            _voiceModeActive = true;
-            _isV2VMode = false;
-            _statusText = context.l10n.voiceElevenLabsFallbackActive;
-          });
-          await _startListening();
-          break;
-        case V2VFailureChoice.stop:
-          await _cancelFailedVoiceAttempt();
-          if (EllaVoiceChatPage.shouldCloseRouteAfterV2VFailure(choice, modalPresentation: widget.modalPresentation) &&
-              mounted) {
-            Navigator.of(context).pop();
-          }
-          break;
-      }
+      choice = await showV2VFallbackDialog(context, receipt, allowStandardFallback: _sessionScope == null);
     } finally {
       _v2vFallbackPromptActive = false;
+    }
+    if (!mounted) return;
+    switch (choice) {
+      case V2VFailureChoice.retry:
+        final retryGeneration = _beginV2VStartup(provider);
+        await _startV2V(provider, startupGeneration: retryGeneration);
+        break;
+      case V2VFailureChoice.useElevenLabs:
+        if (_sessionScope != null) break;
+        _usingElevenLabsFallback = true;
+        _startStandardVoiceConsentLease();
+        setState(() {
+          _voiceModeActive = true;
+          _isV2VMode = false;
+          _statusText = context.l10n.voiceElevenLabsFallbackActive;
+        });
+        await _startListening();
+        break;
+      case V2VFailureChoice.stop:
+        await _cancelFailedVoiceAttempt();
+        if (EllaVoiceChatPage.shouldCloseRouteAfterV2VFailure(choice, modalPresentation: widget.modalPresentation) &&
+            mounted) {
+          Navigator.of(context).pop();
+        }
+        break;
     }
   }
 

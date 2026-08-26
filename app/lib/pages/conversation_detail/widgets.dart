@@ -950,6 +950,7 @@ class _TypeCorrectionLink extends StatelessWidget {
         onTap: () {
           HapticFeedback.lightImpact();
           final messenger = ScaffoldMessenger.of(context);
+          final acceptedMessage = context.l10n.memoryCorrectionPending;
           showModalBottomSheet(
             context: context,
             isScrollControlled: true,
@@ -961,7 +962,7 @@ class _TypeCorrectionLink extends StatelessWidget {
                 messenger.showSnackBar(
                   SnackBar(
                     key: const ValueKey('type-correction-accepted'),
-                    content: Text(context.l10n.memoryCorrectionPending),
+                    content: Text(acceptedMessage),
                   ),
                 );
               },
