@@ -85,4 +85,107 @@ void main() {
     expect(api.loadCalls, 2, reason: 'route recreation may refresh the signed URL without blanking cached bytes');
     expect(requestedKeys, hasLength(2));
   });
+
+  testWidgets('keeps cached artwork visible through a transient refresh failure', (tester) async {
+    final api = _DelayedArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    final conversation = ServerConversation(
+      id: 'memory-transient',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] A cached memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'summary-revision-1',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+        ),
+      ),
+    );
+    await tester.pump();
+    api.remoteResult.complete(
+      const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_unavailable',
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-cached-artwork-memory-transient')), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+  });
+
+  testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
+    final api = _DelayedArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    final conversation = ServerConversation(
+      id: 'memory-declined',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] A cached memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'summary-revision-1',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('memory-cached-artwork-memory-declined')), findsOneWidget);
+
+    api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-cached-artwork-memory-declined')), findsNothing);
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+  });
+
+  testWidgets('shows a friendly preparing state while artwork is being generated', (tester) async {
+    final api = _DelayedArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-generating',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+
+    api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await tester.pump();
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+  });
 }

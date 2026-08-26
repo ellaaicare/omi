@@ -13,6 +13,8 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryArtworkCachedFileLookup = Future<File?> Function(String cacheKey);
 
+enum _MemoryArtworkFallbackKind { preparing, unavailable }
+
 class MemoryArtworkImage extends StatefulWidget {
   const MemoryArtworkImage({
     super.key,
@@ -120,6 +122,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   @override
   Widget build(BuildContext context) {
     final result = _remoteResult;
+    if (_mustSuppressCachedArtwork(result)) {
+      return _fallback(context, kind: _MemoryArtworkFallbackKind.unavailable);
+    }
     if (result?.isReady == true) {
       return Semantics(
         image: true,
@@ -131,17 +136,39 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           cacheManager: MemoryArtworkCache.manager,
           fit: widget.fit,
           useOldImageOnUrlChange: true,
-          placeholder: (_, __) => _cachedArtworkOrFallback(context),
-          errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context),
+          placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+          errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.unavailable),
         ),
       );
     }
-    return _cachedArtworkOrFallback(context);
+    final fallbackKind = result == null ||
+            result.status == MemoryArtworkResultStatus.generating ||
+            result.status == MemoryArtworkResultStatus.unavailable
+        ? _MemoryArtworkFallbackKind.preparing
+        : _MemoryArtworkFallbackKind.unavailable;
+    return _cachedArtworkOrFallback(context, kind: fallbackKind);
   }
 
-  Widget _cachedArtworkOrFallback(BuildContext context) {
+  bool _mustSuppressCachedArtwork(MemoryArtworkResult? result) {
+    if (result == null) return false;
+    if (result.status == MemoryArtworkResultStatus.declined) return true;
+    if (result.status != MemoryArtworkResultStatus.unavailable) return false;
+    return const {
+      'memory_artwork_authority_changed',
+      'memory_artwork_consent_required',
+      'memory_artwork_deletion_pending',
+      'memory_artwork_discarded',
+      'memory_artwork_memory_not_found',
+      'memory_artwork_preference_authority_stale',
+      'memory_artwork_release_disabled',
+      'memory_artwork_sensitive_source_excluded',
+      'memory_artwork_source_stale',
+    }.contains(result.failureCode);
+  }
+
+  Widget _cachedArtworkOrFallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
     final cachedFile = _cachedFile;
-    if (cachedFile == null) return _fallback(context);
+    if (cachedFile == null) return _fallback(context, kind: kind);
     return Semantics(
       image: true,
       label: context.l10n.memoryGeneratedArtworkLabel,
@@ -150,12 +177,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         key: Key('memory-cached-artwork-${widget.conversation.id}'),
         fit: widget.fit,
         gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => _fallback(context),
+        errorBuilder: (_, __, ___) => _fallback(context, kind: kind),
       ),
     );
   }
 
-  Widget _fallback(BuildContext context) {
+  Widget _fallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
     final bytes = _sourcePhoto();
     if (bytes != null) {
       return Semantics(
@@ -166,16 +193,21 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           key: const Key('memory-source-photo'),
           fit: widget.fit,
           gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => _placeholder(),
+          errorBuilder: (_, __, ___) => _placeholder(kind),
         ),
       );
     }
-    return _placeholder();
+    return _placeholder(kind);
   }
 
-  Widget _placeholder() {
+  Widget _placeholder(_MemoryArtworkFallbackKind kind) {
+    final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
+    final semanticsLabel =
+        isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel;
+    final visibleLabel =
+        isPreparing ? context.l10n.memoryArtworkPreparingShort : context.l10n.memoryArtworkUnavailableLabel;
     return Semantics(
-      label: context.l10n.memoryArtworkPreparingLabel,
+      label: semanticsLabel,
       child: DecoratedBox(
         key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
         decoration: const BoxDecoration(
@@ -185,7 +217,25 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             colors: [Color(0xFFE9E3D8), Color(0xFFDCE9E3)],
           ),
         ),
-        child: const Center(child: Icon(Icons.brush_outlined, color: Color(0xFF57736A), size: 30)),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.brush_outlined, color: Color(0xFF57736A), size: 30),
+                const SizedBox(height: 8),
+                Text(
+                  visibleLabel,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Color(0xFF57736A), fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
