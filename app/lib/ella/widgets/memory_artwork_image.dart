@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/ella/services/memory_artwork_cache.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class MemoryArtworkImage extends StatefulWidget {
@@ -38,9 +40,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   void _refreshRequest() {
-    _request = widget.conversation.artwork?.isReady == true
-        ? (widget.api ?? MemoryArtworkApi()).fetch(widget.conversation.id)
-        : null;
+    final artwork = widget.conversation.artwork;
+    _request = (widget.api ?? MemoryArtworkApi()).loadForDisplay(
+      widget.conversation.id,
+      enqueueIfMissing: artwork == null || artwork.status == MemoryArtworkStatus.unavailable,
+    );
   }
 
   Uint8List? _sourcePhoto() {
@@ -69,12 +73,15 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         return Semantics(
           image: true,
           label: context.l10n.memoryGeneratedArtworkLabel,
-          child: Image.network(
-            result!.url.toString(),
+          child: CachedNetworkImage(
+            imageUrl: result!.url.toString(),
             key: Key('memory-generated-artwork-${widget.conversation.id}'),
+            cacheKey: result.cacheKey,
+            cacheManager: MemoryArtworkCache.manager,
             fit: widget.fit,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => _fallback(context),
+            useOldImageOnUrlChange: true,
+            placeholder: (_, __) => _fallback(context),
+            errorWidget: (_, __, ___) => _fallback(context),
           ),
         );
       },

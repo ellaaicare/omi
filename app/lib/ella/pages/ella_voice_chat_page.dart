@@ -253,6 +253,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   bool _authoritativeSoftWarning = false;
   Timer? _quotaClock;
   bool _endingForPolicy = false;
+  bool _v2vFallbackPromptActive = false;
 
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
@@ -810,13 +811,24 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _v2vClient = null;
           setState(() {
             _orbState = VoiceOrbState.idle;
-            _statusText = 'Disconnected — Tap to Reconnect';
+            _statusText = context.l10n.ellaVoiceTechnicalFailure;
             _isV2VMode = false;
             _voiceModeActive = false;
           });
           _notifyMemorySessionEnded(endedSessionId);
           _v2vTurnReconciler.endSession(endedSessionId);
           _activeSessionId = '';
+          unawaited(
+            _presentV2VFailure(
+              provider,
+              V2VConnectionReceipt(
+                connected: false,
+                provider: provider,
+                stage: V2VConnectionStage.websocket,
+                errorCode: 'voice_transport_disconnected',
+              ),
+            ),
+          );
         }
       },
     );
@@ -885,33 +897,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _audioLevel = 0.0;
       });
 
-      if (!mounted) return;
-      final choice = await showV2VFallbackDialog(context, receipt, allowStandardFallback: _sessionScope == null);
-      if (!mounted) return;
-      switch (choice) {
-        case V2VFailureChoice.retry:
-          final retryGeneration = _beginV2VStartup(provider);
-          await _startV2V(provider, startupGeneration: retryGeneration);
-          break;
-        case V2VFailureChoice.useElevenLabs:
-          if (_sessionScope != null) break;
-          _usingElevenLabsFallback = true;
-          _startStandardVoiceConsentLease();
-          setState(() {
-            _voiceModeActive = true;
-            _isV2VMode = false;
-            _statusText = context.l10n.voiceElevenLabsFallbackActive;
-          });
-          await _startListening();
-          break;
-        case V2VFailureChoice.stop:
-          await _cancelFailedVoiceAttempt();
-          if (EllaVoiceChatPage.shouldCloseRouteAfterV2VFailure(choice, modalPresentation: widget.modalPresentation) &&
-              mounted) {
-            Navigator.of(context).pop();
-          }
-          break;
-      }
+      await _presentV2VFailure(provider, receipt);
       return;
     }
 
@@ -942,6 +928,41 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _orbState = VoiceOrbState.listening;
       _statusText = context.l10n.voiceV2vActive(providerName);
     });
+  }
+
+  Future<void> _presentV2VFailure(String provider, V2VConnectionReceipt receipt) async {
+    if (!mounted || _v2vFallbackPromptActive) return;
+    _v2vFallbackPromptActive = true;
+    try {
+      final choice = await showV2VFallbackDialog(context, receipt, allowStandardFallback: _sessionScope == null);
+      if (!mounted) return;
+      switch (choice) {
+        case V2VFailureChoice.retry:
+          final retryGeneration = _beginV2VStartup(provider);
+          await _startV2V(provider, startupGeneration: retryGeneration);
+          break;
+        case V2VFailureChoice.useElevenLabs:
+          if (_sessionScope != null) break;
+          _usingElevenLabsFallback = true;
+          _startStandardVoiceConsentLease();
+          setState(() {
+            _voiceModeActive = true;
+            _isV2VMode = false;
+            _statusText = context.l10n.voiceElevenLabsFallbackActive;
+          });
+          await _startListening();
+          break;
+        case V2VFailureChoice.stop:
+          await _cancelFailedVoiceAttempt();
+          if (EllaVoiceChatPage.shouldCloseRouteAfterV2VFailure(choice, modalPresentation: widget.modalPresentation) &&
+              mounted) {
+            Navigator.of(context).pop();
+          }
+          break;
+      }
+    } finally {
+      _v2vFallbackPromptActive = false;
+    }
   }
 
   Future<bool> _preparePhoneCaptureForVoice({required bool v2v}) async {

@@ -77,7 +77,7 @@ void main() {
     );
   });
 
-  testWidgets('test_type_correction_202_polls_receipt_and_surfaces_terminal_failure_without_logging_body', (
+  testWidgets('test_type_correction_202_acknowledges_queue_immediately_and_polls_without_logging_body', (
     tester,
   ) async {
     const conversationId = 'conversation-1';
@@ -87,6 +87,7 @@ void main() {
     final logs = <String>[];
     var receiptCalls = 0;
     var refreshCalls = 0;
+    var acceptedCalls = 0;
     final submittedCorrectionIds = <String>[];
 
     Future<ConversationCorrectionSubmission?> submitter({
@@ -214,6 +215,7 @@ void main() {
             submitter: submitter,
             receiptPoller: receiptPoller,
             authorityProvider: () => authority,
+            onAccepted: () async => acceptedCalls += 1,
             onApplied: () async => refreshCalls += 1,
           ),
         ),
@@ -226,18 +228,10 @@ void main() {
 
     expect(receiptCalls, 2);
     expect(refreshCalls, 0);
+    expect(acceptedCalls, 1);
     expect(submittedCorrectionIds, hasLength(1));
-    expect(
-      find.text("Ella can't reach your correction service right now"),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
-    await tester.pumpAndSettle();
-    expect(submittedCorrectionIds, hasLength(2));
-    expect(submittedCorrectionIds.toSet(), hasLength(2));
-    expect(receiptCalls, 3);
     expect(find.textContaining('self_hosted_runtime_target_mode_required'), findsNothing);
-    expect(find.byType(CorrectSummarySheet), findsOneWidget);
+    expect(find.byType(CorrectSummarySheet), findsNothing);
     expect(find.text('Memory updated'), findsNothing);
     expect(logs, isNotEmpty);
     expect(logs.every((entry) => !entry.contains(correctionText)), isTrue);
@@ -246,12 +240,10 @@ void main() {
       'submitConversationCorrection: status=202',
       'getConversationCorrectionReceipt: status=200',
       'getConversationCorrectionReceipt: status=200',
-      'submitConversationCorrection: status=202',
-      'getConversationCorrectionReceipt: status=200',
     ]);
   });
 
-  testWidgets('test_type_correction_unknown_terminal_failure_uses_non_english_generic_localization', (
+  testWidgets('test_type_correction_submit_failure_stays_visible_with_non_english_generic_localization', (
     tester,
   ) async {
     const conversationId = 'conversation-es';
@@ -286,13 +278,7 @@ void main() {
               required requestTimeout,
             }) async {
               logs.add('submit status=202');
-              return ConversationCorrectionSubmission(
-                correctionId: correctionId,
-                conversationId: conversationId,
-                traceId: 'correction:conversation-es:correction-es',
-                status: 'queued',
-                queued: true,
-              );
+              return null;
             },
             receiptPoller: ({
               required conversationId,
@@ -301,15 +287,7 @@ void main() {
               required exactAuthority,
               required pollBudget,
             }) async {
-              logs.add('receipt status=200');
-              return ConversationCorrectionReceipt(
-                correctionId: correctionId,
-                conversationId: conversationId,
-                status: 'direct_apply_failed',
-                before: const ConversationCorrectionSummary(),
-                after: const ConversationCorrectionSummary(),
-                failureCode: 'unrecognized_backend_failure_private_detail',
-              );
+              fail('receipt polling must not start after a failed submit');
             },
           ),
         ),
@@ -321,7 +299,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Ella no pudo actualizar este recuerdo'), findsOneWidget);
-    expect(find.textContaining('unrecognized_backend_failure_private_detail'), findsNothing);
+    expect(find.byType(CorrectSummarySheet), findsOneWidget);
     expect(logs.every((entry) => !entry.contains(correctionText)), isTrue);
   });
 

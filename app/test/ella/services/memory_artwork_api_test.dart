@@ -60,9 +60,105 @@ void main() {
 
     expect(result.isReady, isTrue);
     expect(result.url, Uri.parse('https://private-storage.example/signed'));
+    expect(result.cacheKey, hasLength(64));
     expect(requestedUrl, 'https://api.example/v1/ella/memories/memory%2Fa/artwork');
     expect(expectedUid, 'owner-a');
     expect(requestAuthority, same(authority));
+  });
+
+  test('cache identity is stable across signed URL renewal and isolated by owner', () async {
+    var urlRevision = 0;
+    MemoryArtworkApi apiFor(_Authority authority) => MemoryArtworkApi(
+          baseUrl: 'https://api.example/',
+          authorityProvider: () => authority,
+          request: ({
+            required url,
+            required headers,
+            required body,
+            required method,
+            timeout,
+            retries,
+            requireAuthCheck,
+            expectedAuthenticatedUid,
+            exactAuthority,
+          }) async {
+            urlRevision += 1;
+            return http.Response(
+              jsonEncode({
+                'schema_version': memoryArtworkSchemaVersion,
+                'status': 'ready',
+                'url': 'https://private-storage.example/signed-$urlRevision',
+                'style_version': memoryArtworkDefaultStyle,
+                'enrichment_revision': 'summary-a',
+              }),
+              200,
+            );
+          },
+        );
+
+    final ownerAApi = apiFor(_Authority('owner-a'));
+    final first = await ownerAApi.fetch('memory-a');
+    final renewed = await ownerAApi.fetch('memory-a');
+    final otherOwner = await apiFor(_Authority('owner-b')).fetch('memory-a');
+
+    expect(first.url, isNot(renewed.url));
+    expect(first.cacheKey, renewed.cacheKey);
+    expect(otherOwner.cacheKey, isNot(first.cacheKey));
+  });
+
+  test('visible historical memory is enqueued once and polled until artwork is ready', () async {
+    final authority = _Authority('owner-a');
+    final methods = <String>[];
+    var getCalls = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        methods.add(method);
+        if (method == 'POST') {
+          return http.Response(jsonEncode({'outcome': 'queued', 'status': 'generating'}), 202);
+        }
+        getCalls += 1;
+        if (getCalls == 1) {
+          return http.Response(
+              jsonEncode({
+                'detail': {'code': 'memory_artwork_not_found'}
+              }),
+              404);
+        }
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': getCalls == 2 ? 'generating' : 'ready',
+            if (getCalls > 2) 'url': 'https://private-storage.example/lazy-ready',
+            'style_version': memoryArtworkDefaultStyle,
+            'enrichment_revision': 'summary-lazy',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay(
+      'memory-old',
+      enqueueIfMissing: true,
+      pollAttempts: 3,
+      pollInterval: Duration.zero,
+    );
+
+    expect(result.isReady, isTrue);
+    expect(methods, ['GET', 'POST', 'GET', 'GET']);
+    expect(result.cacheKey, hasLength(64));
   });
 
   test('fetch rejects vendor or malformed URLs and never exposes them', () async {

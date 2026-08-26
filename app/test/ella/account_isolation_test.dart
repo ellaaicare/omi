@@ -855,6 +855,7 @@ void main() {
       stopGuardian: () => calls.add('guardian'),
       stopServices: () => calls.add('wal-services'),
       quarantineLegacy: () => calls.add('quarantine'),
+      clearArtworkCache: () => calls.add('artwork-cache'),
     );
 
     await service.stopForAccountTransition();
@@ -868,6 +869,7 @@ void main() {
       'v2v',
       'wal-services',
       'quarantine',
+      'artwork-cache',
     ]);
   });
 
