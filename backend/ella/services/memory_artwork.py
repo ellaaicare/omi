@@ -39,7 +39,6 @@ from utils.ella.memory_artwork_storage import (
     GCSMemoryArtworkStore,
     MemoryArtworkStorageError,
     StoredArtwork,
-    memory_artwork_owner_lock,
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
@@ -102,6 +101,7 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
 MIN_PROVIDER_TIMEOUT_SECONDS = 60.0
 MAX_PROVIDER_TIMEOUT_SECONDS = 900.0
 PROVIDER_LEASE_MARGIN_SECONDS = 300
+PUBLICATION_LEASE_SECONDS = 600
 PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
@@ -230,6 +230,8 @@ class MemoryArtworkRepository(Protocol):
 
     def mark_storage_cleanup_required(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
+    def renew_publication_claim(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
@@ -247,6 +249,7 @@ class FirestoreMemoryArtworkRepository:
     retry_job = staticmethod(artwork_db.retry_job)
     fail_job = staticmethod(artwork_db.fail_job)
     mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
+    renew_publication_claim = staticmethod(artwork_db.renew_publication_claim)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -1145,15 +1148,17 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_source_changed")
-        # Persist cleanup intent before the deterministic upload. If the upload
-        # succeeds but its acknowledgement is lost, deletion still fails closed
-        # unless it can remove the owner's private prefix.
-        if not self.repository.mark_storage_cleanup_required(
+        # Renew both durable claims and persist cleanup intent atomically before
+        # publication. Account and memory deletion touch the same Firestore
+        # documents, so this fences publication across backend instances.
+        if not self.repository.renew_publication_claim(
             uid,
             memory_id,
             generation_key,
             generation_lease_token=lease_token,
             job_lease_token=job_lease_token,
+            now=datetime.now(timezone.utc),
+            lease_seconds=PUBLICATION_LEASE_SECONDS,
         ):
             self.repository.mark_generation_unavailable(
                 uid,
@@ -1163,39 +1168,38 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_deletion_pending")
-        with memory_artwork_owner_lock(uid):
-            upload_preferences = self.repository.get_preferences(uid)
-            reject_deletion_pending(upload_preferences)
-            upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
-            reject_claim_drift(upload_conversation)
-            store = self.store_factory()
-            try:
-                stored = store.put(
-                    uid=uid,
-                    profile_binding_id=authority.binding_id,
-                    memory_id=memory_id,
-                    generation_key=generation_key,
-                    content_type=generated.content_type,
-                    image_bytes=generated.image_bytes,
-                )
-            except MemoryArtworkStorageError as exc:
-                self.repository.mark_generation_unavailable(
-                    uid,
-                    memory_id,
-                    generation_key=generation_key,
-                    failure_code=str(exc),
-                    lease_token=lease_token,
-                )
-                raise MemoryArtworkError(str(exc), retryable=True) from exc
-            except Exception as exc:
-                self.repository.mark_generation_unavailable(
-                    uid,
-                    memory_id,
-                    generation_key=generation_key,
-                    failure_code="memory_artwork_storage_failed",
-                    lease_token=lease_token,
-                )
-                raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
+        upload_preferences = self.repository.get_preferences(uid)
+        reject_deletion_pending(upload_preferences)
+        upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
+        reject_claim_drift(upload_conversation)
+        store = self.store_factory()
+        try:
+            stored = store.put(
+                uid=uid,
+                profile_binding_id=authority.binding_id,
+                memory_id=memory_id,
+                generation_key=generation_key,
+                content_type=generated.content_type,
+                image_bytes=generated.image_bytes,
+            )
+        except MemoryArtworkStorageError as exc:
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code=str(exc),
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError(str(exc), retryable=True) from exc
+        except Exception as exc:
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code="memory_artwork_storage_failed",
+                lease_token=lease_token,
+            )
+            raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
         # The object key is deterministic for this generation and can be shared
         # by an outcome-ambiguous retry. Workers therefore never delete it after
         # upload; the persisted cleanup marker delegates destructive cleanup to

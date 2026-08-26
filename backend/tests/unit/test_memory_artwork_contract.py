@@ -4,10 +4,8 @@ import copy
 import importlib.util
 import io
 import json
-import multiprocessing
 import sys
 import types
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -45,6 +43,7 @@ def _load_service_module():
         "retry_job",
         "fail_job",
         "mark_storage_cleanup_required",
+        "renew_publication_claim",
     ):
         setattr(database_stub, name, lambda *args, **kwargs: None)
     database_stub.STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
@@ -371,6 +370,31 @@ class FakeRepository:
         self.storage_cleanup_required.add(uid)
         return True
 
+    def renew_publication_claim(
+        self,
+        uid,
+        memory_id,
+        generation_key,
+        *,
+        generation_lease_token,
+        job_lease_token,
+        now,
+        lease_seconds,
+    ):
+        if not self.mark_storage_cleanup_required(
+            uid,
+            memory_id,
+            generation_key,
+            generation_lease_token=generation_lease_token,
+            job_lease_token=job_lease_token,
+        ):
+            return False
+        publication_expiry = now + timedelta(seconds=lease_seconds)
+        conversation = self.conversations[(uid, memory_id)]
+        conversation["artwork"]["lease_expires_at"] = publication_expiry
+        self.jobs[(uid, memory_id, generation_key)]["lease_expires_at"] = publication_expiry
+        return True
+
 
 def _run_claimed_process(service, repository, uid="owner-a", memory_id="memory-1"):
     conversation = repository.get_conversation(uid, memory_id) or {}
@@ -644,6 +668,7 @@ def test_delayed_provider_uses_job_and_generation_leases_longer_than_request_dea
             super().__init__()
             self.job_lease_seconds = []
             self.generation_lease_seconds = []
+            self.publication_lease_seconds = []
 
         def claim_job(self, uid, memory_id, generation_key, *, lease_token, now, lease_seconds):
             self.job_lease_seconds.append(lease_seconds)
@@ -666,6 +691,10 @@ def test_delayed_provider_uses_job_and_generation_leases_longer_than_request_dea
                 now=now,
                 lease_seconds=lease_seconds,
             )
+
+        def renew_publication_claim(self, uid, memory_id, generation_key, **kwargs):
+            self.publication_lease_seconds.append(kwargs["lease_seconds"])
+            return super().renew_publication_claim(uid, memory_id, generation_key, **kwargs)
 
     class DelayedProvider(FakeProvider):
         async def generate(self, **kwargs):
@@ -697,6 +726,7 @@ def test_delayed_provider_uses_job_and_generation_leases_longer_than_request_dea
     assert result == {"outcome": "ready", "status": "ready"}
     assert repository.job_lease_seconds == [600]
     assert repository.generation_lease_seconds == [600]
+    assert repository.publication_lease_seconds == [artwork.PUBLICATION_LEASE_SECONDS]
     assert provider.calls == 1
 
 
@@ -731,44 +761,6 @@ def test_idempotent_generation_and_owner_scoped_signed_url():
         asyncio.run(service.signed_url("owner-b", "memory-1"))
     assert missing.value.code == "memory_artwork_memory_not_found"
     assert len(store.signed) == 1
-
-
-def test_object_upload_runs_inside_owner_publication_lock(monkeypatch):
-    lock_state = {"held": False}
-    lock_calls = []
-
-    @contextmanager
-    def recording_lock(uid):
-        assert lock_state["held"] is False
-        lock_calls.append(uid)
-        lock_state["held"] = True
-        try:
-            yield
-        finally:
-            lock_state["held"] = False
-
-    class LockAwareStore(FakeStore):
-        def put(self, **kwargs):
-            assert lock_state["held"] is True
-            return super().put(**kwargs)
-
-    repository = FakeRepository()
-    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
-    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
-    store = LockAwareStore()
-    service = artwork.MemoryArtworkService(
-        repository=repository,
-        authority_resolver=_resolver,
-        provider_factory=FakeProvider,
-        store_factory=lambda: store,
-        config=_enabled_config(),
-    )
-    monkeypatch.setattr(artwork, "memory_artwork_owner_lock", recording_lock)
-    asyncio.run(service.enqueue("owner-a", "memory-1"))
-
-    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
-    assert lock_calls == ["owner-a"]
-    assert len(store.puts) == 1
 
 
 def test_process_requires_current_durable_job_claim_before_provider():
@@ -951,7 +943,7 @@ def test_failed_storage_write_remains_covered_by_cleanup_marker():
 
 def test_cleanup_marker_failure_prevents_object_upload():
     class FailingMarkerRepository(FakeRepository):
-        def mark_storage_cleanup_required(
+        def renew_publication_claim(
             self,
             uid,
             memory_id,
@@ -959,6 +951,8 @@ def test_cleanup_marker_failure_prevents_object_upload():
             *,
             generation_lease_token,
             job_lease_token,
+            now,
+            lease_seconds,
         ):
             return False
 
@@ -1132,8 +1126,8 @@ def test_expired_claim_after_object_write_never_deletes_shared_idempotent_object
 
 def test_deletion_marker_after_cleanup_reservation_blocks_object_upload():
     class DeletingRepository(FakeRepository):
-        def mark_storage_cleanup_required(self, uid, memory_id, generation_key, **kwargs):
-            result = super().mark_storage_cleanup_required(uid, memory_id, generation_key, **kwargs)
+        def renew_publication_claim(self, uid, memory_id, generation_key, **kwargs):
+            result = super().renew_publication_claim(uid, memory_id, generation_key, **kwargs)
             if result:
                 self.deletion_pending.add(uid)
             return result
@@ -1820,6 +1814,62 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
         is False
     )
     reference.state["discarded"] = False
+    publication_now = datetime.now(timezone.utc)
+    reference.state[artwork_database.ARTWORK_FIELD]["lease_expires_at"] = publication_now - timedelta(seconds=1)
+    job_reference.state["lease_expires_at"] = publication_now - timedelta(seconds=1)
+    assert (
+        artwork_database._renew_publication_claim_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
+            now=publication_now,
+            lease_seconds=600,
+        )
+        is True
+    )
+    publication_expiry = publication_now + timedelta(seconds=600)
+    assert user_reference.state[artwork_database.STORAGE_CLEANUP_REQUIRED_FIELD] is True
+    assert reference.state[artwork_database.ARTWORK_FIELD]["lease_expires_at"] == publication_expiry
+    assert job_reference.state["lease_expires_at"] == publication_expiry
+    updates_before_deletion_rejection = transaction.updates
+    user_reference.state[artwork_database.DELETION_PENDING_FIELD] = True
+    assert (
+        artwork_database._renew_publication_claim_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
+            now=publication_now,
+            lease_seconds=600,
+        )
+        is False
+    )
+    assert transaction.updates == updates_before_deletion_rejection
+    user_reference.state[artwork_database.DELETION_PENDING_FIELD] = False
+    reference.state["deletion_pending"] = True
+    assert (
+        artwork_database._renew_publication_claim_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
+            now=publication_now,
+            lease_seconds=600,
+        )
+        is False
+    )
+    assert transaction.updates == updates_before_deletion_rejection
+    reference.state["deletion_pending"] = False
     assert (
         artwork_database._finalize_generation_transaction(
             transaction,
@@ -2235,9 +2285,6 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
     delete_start = conversations_source.index("def delete_conversation(uid, conversation_id)")
-    assert conversations_source.index("with memory_artwork_owner_lock(uid)", delete_start) < conversations_source.index(
-        "claim_deletion", delete_start
-    )
     assert conversations_source.index("has_processing_jobs_for_memory", delete_start) < conversations_source.index(
         "delete_conversation_artwork_if_present", delete_start
     )
@@ -2265,79 +2312,6 @@ def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monk
     with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
         memory_artwork_storage.delete_all_user_artwork("owner-a", cleanup_required=True)
     assert str(failure.value) == "memory_artwork_storage_cleanup_unavailable"
-
-
-def test_owner_publication_lock_serializes_across_processes(monkeypatch, tmp_path):
-    from utils.ella import memory_artwork_storage
-
-    monkeypatch.setenv(memory_artwork_storage.OWNER_LOCK_DIR_ENV, str(tmp_path / "owner-locks"))
-    context = multiprocessing.get_context("fork")
-    attempted = context.Event()
-    acquired = context.Event()
-
-    def acquire_in_child():
-        attempted.set()
-        with memory_artwork_storage.memory_artwork_owner_lock("owner-a"):
-            acquired.set()
-
-    with memory_artwork_storage.memory_artwork_owner_lock("owner-a"):
-        child = context.Process(target=acquire_in_child)
-        child.start()
-        assert attempted.wait(timeout=2)
-        assert acquired.wait(timeout=0.2) is False
-
-    assert acquired.wait(timeout=2)
-    child.join(timeout=2)
-    assert child.exitcode == 0
-
-
-def test_account_deletion_runs_inside_owner_publication_lock(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
-    lock_state = {"held": False}
-    calls = []
-
-    @contextmanager
-    def recording_lock(uid):
-        assert uid == "owner-a"
-        lock_state["held"] = True
-        try:
-            yield
-        finally:
-            lock_state["held"] = False
-
-    class Repository:
-        @staticmethod
-        def begin_account_deletion(uid):
-            assert lock_state["held"] is True
-            calls.append(("begin", uid))
-            return True
-
-        @staticmethod
-        def has_processing_jobs(uid):
-            assert lock_state["held"] is True
-            calls.append(("processing", uid))
-            return False
-
-        @staticmethod
-        def storage_cleanup_required(uid):
-            assert lock_state["held"] is True
-            return False
-
-        @staticmethod
-        def delete_jobs_for_uid(uid):
-            assert lock_state["held"] is True
-            calls.append(("delete-jobs", uid))
-
-    monkeypatch.setattr(memory_artwork_storage, "memory_artwork_owner_lock", recording_lock)
-    monkeypatch.setattr(
-        memory_artwork_storage,
-        "delete_all_user_artwork",
-        lambda uid, *, cleanup_required: 0,
-    )
-
-    assert memory_artwork_storage.prepare_account_artwork_deletion("owner-a", repository=Repository) == 0
-    assert calls == [("begin", "owner-a"), ("processing", "owner-a"), ("delete-jobs", "owner-a")]
 
 
 def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(monkeypatch):

@@ -453,6 +453,78 @@ def mark_storage_cleanup_required(
     )
 
 
+def _renew_publication_claim_transaction(
+    transaction,
+    user_ref,
+    conversation_ref,
+    job_ref,
+    *,
+    generation_key: str,
+    generation_lease_token: str,
+    job_lease_token: str,
+    now: datetime,
+    lease_seconds: int,
+) -> bool:
+    user_snapshot = user_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    job_snapshot = job_ref.get(transaction=transaction)
+    user = user_snapshot.to_dict() if user_snapshot.exists else {}
+    conversation = conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
+    job = job_snapshot.to_dict() if job_snapshot.exists else {}
+    current_artwork = conversation.get(ARTWORK_FIELD) or {}
+    if (
+        not user_snapshot.exists
+        or bool(user.get(DELETION_PENDING_FIELD))
+        or not conversation_snapshot.exists
+        or bool(conversation.get("deletion_pending"))
+        or not isinstance(current_artwork, dict)
+        or current_artwork.get("generation_key") != generation_key
+        or current_artwork.get("lease_token") != generation_lease_token
+        or current_artwork.get("status") != "generating"
+        or not _terminal_enrichment_matches(conversation, str(current_artwork.get("enrichment_revision") or ""))
+        or not job_snapshot.exists
+        or job.get("generation_key") != generation_key
+        or job.get("status") != "processing"
+        or job.get("lease_token") != job_lease_token
+    ):
+        return False
+    publication_expiry = now + timedelta(seconds=max(1, lease_seconds))
+    renewed_artwork = dict(current_artwork)
+    renewed_artwork.update({"lease_expires_at": publication_expiry, "updated_at": now})
+    transaction.update(user_ref, {STORAGE_CLEANUP_REQUIRED_FIELD: True})
+    transaction.update(conversation_ref, {ARTWORK_FIELD: renewed_artwork})
+    transaction.update(job_ref, {"lease_expires_at": publication_expiry, "updated_at": now})
+    return True
+
+
+@transactional
+def _renew_publication_claim(transaction, user_ref, conversation_ref, job_ref, **kwargs) -> bool:
+    return _renew_publication_claim_transaction(transaction, user_ref, conversation_ref, job_ref, **kwargs)
+
+
+def renew_publication_claim(
+    uid: str,
+    memory_id: str,
+    generation_key: str,
+    *,
+    generation_lease_token: str,
+    job_lease_token: str,
+    now: datetime,
+    lease_seconds: int,
+) -> bool:
+    return _renew_publication_claim(
+        db.transaction(),
+        _user_ref(uid),
+        _conversation_ref(uid, memory_id),
+        _job_ref(uid, memory_id, generation_key),
+        generation_key=generation_key,
+        generation_lease_token=generation_lease_token,
+        job_lease_token=job_lease_token,
+        now=now,
+        lease_seconds=lease_seconds,
+    )
+
+
 def storage_cleanup_required(uid: str) -> bool:
     snapshot = _user_ref(uid).get()
     return bool(snapshot.exists and (snapshot.to_dict() or {}).get(STORAGE_CLEANUP_REQUIRED_FIELD))
