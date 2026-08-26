@@ -12,11 +12,19 @@ import 'package:omi/utils/l10n_extensions.dart';
 class AiConsentSheet extends StatefulWidget {
   static final Uri privacyPolicyUri = EllaLegalLinks.privacy;
 
-  const AiConsentSheet({super.key, this.onAccept, this.onDecline, this.onRequestDeletion, this.reviewMode = false});
+  const AiConsentSheet({
+    super.key,
+    this.onAccept,
+    this.onDecline,
+    this.onRequestDeletion,
+    this.canPersistDecision,
+    this.reviewMode = false,
+  });
 
   final Future<AiConsentGrantOutcome> Function()? onAccept;
   final Future<bool> Function()? onDecline;
   final Future<void> Function()? onRequestDeletion;
+  final bool Function()? canPersistDecision;
   final bool reviewMode;
 
   static Future<bool?> show(
@@ -24,6 +32,7 @@ class AiConsentSheet extends StatefulWidget {
     Future<AiConsentGrantOutcome> Function()? onAccept,
     Future<bool> Function()? onDecline,
     Future<void> Function()? onRequestDeletion,
+    bool Function()? canPersistDecision,
     bool reviewMode = false,
     bool pilotLocaleRestricted = isEllaInternalPilotEnabled,
   }) {
@@ -44,6 +53,7 @@ class AiConsentSheet extends StatefulWidget {
           onAccept: onAccept,
           onDecline: onDecline,
           onRequestDeletion: onRequestDeletion,
+          canPersistDecision: canPersistDecision,
           reviewMode: reviewMode,
         ),
       ),
@@ -101,6 +111,11 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
   Future<void> _decline() async {
     if (_isSubmitting) return;
     setState(() => _isSubmitting = true);
+
+    if (!(widget.canPersistDecision?.call() ?? true)) {
+      if (mounted) Navigator.of(context).pop(false);
+      return;
+    }
 
     final preferences = SharedPreferencesUtil();
     if (widget.reviewMode) {

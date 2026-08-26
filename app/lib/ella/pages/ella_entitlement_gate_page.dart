@@ -157,6 +157,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
         if (provider.boundUid != uid) return false;
         return await (widget.consentDeclineRequester?.call(uid) ?? consentService.declineCurrentConsent(uid: uid));
       },
+      canPersistDecision: () => provider.boundUid == uid,
     );
     if (!mounted || accepted != true || provider.boundUid != uid) return;
     await provider.retry();

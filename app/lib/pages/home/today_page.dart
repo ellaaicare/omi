@@ -813,7 +813,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _finishExternalCapture(CaptureProvider capture) async {
-    if (_homeCaptureStarting) return;
+    if (!mounted || _homeCaptureStarting) return;
     final existingSource = _externalCaptureFinalizationSource;
     final source = existingSource ??
         switch (capture.recordingState) {

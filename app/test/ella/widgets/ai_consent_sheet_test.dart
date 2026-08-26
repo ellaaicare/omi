@@ -101,6 +101,47 @@ void main() {
     expect(find.text('Allow and continue'), findsNothing);
   });
 
+  testWidgets('stale authority cannot persist a decline for the replacement account', (tester) async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-b';
+    await preferences.saveBool('aiConsentAccepted', true);
+    await preferences.saveString('aiConsentReceiptUid', 'uid-b');
+    await preferences.saveString('aiConsentReceiptId', 'replacement-account-receipt');
+    var declineCalls = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => AiConsentSheet.show(
+                context,
+                canPersistDecision: () => false,
+                onDecline: () async {
+                  declineCalls++;
+                  return true;
+                },
+              ),
+              child: const Text('Show consent'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Show consent'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+
+    expect(declineCalls, 0);
+    expect(preferences.getBool('aiConsentAccepted'), isTrue);
+    expect(preferences.aiConsentReceiptUid, 'uid-b');
+    expect(preferences.aiConsentReceiptId, 'replacement-account-receipt');
+    expect(preferences.getString('aiConsentDeferredVersion'), isEmpty);
+  });
+
   testWidgets('names managed-cloud recipients, data, purpose, and narrow scope before acceptance', (tester) async {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
