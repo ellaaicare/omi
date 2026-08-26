@@ -920,7 +920,8 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
-        rows = await self.pool.fetch("""
+        rows = await self.pool.fetch(
+            """
             SELECT DISTINCT expected_model, model_policy_version
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
@@ -928,7 +929,8 @@ class EllaProvisioningRepository:
               AND health_state = 'healthy'
               AND active = false
               AND user_id IS NULL
-            """)
+            """
+        )
         if not rows:
             return None
         policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
@@ -1058,14 +1060,16 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch("""
+        rows = await self.pool.fetch(
+            """
             SELECT id, runtime_instance_id, status, health_state, expected_model,
                    prompt_pack_version, revision, claimed_at, quarantined_at,
                    quarantine_reason, created_at, updated_at
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
             ORDER BY created_at ASC, id ASC
-            """)
+            """
+        )
         return [dict(row) for row in rows]
 
     async def claim_cloud_pool_binding(
