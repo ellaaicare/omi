@@ -2899,6 +2899,120 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
             "authority_revision": authority_revision,
         } in receipts
 
+        migration_receipt_sha256 = "a" * 64
+        migration_lock_key = f"retained_profile_capabilities_migrated:{migration_receipt_sha256}"
+        async with pool.acquire() as lock_holder, pool.acquire() as contender:
+            async with lock_holder.transaction():
+                await lock_holder.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                    migration_lock_key,
+                )
+                async with contender.transaction():
+                    assert (
+                        await contender.fetchval(
+                            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))",
+                            migration_lock_key,
+                        )
+                        is False
+                    )
+            async with contender.transaction():
+                assert (
+                    await contender.fetchval(
+                        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))",
+                        migration_lock_key,
+                    )
+                    is True
+                )
+        with pytest.raises(ValueError, match="retained_profile_migration_receipt_invalid"):
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256="not-a-sha256",
+            )
+        replay_migration_receipt_sha256 = "b" * 64
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_provisioning_jobs
+                SET receipts = receipts || jsonb_build_array(jsonb_build_object(
+                    'type', 'retained_profile_capabilities_migrated',
+                    'content_free', TRUE,
+                    'migration_receipt_sha256', $2::text,
+                    'authority_revision', $3::integer,
+                    'profile_binding_id', $4::text
+                ))
+                WHERE id = $1
+                """,
+                job_id,
+                replay_migration_receipt_sha256,
+                authority_revision - 1,
+                str(grant.profile_binding_id),
+            )
+        await repository.update_job(
+            job_id=str(job_id),
+            state="blocked",
+            stage="runtime_ready",
+            retryable=False,
+            error_code="unsafe_existing_profile_capabilities",
+            error_detail={"status": 409},
+        )
+        assert (
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256=replay_migration_receipt_sha256,
+            )
+            is False
+        )
+        assert (
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256=migration_receipt_sha256,
+            )
+            is True
+        )
+        assert (
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256=migration_receipt_sha256,
+            )
+            is False
+        )
+        async with pool.acquire() as observer:
+            migrated_state = await observer.fetchrow(
+                """
+                SELECT job.state, job.stage, job.retryable, job.error_code,
+                       binding.status, binding.health_state, binding.active,
+                       binding.quarantine_reason
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding ON binding.user_id = job.user_id
+                WHERE job.id = $1
+                """,
+                job_id,
+            )
+            receipts = await observer.fetchval("SELECT receipts FROM ella_provisioning_jobs WHERE id = $1", job_id)
+        if isinstance(receipts, str):
+            receipts = json.loads(receipts)
+        assert tuple(migrated_state.values()) == (
+            "pending",
+            "identity_ready",
+            True,
+            None,
+            "shadow",
+            "pending",
+            False,
+            None,
+        )
+        assert {
+            "type": "retained_profile_capabilities_migrated",
+            "content_free": True,
+            "migration_receipt_sha256": migration_receipt_sha256,
+            "authority_revision": authority_revision,
+            "profile_binding_id": str(grant.profile_binding_id),
+        } in receipts
+
         claimed = await repository.claim_job(str(job_id))
         assert claimed is not None and claimed["stage"] == "profile_ready"
         await repository.stage_runtime_binding(
