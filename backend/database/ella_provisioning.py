@@ -3599,7 +3599,8 @@ class EllaProvisioningRepository:
                 candidates = await connection.fetch(
                     """
                     SELECT job.id AS job_id,
-                           authority.revision AS authority_revision
+                           authority.revision AS authority_revision,
+                           authority.profile_binding_id::text AS profile_binding_id
                     FROM users account
                     JOIN ella_provisioning_jobs job
                       ON job.user_id = account.id
@@ -3646,12 +3647,14 @@ class EllaProvisioningRepository:
                           'content_free', TRUE,
                           'authority_revision', authority.revision
                       ))
-                      AND NOT job.receipts @> jsonb_build_array(jsonb_build_object(
-                          'type', 'retained_profile_capabilities_migrated',
-                          'content_free', TRUE,
-                          'migration_receipt_sha256', $6::text,
-                          'authority_revision', authority.revision
-                      ))
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_provisioning_jobs prior_job
+                          CROSS JOIN LATERAL jsonb_array_elements(prior_job.receipts) prior_receipt
+                          WHERE prior_receipt ->> 'type' = 'retained_profile_capabilities_migrated'
+                            AND prior_receipt ->> 'content_free' = 'true'
+                            AND prior_receipt ->> 'migration_receipt_sha256' = $6
+                      )
                       AND binding.status = 'shadow'
                       AND binding.active = FALSE
                       AND binding.health_state = 'pending'
@@ -3709,6 +3712,7 @@ class EllaProvisioningRepository:
                     "content_free": True,
                     "migration_receipt_sha256": migration_hash,
                     "authority_revision": int(candidate["authority_revision"]),
+                    "profile_binding_id": candidate["profile_binding_id"],
                 }
                 result = await connection.execute(
                     """

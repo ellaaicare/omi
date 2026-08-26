@@ -2906,6 +2906,25 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
                 authority_lineage=lineage,
                 migration_receipt_sha256="not-a-sha256",
             )
+        replay_migration_receipt_sha256 = "b" * 64
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_provisioning_jobs
+                SET receipts = receipts || jsonb_build_array(jsonb_build_object(
+                    'type', 'retained_profile_capabilities_migrated',
+                    'content_free', TRUE,
+                    'migration_receipt_sha256', $2::text,
+                    'authority_revision', $3::integer,
+                    'profile_binding_id', $4::text
+                ))
+                WHERE id = $1
+                """,
+                job_id,
+                replay_migration_receipt_sha256,
+                authority_revision - 1,
+                str(grant.profile_binding_id),
+            )
         await repository.update_job(
             job_id=str(job_id),
             state="blocked",
@@ -2913,6 +2932,14 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
             retryable=False,
             error_code="unsafe_existing_profile_capabilities",
             error_detail={"status": 409},
+        )
+        assert (
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256=replay_migration_receipt_sha256,
+            )
+            is False
         )
         assert (
             await repository.retry_retained_runtime_after_capability_migration(
@@ -2960,6 +2987,7 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
             "content_free": True,
             "migration_receipt_sha256": migration_receipt_sha256,
             "authority_revision": authority_revision,
+            "profile_binding_id": str(grant.profile_binding_id),
         } in receipts
 
         claimed = await repository.claim_job(str(job_id))
