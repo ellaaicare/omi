@@ -279,6 +279,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeCaptureAuthorityGeneration++;
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
+    _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
@@ -1594,7 +1595,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     }
     if (externalCaptureActive) {
       return TodayCaptureDockPresentation(
-        mode: TodayCaptureDockMode.recording,
+        mode: externalCaptureFinalizationPending ? TodayCaptureDockMode.finishing : TodayCaptureDockMode.recording,
         status: status,
         primaryLabel: context.l10n.todayDockFinish,
         primaryIcon: Icons.stop_rounded,

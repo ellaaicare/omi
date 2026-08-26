@@ -288,6 +288,32 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
+  testWidgets('account authority change discards a failed external finalization target', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      finalizationResults: const [false],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.text('Recording needs attention'), findsOneWidget);
+
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    expect(find.text('Record'), findsOneWidget);
+    expect(find.text('Finish'), findsNothing);
+    expect(find.text('Recording needs attention'), findsNothing);
+  });
+
   testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);

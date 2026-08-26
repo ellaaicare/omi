@@ -44,27 +44,35 @@ void main() {
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
   });
 
-  testWidgets('non-Home active capture opens its live transcript from the primary action', (tester) async {
+  testWidgets('non-Home active capture keeps Finish and Transcript as separate actions', (tester) async {
     var primaryTaps = 0;
+    var finishTaps = 0;
     var transcriptTaps = 0;
     await _pumpRecordControl(
       tester,
       recordingState: RecordingState.record,
       onTap: () => primaryTaps += 1,
+      onFinishExternalCapture: () => finishTaps += 1,
       onViewTranscript: () => transcriptTaps += 1,
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.transcript), findsOneWidget);
     expect(find.text(l10n.todayDockRecord), findsNothing);
+    expect(find.text(l10n.todayDockFinish), findsOneWidget);
     expect(find.byIcon(Icons.subject_rounded), findsOneWidget);
-    expect(find.byKey(const Key('today-view-live-transcript')), findsNothing);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
     expect(_recordActionSemantics(tester).properties.selected, isTrue);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
     expect(primaryTaps, 0);
+    expect(finishTaps, 1);
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+
     expect(transcriptTaps, 1);
   });
 
@@ -197,6 +205,7 @@ Future<void> _pumpRecordControl(
   CaptureDiagnostics diagnostics = const CaptureDiagnostics(),
   bool necklaceContinuouslyRecording = false,
   VoidCallback? onViewTranscript,
+  VoidCallback? onFinishExternalCapture,
   VoidCallback? onUnavailable,
   VoidCallback? onTap,
 }) {
@@ -215,6 +224,7 @@ Future<void> _pumpRecordControl(
           diagnostics: diagnostics,
           necklaceContinuouslyRecording: necklaceContinuouslyRecording,
           onViewTranscript: onViewTranscript ?? () {},
+          onFinishExternalCapture: onFinishExternalCapture ?? () {},
           onUnavailable: onUnavailable,
           onTap: onTap ?? () {},
         ),
