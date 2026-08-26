@@ -25,3 +25,17 @@ async def get_ella_postgres_pool() -> asyncpg.Pool:
             max_size=10,
         )
     return _pool
+
+
+async def open_ella_postgres_connection() -> asyncpg.Connection:
+    """Open a loop-local session for connection-scoped advisory locks."""
+    dsn = os.getenv("ELLA_POSTGRES_DSN", "").strip()
+    if dsn:
+        return await asyncpg.connect(dsn=dsn)
+    return await asyncpg.connect(
+        host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
+        port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
+        user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
+        password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
+        database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
+    )

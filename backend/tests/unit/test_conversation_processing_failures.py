@@ -1,5 +1,6 @@
 import ast
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -2142,7 +2143,7 @@ def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatc
     loop_thread = None
     blocking_threads = []
 
-    def blocking_call(*_args):
+    def blocking_call(*_args, **_kwargs):
         blocking_threads.append(threading.get_ident())
         return {}
 
@@ -2150,10 +2151,16 @@ def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatc
         assert threading.get_ident() == loop_thread
         return 1
 
+    @asynccontextmanager
+    async def publication_lock(uid):
+        assert uid == "uid-a"
+        yield object()
+
     monkeypatch.setattr(conversations_router, "_get_valid_conversation_by_id", blocking_call)
     monkeypatch.setattr(conversations_router.conversations_db, "delete_conversation", blocking_call)
     monkeypatch.setattr(conversations_router, "delete_vector", blocking_call)
     monkeypatch.setattr(conversations_router, "invalidate_deleted_conversation_source", invalidate)
+    monkeypatch.setattr(conversations_router, "acquire_memory_artwork_publication_lock", publication_lock)
 
     async def run():
         nonlocal loop_thread

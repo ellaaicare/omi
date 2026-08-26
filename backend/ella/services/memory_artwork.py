@@ -39,6 +39,7 @@ from utils.ella.memory_artwork_storage import (
     GCSMemoryArtworkStore,
     MemoryArtworkStorageError,
     StoredArtwork,
+    acquire_memory_artwork_publication_lock,
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
@@ -1148,40 +1149,40 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_source_changed")
-        # Renew both durable claims and persist cleanup intent atomically before
-        # publication. Account and memory deletion touch the same Firestore
-        # documents, so this fences publication across backend instances.
-        if not self.repository.renew_publication_claim(
-            uid,
-            memory_id,
-            generation_key,
-            generation_lease_token=lease_token,
-            job_lease_token=job_lease_token,
-            now=datetime.now(timezone.utc),
-            lease_seconds=PUBLICATION_LEASE_SECONDS,
-        ):
-            self.repository.mark_generation_unavailable(
-                uid,
-                memory_id,
-                generation_key=generation_key,
-                failure_code="deletion_pending",
-                lease_token=lease_token,
-            )
-            raise MemoryArtworkError("memory_artwork_deletion_pending")
-        upload_preferences = self.repository.get_preferences(uid)
-        reject_deletion_pending(upload_preferences)
-        upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
-        reject_claim_drift(upload_conversation)
-        store = self.store_factory()
         try:
-            stored = store.put(
-                uid=uid,
-                profile_binding_id=authority.binding_id,
-                memory_id=memory_id,
-                generation_key=generation_key,
-                content_type=generated.content_type,
-                image_bytes=generated.image_bytes,
-            )
+            async with acquire_memory_artwork_publication_lock(uid):
+                # Renew both durable claims and persist cleanup intent while the
+                # crash-released distributed lock excludes destructive cleanup.
+                if not self.repository.renew_publication_claim(
+                    uid,
+                    memory_id,
+                    generation_key,
+                    generation_lease_token=lease_token,
+                    job_lease_token=job_lease_token,
+                    now=datetime.now(timezone.utc),
+                    lease_seconds=PUBLICATION_LEASE_SECONDS,
+                ):
+                    self.repository.mark_generation_unavailable(
+                        uid,
+                        memory_id,
+                        generation_key=generation_key,
+                        failure_code="deletion_pending",
+                        lease_token=lease_token,
+                    )
+                    raise MemoryArtworkError("memory_artwork_deletion_pending")
+                upload_preferences = self.repository.get_preferences(uid)
+                reject_deletion_pending(upload_preferences)
+                upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
+                reject_claim_drift(upload_conversation)
+                store = self.store_factory()
+                stored = store.put(
+                    uid=uid,
+                    profile_binding_id=authority.binding_id,
+                    memory_id=memory_id,
+                    generation_key=generation_key,
+                    content_type=generated.content_type,
+                    image_bytes=generated.image_bytes,
+                )
         except MemoryArtworkStorageError as exc:
             self.repository.mark_generation_unavailable(
                 uid,
@@ -1191,6 +1192,8 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError(str(exc), retryable=True) from exc
+        except MemoryArtworkError:
+            raise
         except Exception as exc:
             self.repository.mark_generation_unavailable(
                 uid,

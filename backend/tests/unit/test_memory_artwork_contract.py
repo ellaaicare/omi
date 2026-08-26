@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import types
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,6 +20,12 @@ from PIL import Image
 @pytest.fixture(autouse=True)
 def _current_global_ai_consent(monkeypatch):
     monkeypatch.setattr(artwork, "has_current_global_ai_consent", lambda uid: True)
+
+    @asynccontextmanager
+    async def publication_lock(uid):
+        yield object()
+
+    monkeypatch.setattr(artwork, "acquire_memory_artwork_publication_lock", publication_lock)
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -2284,7 +2291,10 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
 
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
-    delete_start = conversations_source.index("def delete_conversation(uid, conversation_id)")
+    delete_start = conversations_source.index("def delete_conversation(uid, conversation_id")
+    assert conversations_source.index(
+        "require_memory_artwork_publication_lock", delete_start
+    ) < conversations_source.index("claim_deletion", delete_start)
     assert conversations_source.index("has_processing_jobs_for_memory", delete_start) < conversations_source.index(
         "delete_conversation_artwork_if_present", delete_start
     )
@@ -2294,13 +2304,17 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
     assert conversations_source.index("delete_jobs_for_memory", delete_start) < conversations_source.index(
         "conversation_ref.delete()", delete_start
     )
-    assert account_route_source.index("prepare_account_artwork_deletion, uid") < account_route_source.index(
-        "unlink_self_owner_account_on_deletion(uid=uid)", account_route_source.index("def delete_account")
-    )
+    account_delete_start = account_route_source.index("async def delete_account")
+    assert account_route_source.index(
+        "acquire_memory_artwork_publication_lock", account_delete_start
+    ) < account_route_source.index("prepare_account_artwork_deletion", account_delete_start)
+    assert account_route_source.index(
+        "prepare_account_artwork_deletion", account_delete_start
+    ) < account_route_source.index("unlink_self_owner_account_on_deletion(uid=uid)", account_delete_start)
     user_database_source = (BACKEND_ROOT / "database" / "users.py").read_text(encoding="utf-8")
-    user_delete_start = user_database_source.index("def delete_user_data(uid: str)")
+    user_delete_start = user_database_source.index("def delete_user_data(uid: str")
     assert user_database_source.index(
-        "prepare_account_artwork_deletion(uid)", user_delete_start
+        "prepare_account_artwork_deletion(uid, lock_proof=artwork_lock_proof)", user_delete_start
     ) < user_database_source.index("subcollections_to_delete", user_delete_start)
 
 
@@ -2314,9 +2328,100 @@ def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monk
     assert str(failure.value) == "memory_artwork_storage_cleanup_unavailable"
 
 
+def test_distributed_publication_lock_holds_postgres_session_until_release(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    calls = []
+
+    class Connection:
+        closed = False
+
+        async def fetchval(self, query, lock_name):
+            calls.append(("query", "try" if "try" in query else "unlock", lock_name))
+            return True
+
+        async def close(self):
+            self.closed = True
+
+        def is_closed(self):
+            return self.closed
+
+    connection = Connection()
+
+    async def open_connection():
+        calls.append(("open",))
+        return connection
+
+    monkeypatch.setattr(memory_artwork_storage, "open_ella_postgres_connection", open_connection)
+
+    async def scenario():
+        async with memory_artwork_storage.acquire_memory_artwork_publication_lock("owner-a") as proof:
+            memory_artwork_storage.require_memory_artwork_publication_lock("owner-a", proof)
+            with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError):
+                memory_artwork_storage.require_memory_artwork_publication_lock("owner-b", proof)
+        with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError):
+            memory_artwork_storage.require_memory_artwork_publication_lock("owner-a", proof)
+
+    asyncio.run(scenario())
+
+    assert calls[0] == ("open",)
+    assert calls[1][0:2] == ("query", "try")
+    assert calls[2][0:2] == ("query", "unlock")
+    assert calls[1][2] == calls[2][2]
+    assert connection.closed is True
+
+
+def test_distributed_publication_lock_fails_closed_when_owner_is_busy(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    class Connection:
+        closed = False
+
+        async def fetchval(self, query, lock_name):
+            assert "pg_try_advisory_lock" in query
+            assert lock_name.startswith("ella-memory-artwork-publication-v1:")
+            return False
+
+        def is_closed(self):
+            return self.closed
+
+        async def close(self):
+            self.closed = True
+
+    connection = Connection()
+
+    async def open_connection():
+        return connection
+
+    monkeypatch.setattr(memory_artwork_storage, "open_ella_postgres_connection", open_connection)
+
+    async def scenario():
+        with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+            async with memory_artwork_storage.acquire_memory_artwork_publication_lock("owner-a"):
+                raise AssertionError("busy owner lock must not enter the publication section")
+        assert str(failure.value) == "memory_artwork_publication_lock_busy"
+
+    asyncio.run(scenario())
+    assert connection.closed is True
+
+
+def test_account_deletion_requires_distributed_publication_lock():
+    from utils.ella import memory_artwork_storage
+
+    class Repository:
+        @staticmethod
+        def begin_account_deletion(uid):
+            raise AssertionError("deletion must not start without the distributed lock")
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+        memory_artwork_storage.prepare_account_artwork_deletion("owner-a", repository=Repository)
+    assert str(failure.value) == "memory_artwork_publication_lock_required"
+
+
 def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(monkeypatch):
     from utils.ella import memory_artwork_storage
 
+    monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
     calls = []
 
     class Repository:
@@ -2353,6 +2458,8 @@ def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(
 
 def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven(monkeypatch):
     from utils.ella import memory_artwork_storage
+
+    monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
 
     class Repository:
         jobs_deleted = False

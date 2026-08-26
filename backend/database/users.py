@@ -408,12 +408,12 @@ def update_person_speech_samples_version(uid: str, person_id: str, version: int)
     return True
 
 
-def delete_user_data(uid: str):
+def delete_user_data(uid: str, *, artwork_lock_proof=None):
     user_ref = db.collection('users').document(uid)
     if not user_ref.get().exists:
         return {'status': 'error', 'message': 'User not found'}
 
-    prepare_account_artwork_deletion(uid)
+    prepare_account_artwork_deletion(uid, lock_proof=artwork_lock_proof)
 
     subcollections_to_delete = [
         'conversations',
