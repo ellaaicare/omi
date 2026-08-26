@@ -3094,7 +3094,9 @@ class EllaProvisioningRepository:
                 else:
                     recovery_candidates = await connection.fetch(
                         """
-                        SELECT job.id AS job_id, binding.id AS binding_id
+                        SELECT job.id AS job_id,
+                               binding.id AS binding_id,
+                               authority.revision AS authority_revision
                         FROM users account
                         JOIN ella_provisioning_jobs job
                           ON job.user_id = account.id
@@ -3198,6 +3200,7 @@ class EllaProvisioningRepository:
                             "processor_set_hash": lineage.processor_set_hash,
                             "scope_version": lineage.scope_version,
                             "scope_hash": lineage.scope_hash,
+                            "authority_revision": int(recovery_candidates[0]["authority_revision"]),
                         }
                     ]
                     consumed = await connection.fetchval(

@@ -2551,6 +2551,10 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 "SELECT receipts FROM ella_provisioning_jobs WHERE id = $1",
                 job_id,
             )
+            recovered_authority_revision = await observer.fetchval(
+                "SELECT revision FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                user_id,
+            )
         if isinstance(recovery_receipts, str):
             recovery_receipts = json.loads(recovery_receipts)
         assert dict(recovered_entitlement) == {"status": "active", "revision": 5}
@@ -2561,6 +2565,7 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             "processor_set_hash": current_lineage.processor_set_hash,
             "scope_version": current_lineage.scope_version,
             "scope_hash": current_lineage.scope_hash,
+            "authority_revision": recovered_authority_revision,
         }
         assert expected_recovery_receipt in recovery_receipts
 
@@ -2582,37 +2587,31 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             )
         assert dict(final_entitlement) == {"status": "revoked", "revision": 6}
 
-        # A later exact consent lineage is a new consent-driven transition, not
-        # an operator override. The newer authority timestamp may recover the
-        # same exact retained row and records that lineage independently.
-        next_lineage = RuntimeTargetLineage(
-            policy_version=f"{current_lineage.policy_version}-successor",
-            processor_set_hash="sha256:" + ("a" * 64),
-            scope_version=f"{current_lineage.scope_version}-successor",
-            scope_hash="sha256:" + ("b" * 64),
-        ).validate()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE ella_managed_cloud_consent_authority
-                SET policy_version = $2,
-                    processor_set_hash = $3,
-                    scope_version = $4,
-                    scope_hash = $5,
-                    updated_at = CURRENT_TIMESTAMP + INTERVAL '1 second'
-                WHERE user_id = $1
-                """,
-                user_id,
-                next_lineage.policy_version,
-                next_lineage.processor_set_hash,
-                next_lineage.scope_version,
-                next_lineage.scope_hash,
-            )
+        # A later receipt for the same exact contract is a new consent-driven
+        # transition, not an operator override. Its authority revision must
+        # make the recovery receipt unique even though all lineage hashes stay
+        # byte-identical.
+        same_lineage_grant = managed_cloud_consent.ManagedCloudGrant(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-receipt-same-lineage-recovery",
+            profile_binding_id=initial_grant.profile_binding_id,
+            policy_version=current_lineage.policy_version,
+            processor_set_hash=current_lineage.processor_set_hash,
+            scope_version=current_lineage.scope_version,
+            scope_hash=current_lineage.scope_hash,
+        )
+        same_lineage_authority = await managed_cloud_consent.synchronize_grant(
+            grant=same_lineage_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        assert same_lineage_authority["revision"] == recovered_authority_revision + 1
 
         assert (
             await repository.seed_voice_entitlement_if_absent(
                 uid=uid,
-                retained_authority_lineage=next_lineage,
+                retained_authority_lineage=current_lineage,
             )
             is True
         )
@@ -2631,10 +2630,11 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
         assert {
             "type": "retained_entitlement_recovered",
             "content_free": True,
-            "policy_version": next_lineage.policy_version,
-            "processor_set_hash": next_lineage.processor_set_hash,
-            "scope_version": next_lineage.scope_version,
-            "scope_hash": next_lineage.scope_hash,
+            "policy_version": current_lineage.policy_version,
+            "processor_set_hash": current_lineage.processor_set_hash,
+            "scope_version": current_lineage.scope_version,
+            "scope_hash": current_lineage.scope_hash,
+            "authority_revision": same_lineage_authority["revision"],
         } in rotated_receipts
 
     asyncio.run(_run_with_database(scenario))
