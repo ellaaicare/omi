@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import types
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,6 +20,12 @@ from PIL import Image
 @pytest.fixture(autouse=True)
 def _current_global_ai_consent(monkeypatch):
     monkeypatch.setattr(artwork, "has_current_global_ai_consent", lambda uid: True)
+
+    @asynccontextmanager
+    async def publication_lock(uid):
+        yield object()
+
+    monkeypatch.setattr(artwork, "acquire_memory_artwork_publication_lock", publication_lock)
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +50,7 @@ def _load_service_module():
         "retry_job",
         "fail_job",
         "mark_storage_cleanup_required",
+        "renew_publication_claim",
     ):
         setattr(database_stub, name, lambda *args, **kwargs: None)
     database_stub.STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
@@ -369,6 +377,31 @@ class FakeRepository:
         self.storage_cleanup_required.add(uid)
         return True
 
+    def renew_publication_claim(
+        self,
+        uid,
+        memory_id,
+        generation_key,
+        *,
+        generation_lease_token,
+        job_lease_token,
+        now,
+        lease_seconds,
+    ):
+        if not self.mark_storage_cleanup_required(
+            uid,
+            memory_id,
+            generation_key,
+            generation_lease_token=generation_lease_token,
+            job_lease_token=job_lease_token,
+        ):
+            return False
+        publication_expiry = now + timedelta(seconds=lease_seconds)
+        conversation = self.conversations[(uid, memory_id)]
+        conversation["artwork"]["lease_expires_at"] = publication_expiry
+        self.jobs[(uid, memory_id, generation_key)]["lease_expires_at"] = publication_expiry
+        return True
+
 
 def _run_claimed_process(service, repository, uid="owner-a", memory_id="memory-1"):
     conversation = repository.get_conversation(uid, memory_id) or {}
@@ -613,6 +646,97 @@ def test_environment_owner_gate_requires_nonempty_allowlist(monkeypatch):
     assert config.allows_uid("owner-a") is False
 
 
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout", "expected_lease"),
+    [
+        ("15", 60.0, 360),
+        ("300", 300.0, 600),
+        ("1200", 900.0, 1200),
+        ("not-a-number", 600.0, 900),
+    ],
+)
+def test_provider_timeout_is_bounded_and_lease_includes_completion_margin(
+    monkeypatch,
+    configured_timeout,
+    expected_timeout,
+    expected_lease,
+):
+    monkeypatch.setenv(artwork.PROVIDER_TIMEOUT_SECONDS_ENV, configured_timeout)
+
+    assert artwork._provider_timeout_seconds() == expected_timeout
+    assert artwork._artwork_lease_seconds() == expected_lease
+
+
+def test_delayed_provider_uses_job_and_generation_leases_longer_than_request_deadline(monkeypatch):
+    monkeypatch.setenv(artwork.PROVIDER_TIMEOUT_SECONDS_ENV, "300")
+
+    class LeaseRecordingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.job_lease_seconds = []
+            self.generation_lease_seconds = []
+            self.publication_lease_seconds = []
+
+        def claim_job(self, uid, memory_id, generation_key, *, lease_token, now, lease_seconds):
+            self.job_lease_seconds.append(lease_seconds)
+            return super().claim_job(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=lease_token,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+
+        def claim_generation(self, uid, memory_id, *, generation_key, lease_token, now, lease_seconds):
+            self.generation_lease_seconds.append(lease_seconds)
+            return super().claim_generation(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                lease_token=lease_token,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+
+        def renew_publication_claim(self, uid, memory_id, generation_key, **kwargs):
+            self.publication_lease_seconds.append(kwargs["lease_seconds"])
+            return super().renew_publication_claim(uid, memory_id, generation_key, **kwargs)
+
+    class DelayedProvider(FakeProvider):
+        async def generate(self, **kwargs):
+            await asyncio.sleep(0)
+            return await super().generate(**kwargs)
+
+    repository = LeaseRecordingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = DelayedProvider()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    reservation = asyncio.run(service.enqueue("owner-a", "memory-1"))
+    generation_key = str(repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"])
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(worker.run_job("owner-a", "memory-1", generation_key))
+
+    assert reservation["status"] == "generating"
+    assert result == {"outcome": "ready", "status": "ready"}
+    assert repository.job_lease_seconds == [600]
+    assert repository.generation_lease_seconds == [600]
+    assert repository.publication_lease_seconds == [artwork.PUBLICATION_LEASE_SECONDS]
+    assert provider.calls == 1
+
+
 def test_idempotent_generation_and_owner_scoped_signed_url():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
@@ -826,7 +950,7 @@ def test_failed_storage_write_remains_covered_by_cleanup_marker():
 
 def test_cleanup_marker_failure_prevents_object_upload():
     class FailingMarkerRepository(FakeRepository):
-        def mark_storage_cleanup_required(
+        def renew_publication_claim(
             self,
             uid,
             memory_id,
@@ -834,6 +958,8 @@ def test_cleanup_marker_failure_prevents_object_upload():
             *,
             generation_lease_token,
             job_lease_token,
+            now,
+            lease_seconds,
         ):
             return False
 
@@ -973,6 +1099,63 @@ def test_expired_job_claim_after_provider_prevents_storage_egress():
 
     assert failure.value.code == "memory_artwork_job_claim_invalid"
     assert provider.calls == 1
+    assert store.puts == []
+
+
+def test_expired_claim_after_object_write_never_deletes_shared_idempotent_object():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+
+    class ClaimExpiringStore(FakeStore):
+        def put(self, **kwargs):
+            stored = super().put(**kwargs)
+            next(iter(repository.jobs.values()))["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+            return stored
+
+    store = ClaimExpiringStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_job_claim_invalid"
+    assert len(store.puts) == 1
+    assert store.deletes == []
+
+
+def test_deletion_marker_after_cleanup_reservation_blocks_object_upload():
+    class DeletingRepository(FakeRepository):
+        def renew_publication_claim(self, uid, memory_id, generation_key, **kwargs):
+            result = super().renew_publication_claim(uid, memory_id, generation_key, **kwargs)
+            if result:
+                self.deletion_pending.add(uid)
+            return result
+
+    repository = DeletingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_deletion_pending"
     assert store.puts == []
 
 
@@ -1289,6 +1472,35 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
         ("order_by", "created_at", artwork_database.firestore.Query.DESCENDING),
         ("limit", 10),
     ]
+
+
+def test_absent_artwork_preferences_are_not_made_truthy_by_false_housekeeping_flags(monkeypatch):
+    class Snapshot:
+        exists = True
+
+        def to_dict(self):
+            return {
+                artwork_database.STORAGE_CLEANUP_REQUIRED_FIELD: False,
+                artwork_database.DELETION_PENDING_FIELD: False,
+            }
+
+    class User:
+        def get(self):
+            return Snapshot()
+
+    class Users:
+        def document(self, uid):
+            assert uid == "owner-a"
+            return User()
+
+    class Database:
+        def collection(self, name):
+            assert name == "users"
+            return Users()
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+
+    assert artwork_database.get_preferences("owner-a") == {}
 
 
 def test_durable_worker_recovers_retryable_job_after_restart():
@@ -1609,6 +1821,62 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
         is False
     )
     reference.state["discarded"] = False
+    publication_now = datetime.now(timezone.utc)
+    reference.state[artwork_database.ARTWORK_FIELD]["lease_expires_at"] = publication_now - timedelta(seconds=1)
+    job_reference.state["lease_expires_at"] = publication_now - timedelta(seconds=1)
+    assert (
+        artwork_database._renew_publication_claim_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
+            now=publication_now,
+            lease_seconds=600,
+        )
+        is True
+    )
+    publication_expiry = publication_now + timedelta(seconds=600)
+    assert user_reference.state[artwork_database.STORAGE_CLEANUP_REQUIRED_FIELD] is True
+    assert reference.state[artwork_database.ARTWORK_FIELD]["lease_expires_at"] == publication_expiry
+    assert job_reference.state["lease_expires_at"] == publication_expiry
+    updates_before_deletion_rejection = transaction.updates
+    user_reference.state[artwork_database.DELETION_PENDING_FIELD] = True
+    assert (
+        artwork_database._renew_publication_claim_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
+            now=publication_now,
+            lease_seconds=600,
+        )
+        is False
+    )
+    assert transaction.updates == updates_before_deletion_rejection
+    user_reference.state[artwork_database.DELETION_PENDING_FIELD] = False
+    reference.state["deletion_pending"] = True
+    assert (
+        artwork_database._renew_publication_claim_transaction(
+            transaction,
+            user_reference,
+            reference,
+            job_reference,
+            generation_key="a" * 64,
+            generation_lease_token="lease-a",
+            job_lease_token="lease-a",
+            now=publication_now,
+            lease_seconds=600,
+        )
+        is False
+    )
+    assert transaction.updates == updates_before_deletion_rejection
+    reference.state["deletion_pending"] = False
     assert (
         artwork_database._finalize_generation_transaction(
             transaction,
@@ -2023,7 +2291,10 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
 
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
-    delete_start = conversations_source.index("def delete_conversation(uid, conversation_id)")
+    delete_start = conversations_source.index("def delete_conversation(uid, conversation_id")
+    assert conversations_source.index(
+        "require_memory_artwork_publication_lock", delete_start
+    ) < conversations_source.index("claim_deletion", delete_start)
     assert conversations_source.index("has_processing_jobs_for_memory", delete_start) < conversations_source.index(
         "delete_conversation_artwork_if_present", delete_start
     )
@@ -2033,13 +2304,17 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
     assert conversations_source.index("delete_jobs_for_memory", delete_start) < conversations_source.index(
         "conversation_ref.delete()", delete_start
     )
-    assert account_route_source.index("prepare_account_artwork_deletion, uid") < account_route_source.index(
-        "unlink_self_owner_account_on_deletion(uid=uid)", account_route_source.index("def delete_account")
-    )
+    account_delete_start = account_route_source.index("async def delete_account")
+    assert account_route_source.index(
+        "acquire_memory_artwork_publication_lock", account_delete_start
+    ) < account_route_source.index("prepare_account_artwork_deletion", account_delete_start)
+    assert account_route_source.index(
+        "prepare_account_artwork_deletion", account_delete_start
+    ) < account_route_source.index("unlink_self_owner_account_on_deletion(uid=uid)", account_delete_start)
     user_database_source = (BACKEND_ROOT / "database" / "users.py").read_text(encoding="utf-8")
-    user_delete_start = user_database_source.index("def delete_user_data(uid: str)")
+    user_delete_start = user_database_source.index("def delete_user_data(uid: str")
     assert user_database_source.index(
-        "prepare_account_artwork_deletion(uid)", user_delete_start
+        "prepare_account_artwork_deletion(uid, lock_proof=artwork_lock_proof)", user_delete_start
     ) < user_database_source.index("subcollections_to_delete", user_delete_start)
 
 
@@ -2053,9 +2328,100 @@ def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monk
     assert str(failure.value) == "memory_artwork_storage_cleanup_unavailable"
 
 
+def test_distributed_publication_lock_holds_postgres_session_until_release(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    calls = []
+
+    class Connection:
+        closed = False
+
+        async def fetchval(self, query, lock_name):
+            calls.append(("query", "try" if "try" in query else "unlock", lock_name))
+            return True
+
+        async def close(self):
+            self.closed = True
+
+        def is_closed(self):
+            return self.closed
+
+    connection = Connection()
+
+    async def open_connection():
+        calls.append(("open",))
+        return connection
+
+    monkeypatch.setattr(memory_artwork_storage, "open_ella_postgres_connection", open_connection)
+
+    async def scenario():
+        async with memory_artwork_storage.acquire_memory_artwork_publication_lock("owner-a") as proof:
+            memory_artwork_storage.require_memory_artwork_publication_lock("owner-a", proof)
+            with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError):
+                memory_artwork_storage.require_memory_artwork_publication_lock("owner-b", proof)
+        with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError):
+            memory_artwork_storage.require_memory_artwork_publication_lock("owner-a", proof)
+
+    asyncio.run(scenario())
+
+    assert calls[0] == ("open",)
+    assert calls[1][0:2] == ("query", "try")
+    assert calls[2][0:2] == ("query", "unlock")
+    assert calls[1][2] == calls[2][2]
+    assert connection.closed is True
+
+
+def test_distributed_publication_lock_fails_closed_when_owner_is_busy(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    class Connection:
+        closed = False
+
+        async def fetchval(self, query, lock_name):
+            assert "pg_try_advisory_lock" in query
+            assert lock_name.startswith("ella-memory-artwork-publication-v1:")
+            return False
+
+        def is_closed(self):
+            return self.closed
+
+        async def close(self):
+            self.closed = True
+
+    connection = Connection()
+
+    async def open_connection():
+        return connection
+
+    monkeypatch.setattr(memory_artwork_storage, "open_ella_postgres_connection", open_connection)
+
+    async def scenario():
+        with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+            async with memory_artwork_storage.acquire_memory_artwork_publication_lock("owner-a"):
+                raise AssertionError("busy owner lock must not enter the publication section")
+        assert str(failure.value) == "memory_artwork_publication_lock_busy"
+
+    asyncio.run(scenario())
+    assert connection.closed is True
+
+
+def test_account_deletion_requires_distributed_publication_lock():
+    from utils.ella import memory_artwork_storage
+
+    class Repository:
+        @staticmethod
+        def begin_account_deletion(uid):
+            raise AssertionError("deletion must not start without the distributed lock")
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+        memory_artwork_storage.prepare_account_artwork_deletion("owner-a", repository=Repository)
+    assert str(failure.value) == "memory_artwork_publication_lock_required"
+
+
 def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(monkeypatch):
     from utils.ella import memory_artwork_storage
 
+    monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
     calls = []
 
     class Repository:
@@ -2092,6 +2458,8 @@ def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(
 
 def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven(monkeypatch):
     from utils.ella import memory_artwork_storage
+
+    monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
 
     class Repository:
         jobs_deleted = False
@@ -2438,6 +2806,45 @@ def test_first_party_provider_sends_bounded_owner_scoped_designer_brief(monkeypa
         "summary": "Two friends paused beside a frozen lake in blue evening light.",
     }
     assert "opaque prompt" not in request.content.decode()
+
+
+def test_first_party_provider_enforces_wall_clock_deadline(monkeypatch, tmp_path):
+    token_file = tmp_path / "artwork-service-token"
+    token_file.write_text("test-service-token-value-0000000000000000")
+    token_file.chmod(0o600)
+    monkeypatch.setenv(artwork.PROVIDER_URL_ENV, "https://artwork.internal/v1/ella/internal/artwork/render")
+    monkeypatch.setenv(artwork.PROVIDER_ALLOWED_HOST_ENV, "artwork.internal")
+    monkeypatch.setenv(artwork.PROVIDER_TOKEN_FILE_ENV, str(token_file))
+
+    async def never_finishes(*args, **kwargs):
+        await asyncio.sleep(1)
+        raise AssertionError("wall-clock timeout did not cancel provider request")
+
+    monkeypatch.setattr(artwork, "_bounded_provider_post", never_finishes)
+    context = artwork.ArtworkProviderContext(
+        owner_uid="owner-a",
+        profile_binding="profile-owner-a",
+        authority_generation=7,
+        source_revision="summary-v3",
+        consent_version="ai-data-processors-v10-test",
+        title="A winter walk",
+        summary="Two friends paused beside a frozen lake in blue evening light.",
+    )
+    provider = artwork.FirstPartyHTTPArtworkProvider(client=object())
+    provider.timeout_seconds = 0.01
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(
+            provider.generate(
+                prompt="Synthetic test prompt.",
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+                idempotency_key="job-123",
+                context=context,
+            )
+        )
+
+    assert failure.value.code == "memory_artwork_provider_unavailable"
+    assert failure.value.retryable is True
 
 
 def test_first_party_provider_rejects_missing_context_before_egress(monkeypatch, tmp_path):

@@ -18,6 +18,7 @@ import opuslib  # type: ignore
 import lc3  # lc3py
 
 from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from websockets.exceptions import ConnectionClosed
@@ -90,6 +91,7 @@ from utils.capture_buffer import (
     prepare_conversation_bound_capture_batch,
     queue_pusher_transcript_batch,
 )
+from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -1081,7 +1083,13 @@ async def _stream_handler(
                     await _create_conversation_fallback(conversation)
             else:
                 print(f'Clean up the conversation {conversation_id}, reason: no content', uid, session_id)
-                conversations_db.delete_conversation(uid, conversation_id)
+                async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+                    await run_in_threadpool(
+                        conversations_db.delete_conversation,
+                        uid,
+                        conversation_id,
+                        artwork_lock_proof=artwork_lock_proof,
+                    )
             complete_rotated_capture(uid, conversation_id, generation_id, owner_token)
         return True
 

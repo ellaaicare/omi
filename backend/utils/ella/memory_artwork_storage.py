@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional
@@ -24,6 +25,7 @@ except ImportError:  # pragma: no cover - exercised by production test stubs wit
 
 
 from database import memory_artwork as default_memory_artwork_repository
+from database.ella_postgres import open_ella_postgres_connection
 
 ARTWORK_OBJECT_RE = re.compile(
     r"^users/(?P<owner>[0-9a-f]{64})/profiles/(?P<profile>[0-9a-f]{64})/memories/"
@@ -31,10 +33,24 @@ ARTWORK_OBJECT_RE = re.compile(
 )
 MAX_ARTWORK_BYTES = 12 * 1024 * 1024
 SIGNED_URL_TTL_SECONDS = 300
+_PUBLICATION_LOCK_NAMESPACE = "ella-memory-artwork-publication-v1"
+_PUBLICATION_LOCK_ISSUER = object()
+_ACTIVE_PUBLICATION_LOCKS: dict[object, str] = {}
 
 
 class MemoryArtworkStorageError(RuntimeError):
     """A content-free storage failure safe to surface as a fixed error code."""
+
+
+class MemoryArtworkPublicationLockProof:
+    """Opaque proof that this process currently owns the distributed owner lock."""
+
+    __slots__ = ("_nonce",)
+
+    def __init__(self, issuer):
+        if issuer is not _PUBLICATION_LOCK_ISSUER:
+            raise TypeError("memory_artwork_publication_lock_proof_private")
+        self._nonce = object()
 
 
 @dataclass(frozen=True)
@@ -47,6 +63,49 @@ class StoredArtwork:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def require_memory_artwork_publication_lock(uid: str, proof: MemoryArtworkPublicationLockProof) -> None:
+    if not uid or _ACTIVE_PUBLICATION_LOCKS.get(proof) != _sha256(uid):
+        raise MemoryArtworkStorageError("memory_artwork_publication_lock_required")
+
+
+@asynccontextmanager
+async def acquire_memory_artwork_publication_lock(uid: str):
+    """Take a crash-released, cross-instance owner lock for publication/deletion."""
+    if not uid:
+        raise MemoryArtworkStorageError("memory_artwork_owner_missing")
+    connection = await open_ella_postgres_connection()
+    lock_name = f"{_PUBLICATION_LOCK_NAMESPACE}:{_sha256(uid)}"
+    locked = False
+    proof = None
+    try:
+        locked = bool(
+            await connection.fetchval(
+                "SELECT pg_try_advisory_lock(hashtextextended($1::text, 0))",
+                lock_name,
+            )
+        )
+        if not locked:
+            raise MemoryArtworkStorageError("memory_artwork_publication_lock_busy")
+        proof = MemoryArtworkPublicationLockProof(_PUBLICATION_LOCK_ISSUER)
+        _ACTIVE_PUBLICATION_LOCKS[proof] = _sha256(uid)
+        yield proof
+    finally:
+        if proof is not None:
+            _ACTIVE_PUBLICATION_LOCKS.pop(proof, None)
+        if locked:
+            try:
+                unlocked = await connection.fetchval(
+                    "SELECT pg_advisory_unlock(hashtextextended($1::text, 0))",
+                    lock_name,
+                )
+                if not unlocked:
+                    await connection.close()
+            except Exception:
+                await connection.close()
+        if not connection.is_closed():
+            await connection.close()
 
 
 def _extension(content_type: str) -> str:
@@ -205,10 +264,11 @@ def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:
     return GCSMemoryArtworkStore().delete_user_prefix(uid=uid)
 
 
-def prepare_account_artwork_deletion(uid: str, *, repository=None) -> int:
+def prepare_account_artwork_deletion(uid: str, *, repository=None, lock_proof=None) -> int:
     if repository is None:
         repository = default_memory_artwork_repository
 
+    require_memory_artwork_publication_lock(uid, lock_proof)
     repository.begin_account_deletion(uid)
     if repository.has_processing_jobs(uid):
         raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")

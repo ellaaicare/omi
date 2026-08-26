@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -190,6 +191,35 @@ class FakeFixtureStore:
 
     async def vector_exists(self, uid, conversation_id):
         return (uid, conversation_id) in self.vectors
+
+
+def test_production_fixture_cleanup_holds_owner_publication_lock(monkeypatch):
+    events = []
+    lock_proof = object()
+
+    class Conversations:
+        @staticmethod
+        def delete_conversation(uid, conversation_id, *, artwork_lock_proof=None):
+            assert uid == "staging-synthetic-owner"
+            assert conversation_id == "conversation-a"
+            assert artwork_lock_proof is lock_proof
+            events.append("deleted")
+
+    @asynccontextmanager
+    async def publication_lock(uid):
+        assert uid == "staging-synthetic-owner"
+        events.append("entered")
+        yield lock_proof
+        events.append("released")
+
+    monkeypatch.setattr(canary, "conversations_db", Conversations())
+    monkeypatch.setattr(canary, "vector_db", object())
+    monkeypatch.setattr(canary, "acquire_memory_artwork_publication_lock", publication_lock)
+
+    store = canary.ProductionFixtureStore()
+    asyncio.run(store.delete_conversation("staging-synthetic-owner", "conversation-a"))
+
+    assert events == ["entered", "deleted", "released"]
 
 
 class FakeAdapter:

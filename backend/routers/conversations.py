@@ -56,7 +56,7 @@ from utils.other.storage import get_conversation_recording_if_exists
 from utils.app_integrations import trigger_external_integrations
 from models.chat import Message
 from utils.conversations.location import get_google_maps_location
-from utils.ella.memory_artwork_storage import MemoryArtworkStorageError
+from utils.ella.memory_artwork_storage import MemoryArtworkStorageError, acquire_memory_artwork_publication_lock
 
 router = APIRouter()
 
@@ -409,7 +409,13 @@ async def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"code": "today_card_source_invalidation_failed"}) from exc
     try:
-        await run_in_threadpool(conversations_db.delete_conversation, uid, conversation_id)
+        async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+            await run_in_threadpool(
+                conversations_db.delete_conversation,
+                uid,
+                conversation_id,
+                artwork_lock_proof=artwork_lock_proof,
+            )
     except MemoryArtworkStorageError as exc:
         raise HTTPException(status_code=503, detail={"code": str(exc), "retryable": True}) from exc
     await run_in_threadpool(delete_vector, uid, conversation_id)

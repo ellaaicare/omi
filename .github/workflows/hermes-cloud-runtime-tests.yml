@@ -939,8 +939,8 @@ jobs:
           test "$(
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
-          )" -eq 20
-          test "$collected" -eq 573
+          )" -eq 21
+          test "$collected" -eq 574
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

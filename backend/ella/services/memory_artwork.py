@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import secrets
 import stat
@@ -38,6 +39,7 @@ from utils.ella.memory_artwork_storage import (
     GCSMemoryArtworkStore,
     MemoryArtworkStorageError,
     StoredArtwork,
+    acquire_memory_artwork_publication_lock,
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
@@ -95,7 +97,13 @@ TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024
 MAX_BACKFILL_MEMORIES = 10
 BACKFILL_SCAN_LIMIT = 50
-PROVIDER_TIMEOUT_SECONDS = 45.0
+PROVIDER_TIMEOUT_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TIMEOUT_SECONDS"
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
+MIN_PROVIDER_TIMEOUT_SECONDS = 60.0
+MAX_PROVIDER_TIMEOUT_SECONDS = 900.0
+PROVIDER_LEASE_MARGIN_SECONDS = 300
+PUBLICATION_LEASE_SECONDS = 600
+PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
 PROVIDER_ALLOWED_HOST_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST"
@@ -112,6 +120,21 @@ MAX_PROVIDER_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_BASE64_ARTWORK_CHARS = ((MAX_ARTWORK_BYTES + 2) // 3) * 4
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_timeout_seconds() -> float:
+    raw_value = os.getenv(PROVIDER_TIMEOUT_SECONDS_ENV, str(DEFAULT_PROVIDER_TIMEOUT_SECONDS)).strip()
+    try:
+        timeout_seconds = float(raw_value)
+    except ValueError:
+        timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    if not math.isfinite(timeout_seconds):
+        timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    return min(MAX_PROVIDER_TIMEOUT_SECONDS, max(MIN_PROVIDER_TIMEOUT_SECONDS, timeout_seconds))
+
+
+def _artwork_lease_seconds() -> int:
+    return max(120, math.ceil(_provider_timeout_seconds()) + PROVIDER_LEASE_MARGIN_SECONDS)
 
 
 class MemoryArtworkError(RuntimeError):
@@ -208,6 +231,8 @@ class MemoryArtworkRepository(Protocol):
 
     def mark_storage_cleanup_required(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
+    def renew_publication_claim(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
@@ -225,6 +250,7 @@ class FirestoreMemoryArtworkRepository:
     retry_job = staticmethod(artwork_db.retry_job)
     fail_job = staticmethod(artwork_db.fail_job)
     mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
+    renew_publication_claim = staticmethod(artwork_db.renew_publication_claim)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -308,6 +334,7 @@ class FirstPartyHTTPArtworkProvider:
             raise MemoryArtworkError("memory_artwork_provider_credential_unavailable", retryable=True)
         self.token = _read_protected_token(token_file)
         self.client = client
+        self.timeout_seconds = _provider_timeout_seconds()
 
     async def generate(
         self,
@@ -324,35 +351,36 @@ class FirstPartyHTTPArtworkProvider:
             raise MemoryArtworkError("memory_artwork_style_version_invalid", retryable=False)
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
-            timeout=PROVIDER_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(self.timeout_seconds, connect=PROVIDER_CONNECT_TIMEOUT_SECONDS),
             follow_redirects=False,
             trust_env=False,
         )
         try:
-            status_code, headers, image_bytes = await _bounded_provider_post(
-                client,
-                self.url,
-                max_response_bytes=MAX_ARTWORK_BYTES,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Idempotency-Key": idempotency_key,
-                    "X-Ella-Contract": ARTWORK_PROVIDER_CONTRACT_VERSION,
-                },
-                json={
-                    "schemaVersion": "ella.artwork.brief.v1",
-                    "jobId": idempotency_key,
-                    "ownerUid": context.owner_uid,
-                    "profileBinding": context.profile_binding,
-                    "authorityGeneration": context.authority_generation,
-                    "sourceRevision": context.source_revision,
-                    "consentVersion": context.consent_version,
-                    "synthetic": False,
-                    "style": designer_style,
-                    "title": context.title,
-                    "summary": context.summary,
-                },
-            )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(self.timeout_seconds):
+                status_code, headers, image_bytes = await _bounded_provider_post(
+                    client,
+                    self.url,
+                    max_response_bytes=MAX_ARTWORK_BYTES,
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Idempotency-Key": idempotency_key,
+                        "X-Ella-Contract": ARTWORK_PROVIDER_CONTRACT_VERSION,
+                    },
+                    json={
+                        "schemaVersion": "ella.artwork.brief.v1",
+                        "jobId": idempotency_key,
+                        "ownerUid": context.owner_uid,
+                        "profileBinding": context.profile_binding,
+                        "authorityGeneration": context.authority_generation,
+                        "sourceRevision": context.source_revision,
+                        "consentVersion": context.consent_version,
+                        "synthetic": False,
+                        "style": designer_style,
+                        "title": context.title,
+                        "summary": context.summary,
+                    },
+                )
+        except (httpx.HTTPError, TimeoutError) as exc:
             raise MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True) from exc
         finally:
             if owns_client:
@@ -386,6 +414,7 @@ class XaiMemoryArtworkProvider:
         if not self.model:
             raise MemoryArtworkError("memory_artwork_provider_model_invalid", retryable=False)
         self.client = client
+        self.timeout_seconds = _provider_timeout_seconds()
 
     @staticmethod
     def _normalize_image(image_bytes: bytes) -> bytes:
@@ -422,31 +451,32 @@ class XaiMemoryArtworkProvider:
     ) -> GeneratedArtwork:
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
-            timeout=PROVIDER_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(self.timeout_seconds, connect=PROVIDER_CONNECT_TIMEOUT_SECONDS),
             follow_redirects=False,
             trust_env=False,
         )
         try:
-            status_code, _, response_body = await _bounded_provider_post(
-                client,
-                XAI_IMAGE_ENDPOINT,
-                max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Idempotency-Key": idempotency_key,
-                },
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "n": 1,
-                    "aspect_ratio": "3:2",
-                    "resolution": "2k",
-                    "quality": "low",
-                    "response_format": "b64_json",
-                },
-            )
-        except httpx.HTTPError as exc:
+            async with asyncio.timeout(self.timeout_seconds):
+                status_code, _, response_body = await _bounded_provider_post(
+                    client,
+                    XAI_IMAGE_ENDPOINT,
+                    max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": idempotency_key,
+                    },
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "n": 1,
+                        "aspect_ratio": "3:2",
+                        "resolution": "2k",
+                        "quality": "low",
+                        "response_format": "b64_json",
+                    },
+                )
+        except (httpx.HTTPError, TimeoutError) as exc:
             raise MemoryArtworkError("memory_artwork_provider_unavailable", retryable=True) from exc
         finally:
             if owns_client:
@@ -855,7 +885,7 @@ class MemoryArtworkService:
             generation_key=generation_key,
             lease_token=lease_token,
             now=datetime.now(timezone.utc),
-            lease_seconds=120,
+            lease_seconds=_artwork_lease_seconds(),
         )
         if claimed is None:
             return {"outcome": "not_claimed", "status": str(artwork.get("status") or "unavailable")}
@@ -1119,34 +1149,40 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_source_changed")
-        # Persist cleanup intent before the deterministic upload. If the upload
-        # succeeds but its acknowledgement is lost, deletion still fails closed
-        # unless it can remove the owner's private prefix.
-        if not self.repository.mark_storage_cleanup_required(
-            uid,
-            memory_id,
-            generation_key,
-            generation_lease_token=lease_token,
-            job_lease_token=job_lease_token,
-        ):
-            self.repository.mark_generation_unavailable(
-                uid,
-                memory_id,
-                generation_key=generation_key,
-                failure_code="deletion_pending",
-                lease_token=lease_token,
-            )
-            raise MemoryArtworkError("memory_artwork_deletion_pending")
-        store = self.store_factory()
         try:
-            stored = store.put(
-                uid=uid,
-                profile_binding_id=authority.binding_id,
-                memory_id=memory_id,
-                generation_key=generation_key,
-                content_type=generated.content_type,
-                image_bytes=generated.image_bytes,
-            )
+            async with acquire_memory_artwork_publication_lock(uid):
+                # Renew both durable claims and persist cleanup intent while the
+                # crash-released distributed lock excludes destructive cleanup.
+                if not self.repository.renew_publication_claim(
+                    uid,
+                    memory_id,
+                    generation_key,
+                    generation_lease_token=lease_token,
+                    job_lease_token=job_lease_token,
+                    now=datetime.now(timezone.utc),
+                    lease_seconds=PUBLICATION_LEASE_SECONDS,
+                ):
+                    self.repository.mark_generation_unavailable(
+                        uid,
+                        memory_id,
+                        generation_key=generation_key,
+                        failure_code="deletion_pending",
+                        lease_token=lease_token,
+                    )
+                    raise MemoryArtworkError("memory_artwork_deletion_pending")
+                upload_preferences = self.repository.get_preferences(uid)
+                reject_deletion_pending(upload_preferences)
+                upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
+                reject_claim_drift(upload_conversation)
+                store = self.store_factory()
+                stored = store.put(
+                    uid=uid,
+                    profile_binding_id=authority.binding_id,
+                    memory_id=memory_id,
+                    generation_key=generation_key,
+                    content_type=generated.content_type,
+                    image_bytes=generated.image_bytes,
+                )
         except MemoryArtworkStorageError as exc:
             self.repository.mark_generation_unavailable(
                 uid,
@@ -1156,6 +1192,8 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError(str(exc), retryable=True) from exc
+        except MemoryArtworkError:
+            raise
         except Exception as exc:
             self.repository.mark_generation_unavailable(
                 uid,
@@ -1165,6 +1203,10 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
+        # The object key is deterministic for this generation and can be shared
+        # by an outcome-ambiguous retry. Workers therefore never delete it after
+        # upload; the persisted cleanup marker delegates destructive cleanup to
+        # the explicit memory/account deletion paths.
         generated_width = generated.pixel_width
         generated_height = generated.pixel_height
         del generated
@@ -1173,7 +1215,6 @@ class MemoryArtworkService:
             final_preferences = self.repository.get_preferences(uid)
             final_conversation = self.repository.get_conversation(uid, memory_id) or {}
         except Exception as exc:
-            store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -1211,7 +1252,6 @@ class MemoryArtworkService:
                 style_version=str(claimed.get("style_version") or ""),
             )
         ):
-            store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -1262,7 +1302,6 @@ class MemoryArtworkService:
             ready_state=ready_state,
         )
         if not finalized:
-            store.delete(uid=uid, memory_id=memory_id, object_key=stored.object_key)
             raise MemoryArtworkError("memory_artwork_finalize_conflict", retryable=True)
         return {"outcome": "ready", "status": "ready"}
 
@@ -1453,7 +1492,7 @@ class MemoryArtworkWorker:
             generation_key,
             lease_token=job_lease_token,
             now=datetime.now(timezone.utc),
-            lease_seconds=120,
+            lease_seconds=_artwork_lease_seconds(),
         )
         if claimed_job is None:
             return {"outcome": "not_claimed", "status": "unavailable"}
