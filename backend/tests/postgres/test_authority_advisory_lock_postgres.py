@@ -3073,6 +3073,120 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
             False,
         )
 
+        claimed_after_interruption = await repository.claim_job(str(job_id))
+        assert claimed_after_interruption is not None and claimed_after_interruption["stage"] == "profile_ready"
+        await repository.stage_runtime_binding(
+            uid=uid,
+            binding={
+                "binding_id": str(binding_id),
+                "provider": "hermes",
+                "profile_name": "current-retained-runtime-profile",
+                "agent_id": "current-retained-runtime-agent",
+                "template_version": "hermes-user-v1",
+                "model_policy_version": "model-policy-v1",
+                "voice_policy_version": "voice-policy-v1",
+                "health_state": "healthy",
+                "health_receipt": {"content_free": True},
+                "runtime_target_mode": "hermes-chat",
+            },
+            retained_rearm_job_id=str(job_id),
+            retained_authority_lineage=lineage,
+            retained_authority_revision=int(advanced_again["revision"]),
+        )
+        await repository.update_job(
+            job_id=str(job_id),
+            state="retryable",
+            stage="runtime_ready",
+            retryable=True,
+            error_code="provision_transaction_timeout",
+            error_detail={"reconciliation": "retry_same_job_binding"},
+            receipt={
+                "type": "runtime_attestation_reconciliation_required",
+                "same_job_binding_required": True,
+                "content_free": True,
+            },
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE ella_provisioning_jobs SET updated_at = CURRENT_TIMESTAMP - INTERVAL '3 minutes' WHERE id = $1",
+                job_id,
+            )
+        retried = await repository.claim_job(str(job_id))
+        assert retried is not None and retried["stage"] == "profile_ready"
+        advanced_after_interruption = await managed_cloud_consent.synchronize_grant(
+            grant=managed_cloud_consent.ManagedCloudGrant(
+                account_uid=uid,
+                profile_uid=uid,
+                consent_receipt_id="synthetic-current-retained-runtime-fourth-receipt",
+                profile_binding_id=grant.profile_binding_id,
+                policy_version=grant.policy_version,
+                processor_set_hash=grant.processor_set_hash,
+                scope_version=grant.scope_version,
+                scope_hash=grant.scope_hash,
+            ),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="current-retained-runtime@example.invalid",
+        )
+        assert int(advanced_after_interruption["revision"]) > int(advanced_again["revision"])
+        with pytest.raises(RuntimePoolClaimError, match="retained_runtime_authority_stale"):
+            await repository.stage_runtime_binding(
+                uid=uid,
+                binding={
+                    "binding_id": str(binding_id),
+                    "provider": "hermes",
+                    "profile_name": "current-retained-runtime-profile",
+                    "agent_id": "current-retained-runtime-agent",
+                    "template_version": "hermes-user-v1",
+                    "model_policy_version": "model-policy-v1",
+                    "voice_policy_version": "voice-policy-v1",
+                    "health_state": "healthy",
+                    "health_receipt": {"content_free": True},
+                    "runtime_target_mode": "hermes-chat",
+                },
+                retained_rearm_job_id=str(job_id),
+                retained_authority_lineage=lineage,
+                retained_authority_revision=int(advanced_again["revision"]),
+            )
+        assert (
+            await repository.quarantine_retained_runtime_authority_drift(
+                uid=uid,
+                job_id=str(job_id),
+                authority_lineage=lineage,
+                stale_authority_revision=int(advanced_again["revision"]),
+            )
+            is True
+        )
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=lineage,
+            )
+            is True
+        )
+        assert await repository.rearm_retained_runtime_after_consent(uid=uid, authority_lineage=lineage) is True
+        async with pool.acquire() as observer:
+            recovered_after_interruption = await observer.fetchrow(
+                """
+                SELECT entitlement.consent_authority_revision,
+                       job.state, job.stage, binding.status,
+                       binding.health_state, binding.active
+                FROM users account
+                JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+                JOIN ella_provisioning_jobs job ON job.user_id = account.id
+                JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+                WHERE account.omi_uid = $1
+                """,
+                uid,
+            )
+        assert tuple(recovered_after_interruption.values()) == (
+            int(advanced_after_interruption["revision"]),
+            "pending",
+            "identity_ready",
+            "shadow",
+            "pending",
+            False,
+        )
+
     asyncio.run(_run_with_database(scenario))
 
 

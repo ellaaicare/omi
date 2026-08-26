@@ -3665,7 +3665,7 @@ class EllaProvisioningRepository:
                       AND account.profile_class = 'real'
                       AND job.state = 'provisioning'
                       AND (
-                          (job.stage = 'profile_ready' AND binding.health_state = 'pending')
+                          (job.stage = 'profile_ready' AND binding.health_state IN ('pending', 'healthy'))
                           OR (job.stage = 'smoke_passed' AND binding.health_state = 'healthy')
                       )
                       AND job.retryable = TRUE
