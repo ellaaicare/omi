@@ -66,7 +66,7 @@ def list_recent_conversations(uid: str, *, limit: int) -> list[dict[str, Any]]:
         .order_by("created_at", direction=firestore.Query.DESCENDING)
         .limit(limit)
     )
-    return [snapshot.to_dict() for snapshot in query.stream()]
+    return [{**(snapshot.to_dict() or {}), "id": snapshot.id} for snapshot in query.stream()]
 
 
 def _terminal_enrichment_matches(conversation: dict[str, Any], enrichment_revision: str) -> bool:
