@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
+import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -31,6 +35,8 @@ ARTWORK_OBJECT_RE = re.compile(
 )
 MAX_ARTWORK_BYTES = 12 * 1024 * 1024
 SIGNED_URL_TTL_SECONDS = 300
+OWNER_LOCK_DIR_ENV = "ELLA_MEMORY_ARTWORK_LOCK_DIR"
+DEFAULT_OWNER_LOCK_DIR = "/tmp/ella-memory-artwork-locks"
 
 
 class MemoryArtworkStorageError(RuntimeError):
@@ -47,6 +53,47 @@ class StoredArtwork:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@contextmanager
+def memory_artwork_owner_lock(uid: str):
+    """Serialize private object publication and deletion for one owner."""
+    if not uid:
+        raise MemoryArtworkStorageError("memory_artwork_owner_missing")
+    lock_dir = Path(os.getenv(OWNER_LOCK_DIR_ENV, DEFAULT_OWNER_LOCK_DIR).strip() or DEFAULT_OWNER_LOCK_DIR)
+    try:
+        lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory_metadata = lock_dir.lstat()
+    except OSError as exc:
+        raise MemoryArtworkStorageError("memory_artwork_owner_lock_unavailable") from exc
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or directory_metadata.st_uid != os.geteuid()
+        or directory_metadata.st_mode & 0o077
+    ):
+        raise MemoryArtworkStorageError("memory_artwork_owner_lock_insecure")
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_dir / f"{_sha256(uid)}.lock", flags, 0o600)
+    except OSError as exc:
+        raise MemoryArtworkStorageError("memory_artwork_owner_lock_unavailable") from exc
+    try:
+        file_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_metadata.st_mode)
+            or file_metadata.st_uid != os.geteuid()
+            or file_metadata.st_mode & 0o077
+        ):
+            raise MemoryArtworkStorageError("memory_artwork_owner_lock_insecure")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _extension(content_type: str) -> str:
@@ -209,14 +256,13 @@ def prepare_account_artwork_deletion(uid: str, *, repository=None) -> int:
     if repository is None:
         repository = default_memory_artwork_repository
 
-    if repository.has_processing_jobs(uid):
-        raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
-    repository.begin_account_deletion(uid)
-    if repository.has_processing_jobs(uid):
-        raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
-    deleted = delete_all_user_artwork(
-        uid,
-        cleanup_required=repository.storage_cleanup_required(uid),
-    )
-    repository.delete_jobs_for_uid(uid)
-    return deleted
+    with memory_artwork_owner_lock(uid):
+        repository.begin_account_deletion(uid)
+        if repository.has_processing_jobs(uid):
+            raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
+        deleted = delete_all_user_artwork(
+            uid,
+            cleanup_required=repository.storage_cleanup_required(uid),
+        )
+        repository.delete_jobs_for_uid(uid)
+        return deleted

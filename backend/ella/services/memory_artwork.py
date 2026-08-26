@@ -39,6 +39,7 @@ from utils.ella.memory_artwork_storage import (
     GCSMemoryArtworkStore,
     MemoryArtworkStorageError,
     StoredArtwork,
+    memory_artwork_owner_lock,
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
@@ -1162,38 +1163,39 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_deletion_pending")
-        upload_preferences = self.repository.get_preferences(uid)
-        reject_deletion_pending(upload_preferences)
-        upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
-        reject_claim_drift(upload_conversation)
-        store = self.store_factory()
-        try:
-            stored = store.put(
-                uid=uid,
-                profile_binding_id=authority.binding_id,
-                memory_id=memory_id,
-                generation_key=generation_key,
-                content_type=generated.content_type,
-                image_bytes=generated.image_bytes,
-            )
-        except MemoryArtworkStorageError as exc:
-            self.repository.mark_generation_unavailable(
-                uid,
-                memory_id,
-                generation_key=generation_key,
-                failure_code=str(exc),
-                lease_token=lease_token,
-            )
-            raise MemoryArtworkError(str(exc), retryable=True) from exc
-        except Exception as exc:
-            self.repository.mark_generation_unavailable(
-                uid,
-                memory_id,
-                generation_key=generation_key,
-                failure_code="memory_artwork_storage_failed",
-                lease_token=lease_token,
-            )
-            raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
+        with memory_artwork_owner_lock(uid):
+            upload_preferences = self.repository.get_preferences(uid)
+            reject_deletion_pending(upload_preferences)
+            upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
+            reject_claim_drift(upload_conversation)
+            store = self.store_factory()
+            try:
+                stored = store.put(
+                    uid=uid,
+                    profile_binding_id=authority.binding_id,
+                    memory_id=memory_id,
+                    generation_key=generation_key,
+                    content_type=generated.content_type,
+                    image_bytes=generated.image_bytes,
+                )
+            except MemoryArtworkStorageError as exc:
+                self.repository.mark_generation_unavailable(
+                    uid,
+                    memory_id,
+                    generation_key=generation_key,
+                    failure_code=str(exc),
+                    lease_token=lease_token,
+                )
+                raise MemoryArtworkError(str(exc), retryable=True) from exc
+            except Exception as exc:
+                self.repository.mark_generation_unavailable(
+                    uid,
+                    memory_id,
+                    generation_key=generation_key,
+                    failure_code="memory_artwork_storage_failed",
+                    lease_token=lease_token,
+                )
+                raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
         # The object key is deterministic for this generation and can be shared
         # by an outcome-ambiguous retry. Workers therefore never delete it after
         # upload; the persisted cleanup marker delegates destructive cleanup to

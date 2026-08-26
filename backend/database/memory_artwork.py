@@ -271,10 +271,6 @@ def _processing_job_is_active(job: dict[str, Any], *, now: datetime) -> bool:
     return bool(job.get("status") == "processing" and isinstance(lease_expires_at, datetime) and lease_expires_at > now)
 
 
-def _job_is_processing(job: dict[str, Any]) -> bool:
-    return job.get("status") == "processing"
-
-
 def _job_claim_is_current_transaction(
     transaction,
     user_ref,
@@ -480,14 +476,17 @@ def begin_account_deletion(uid: str) -> bool:
 
 
 def has_processing_jobs(uid: str, *, now: Optional[datetime] = None) -> bool:
+    current_time = now or datetime.now(timezone.utc)
     snapshots = db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
-    return any(_job_is_processing(snapshot.to_dict() or {}) for snapshot in snapshots)
+    return any(_processing_job_is_active(snapshot.to_dict() or {}, now=current_time) for snapshot in snapshots)
 
 
 def has_processing_jobs_for_memory(uid: str, memory_id: str, *, now: Optional[datetime] = None) -> bool:
+    current_time = now or datetime.now(timezone.utc)
     snapshots = db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
     return any(
-        (snapshot.to_dict() or {}).get("memory_id") == memory_id and _job_is_processing(snapshot.to_dict() or {})
+        (snapshot.to_dict() or {}).get("memory_id") == memory_id
+        and _processing_job_is_active(snapshot.to_dict() or {}, now=current_time)
         for snapshot in snapshots
     )
 
