@@ -921,8 +921,7 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT DISTINCT expected_model, model_policy_version
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
@@ -930,8 +929,7 @@ class EllaProvisioningRepository:
               AND health_state = 'healthy'
               AND active = false
               AND user_id IS NULL
-            """
-        )
+            """)
         if not rows:
             return None
         policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
@@ -1061,16 +1059,14 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT id, runtime_instance_id, status, health_state, expected_model,
                    prompt_pack_version, revision, claimed_at, quarantined_at,
                    quarantine_reason, created_at, updated_at
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
             ORDER BY created_at ASC, id ASC
-            """
-        )
+            """)
         return [dict(row) for row in rows]
 
     async def claim_cloud_pool_binding(
@@ -3565,6 +3561,172 @@ class EllaProvisioningRepository:
                 )
                 if job_result != "UPDATE 1" or binding_result != "UPDATE 1":
                     raise RuntimePoolClaimError("retained_runtime_rearm_stale")
+                return True
+
+    async def retry_retained_runtime_after_capability_migration(
+        self,
+        *,
+        uid: str,
+        authority_lineage: RuntimeTargetLineage,
+        migration_receipt_sha256: str,
+    ) -> bool:
+        """Retry an already-rearmed retained runtime after an explicit profile migration."""
+        lineage = authority_lineage.validate()
+        migration_hash = migration_receipt_sha256.strip().lower()
+        if len(migration_hash) != 64 or any(character not in "0123456789abcdef" for character in migration_hash):
+            raise ValueError("retained_profile_migration_receipt_invalid")
+
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                candidates = await connection.fetch(
+                    """
+                    SELECT job.id AS job_id,
+                           authority.revision AS authority_revision
+                    FROM users account
+                    JOIN ella_provisioning_jobs job
+                      ON job.user_id = account.id
+                    JOIN ella_runtime_bindings binding
+                      ON binding.user_id = account.id
+                     AND binding.provider = 'hermes'
+                     AND binding.role = 'user'
+                     AND binding.template_version = job.target_schema_version
+                    JOIN agent_clusters cluster
+                      ON cluster.user_id = account.id
+                     AND cluster.status = 'ACTIVE'
+                     AND jsonb_typeof(cluster.agents) = 'object'
+                     AND NULLIF(BTRIM(cluster.agents->>'userAgentId'), '') IS NOT NULL
+                    JOIN ella_managed_cloud_consent_authority authority
+                      ON authority.user_id = account.id
+                     AND authority.decision = 'granted'
+                     AND authority.consent_receipt_ref IS NOT NULL
+                     AND authority.profile_binding_id IS NOT NULL
+                     AND authority.policy_version = $2
+                     AND authority.processor_set_hash = $3
+                     AND authority.scope_version = $4
+                     AND authority.scope_hash = $5
+                    JOIN voice_entitlements entitlement
+                      ON entitlement.uid = account.omi_uid
+                     AND entitlement.consent_authority_revision = authority.revision
+                    WHERE account.omi_uid = $1
+                      AND account.status = 'ACTIVE'
+                      AND account.profile_class = 'real'
+                      AND job.state = 'blocked'
+                      AND job.stage = 'runtime_ready'
+                      AND job.retryable = FALSE
+                      AND job.error_code = 'unsafe_existing_profile_capabilities'
+                      AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                          'type', 'retained_entitlement_recovered',
+                          'content_free', TRUE,
+                          'policy_version', $2::text,
+                          'processor_set_hash', $3::text,
+                          'scope_version', $4::text,
+                          'scope_hash', $5::text,
+                          'authority_revision', authority.revision
+                      ))
+                      AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                          'type', 'retained_runtime_rearmed',
+                          'content_free', TRUE,
+                          'authority_revision', authority.revision
+                      ))
+                      AND NOT job.receipts @> jsonb_build_array(jsonb_build_object(
+                          'type', 'retained_profile_capabilities_migrated',
+                          'content_free', TRUE,
+                          'migration_receipt_sha256', $6::text,
+                          'authority_revision', authority.revision
+                      ))
+                      AND binding.status = 'shadow'
+                      AND binding.active = FALSE
+                      AND binding.health_state = 'pending'
+                      AND binding.runtime_target_mode = 'hermes-chat'
+                      AND binding.quarantine_reason IS NULL
+                      AND entitlement.status = 'active'
+                      AND entitlement.invitation_id IS NULL
+                      AND entitlement.plan = 'canary'
+                      AND entitlement.daily_limit_s = 2700
+                      AND entitlement.monthly_limit_s = 43200
+                      AND entitlement.max_session_s = 1200
+                      AND entitlement.max_concurrent = 1
+                      AND entitlement.provider_allowlist = ARRAY['grok-voice']::text[]
+                      AND entitlement.model_allowlist = ARRAY[]::text[]
+                      AND entitlement.mode_allowlist = ARRAY['v4']::text[]
+                      AND (
+                          entitlement.fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                          OR (
+                              jsonb_typeof(entitlement.fallback_policy) = 'string'
+                              AND entitlement.fallback_policy #>> '{}' = '{"order": [], "enabled": false}'
+                          )
+                      )
+                      AND entitlement.operator_note IN (
+                          'auto-provision self-hosted grok voice',
+                          'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31'
+                      )
+                      AND entitlement.consent_authority_epoch IS NULL
+                      AND entitlement.invitation_consent_pending = FALSE
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_invitation_redemptions redemption
+                          WHERE redemption.user_id = account.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_bindings active_binding
+                          WHERE active_binding.user_id = account.id
+                            AND active_binding.active = TRUE
+                      )
+                    FOR UPDATE OF job, binding, cluster, authority, entitlement
+                    """,
+                    uid,
+                    lineage.policy_version,
+                    lineage.processor_set_hash,
+                    lineage.scope_version,
+                    lineage.scope_hash,
+                    migration_hash,
+                )
+                if len(candidates) != 1:
+                    return False
+
+                candidate = candidates[0]
+                receipt = {
+                    "type": "retained_profile_capabilities_migrated",
+                    "content_free": True,
+                    "migration_receipt_sha256": migration_hash,
+                    "authority_revision": int(candidate["authority_revision"]),
+                }
+                result = await connection.execute(
+                    """
+                    UPDATE ella_provisioning_jobs
+                    SET state = 'pending',
+                        stage = 'identity_ready',
+                        retryable = TRUE,
+                        error_code = NULL,
+                        error_detail = '{}'::jsonb,
+                        receipts = receipts || jsonb_build_array($2::jsonb),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND state = 'blocked'
+                      AND stage = 'runtime_ready'
+                      AND retryable = FALSE
+                      AND error_code = 'unsafe_existing_profile_capabilities'
+                    """,
+                    candidate["job_id"],
+                    json.dumps(receipt),
+                )
+                if result != "UPDATE 1":
+                    raise RuntimePoolClaimError("retained_profile_migration_retry_stale")
                 return True
 
     async def quarantine_retained_runtime_authority_drift(

@@ -179,12 +179,10 @@ async def _seed_grant(pool, uid):
 
 def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             INSERT INTO users (omi_uid, guardian_mode)
             VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
-            """
-        )
+            """)
         previous_pool = guardian._pool
         guardian._pool = pool
         try:
@@ -201,8 +199,7 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
 def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -279,8 +276,7 @@ def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects
                     'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
                     'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
                 );
-            """
-        )
+            """)
 
         before = {
             table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
@@ -601,23 +597,19 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """
-            )
+                """)
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -2896,6 +2888,69 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
         assert {
             "type": "retained_runtime_rearmed",
             "content_free": True,
+            "authority_revision": authority_revision,
+        } in receipts
+
+        migration_receipt_sha256 = "a" * 64
+        with pytest.raises(ValueError, match="retained_profile_migration_receipt_invalid"):
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256="not-a-sha256",
+            )
+        await repository.update_job(
+            job_id=str(job_id),
+            state="blocked",
+            stage="runtime_ready",
+            retryable=False,
+            error_code="unsafe_existing_profile_capabilities",
+            error_detail={"status": 409},
+        )
+        assert (
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256=migration_receipt_sha256,
+            )
+            is True
+        )
+        assert (
+            await repository.retry_retained_runtime_after_capability_migration(
+                uid=uid,
+                authority_lineage=lineage,
+                migration_receipt_sha256=migration_receipt_sha256,
+            )
+            is False
+        )
+        async with pool.acquire() as observer:
+            migrated_state = await observer.fetchrow(
+                """
+                SELECT job.state, job.stage, job.retryable, job.error_code,
+                       binding.status, binding.health_state, binding.active,
+                       binding.quarantine_reason
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding ON binding.user_id = job.user_id
+                WHERE job.id = $1
+                """,
+                job_id,
+            )
+            receipts = await observer.fetchval("SELECT receipts FROM ella_provisioning_jobs WHERE id = $1", job_id)
+        if isinstance(receipts, str):
+            receipts = json.loads(receipts)
+        assert tuple(migrated_state.values()) == (
+            "pending",
+            "identity_ready",
+            True,
+            None,
+            "shadow",
+            "pending",
+            False,
+            None,
+        )
+        assert {
+            "type": "retained_profile_capabilities_migrated",
+            "content_free": True,
+            "migration_receipt_sha256": migration_receipt_sha256,
             "authority_revision": authority_revision,
         } in receipts
 
