@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_invite_link_controller.dart';
+import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/providers/ella_entitlement_provider.dart';
 import 'package:omi/providers/locale_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
@@ -20,6 +22,8 @@ class EllaEntitlementGatePage extends StatefulWidget {
     this.onSignOutOverride,
     this.pilotLocaleRestricted = isEllaInternalPilotEnabled,
     this.onPilotLocaleAllowed,
+    this.consentGrantRequester,
+    this.consentDeclineRequester,
   });
 
   final Widget readyChild;
@@ -27,6 +31,8 @@ class EllaEntitlementGatePage extends StatefulWidget {
   final VoidCallback? onSignOutOverride;
   final bool pilotLocaleRestricted;
   final Future<void> Function()? onPilotLocaleAllowed;
+  final Future<AiConsentGrantOutcome> Function(String uid)? consentGrantRequester;
+  final Future<bool> Function(String uid)? consentDeclineRequester;
 
   @override
   State<EllaEntitlementGatePage> createState() => _EllaEntitlementGatePageState();
@@ -130,6 +136,33 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
     await signOutAndClearUserData(context);
   }
 
+  Future<void> _reauthorizeAndRetry() async {
+    final provider = context.read<EllaEntitlementProvider>();
+    final uid = provider.boundUid ?? '';
+    if (uid.isEmpty) return;
+    final consentService = EllaAiConsentService();
+    final accepted = await AiConsentSheet.show(
+      context,
+      onAccept: () async {
+        if (provider.boundUid != uid) {
+          return const AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.authorityChanged);
+        }
+        final outcome =
+            await (widget.consentGrantRequester?.call(uid) ?? consentService.grantCurrentConsentWithOutcome(uid: uid));
+        return provider.boundUid == uid
+            ? outcome
+            : const AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.authorityChanged);
+      },
+      onDecline: () async {
+        if (provider.boundUid != uid) return false;
+        return await (widget.consentDeclineRequester?.call(uid) ?? consentService.declineCurrentConsent(uid: uid));
+      },
+      canPersistDecision: () => provider.boundUid == uid,
+    );
+    if (!mounted || accepted != true || provider.boundUid != uid) return;
+    await provider.retry();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_isPilotLocaleAllowed) {
@@ -190,7 +223,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
             title: context.l10n.ellaAccessNeedsCheckTitle,
             body: context.l10n.ellaAccessNeedsCheckBody,
             primaryLabel: context.l10n.retry,
-            onPrimary: provider.retry,
+            onPrimary: _reauthorizeAndRetry,
             onSignOut: _signOut,
             supportCode: supportCode,
           );

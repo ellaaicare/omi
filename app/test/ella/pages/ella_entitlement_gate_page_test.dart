@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_invite_link_controller.dart';
 import 'package:omi/l10n/app_localizations.dart';
@@ -143,6 +146,133 @@ void main() {
     expect(find.byType(TextField), findsNothing);
   });
 
+  testWidgets('revoked recovery requires a fresh explicit consent grant before retrying entitlement', (tester) async {
+    final transport = _RecoveryEntitlementTransport();
+    final provider = EllaEntitlementProvider(
+      transport: transport,
+      authenticatedUidChanges: const Stream.empty(),
+      initialAuthenticatedUid: 'uid-a',
+    );
+    addTearDown(provider.dispose);
+    await provider.load();
+    final grantedUids = <String>[];
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaEntitlementGatePage(
+            startOnMount: false,
+            onSignOutOverride: _noop,
+            consentGrantRequester: (uid) async {
+              grantedUids.add(uid);
+              return const AiConsentGrantOutcome.accepted('aicr-fresh');
+            },
+            readyChild: const Text('ONBOARDING READY'),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('Allow and continue'), findsOneWidget);
+    expect(transport.fetchCalls, 1);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Allow and continue'));
+    await tester.pumpAndSettle();
+
+    expect(grantedUids, ['uid-a']);
+    expect(transport.fetchCalls, 2);
+    expect(find.text('ONBOARDING READY'), findsOneWidget);
+  });
+
+  testWidgets('revoked recovery stays closed when consent is declined', (tester) async {
+    final transport = _RecoveryEntitlementTransport();
+    final provider = EllaEntitlementProvider(
+      transport: transport,
+      authenticatedUidChanges: const Stream.empty(),
+      initialAuthenticatedUid: 'uid-a',
+    );
+    addTearDown(provider.dispose);
+    await provider.load();
+    var declineCalls = 0;
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaEntitlementGatePage(
+            startOnMount: false,
+            onSignOutOverride: _noop,
+            consentGrantRequester: (_) async => const AiConsentGrantOutcome.accepted('unexpected'),
+            consentDeclineRequester: (_) async {
+              declineCalls++;
+              return true;
+            },
+            readyChild: const Text('ONBOARDING READY'),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Retry'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+
+    expect(declineCalls, 1);
+    expect(transport.fetchCalls, 1);
+    expect(find.text('ONBOARDING READY'), findsNothing);
+  });
+
+  testWidgets('account drift during revoked recovery cannot retry under the replacement account', (tester) async {
+    final transport = _RecoveryEntitlementTransport();
+    final provider = EllaEntitlementProvider(
+      transport: transport,
+      authenticatedUidChanges: const Stream.empty(),
+      initialAuthenticatedUid: 'uid-a',
+    );
+    addTearDown(provider.dispose);
+    await provider.load();
+    final grant = Completer<AiConsentGrantOutcome>();
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaEntitlementGatePage(
+            startOnMount: false,
+            onSignOutOverride: _noop,
+            consentGrantRequester: (_) => grant.future,
+            readyChild: const Text('ONBOARDING READY'),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Retry'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Allow and continue'));
+    await tester.pump();
+    provider.bindAuthenticatedUid('uid-b');
+    grant.complete(const AiConsentGrantOutcome.accepted('stale-receipt'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(transport.fetchCalls, 1);
+    expect(find.text('ONBOARDING READY'), findsNothing);
+  });
+
   testWidgets('non-English internal pilot performs no claim request and exposes no English-only claim UI',
       (tester) async {
     final transport = _CountingEntitlementTransport();
@@ -197,4 +327,23 @@ class _CountingEntitlementTransport implements EllaEntitlementTransport {
     redeemCalls++;
     return EllaAccessDemoFixtures.active;
   }
+}
+
+class _RecoveryEntitlementTransport implements EllaEntitlementTransport {
+  int fetchCalls = 0;
+
+  @override
+  Future<EllaEntitlement> fetch() async {
+    fetchCalls++;
+    return fetchCalls == 1
+        ? EllaEntitlement(
+            status: EllaEntitlementStatus.revoked,
+            quota: EllaAccessDemoFixtures.quota(),
+            supportCode: 'SUP-RECOVERY',
+          )
+        : EllaAccessDemoFixtures.active;
+  }
+
+  @override
+  Future<EllaEntitlement> redeem(String code) => throw UnimplementedError();
 }

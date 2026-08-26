@@ -47,6 +47,8 @@ typedef GuardianAvailability = bool Function();
 
 enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
 
+enum _ExternalCaptureSource { phone, necklace }
+
 enum TodayCaptureDockMode { ready, starting, recording, finishing, unavailable }
 
 class TodayCaptureDockPresentation {
@@ -55,7 +57,7 @@ class TodayCaptureDockPresentation {
     required this.status,
     required this.primaryLabel,
     required this.primaryIcon,
-    required this.opensTranscript,
+    required this.finishesExternalCapture,
     required this.primaryEnabled,
   });
 
@@ -63,7 +65,7 @@ class TodayCaptureDockPresentation {
   final String status;
   final String primaryLabel;
   final IconData primaryIcon;
-  final bool opensTranscript;
+  final bool finishesExternalCapture;
   final bool primaryEnabled;
 
   bool get emphasized => mode == TodayCaptureDockMode.recording;
@@ -170,6 +172,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _homeCaptureStarting = false;
   bool _homeCaptureFinalizationPending = false;
   Future<bool>? _homeCaptureFinalizationInFlight;
+  _ExternalCaptureSource? _externalCaptureFinalizationSource;
   bool _abandonHomeCaptureAfterFinalization = false;
   int _homeCaptureAuthorityGeneration = 0;
   _HomeCaptureSource? _homeCaptureSource;
@@ -276,6 +279,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeCaptureAuthorityGeneration++;
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
+    _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
@@ -782,6 +786,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       MaterialPageRoute(
         builder: (_) => ConversationCapturingPage(
           onProcessNow: () async {
+            if (_externalCaptureFinalizationSource != null) {
+              await _finishExternalCapture(capture);
+              return _externalCaptureFinalizationSource == null;
+            }
             if (_homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null) {
               return _finishHomeCapture(capture);
             }
@@ -789,7 +797,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               return _finalizeHomeMoment(capture);
             }
             if (capture.phoneCaptureOwnsMobileAudio || capture.recordingState == RecordingState.record) {
-              return capture.stopStreamRecordingAndFinalize();
+              await _finishExternalCapture(capture);
+              return _externalCaptureFinalizationSource == null;
             }
             return false;
           },
@@ -800,6 +809,56 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
       await _joinHomeCaptureFinalization(finalization);
+    }
+  }
+
+  Future<void> _finishExternalCapture(CaptureProvider capture) async {
+    if (!mounted || _homeCaptureStarting) return;
+    final existingSource = _externalCaptureFinalizationSource;
+    final source = existingSource ??
+        switch (capture.recordingState) {
+          RecordingState.record => _ExternalCaptureSource.phone,
+          RecordingState.deviceRecord => _ExternalCaptureSource.necklace,
+          _ => null,
+        };
+    if (source == null) return;
+    setState(() => _homeCaptureStarting = true);
+    try {
+      if (existingSource == null && mounted) {
+        setState(() => _externalCaptureFinalizationSource = source);
+      }
+
+      var finished = false;
+      var confirmedEmpty = false;
+      if (existingSource != null) {
+        finished = await capture.finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true);
+        if (!finished && !capture.captureDiagnostics.hasPhysicalAudio && !capture.hasCapturableContent) {
+          confirmedEmpty = !await capture.awaitFinalCapturableContent();
+        }
+      } else if (source == _ExternalCaptureSource.phone) {
+        final result = await capture.stopPhoneCaptureForVoiceTakeover();
+        finished = result == PhoneCaptureStopResult.finalized;
+        confirmedEmpty = result == PhoneCaptureStopResult.empty;
+      } else {
+        final hadCaptureEvidence = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
+        finished = await capture.stopStreamDeviceRecordingAndFinalize();
+        if (!finished && !hadCaptureEvidence && !capture.captureDiagnostics.hasPhysicalAudio) {
+          confirmedEmpty = !await capture.awaitFinalCapturableContent();
+        }
+      }
+
+      if ((finished || confirmedEmpty) && mounted) {
+        setState(() => _externalCaptureFinalizationSource = null);
+      }
+      if (!finished && mounted) {
+        final message = confirmedEmpty ? context.l10n.todayNoWordsCaptured : context.l10n.todayRecordingUnavailable;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+    } finally {
+      if (mounted) setState(() => _homeCaptureStarting = false);
     }
   }
 
@@ -928,6 +987,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final showGuardianSurfaces = _guardianAvailable;
     final homeCaptureOwned =
         _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
+    final externalCaptureFinalizationPending = _externalCaptureFinalizationSource != null;
     final homeCaptureUsesNecklace = _homeCaptureSource == _HomeCaptureSource.necklaceOwned ||
         _homeCaptureSource == _HomeCaptureSource.necklaceContinuous;
     final dockClearance = todayDockScrollClearance(
@@ -1062,6 +1122,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             child: TodayRecordMomentControl(
               homeCaptureOwned: homeCaptureOwned,
               homeCaptureUsesNecklace: homeCaptureUsesNecklace,
+              externalCaptureFinalizationPending: externalCaptureFinalizationPending,
+              externalCaptureUsesNecklace: _externalCaptureFinalizationSource == _ExternalCaptureSource.necklace,
               starting: _homeCaptureStarting,
               hasNecklace: hasNecklace,
               necklaceConnected: deviceConnected,
@@ -1077,6 +1139,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               onOpenWhispers: () =>
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
               onViewTranscript: () => _openLiveTranscript(capture),
+              onFinishExternalCapture: () => _finishExternalCapture(capture),
               onUnavailable: () => ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
@@ -1338,6 +1401,8 @@ class TodayRecordMomentControl extends StatelessWidget {
     super.key,
     required this.homeCaptureOwned,
     required this.homeCaptureUsesNecklace,
+    this.externalCaptureFinalizationPending = false,
+    this.externalCaptureUsesNecklace = false,
     required this.starting,
     this.hasNecklace = false,
     required this.necklaceConnected,
@@ -1351,12 +1416,15 @@ class TodayRecordMomentControl extends StatelessWidget {
     this.onOpenControls,
     this.onOpenWhispers,
     required this.onViewTranscript,
+    required this.onFinishExternalCapture,
     this.onUnavailable,
     required this.onTap,
   });
 
   final bool homeCaptureOwned;
   final bool homeCaptureUsesNecklace;
+  final bool externalCaptureFinalizationPending;
+  final bool externalCaptureUsesNecklace;
   final bool starting;
   final bool hasNecklace;
   final bool necklaceConnected;
@@ -1370,6 +1438,7 @@ class TodayRecordMomentControl extends StatelessWidget {
   final VoidCallback? onOpenControls;
   final VoidCallback? onOpenWhispers;
   final VoidCallback onViewTranscript;
+  final VoidCallback onFinishExternalCapture;
   final VoidCallback? onUnavailable;
   final VoidCallback onTap;
 
@@ -1380,6 +1449,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     final necklaceRecording = recordingState == RecordingState.deviceRecord;
     final active = homeCaptureOwned && (phoneRecording || necklaceRecording);
     final usesNecklace = homeCaptureUsesNecklace ||
+        externalCaptureUsesNecklace ||
         necklaceRecording ||
         (initialising && diagnostics.source == CaptureDiagnosticSource.necklace) ||
         (!phoneRecording && !initialising && necklaceConnected);
@@ -1389,6 +1459,7 @@ class TodayRecordMomentControl extends StatelessWidget {
       phoneRecording: phoneRecording,
       necklaceRecording: necklaceRecording,
       usesNecklace: usesNecklace,
+      externalCaptureFinalizationPending: externalCaptureFinalizationPending,
     );
 
     return Material(
@@ -1455,20 +1526,18 @@ class TodayRecordMomentControl extends StatelessWidget {
                       emphasized: presentation.emphasized,
                       enabled: presentation.primaryEnabled,
                       onDisabledTap: presentation.mode == TodayCaptureDockMode.unavailable ? onUnavailable : null,
-                      onTap: presentation.opensTranscript ? onViewTranscript : onTap,
+                      onTap: presentation.finishesExternalCapture ? onFinishExternalCapture : onTap,
                     ),
                   ),
-                  if (!presentation.opensTranscript) ...[
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: _TodayDockAction(
-                        actionKey: const Key('today-view-live-transcript'),
-                        icon: Icons.subject_rounded,
-                        label: context.l10n.transcript,
-                        onTap: onViewTranscript,
-                      ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: _TodayDockAction(
+                      actionKey: const Key('today-view-live-transcript'),
+                      icon: Icons.subject_rounded,
+                      label: context.l10n.transcript,
+                      onTap: onViewTranscript,
                     ),
-                  ],
+                  ),
                   if (showWhispers) ...[
                     const SizedBox(width: 6),
                     Expanded(
@@ -1496,39 +1565,42 @@ class TodayRecordMomentControl extends StatelessWidget {
     required bool phoneRecording,
     required bool necklaceRecording,
     required bool usesNecklace,
+    required bool externalCaptureFinalizationPending,
   }) {
     final status = initialising
         ? context.l10n.todayDockStarting
-        : recordingState == RecordingState.error
-            ? homeCaptureOwned
-                ? context.l10n.todayDockRecordingNeedsAttention
-                : context.l10n.todayDockPhoneReady
-            : homeCaptureOwned && usesNecklace && necklaceConnecting
-                ? context.l10n.todayDockNecklaceConnecting
-                : phoneRecording
-                    ? context.l10n.todayDockRecordingPhone
-                    : necklaceRecording || (homeCaptureOwned && usesNecklace)
-                        ? context.l10n.todayDockRecordingNecklace
-                        : context.l10n.todayDockPhoneReady;
-    final opensTranscript =
-        !homeCaptureOwned && (phoneRecording || (necklaceRecording && !necklaceContinuouslyRecording));
+        : externalCaptureFinalizationPending
+            ? context.l10n.todayDockRecordingNeedsAttention
+            : recordingState == RecordingState.error
+                ? homeCaptureOwned
+                    ? context.l10n.todayDockRecordingNeedsAttention
+                    : context.l10n.todayDockPhoneReady
+                : homeCaptureOwned && usesNecklace && necklaceConnecting
+                    ? context.l10n.todayDockNecklaceConnecting
+                    : phoneRecording
+                        ? context.l10n.todayDockRecordingPhone
+                        : necklaceRecording || (homeCaptureOwned && usesNecklace)
+                            ? context.l10n.todayDockRecordingNecklace
+                            : context.l10n.todayDockPhoneReady;
+    final externalCaptureActive = !homeCaptureOwned &&
+        (externalCaptureFinalizationPending || phoneRecording || (necklaceRecording && !necklaceContinuouslyRecording));
     if (initialising) {
       return TodayCaptureDockPresentation(
         mode: TodayCaptureDockMode.starting,
         status: status,
         primaryLabel: context.l10n.todayDockRecord,
         primaryIcon: Icons.mic_none_rounded,
-        opensTranscript: false,
+        finishesExternalCapture: false,
         primaryEnabled: false,
       );
     }
-    if (opensTranscript) {
+    if (externalCaptureActive) {
       return TodayCaptureDockPresentation(
-        mode: TodayCaptureDockMode.recording,
+        mode: externalCaptureFinalizationPending ? TodayCaptureDockMode.finishing : TodayCaptureDockMode.recording,
         status: status,
-        primaryLabel: context.l10n.transcript,
-        primaryIcon: Icons.subject_rounded,
-        opensTranscript: true,
+        primaryLabel: context.l10n.todayDockFinish,
+        primaryIcon: Icons.stop_rounded,
+        finishesExternalCapture: true,
         primaryEnabled: true,
       );
     }
@@ -1538,7 +1610,7 @@ class TodayRecordMomentControl extends StatelessWidget {
         status: status,
         primaryLabel: context.l10n.todayDockFinish,
         primaryIcon: Icons.stop_rounded,
-        opensTranscript: false,
+        finishesExternalCapture: false,
         primaryEnabled: true,
       );
     }
@@ -1547,7 +1619,7 @@ class TodayRecordMomentControl extends StatelessWidget {
       status: status,
       primaryLabel: context.l10n.todayDockRecord,
       primaryIcon: Icons.mic_none_rounded,
-      opensTranscript: false,
+      finishesExternalCapture: false,
       primaryEnabled: true,
     );
   }

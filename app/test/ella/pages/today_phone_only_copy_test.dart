@@ -47,6 +47,7 @@ void main() {
             recordingState: RecordingState.stop,
             necklaceContinuouslyRecording: false,
             onViewTranscript: () {},
+            onFinishExternalCapture: () {},
             onTap: () {},
           ),
         ),

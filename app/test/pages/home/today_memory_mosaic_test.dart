@@ -214,7 +214,8 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('confirmed phone audio remains visibly identified outside a Home-owned moment', (tester) async {
+  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation',
+      (tester) async {
     final harness = await _pumpHome(
       tester,
       conversations: const [],
@@ -224,6 +225,133 @@ void main() {
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+
+    final transcriptContext = tester.element(find.byType(ConversationCapturingPage));
+    final navigator = Navigator.of(transcriptContext);
+    navigator.removeRoute(ModalRoute.of(transcriptContext)!);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ConversationCapturingPage), findsNothing);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
+  testWidgets('failed external finalization keeps a retryable Finish target across transcript navigation',
+      (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      finalizationResults: const [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final transcriptContext = tester.element(find.byType(ConversationCapturingPage));
+    Navigator.of(transcriptContext).removeRoute(ModalRoute.of(transcriptContext)!);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Finish'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
+  testWidgets('first phone finalization failure from Transcript preserves the exact retry target', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      finalizationResults: const [false, true],
+    );
+    addTearDown(harness.dispose);
+    harness.capture.segments = [_liveTranscriptSegment('transcript-owned-retry')];
+    harness.capture.notifyListeners();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+
+    await tester.tap(find.text('Process Now'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Process Now'), findsOneWidget, reason: 'the transcript route must stay open after failure');
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
+    expect(harness.capture.finalizationCalls, 2);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
+  testWidgets('account authority change discards a failed external finalization target', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      finalizationResults: const [false],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.text('Recording needs attention'), findsOneWidget);
+
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    expect(find.text('Record'), findsOneWidget);
+    expect(find.text('Finish'), findsNothing);
+    expect(find.text('Recording needs attention'), findsNothing);
   });
 
   testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
@@ -1112,6 +1240,14 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<bool> stopStreamRecordingAndFinalize() async {
     await stopStreamRecording();
     return finalizeCurrentConversation();
+  }
+
+  @override
+  Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() async {
+    await stopStreamRecording();
+    final finalized = await finalizeCurrentConversation();
+    if (finalized) return PhoneCaptureStopResult.finalized;
+    return hasContent || hasFinalContent ? PhoneCaptureStopResult.failed : PhoneCaptureStopResult.empty;
   }
 
   @override
