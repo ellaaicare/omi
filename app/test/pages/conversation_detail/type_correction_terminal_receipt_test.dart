@@ -77,9 +77,7 @@ void main() {
     );
   });
 
-  testWidgets('test_type_correction_202_acknowledges_queue_immediately_and_polls_without_logging_body', (
-    tester,
-  ) async {
+  testWidgets('test_type_correction_202_acknowledges_queue_immediately_and_polls_without_logging_body', (tester) async {
     const conversationId = 'conversation-1';
     const correctionText = 'private correction sentinel';
     const responseOnlySentinel = 'response-body-must-not-be-logged';
@@ -90,7 +88,7 @@ void main() {
     var acceptedCalls = 0;
     final submittedCorrectionIds = <String>[];
 
-    Future<ConversationCorrectionSubmission?> submitter({
+    Future<ConversationCorrectionSubmitResult> submitter({
       required String conversationId,
       required String correctionId,
       required String correctionText,
@@ -102,7 +100,7 @@ void main() {
       required Duration requestTimeout,
     }) {
       submittedCorrectionIds.add(correctionId);
-      return submitConversationCorrection(
+      return submitConversationCorrectionResult(
         conversationId: conversationId,
         correctionId: correctionId,
         correctionText: correctionText,
@@ -278,7 +276,7 @@ void main() {
               required requestTimeout,
             }) async {
               logs.add('submit status=202');
-              return null;
+              return const ConversationCorrectionSubmitResult.rejected();
             },
             receiptPoller: ({
               required conversationId,
@@ -301,6 +299,74 @@ void main() {
     expect(find.text('Ella no pudo actualizar este recuerdo'), findsOneWidget);
     expect(find.byType(CorrectSummarySheet), findsOneWidget);
     expect(logs.every((entry) => !entry.contains(correctionText)), isTrue);
+  });
+
+  testWidgets('uncertain correction delivery reconciles by durable id without showing a false failure', (tester) async {
+    const conversationId = 'conversation-uncertain';
+    final authority = _ExactAuthority('owner-1');
+    var receiptCalls = 0;
+    var acceptedCalls = 0;
+    var appliedCalls = 0;
+
+    final conversation = ServerConversation(
+      id: conversationId,
+      createdAt: DateTime.utc(2026, 8, 26),
+      structured: Structured('Before', '[Ella] Before.'),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: CorrectSummarySheet(
+            conversation: conversation,
+            appSummary: '[Ella] Before.',
+            authorityProvider: () => authority,
+            submitter: ({
+              required conversationId,
+              required correctionId,
+              required correctionText,
+              summaryTitle,
+              summaryOverview,
+              appSummary,
+              expectedAuthenticatedUid,
+              exactAuthority,
+              required requestTimeout,
+            }) async {
+              return const ConversationCorrectionSubmitResult.uncertain();
+            },
+            receiptPoller: ({
+              required conversationId,
+              required correctionId,
+              required expectedAuthenticatedUid,
+              required exactAuthority,
+              required pollBudget,
+            }) async {
+              receiptCalls += 1;
+              return ConversationCorrectionReceipt(
+                correctionId: correctionId,
+                conversationId: conversationId,
+                status: 'applied',
+                before: const ConversationCorrectionSummary(title: 'Before'),
+                after: const ConversationCorrectionSummary(title: 'After'),
+              );
+            },
+            onAccepted: () async => acceptedCalls += 1,
+            onApplied: () async => appliedCalls += 1,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byKey(const ValueKey('type-correction-input')), 'Correct this summary.');
+    await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
+    await tester.pumpAndSettle();
+
+    expect(receiptCalls, 1);
+    expect(acceptedCalls, 1);
+    expect(appliedCalls, 1);
+    expect(find.byType(CorrectSummarySheet), findsNothing);
+    expect(find.text('Ella couldn\'t update this memory'), findsNothing);
   });
 
   test('test_correction_receipt_pending_past_provider_timeout_later_applies_without_resubmission', () async {
@@ -438,11 +504,7 @@ void main() {
       correctionText: 'Original correction.',
       summaryTitle: 'Before',
     );
-    await store.clearIfTerminal(
-      uid: 'owner-1',
-      conversationId: 'conversation-changed',
-      correctionId: changed,
-    );
+    await store.clearIfTerminal(uid: 'owner-1', conversationId: 'conversation-changed', correctionId: changed);
     final originalAfterChangedCleanup = await const PendingConversationCorrectionIdentityStore().acquire(
       uid: 'owner-1',
       conversationId: 'conversation-changed',
@@ -538,6 +600,31 @@ void main() {
     expect(submission, isNull);
     expect(observedTimeout, const Duration(milliseconds: 20));
     expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 200)));
+  });
+
+  test('typed correction result treats a lost accepted response as uncertain instead of rejected', () async {
+    final authority = _ExactAuthority('owner-1');
+    final result = await submitConversationCorrectionResult(
+      conversationId: 'conversation-accepted-response-lost',
+      correctionId: 'correction-accepted-response-lost',
+      correctionText: 'Correct this summary.',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      debugLog: (_) {},
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        required timeout,
+      }) async {
+        return http.Response('', 202);
+      },
+    );
+
+    expect(result.disposition, ConversationCorrectionSubmitDisposition.uncertain);
+    expect(result.submission, isNull);
   });
 
   test('submission fails closed when response correction id differs from submitted id', () async {

@@ -22,12 +22,14 @@ class MemoryArtworkImage extends StatefulWidget {
     this.api,
     this.cachedFileLookup,
     this.fit = BoxFit.cover,
+    this.retryDelay = const Duration(seconds: 5),
   });
 
   final ServerConversation conversation;
   final MemoryArtworkApi? api;
   final MemoryArtworkCachedFileLookup? cachedFileLookup;
   final BoxFit fit;
+  final Duration retryDelay;
 
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
@@ -38,6 +40,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   File? _cachedFile;
   String _cacheKey = '';
   int _requestGeneration = 0;
+  Timer? _retryTimer;
 
   @override
   void initState() {
@@ -56,7 +59,15 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     }
   }
 
+  @override
+  void dispose() {
+    _retryTimer?.cancel();
+    super.dispose();
+  }
+
   void _refreshRequest() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
     final generation = ++_requestGeneration;
     final api = widget.api ?? MemoryArtworkApi();
     final artwork = widget.conversation.artwork;
@@ -98,13 +109,43 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     try {
       result = await api.loadForDisplay(
         widget.conversation.id,
-        enqueueIfMissing: artwork == null || artwork.status == MemoryArtworkStatus.unavailable,
+        enqueueIfMissing: artwork == null ||
+            artwork.status == MemoryArtworkStatus.generating ||
+            artwork.status == MemoryArtworkStatus.unavailable,
       );
     } catch (_) {
+      _scheduleRetry(api, artwork, generation);
       return;
     }
     if (!mounted || generation != _requestGeneration) return;
     setState(() => _remoteResult = result);
+    if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation);
+  }
+
+  bool _shouldRetry(MemoryArtworkResult result) {
+    if (result.status == MemoryArtworkResultStatus.generating) return true;
+    if (result.status != MemoryArtworkResultStatus.unavailable) return false;
+    return const {
+      'memory_artwork_unavailable',
+      'memory_artwork_not_found',
+      'memory_artwork_generation_not_queued',
+      'memory_artwork_provider_unavailable',
+      'memory_artwork_provider_failed',
+      'memory_artwork_runtime_authority_unavailable',
+      'memory_artwork_worker_failed',
+      'memory_artwork_finalize_conflict',
+      'memory_artwork_object_missing',
+      'memory_artwork_storage_failed',
+    }.contains(result.failureCode);
+  }
+
+  void _scheduleRetry(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) {
+    if (!mounted || generation != _requestGeneration || _retryTimer?.isActive == true) return;
+    _retryTimer = Timer(widget.retryDelay, () {
+      _retryTimer = null;
+      if (!mounted || generation != _requestGeneration) return;
+      unawaited(_loadRemoteResult(api, artwork, generation));
+    });
   }
 
   Uint8List? _sourcePhoto() {

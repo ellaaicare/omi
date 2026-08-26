@@ -108,7 +108,7 @@ class MemoryArtworkApi {
     if (result.isReady || result.status == MemoryArtworkResultStatus.declined || !authority.isExactCurrent()) {
       return result;
     }
-    if (enqueueIfMissing) {
+    if (enqueueIfMissing && result.status == MemoryArtworkResultStatus.unavailable) {
       result = await _enqueueWithAuthority(authority, memoryId);
       if (result.status != MemoryArtworkResultStatus.generating || !authority.isExactCurrent()) {
         return result;

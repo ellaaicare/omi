@@ -36,6 +36,36 @@ class _DelayedArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _RefreshingArtworkApi extends MemoryArtworkApi {
+  _RefreshingArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    if (loadCalls == 1) return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/art.png'),
+      cacheKey: 'ready-artwork-cache-key',
+    );
+  }
+}
+
 void main() {
   testWidgets('renders owner-scoped disk artwork before signed URL refresh completes', (tester) async {
     final api = _DelayedArtworkApi();
@@ -173,11 +203,7 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(
-          conversation: conversation,
-          api: api,
-          cachedFileLookup: (_) async => null,
-        ),
+        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => null),
       ),
     );
     await tester.pump();
@@ -187,6 +213,39 @@ void main() {
     api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
     expect(find.text('Preparing illustration…'), findsOneWidget);
+  });
+
+  testWidgets('continues refreshing a visible generating illustration until it becomes ready', (tester) async {
+    final api = _RefreshingArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-eventually-ready',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(api.loadCalls, 1);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-eventually-ready')), findsOneWidget);
   });
 
   testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {

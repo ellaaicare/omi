@@ -209,6 +209,50 @@ void main() {
     expect(result.cacheKey, hasLength(64));
   });
 
+  test('already-generating artwork is polled without duplicate enqueue', () async {
+    final authority = _Authority('owner-a');
+    final methods = <String>[];
+    var getCalls = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        methods.add(method);
+        getCalls += 1;
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': getCalls == 1 ? 'generating' : 'ready',
+            if (getCalls > 1) 'url': 'https://private-storage.example/ready',
+            'style_version': memoryArtworkDefaultStyle,
+            'enrichment_revision': 'summary-new',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay(
+      'memory-new',
+      enqueueIfMissing: true,
+      pollAttempts: 1,
+      pollInterval: Duration.zero,
+    );
+
+    expect(result.isReady, isTrue);
+    expect(methods, ['GET', 'GET']);
+  });
+
   test('terminal policy response returns immediately without retaining the polling window', () async {
     var calls = 0;
     final api = MemoryArtworkApi(

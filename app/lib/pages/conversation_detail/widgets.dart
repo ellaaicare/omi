@@ -989,7 +989,7 @@ class _TypeCorrectionLink extends StatelessWidget {
   }
 }
 
-typedef CorrectionSubmitter = Future<ConversationCorrectionSubmission?> Function({
+typedef CorrectionSubmitter = Future<ConversationCorrectionSubmitResult> Function({
   required String conversationId,
   required String correctionId,
   required String correctionText,
@@ -1052,7 +1052,7 @@ class CorrectSummarySheet extends StatefulWidget {
   const CorrectSummarySheet({
     required this.conversation,
     required this.appSummary,
-    this.submitter = submitConversationCorrection,
+    this.submitter = submitConversationCorrectionResult,
     this.receiptPoller = pollConversationCorrectionReceipt,
     this.correctionIdentityStore = const PendingConversationCorrectionIdentityStore(),
     this.authorityProvider = WalOwnerAuthority.operationEntry,
@@ -1103,7 +1103,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
         final submitBudget = remainingBeforeSubmit < conversationCorrectionSubmitBudget
             ? remainingBeforeSubmit
             : conversationCorrectionSubmitBudget;
-        final submission = await widget
+        final submitResult = await widget
             .submitter(
               conversationId: widget.conversation.id,
               correctionId: correctionId,
@@ -1116,7 +1116,19 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
               requestTimeout: submitBudget,
             )
             .timeout(submitBudget);
-        if (submission != null && submission.conversationId == widget.conversation.id && authority.isExactCurrent()) {
+        if (submitResult.wasAcceptedOrMayHaveBeenAccepted) {
+          final submission = submitResult.submission ??
+              ConversationCorrectionSubmission(
+                correctionId: correctionId,
+                conversationId: widget.conversation.id,
+                traceId: 'correction:${widget.conversation.id}:$correctionId',
+                status: 'delivery_uncertain',
+                queued: true,
+              );
+          if (!authority.isExactCurrent()) {
+            if (mounted) Navigator.of(context).pop();
+            return;
+          }
           final pollBudget = remainingBudget();
           if (pollBudget <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
           final receiptPoller = widget.receiptPoller;
