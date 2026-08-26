@@ -2164,40 +2164,6 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
         real_store.delete_memory_prefix(uid="owner-a", memory_id="memory-3")
     assert str(unbound.value) == "memory_artwork_binding_required"
 
-    delete_calls = []
-
-    class Blob:
-        def delete(self, **kwargs):
-            delete_calls.append(kwargs)
-
-    class Bucket:
-        def blob(self, name):
-            assert name == object_key
-            return Blob()
-
-    class Client:
-        def bucket(self, name):
-            assert name == "private-artwork"
-            return Bucket()
-
-    real_store.bucket_name = "private-artwork"
-    real_store.client = Client()
-    real_store.delete(
-        uid="owner-a",
-        memory_id="memory-1",
-        object_key=object_key,
-        object_generation="7",
-    )
-    assert delete_calls == [{"if_generation_match": 7}]
-    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as invalid_generation:
-        real_store.delete(
-            uid="owner-a",
-            memory_id="memory-1",
-            object_key=object_key,
-            object_generation="not-a-generation",
-        )
-    assert str(invalid_generation.value) == "memory_artwork_object_generation_invalid"
-
     conversations_source = (BACKEND_ROOT / "database" / "conversations.py").read_text(encoding="utf-8")
     account_route_source = (BACKEND_ROOT / "routers" / "users.py").read_text(encoding="utf-8")
     delete_start = conversations_source.index("def delete_conversation(uid, conversation_id)")

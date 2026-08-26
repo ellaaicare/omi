@@ -1190,44 +1190,18 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_storage_failed", retryable=True) from exc
+        # The object key is deterministic for this generation and can be shared
+        # by an outcome-ambiguous retry. Workers therefore never delete it after
+        # upload; the persisted cleanup marker delegates destructive cleanup to
+        # the explicit memory/account deletion paths.
         generated_width = generated.pixel_width
         generated_height = generated.pixel_height
         del generated
-
-        def delete_stored_if_claim_current(conversation: Optional[dict[str, Any]] = None) -> bool:
-            try:
-                current_conversation = conversation or self.repository.get_conversation(uid, memory_id) or {}
-            except Exception:
-                return False
-            current_now = datetime.now(timezone.utc)
-            current_claim_is_valid = self.repository.job_claim_is_current(
-                uid,
-                memory_id,
-                generation_key,
-                lease_token=job_lease_token,
-                now=current_now,
-            ) and _generation_claim_is_current(
-                current_conversation,
-                generation_key=generation_key,
-                lease_token=lease_token,
-                now=current_now,
-            )
-            if not current_claim_is_valid:
-                return False
-            store.delete(
-                uid=uid,
-                memory_id=memory_id,
-                object_key=stored.object_key,
-                object_generation=stored.object_generation,
-            )
-            return True
-
         try:
             final_authority = await self.authority_resolver(uid)
             final_preferences = self.repository.get_preferences(uid)
             final_conversation = self.repository.get_conversation(uid, memory_id) or {}
         except Exception as exc:
-            delete_stored_if_claim_current()
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -1265,7 +1239,6 @@ class MemoryArtworkService:
                 style_version=str(claimed.get("style_version") or ""),
             )
         ):
-            delete_stored_if_claim_current(final_conversation)
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
