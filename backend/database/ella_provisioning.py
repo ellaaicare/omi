@@ -919,8 +919,7 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT DISTINCT expected_model, model_policy_version
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
@@ -928,8 +927,7 @@ class EllaProvisioningRepository:
               AND health_state = 'healthy'
               AND active = false
               AND user_id IS NULL
-            """
-        )
+            """)
         if not rows:
             return None
         policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
@@ -1059,16 +1057,14 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT id, runtime_instance_id, status, health_state, expected_model,
                    prompt_pack_version, revision, claimed_at, quarantined_at,
                    quarantine_reason, created_at, updated_at
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
             ORDER BY created_at ASC, id ASC
-            """
-        )
+            """)
         return [dict(row) for row in rows]
 
     async def claim_cloud_pool_binding(
@@ -3117,6 +3113,9 @@ class EllaProvisioningRepository:
                          AND authority.processor_set_hash = $3
                          AND authority.scope_version = $4
                          AND authority.scope_hash = $5
+                        JOIN voice_entitlements entitlement
+                          ON entitlement.uid = account.omi_uid
+                         AND authority.updated_at >= entitlement.updated_at
                         WHERE account.omi_uid = $1
                           AND account.status = 'ACTIVE'
                           AND account.profile_class = 'real'
@@ -3125,7 +3124,6 @@ class EllaProvisioningRepository:
                           AND job.retryable = FALSE
                           AND job.error_code = 'invitation_authority_revoked'
                           AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
-                          AND NOT job.receipts @> '[{"type":"retained_entitlement_recovered","content_free":true}]'::jsonb
                           AND binding.status = 'disabled'
                           AND binding.active = FALSE
                           AND binding.health_state = 'unhealthy'
@@ -3170,7 +3168,13 @@ class EllaProvisioningRepository:
                       AND provider_allowlist = ARRAY['grok-voice']::text[]
                       AND model_allowlist = ARRAY[]::text[]
                       AND mode_allowlist = ARRAY['v4']::text[]
-                      AND fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                      AND (
+                          fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                          OR (
+                              jsonb_typeof(fallback_policy) = 'string'
+                              AND fallback_policy #>> '{}' = '{"order": [], "enabled": false}'
+                          )
+                      )
                       AND operator_note IN (
                           'auto-provision self-hosted grok voice',
                           'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31'
@@ -3182,6 +3186,16 @@ class EllaProvisioningRepository:
                     uid,
                 )
                 if row is not None and lineage is not None:
+                    recovery_receipt = [
+                        {
+                            "type": "retained_entitlement_recovered",
+                            "content_free": True,
+                            "policy_version": lineage.policy_version,
+                            "processor_set_hash": lineage.processor_set_hash,
+                            "scope_version": lineage.scope_version,
+                            "scope_hash": lineage.scope_hash,
+                        }
+                    ]
                     consumed = await connection.fetchval(
                         """
                         UPDATE ella_provisioning_jobs
@@ -3192,7 +3206,7 @@ class EllaProvisioningRepository:
                         RETURNING TRUE
                         """,
                         recovery_candidates[0]["job_id"],
-                        json.dumps([{"type": "retained_entitlement_recovered", "content_free": True}]),
+                        json.dumps(recovery_receipt),
                     )
                     if not consumed:
                         raise RuntimeError("retained_entitlement_recovery_receipt_conflict")
