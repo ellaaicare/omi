@@ -39,6 +39,7 @@ from utils.apps import update_personas_async
 from utils.notifications import send_action_item_data_message
 from utils.conversations.process_conversation import process_conversation
 from utils.conversations.location import get_google_maps_location
+from utils.ella.memory_artwork_storage import MemoryArtworkStorageError, acquire_memory_artwork_publication_lock
 from utils.llm.memories import identify_category_for_memory
 from ella.services.today_card_postgres import invalidate_deleted_conversation_source
 
@@ -1025,7 +1026,16 @@ async def delete_conversation_endpoint(
         await invalidate_deleted_conversation_source(uid, conversation_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"code": "today_card_source_invalidation_failed"}) from exc
-    await run_in_threadpool(conversations_db.delete_conversation, uid, conversation_id)
+    try:
+        async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+            await run_in_threadpool(
+                conversations_db.delete_conversation,
+                uid,
+                conversation_id,
+                artwork_lock_proof=artwork_lock_proof,
+            )
+    except MemoryArtworkStorageError as exc:
+        raise HTTPException(status_code=503, detail={"code": str(exc), "retryable": True}) from exc
     return {"success": True}
 
 

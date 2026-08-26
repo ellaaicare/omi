@@ -41,6 +41,7 @@ from models.conversation import (
     Structured,
 )
 from models.transcript_segment import TranscriptSegment
+from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 
 CONFIG_SCHEMA = "ella-hermes-product-fit-canary-v1"
 CALLBACK_SCHEMA = "ella.hermes.callback.v1"
@@ -733,7 +734,13 @@ class ProductionFixtureStore:
         )
 
     async def delete_conversation(self, uid: str, conversation_id: str) -> None:
-        await asyncio.to_thread(conversations_db.delete_conversation, uid, conversation_id)
+        async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+            await asyncio.to_thread(
+                conversations_db.delete_conversation,
+                uid,
+                conversation_id,
+                artwork_lock_proof=artwork_lock_proof,
+            )
 
     async def delete_vector(self, uid: str, conversation_id: str) -> None:
         if vector_db.index is None:
