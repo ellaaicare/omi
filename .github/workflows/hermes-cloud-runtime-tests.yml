@@ -93,6 +93,7 @@ on:
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -259,6 +260,7 @@ on:
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -909,6 +911,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_017_prerequisite_failure_rolls_back_added_column"
           )
           collected_ids="$(
             pytest --collect-only -q \
@@ -923,7 +926,8 @@ jobs:
               tests/unit/test_hermes_broker_prototype.py \
               tests/unit/test_ella_provisioning_repository.py \
               tests/postgres/test_hermes_cloud_pool_postgres.py \
-              tests/postgres/test_invitation_redemption_postgres.py |
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
               sed '/^$/d'
           )"
           for required_id in "${required_ids[@]}"; do
@@ -936,7 +940,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 20
-          test "$collected" -eq 570
+          test "$collected" -eq 571
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

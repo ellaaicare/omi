@@ -136,6 +136,43 @@ def test_migration_prerequisite_failure_is_atomic(filename, leaked_relations):
     asyncio.run(_assert_failure_rolls_back(filename, leaked_relations))
 
 
+def test_migration_017_prerequisite_failure_rolls_back_added_column():
+    async def scenario() -> None:
+        schema = f"migration_failure_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(TEST_DSN)
+        await admin.execute(f'CREATE SCHEMA "{schema}"')
+        failing = await asyncpg.connect(TEST_DSN, server_settings={"search_path": schema})
+        try:
+            await failing.execute("CREATE TABLE voice_entitlements (uid TEXT PRIMARY KEY)")
+            with pytest.raises(asyncpg.PostgresError):
+                await failing.execute(
+                    (MIGRATIONS / "017_add_voice_entitlement_consent_revision.sql").read_text(encoding="utf-8")
+                )
+        finally:
+            await failing.close()
+
+        verifying = await asyncpg.connect(TEST_DSN, server_settings={"search_path": schema})
+        try:
+            assert not await verifying.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = $1
+                      AND table_name = 'voice_entitlements'
+                      AND column_name = 'consent_authority_revision'
+                )
+                """,
+                schema,
+            )
+        finally:
+            await verifying.close()
+            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+            await admin.close()
+
+    asyncio.run(scenario())
+
+
 def test_migration_015_upgrades_multi_redemption_app_review_history_atomically():
     async def scenario() -> None:
         schema = f"migration_upgrade_{uuid.uuid4().hex}"
@@ -155,23 +192,19 @@ def test_migration_015_upgrades_multi_redemption_app_review_history_atomically()
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
 
-            user_ids = await conn.fetch(
-                """
+            user_ids = await conn.fetch("""
                 INSERT INTO users (omi_uid, email, profile_class)
                 VALUES
                     ('review-history-a', 'review-a@example.test', 'synthetic'),
                     ('review-history-b', 'review-b@example.test', 'synthetic')
                 RETURNING id, omi_uid
-                """
-            )
-            reservation_id = await conn.fetchval(
-                """
+                """)
+            reservation_id = await conn.fetchval("""
                 INSERT INTO ella_invitation_capacity_reservations (
                     pool_key, state, reserved_slots
                 ) VALUES ('app_review', 'reserved', 2)
                 RETURNING id
-                """
-            )
+                """)
             invitation_id = await conn.fetchval(
                 """
                 INSERT INTO ella_invitations (
@@ -269,16 +302,11 @@ def test_migration_015_upgrades_multi_redemption_app_review_history_atomically()
             assert all(row["user_id"] is None for row in rows)
             assert all(row["user_mapping_state"] == "legacy_unmapped" for row in rows)
             assert all(row["consent_pending"] is False for row in rows)
-            assert (
-                await conn.fetchval(
-                    """
+            assert await conn.fetchval("""
                 SELECT convalidated
                 FROM pg_constraint
                 WHERE conname = 'ella_invitation_redemptions_consent_shape_check'
-                """
-                )
-                is True
-            )
+                """) is True
         finally:
             await conn.close()
             await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')

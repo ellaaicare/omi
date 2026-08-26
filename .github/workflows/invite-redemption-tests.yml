@@ -28,6 +28,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -69,6 +70,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -180,7 +182,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 193
+          test "$collected" -eq 194
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -244,6 +246,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_017_prerequisite_failure_rolls_back_added_column"
           )
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
