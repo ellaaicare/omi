@@ -1518,6 +1518,17 @@ class ProvisioningCoordinator:
                     return
                 raise
         except RuntimePoolClaimError as exc:
+            if exc.code == "retained_runtime_authority_stale" and retained_authority_revision is not None:
+                quarantined = await self._repository_call(
+                    authority_snapshot,
+                    self.repository.quarantine_retained_runtime_authority_drift,
+                    uid=identity.uid,
+                    job_id=str(job["id"]),
+                    authority_lineage=retained_authority_lineage,
+                    stale_authority_revision=retained_authority_revision,
+                )
+                if quarantined:
+                    return
             if progress.get("provider_work_started"):
                 await self._record_interrupted_provision(job=job, progress=progress, error_code=exc.code)
                 return

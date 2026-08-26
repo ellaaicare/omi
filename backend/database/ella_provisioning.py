@@ -3567,6 +3567,204 @@ class EllaProvisioningRepository:
                     raise RuntimePoolClaimError("retained_runtime_rearm_stale")
                 return True
 
+    async def quarantine_retained_runtime_authority_drift(
+        self,
+        *,
+        uid: str,
+        job_id: str,
+        authority_lineage: RuntimeTargetLineage,
+        stale_authority_revision: int,
+    ) -> bool:
+        """Fence one retained runtime whose consent advanced during provisioning."""
+        lineage = authority_lineage.validate()
+        if stale_authority_revision <= 0:
+            raise ValueError("retained_runtime_authority_revision_invalid")
+        try:
+            parsed_job_id = uuid.UUID(str(job_id))
+        except ValueError as exc:
+            raise ValueError("retained_runtime_rearm_job_invalid") from exc
+
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                already_quarantined = await connection.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM users account
+                        JOIN ella_provisioning_jobs job
+                          ON job.user_id = account.id
+                         AND job.id = $2
+                        JOIN ella_runtime_bindings binding
+                          ON binding.user_id = account.id
+                         AND binding.provider = 'hermes'
+                         AND binding.role = 'user'
+                        WHERE account.omi_uid = $1
+                          AND job.state = 'blocked'
+                          AND job.stage = 'runtime_ready'
+                          AND job.retryable = FALSE
+                          AND job.error_code = 'invitation_authority_revoked'
+                          AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
+                          AND binding.status = 'disabled'
+                          AND binding.active = FALSE
+                          AND binding.health_state = 'unhealthy'
+                          AND binding.quarantine_reason = 'managed_cloud_consent_grant_changed'
+                    )
+                    """,
+                    uid,
+                    parsed_job_id,
+                )
+                if already_quarantined:
+                    return True
+
+                candidate = await connection.fetchrow(
+                    """
+                    SELECT job.id AS job_id,
+                           binding.id AS binding_id,
+                           authority.revision AS authority_revision
+                    FROM users account
+                    JOIN ella_provisioning_jobs job
+                      ON job.user_id = account.id
+                     AND job.id = $2
+                    JOIN ella_runtime_bindings binding
+                      ON binding.user_id = account.id
+                     AND binding.provider = 'hermes'
+                     AND binding.role = 'user'
+                     AND binding.template_version = job.target_schema_version
+                    JOIN ella_managed_cloud_consent_authority authority
+                      ON authority.user_id = account.id
+                     AND authority.decision = 'granted'
+                     AND authority.consent_receipt_ref IS NOT NULL
+                     AND authority.profile_binding_id IS NOT NULL
+                     AND authority.policy_version = $3
+                     AND authority.processor_set_hash = $4
+                     AND authority.scope_version = $5
+                     AND authority.scope_hash = $6
+                     AND authority.revision > $7
+                    JOIN voice_entitlements entitlement
+                      ON entitlement.uid = account.omi_uid
+                     AND entitlement.status = 'active'
+                     AND entitlement.consent_authority_revision = $7
+                    WHERE account.omi_uid = $1
+                      AND account.status = 'ACTIVE'
+                      AND account.profile_class = 'real'
+                      AND job.state = 'provisioning'
+                      AND job.stage = 'smoke_passed'
+                      AND job.retryable = TRUE
+                      AND job.error_code IS NULL
+                      AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                          'type', 'retained_entitlement_recovered',
+                          'content_free', TRUE,
+                          'policy_version', $3::text,
+                          'processor_set_hash', $4::text,
+                          'scope_version', $5::text,
+                          'scope_hash', $6::text,
+                          'authority_revision', $7::integer
+                      ))
+                      AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                          'type', 'retained_runtime_rearmed',
+                          'content_free', TRUE,
+                          'authority_revision', $7::integer
+                      ))
+                      AND binding.status = 'shadow'
+                      AND binding.active = FALSE
+                      AND binding.health_state = 'healthy'
+                      AND binding.runtime_target_mode = 'hermes-chat'
+                      AND binding.quarantine_reason IS NULL
+                      AND entitlement.invitation_id IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_invitation_redemptions redemption
+                          WHERE redemption.user_id = account.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_bindings active_binding
+                          WHERE active_binding.user_id = account.id
+                            AND active_binding.active = TRUE
+                      )
+                    FOR UPDATE OF job, binding, authority, entitlement
+                    """,
+                    uid,
+                    parsed_job_id,
+                    lineage.policy_version,
+                    lineage.processor_set_hash,
+                    lineage.scope_version,
+                    lineage.scope_hash,
+                    stale_authority_revision,
+                )
+                if candidate is None:
+                    return False
+
+                quarantine_receipt = [
+                    {
+                        "type": "retained_runtime_authority_drift_quarantined",
+                        "content_free": True,
+                        "stale_authority_revision": stale_authority_revision,
+                        "authority_revision": int(candidate["authority_revision"]),
+                    }
+                ]
+                job_result = await connection.execute(
+                    """
+                    UPDATE ella_provisioning_jobs
+                    SET state = 'blocked',
+                        stage = 'runtime_ready',
+                        retryable = FALSE,
+                        error_code = 'invitation_authority_revoked',
+                        error_detail = jsonb_build_object(
+                            'content_free', TRUE,
+                            'reason', 'managed_cloud_consent_grant_changed'
+                        ),
+                        receipts = receipts || $2::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND state = 'provisioning'
+                      AND stage = 'smoke_passed'
+                      AND retryable = TRUE
+                      AND error_code IS NULL
+                    """,
+                    candidate["job_id"],
+                    json.dumps(quarantine_receipt),
+                )
+                binding_result = await connection.execute(
+                    """
+                    UPDATE ella_runtime_bindings
+                    SET status = 'disabled',
+                        active = FALSE,
+                        health_state = 'unhealthy',
+                        health_receipt = jsonb_build_object(
+                            'content_free', TRUE,
+                            'reason', 'managed_cloud_consent_grant_changed'
+                        ),
+                        disabled_at = COALESCE(disabled_at, CURRENT_TIMESTAMP),
+                        quarantine_reason = 'managed_cloud_consent_grant_changed',
+                        revision = revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND status = 'shadow'
+                      AND active = FALSE
+                      AND health_state = 'healthy'
+                      AND quarantine_reason IS NULL
+                    """,
+                    candidate["binding_id"],
+                )
+                if job_result != "UPDATE 1" or binding_result != "UPDATE 1":
+                    raise RuntimePoolClaimError("retained_runtime_authority_quarantine_stale")
+                return True
+
     async def activate_runtime_binding(
         self,
         *,

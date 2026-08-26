@@ -2953,6 +2953,49 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
             assert (
                 await observer.fetchval("SELECT active FROM ella_runtime_bindings WHERE id = $1", binding_id) is False
             )
+        assert (
+            await repository.quarantine_retained_runtime_authority_drift(
+                uid=uid,
+                job_id=str(job_id),
+                authority_lineage=lineage,
+                stale_authority_revision=authority_revision,
+            )
+            is True
+        )
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=lineage,
+            )
+            is True
+        )
+        assert await repository.rearm_retained_runtime_after_consent(uid=uid, authority_lineage=lineage) is True
+        async with pool.acquire() as observer:
+            recovered = await observer.fetchrow(
+                """
+                SELECT entitlement.consent_authority_revision,
+                       job.state, job.stage, job.retryable, job.error_code,
+                       binding.status, binding.health_state, binding.active,
+                       binding.quarantine_reason
+                FROM users account
+                JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+                JOIN ella_provisioning_jobs job ON job.user_id = account.id
+                JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+                WHERE account.omi_uid = $1
+                """,
+                uid,
+            )
+        assert tuple(recovered.values()) == (
+            int(advanced["revision"]),
+            "pending",
+            "identity_ready",
+            True,
+            None,
+            "shadow",
+            "pending",
+            False,
+            None,
+        )
 
     asyncio.run(_run_with_database(scenario))
 

@@ -29,6 +29,7 @@ from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
     REQUIRED_SELF_HOSTED_INVITE_COLUMNS,
+    RuntimePoolClaimError,
     deterministic_runtime_binding_id,
 )
 from ella.services.ai_consent import (
@@ -246,6 +247,9 @@ class FakeRepository:
         self.runtime_rearm_calls = []
         self.runtime_rearm_lineages = []
         self.runtime_rearm_result = False
+        self.retained_drift_quarantine_calls = []
+        self.retained_drift_quarantine_result = False
+        self.activation_error = None
         self.last_stage_arguments = None
         self.last_activation_arguments = None
 
@@ -319,6 +323,10 @@ class FakeRepository:
         self.runtime_rearm_lineages.append(authority_lineage)
         return self.runtime_rearm_result
 
+    async def quarantine_retained_runtime_authority_drift(self, **kwargs):
+        self.retained_drift_quarantine_calls.append(kwargs)
+        return self.retained_drift_quarantine_result
+
     async def stage_runtime_binding(
         self,
         *,
@@ -369,6 +377,8 @@ class FakeRepository:
                 retained_authority_revision=retained_authority_revision,
             )
         self.activation_calls += 1
+        if self.activation_error is not None:
+            raise self.activation_error
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
         return self.binding
@@ -3462,6 +3472,57 @@ def test_retained_rearm_carries_exact_authority_through_stage_and_activation(mon
         **expected,
     }
     assert repository.binding is not None and repository.binding["active"] is True
+
+
+def test_retained_rearm_quarantines_consent_drift_instead_of_retrying_stale_authority(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
+    lineage = current_self_hosted_runtime_lineage()
+    authority_revision = 7
+    job = _job(
+        state="provisioning",
+        stage="profile_ready",
+        receipts=[
+            {
+                "type": "retained_entitlement_recovered",
+                "content_free": True,
+                **lineage.as_dict(),
+                "authority_revision": authority_revision,
+            },
+            {
+                "type": "retained_runtime_rearmed",
+                "content_free": True,
+                "authority_revision": authority_revision,
+            },
+        ],
+    )
+    repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+    repository.job = dict(job)
+    repository.activation_error = RuntimePoolClaimError("retained_runtime_authority_stale")
+    repository.retained_drift_quarantine_result = True
+
+    asyncio.run(
+        ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt())).process_claimed_job(
+            job=job,
+            identity=identity,
+        )
+    )
+
+    assert repository.retained_drift_quarantine_calls == [
+        {
+            "uid": identity.uid,
+            "job_id": str(job["id"]),
+            "authority_lineage": lineage,
+            "stale_authority_revision": authority_revision,
+        }
+    ]
+    assert not any(
+        call.get("state") == "retryable" and call.get("error_code") == "retained_runtime_authority_stale"
+        for call in repository.job_calls
+    )
+    assert repository.binding is None
+    assert repository.user_active is False
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
