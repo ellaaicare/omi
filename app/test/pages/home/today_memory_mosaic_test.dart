@@ -250,6 +250,44 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
+  testWidgets('failed external finalization keeps a retryable Finish target across transcript navigation',
+      (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      finalizationResults: const [false, true],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-view-live-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final transcriptContext = tester.element(find.byType(ConversationCapturingPage));
+    Navigator.of(transcriptContext).removeRoute(ModalRoute.of(transcriptContext)!);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Finish'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.finalizationCalls, 2);
+    expect(harness.capture.finishes, 1);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
   testWidgets('continuous necklace exposes live transcript and explicit process control', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
@@ -1136,6 +1174,14 @@ class _FakeCaptureProvider extends CaptureProvider {
   Future<bool> stopStreamRecordingAndFinalize() async {
     await stopStreamRecording();
     return finalizeCurrentConversation();
+  }
+
+  @override
+  Future<PhoneCaptureStopResult> stopPhoneCaptureForVoiceTakeover() async {
+    await stopStreamRecording();
+    final finalized = await finalizeCurrentConversation();
+    if (finalized) return PhoneCaptureStopResult.finalized;
+    return hasContent || hasFinalContent ? PhoneCaptureStopResult.failed : PhoneCaptureStopResult.empty;
   }
 
   @override
