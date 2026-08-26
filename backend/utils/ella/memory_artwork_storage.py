@@ -209,6 +209,8 @@ def prepare_account_artwork_deletion(uid: str, *, repository=None) -> int:
     if repository is None:
         repository = default_memory_artwork_repository
 
+    if repository.has_processing_jobs(uid):
+        raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
     repository.begin_account_deletion(uid)
     if repository.has_processing_jobs(uid):
         raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")

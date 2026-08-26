@@ -1090,6 +1090,34 @@ def test_expired_claim_after_object_write_never_deletes_shared_idempotent_object
     assert store.deletes == []
 
 
+def test_deletion_marker_after_cleanup_reservation_blocks_object_upload():
+    class DeletingRepository(FakeRepository):
+        def mark_storage_cleanup_required(self, uid, memory_id, generation_key, **kwargs):
+            result = super().mark_storage_cleanup_required(uid, memory_id, generation_key, **kwargs)
+            if result:
+                self.deletion_pending.add(uid)
+            return result
+
+    repository = DeletingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_deletion_pending"
+    assert store.puts == []
+
+
 def test_sensitive_source_is_excluded_without_provider_egress():
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
@@ -2019,6 +2047,46 @@ def test_processing_job_activity_requires_a_future_lease():
         artwork_database._processing_job_is_active({"status": "processing", "lease_expires_at": now}, now=now) is False
     )
     assert artwork_database._processing_job_is_active({"status": "processing"}, now=now) is False
+    assert artwork_database._job_is_processing({"status": "processing", "lease_expires_at": now}) is True
+    assert artwork_database._job_is_processing({"status": "pending", "lease_expires_at": now}) is False
+
+
+def test_deletion_drain_counts_expired_processing_jobs(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class Snapshot:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self.payload)
+
+    class Query:
+        def where(self, field, operator, value):
+            assert (field, operator, value) == ("uid", "==", "owner-a")
+            return self
+
+        def stream(self):
+            return [
+                Snapshot(
+                    {
+                        "status": "processing",
+                        "memory_id": "memory-1",
+                        "lease_expires_at": now - timedelta(minutes=5),
+                    }
+                )
+            ]
+
+    class Database:
+        def collection(self, name):
+            assert name == artwork_database.JOB_COLLECTION
+            return Query()
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+
+    assert artwork_database.has_processing_jobs("owner-a", now=now) is True
+    assert artwork_database.has_processing_jobs_for_memory("owner-a", "memory-1", now=now) is True
+    assert artwork_database.has_processing_jobs_for_memory("owner-a", "memory-2", now=now) is False
 
 
 def test_conversation_deletion_marker_fences_inflight_artwork_finalize():
@@ -2230,7 +2298,51 @@ def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(
         memory_artwork_storage.prepare_account_artwork_deletion("owner-a", repository=Repository)
 
     assert str(failure.value) == "memory_artwork_worker_drain_pending"
-    assert calls == [("begin", "owner-a"), ("processing", "owner-a")]
+    assert calls == [("processing", "owner-a")]
+
+
+def test_account_deletion_rechecks_worker_drain_after_tombstone(monkeypatch):
+    from utils.ella import memory_artwork_storage
+
+    calls = []
+
+    class Repository:
+        processing_checks = 0
+
+        @staticmethod
+        def begin_account_deletion(uid):
+            calls.append(("begin", uid))
+            return True
+
+        @classmethod
+        def has_processing_jobs(cls, uid):
+            cls.processing_checks += 1
+            calls.append(("processing", uid, cls.processing_checks))
+            return cls.processing_checks == 2
+
+        @staticmethod
+        def storage_cleanup_required(uid):
+            raise AssertionError("storage cleanup must wait for the raced worker")
+
+        @staticmethod
+        def delete_jobs_for_uid(uid):
+            raise AssertionError("raced worker job must remain until terminal")
+
+    monkeypatch.setattr(
+        memory_artwork_storage,
+        "delete_all_user_artwork",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cleanup must not race a new worker")),
+    )
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
+        memory_artwork_storage.prepare_account_artwork_deletion("owner-a", repository=Repository)
+
+    assert str(failure.value) == "memory_artwork_worker_drain_pending"
+    assert calls == [
+        ("processing", "owner-a", 1),
+        ("begin", "owner-a"),
+        ("processing", "owner-a", 2),
+    ]
 
 
 def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven(monkeypatch):

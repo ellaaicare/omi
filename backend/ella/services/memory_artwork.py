@@ -1162,6 +1162,10 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_deletion_pending")
+        upload_preferences = self.repository.get_preferences(uid)
+        reject_deletion_pending(upload_preferences)
+        upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
+        reject_claim_drift(upload_conversation)
         store = self.store_factory()
         try:
             stored = store.put(
