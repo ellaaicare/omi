@@ -1424,8 +1424,10 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
     assert len(repository.jobs) == 10
 
     class Snapshot:
+        id = "memory-visible"
+
         def to_dict(self):
-            return {"id": "memory-visible", "discarded": False}
+            return {"id": "caller-supplied-id", "discarded": False}
 
     class Query:
         def __init__(self):
