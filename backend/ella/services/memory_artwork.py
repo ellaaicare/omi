@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import secrets
 import stat
@@ -95,7 +96,12 @@ TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024
 MAX_BACKFILL_MEMORIES = 10
 BACKFILL_SCAN_LIMIT = 50
-PROVIDER_TIMEOUT_SECONDS = 45.0
+PROVIDER_TIMEOUT_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TIMEOUT_SECONDS"
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
+MIN_PROVIDER_TIMEOUT_SECONDS = 60.0
+MAX_PROVIDER_TIMEOUT_SECONDS = 900.0
+PROVIDER_LEASE_MARGIN_SECONDS = 60
+PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PROVIDER_TOKEN_FILE_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TOKEN_FILE"
 PROVIDER_URL_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_URL"
 PROVIDER_ALLOWED_HOST_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_ALLOWED_HOST"
@@ -112,6 +118,21 @@ MAX_PROVIDER_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_BASE64_ARTWORK_CHARS = ((MAX_ARTWORK_BYTES + 2) // 3) * 4
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_timeout_seconds() -> float:
+    raw_value = os.getenv(PROVIDER_TIMEOUT_SECONDS_ENV, str(DEFAULT_PROVIDER_TIMEOUT_SECONDS)).strip()
+    try:
+        timeout_seconds = float(raw_value)
+    except ValueError:
+        timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    if not math.isfinite(timeout_seconds):
+        timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    return min(MAX_PROVIDER_TIMEOUT_SECONDS, max(MIN_PROVIDER_TIMEOUT_SECONDS, timeout_seconds))
+
+
+def _artwork_lease_seconds() -> int:
+    return max(120, math.ceil(_provider_timeout_seconds()) + PROVIDER_LEASE_MARGIN_SECONDS)
 
 
 class MemoryArtworkError(RuntimeError):
@@ -308,6 +329,7 @@ class FirstPartyHTTPArtworkProvider:
             raise MemoryArtworkError("memory_artwork_provider_credential_unavailable", retryable=True)
         self.token = _read_protected_token(token_file)
         self.client = client
+        self.timeout_seconds = _provider_timeout_seconds()
 
     async def generate(
         self,
@@ -324,7 +346,7 @@ class FirstPartyHTTPArtworkProvider:
             raise MemoryArtworkError("memory_artwork_style_version_invalid", retryable=False)
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
-            timeout=PROVIDER_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(self.timeout_seconds, connect=PROVIDER_CONNECT_TIMEOUT_SECONDS),
             follow_redirects=False,
             trust_env=False,
         )
@@ -386,6 +408,7 @@ class XaiMemoryArtworkProvider:
         if not self.model:
             raise MemoryArtworkError("memory_artwork_provider_model_invalid", retryable=False)
         self.client = client
+        self.timeout_seconds = _provider_timeout_seconds()
 
     @staticmethod
     def _normalize_image(image_bytes: bytes) -> bytes:
@@ -422,7 +445,7 @@ class XaiMemoryArtworkProvider:
     ) -> GeneratedArtwork:
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
-            timeout=PROVIDER_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(self.timeout_seconds, connect=PROVIDER_CONNECT_TIMEOUT_SECONDS),
             follow_redirects=False,
             trust_env=False,
         )
@@ -855,7 +878,7 @@ class MemoryArtworkService:
             generation_key=generation_key,
             lease_token=lease_token,
             now=datetime.now(timezone.utc),
-            lease_seconds=120,
+            lease_seconds=_artwork_lease_seconds(),
         )
         if claimed is None:
             return {"outcome": "not_claimed", "status": str(artwork.get("status") or "unavailable")}
@@ -1453,7 +1476,7 @@ class MemoryArtworkWorker:
             generation_key,
             lease_token=job_lease_token,
             now=datetime.now(timezone.utc),
-            lease_seconds=120,
+            lease_seconds=_artwork_lease_seconds(),
         )
         if claimed_job is None:
             return {"outcome": "not_claimed", "status": "unavailable"}

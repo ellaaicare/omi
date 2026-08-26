@@ -41,8 +41,10 @@ def get_preferences(uid: str) -> dict[str, Any]:
     payload = snapshot.to_dict() or {}
     preferences = payload.get(PREFERENCES_FIELD)
     result = dict(preferences) if isinstance(preferences, dict) else {}
-    result[STORAGE_CLEANUP_REQUIRED_FIELD] = bool(payload.get(STORAGE_CLEANUP_REQUIRED_FIELD))
-    result[DELETION_PENDING_FIELD] = bool(payload.get(DELETION_PENDING_FIELD))
+    if payload.get(STORAGE_CLEANUP_REQUIRED_FIELD):
+        result[STORAGE_CLEANUP_REQUIRED_FIELD] = True
+    if payload.get(DELETION_PENDING_FIELD):
+        result[DELETION_PENDING_FIELD] = True
     return result
 
 

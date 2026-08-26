@@ -613,6 +613,91 @@ def test_environment_owner_gate_requires_nonempty_allowlist(monkeypatch):
     assert config.allows_uid("owner-a") is False
 
 
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout", "expected_lease"),
+    [
+        ("15", 60.0, 120),
+        ("300", 300.0, 360),
+        ("1200", 900.0, 960),
+        ("not-a-number", 600.0, 660),
+    ],
+)
+def test_provider_timeout_is_bounded_and_lease_includes_completion_margin(
+    monkeypatch,
+    configured_timeout,
+    expected_timeout,
+    expected_lease,
+):
+    monkeypatch.setenv(artwork.PROVIDER_TIMEOUT_SECONDS_ENV, configured_timeout)
+
+    assert artwork._provider_timeout_seconds() == expected_timeout
+    assert artwork._artwork_lease_seconds() == expected_lease
+
+
+def test_delayed_provider_uses_job_and_generation_leases_longer_than_request_deadline(monkeypatch):
+    monkeypatch.setenv(artwork.PROVIDER_TIMEOUT_SECONDS_ENV, "300")
+
+    class LeaseRecordingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.job_lease_seconds = []
+            self.generation_lease_seconds = []
+
+        def claim_job(self, uid, memory_id, generation_key, *, lease_token, now, lease_seconds):
+            self.job_lease_seconds.append(lease_seconds)
+            return super().claim_job(
+                uid,
+                memory_id,
+                generation_key,
+                lease_token=lease_token,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+
+        def claim_generation(self, uid, memory_id, *, generation_key, lease_token, now, lease_seconds):
+            self.generation_lease_seconds.append(lease_seconds)
+            return super().claim_generation(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                lease_token=lease_token,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+
+    class DelayedProvider(FakeProvider):
+        async def generate(self, **kwargs):
+            await asyncio.sleep(0)
+            return await super().generate(**kwargs)
+
+    repository = LeaseRecordingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = DelayedProvider()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    reservation = asyncio.run(service.enqueue("owner-a", "memory-1"))
+    generation_key = str(repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"])
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(worker.run_job("owner-a", "memory-1", generation_key))
+
+    assert reservation["status"] == "generating"
+    assert result == {"outcome": "ready", "status": "ready"}
+    assert repository.job_lease_seconds == [360]
+    assert repository.generation_lease_seconds == [360]
+    assert provider.calls == 1
+
+
 def test_idempotent_generation_and_owner_scoped_signed_url():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
@@ -1289,6 +1374,35 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
         ("order_by", "created_at", artwork_database.firestore.Query.DESCENDING),
         ("limit", 10),
     ]
+
+
+def test_absent_artwork_preferences_are_not_made_truthy_by_false_housekeeping_flags(monkeypatch):
+    class Snapshot:
+        exists = True
+
+        def to_dict(self):
+            return {
+                artwork_database.STORAGE_CLEANUP_REQUIRED_FIELD: False,
+                artwork_database.DELETION_PENDING_FIELD: False,
+            }
+
+    class User:
+        def get(self):
+            return Snapshot()
+
+    class Users:
+        def document(self, uid):
+            assert uid == "owner-a"
+            return User()
+
+    class Database:
+        def collection(self, name):
+            assert name == "users"
+            return Users()
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+
+    assert artwork_database.get_preferences("owner-a") == {}
 
 
 def test_durable_worker_recovers_retryable_job_after_restart():
