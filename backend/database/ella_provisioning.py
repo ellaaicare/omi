@@ -3634,6 +3634,8 @@ class EllaProvisioningRepository:
                     """
                     SELECT job.id AS job_id,
                            binding.id AS binding_id,
+                           job.stage AS job_stage,
+                           binding.health_state AS binding_health_state,
                            authority.revision AS authority_revision
                     FROM users account
                     JOIN ella_provisioning_jobs job
@@ -3662,7 +3664,10 @@ class EllaProvisioningRepository:
                       AND account.status = 'ACTIVE'
                       AND account.profile_class = 'real'
                       AND job.state = 'provisioning'
-                      AND job.stage = 'smoke_passed'
+                      AND (
+                          (job.stage = 'profile_ready' AND binding.health_state = 'pending')
+                          OR (job.stage = 'smoke_passed' AND binding.health_state = 'healthy')
+                      )
                       AND job.retryable = TRUE
                       AND job.error_code IS NULL
                       AND job.receipts @> jsonb_build_array(jsonb_build_object(
@@ -3681,7 +3686,6 @@ class EllaProvisioningRepository:
                       ))
                       AND binding.status = 'shadow'
                       AND binding.active = FALSE
-                      AND binding.health_state = 'healthy'
                       AND binding.runtime_target_mode = 'hermes-chat'
                       AND binding.quarantine_reason IS NULL
                       AND entitlement.invitation_id IS NULL
@@ -3732,12 +3736,13 @@ class EllaProvisioningRepository:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                       AND state = 'provisioning'
-                      AND stage = 'smoke_passed'
+                      AND stage = $3
                       AND retryable = TRUE
                       AND error_code IS NULL
                     """,
                     candidate["job_id"],
                     json.dumps(quarantine_receipt),
+                    candidate["job_stage"],
                 )
                 binding_result = await connection.execute(
                     """
@@ -3756,10 +3761,11 @@ class EllaProvisioningRepository:
                     WHERE id = $1
                       AND status = 'shadow'
                       AND active = FALSE
-                      AND health_state = 'healthy'
+                      AND health_state = $2
                       AND quarantine_reason IS NULL
                     """,
                     candidate["binding_id"],
+                    candidate["binding_health_state"],
                 )
                 if job_result != "UPDATE 1" or binding_result != "UPDATE 1":
                     raise RuntimePoolClaimError("retained_runtime_authority_quarantine_stale")

@@ -249,6 +249,7 @@ class FakeRepository:
         self.runtime_rearm_result = False
         self.retained_drift_quarantine_calls = []
         self.retained_drift_quarantine_result = False
+        self.stage_error = None
         self.activation_error = None
         self.last_stage_arguments = None
         self.last_activation_arguments = None
@@ -341,6 +342,8 @@ class FakeRepository:
             "retained_authority_lineage": retained_authority_lineage,
             "retained_authority_revision": retained_authority_revision,
         }
+        if self.stage_error is not None:
+            raise self.stage_error
         self.staged = dict(
             binding,
             id=binding["binding_id"],
@@ -3474,7 +3477,7 @@ def test_retained_rearm_carries_exact_authority_through_stage_and_activation(mon
     assert repository.binding is not None and repository.binding["active"] is True
 
 
-def test_retained_rearm_quarantines_consent_drift_instead_of_retrying_stale_authority(monkeypatch):
+def test_retained_rearm_quarantines_consent_drift_before_stage_or_activation(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
     identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
@@ -3497,32 +3500,33 @@ def test_retained_rearm_quarantines_consent_drift_instead_of_retrying_stale_auth
             },
         ],
     )
-    repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
-    repository.job = dict(job)
-    repository.activation_error = RuntimePoolClaimError("retained_runtime_authority_stale")
-    repository.retained_drift_quarantine_result = True
+    for failure_point in ("stage", "activation"):
+        repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+        repository.job = dict(job)
+        setattr(repository, f"{failure_point}_error", RuntimePoolClaimError("retained_runtime_authority_stale"))
+        repository.retained_drift_quarantine_result = True
 
-    asyncio.run(
-        ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt())).process_claimed_job(
-            job=job,
-            identity=identity,
+        asyncio.run(
+            ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt())).process_claimed_job(
+                job=job,
+                identity=identity,
+            )
         )
-    )
 
-    assert repository.retained_drift_quarantine_calls == [
-        {
-            "uid": identity.uid,
-            "job_id": str(job["id"]),
-            "authority_lineage": lineage,
-            "stale_authority_revision": authority_revision,
-        }
-    ]
-    assert not any(
-        call.get("state") == "retryable" and call.get("error_code") == "retained_runtime_authority_stale"
-        for call in repository.job_calls
-    )
-    assert repository.binding is None
-    assert repository.user_active is False
+        assert repository.retained_drift_quarantine_calls == [
+            {
+                "uid": identity.uid,
+                "job_id": str(job["id"]),
+                "authority_lineage": lineage,
+                "stale_authority_revision": authority_revision,
+            }
+        ]
+        assert not any(
+            call.get("state") == "retryable" and call.get("error_code") == "retained_runtime_authority_stale"
+            for call in repository.job_calls
+        )
+        assert repository.binding is None
+        assert repository.user_active is False
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):

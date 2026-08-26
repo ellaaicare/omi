@@ -2997,6 +2997,82 @@ def test_current_retained_consent_rearms_only_exact_quarantine():
             None,
         )
 
+        claimed_again = await repository.claim_job(str(job_id))
+        assert claimed_again is not None and claimed_again["stage"] == "profile_ready"
+        advanced_again = await managed_cloud_consent.synchronize_grant(
+            grant=managed_cloud_consent.ManagedCloudGrant(
+                account_uid=uid,
+                profile_uid=uid,
+                consent_receipt_id="synthetic-current-retained-runtime-third-receipt",
+                profile_binding_id=grant.profile_binding_id,
+                policy_version=grant.policy_version,
+                processor_set_hash=grant.processor_set_hash,
+                scope_version=grant.scope_version,
+                scope_hash=grant.scope_hash,
+            ),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="current-retained-runtime@example.invalid",
+        )
+        assert int(advanced_again["revision"]) > int(advanced["revision"])
+        with pytest.raises(RuntimePoolClaimError, match="retained_runtime_authority_stale"):
+            await repository.stage_runtime_binding(
+                uid=uid,
+                binding={
+                    "binding_id": str(binding_id),
+                    "provider": "hermes",
+                    "profile_name": "current-retained-runtime-profile",
+                    "agent_id": "current-retained-runtime-agent",
+                    "template_version": "hermes-user-v1",
+                    "model_policy_version": "model-policy-v1",
+                    "voice_policy_version": "voice-policy-v1",
+                    "health_state": "healthy",
+                    "health_receipt": {"content_free": True},
+                    "runtime_target_mode": "hermes-chat",
+                },
+                retained_rearm_job_id=str(job_id),
+                retained_authority_lineage=lineage,
+                retained_authority_revision=int(advanced["revision"]),
+            )
+        assert (
+            await repository.quarantine_retained_runtime_authority_drift(
+                uid=uid,
+                job_id=str(job_id),
+                authority_lineage=lineage,
+                stale_authority_revision=int(advanced["revision"]),
+            )
+            is True
+        )
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=lineage,
+            )
+            is True
+        )
+        assert await repository.rearm_retained_runtime_after_consent(uid=uid, authority_lineage=lineage) is True
+        async with pool.acquire() as observer:
+            recovered_again = await observer.fetchrow(
+                """
+                SELECT entitlement.consent_authority_revision,
+                       job.state, job.stage, binding.status,
+                       binding.health_state, binding.active
+                FROM users account
+                JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+                JOIN ella_provisioning_jobs job ON job.user_id = account.id
+                JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+                WHERE account.omi_uid = $1
+                """,
+                uid,
+            )
+        assert tuple(recovered_again.values()) == (
+            int(advanced_again["revision"]),
+            "pending",
+            "identity_ready",
+            "shadow",
+            "pending",
+            False,
+        )
+
     asyncio.run(_run_with_database(scenario))
 
 
