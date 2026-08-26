@@ -336,6 +336,13 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
         captured["uid"] = uid
         return {"status": "none", "quota": {}}
 
+    recoveries = []
+
+    async def fake_no_recovery(uid):
+        recoveries.append(uid)
+        return False
+
+    monkeypatch.setattr(voice, "recover_retained_voice_entitlement", fake_no_recovery)
     monkeypatch.setattr(voice.voice_canary_db, "get_entitlement_contract", fake_contract)
     app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
     response = client.get("/v1/entitlement")
@@ -343,12 +350,13 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
     assert captured["uid"] == "firebase-subject"
     assert response.json()["support_code"].startswith("ENT-")
     assert len(response.json()["correlation_id"]) == 36
+    assert recoveries == []
 
     contracts = [
-        {"status": "revoked", "quota": {}},
+        {"status": "active", "quota": {"daily_limit_s": 2700}},
         {"status": "active", "quota": {"daily_limit_s": 2700}},
     ]
-    recoveries = []
+    recoveries.clear()
 
     async def fake_recover(uid):
         recoveries.append(uid)

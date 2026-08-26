@@ -182,7 +182,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 194
+          test "$collected" -eq 196
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
