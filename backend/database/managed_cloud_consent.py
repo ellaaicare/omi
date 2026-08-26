@@ -269,14 +269,18 @@ async def _quarantine_on_connection(
     )
     await conn.execute(
         """
-        UPDATE voice_entitlements
+        UPDATE voice_entitlements entitlement
         SET status = 'revoked',
-            revision = revision + 1,
+            revision = entitlement.revision + 1,
+            consent_authority_revision = authority.revision,
             updated_at = CURRENT_TIMESTAMP
-        WHERE uid = $1
-          AND status <> 'revoked'
+        FROM ella_managed_cloud_consent_authority authority
+        WHERE entitlement.uid = $1
+          AND authority.user_id = $2
+          AND entitlement.status <> 'revoked'
         """,
         uid,
+        user_id,
     )
     await conn.execute(
         "DELETE FROM voice_active_sessions WHERE uid = $1",
@@ -525,6 +529,7 @@ async def synchronize_grant(
                         """
                         UPDATE voice_entitlements
                         SET consent_authority_epoch = $2,
+                            consent_authority_revision = $7,
                             invitation_consent_pending = FALSE,
                             revision = revision + 1,
                             updated_at = CURRENT_TIMESTAMP
@@ -543,6 +548,7 @@ async def synchronize_grant(
                         grant.processor_set_hash,
                         grant.scope_version,
                         grant.scope_hash,
+                        int(row["revision"]),
                     )
                     if not entitlement:
                         raise ManagedCloudAuthorityUnavailable("invitation_consent_lineage_stale")

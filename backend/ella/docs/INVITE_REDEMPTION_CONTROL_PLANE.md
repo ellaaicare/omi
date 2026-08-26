@@ -157,6 +157,8 @@ psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/014_add_synthetic_invitation_operator_audit.sql
 psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/015_add_invitation_allowed_email_hash.sql
+psql "$ELLA_POSTGRES_DSN" \
+  -f backend/migrations/017_add_voice_entitlement_consent_revision.sql
 ```
 
 Migration `015` is reserved for this invitation lane. Open

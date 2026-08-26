@@ -28,6 +28,7 @@ from database.honcho_attestation import (
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+    REQUIRED_SELF_HOSTED_INVITE_COLUMNS,
     deterministic_runtime_binding_id,
 )
 from ella.services.ai_consent import (
@@ -2845,6 +2846,10 @@ def test_repository_schema_preflight_reports_missing_objects():
         "index:ella_runtime_bindings_one_active_role_key",
     )
     assert len(pool.calls) == 1
+
+
+def test_self_hosted_schema_preflight_requires_consent_revision_migration():
+    assert ("voice_entitlements", "consent_authority_revision") in REQUIRED_SELF_HOSTED_INVITE_COLUMNS
 
 
 def test_schema_preflight_runs_before_identity_mutation():

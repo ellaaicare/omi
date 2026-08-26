@@ -28,6 +28,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -69,6 +70,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -180,7 +182,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 192
+          test "$collected" -eq 194
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -200,6 +202,7 @@ jobs:
             "tests/unit/test_pilot_invite_admin.py::test_operator_examples_never_embed_plaintext_email_or_legacy_email_argument"
             "tests/unit/test_ella_onboarding_contract.py::test_onboarding_ensure_requires_current_ai_consent_dependency"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_invitation_admission_precedes_identity_and_job_writes"
+            "tests/unit/test_ella_provisioning_service.py::test_self_hosted_schema_preflight_requires_consent_revision_migration"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_authority_drift_blocks_before_provider_call"
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
@@ -243,6 +246,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_017_prerequisite_failure_rolls_back_added_column"
           )
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"

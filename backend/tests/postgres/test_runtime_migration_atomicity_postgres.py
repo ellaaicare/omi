@@ -136,6 +136,43 @@ def test_migration_prerequisite_failure_is_atomic(filename, leaked_relations):
     asyncio.run(_assert_failure_rolls_back(filename, leaked_relations))
 
 
+def test_migration_017_prerequisite_failure_rolls_back_added_column():
+    async def scenario() -> None:
+        schema = f"migration_failure_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(TEST_DSN)
+        await admin.execute(f'CREATE SCHEMA "{schema}"')
+        failing = await asyncpg.connect(TEST_DSN, server_settings={"search_path": schema})
+        try:
+            await failing.execute("CREATE TABLE voice_entitlements (uid TEXT PRIMARY KEY)")
+            with pytest.raises(asyncpg.PostgresError):
+                await failing.execute(
+                    (MIGRATIONS / "017_add_voice_entitlement_consent_revision.sql").read_text(encoding="utf-8")
+                )
+        finally:
+            await failing.close()
+
+        verifying = await asyncpg.connect(TEST_DSN, server_settings={"search_path": schema})
+        try:
+            assert not await verifying.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = $1
+                      AND table_name = 'voice_entitlements'
+                      AND column_name = 'consent_authority_revision'
+                )
+                """,
+                schema,
+            )
+        finally:
+            await verifying.close()
+            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+            await admin.close()
+
+    asyncio.run(scenario())
+
+
 def test_migration_015_upgrades_multi_redemption_app_review_history_atomically():
     async def scenario() -> None:
         schema = f"migration_upgrade_{uuid.uuid4().hex}"

@@ -228,6 +228,7 @@ async def _run_with_database(
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_voice_entitlement_consent_revision.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(

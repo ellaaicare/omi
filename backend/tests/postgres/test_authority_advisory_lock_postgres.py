@@ -128,6 +128,7 @@ async def _run_with_database(scenario):
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_voice_entitlement_consent_revision.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         await scenario(pool)
@@ -2498,6 +2499,7 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 UPDATE voice_entitlements
                 SET status = 'revoked',
                     operator_note = 'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31',
+                    fallback_policy = to_jsonb('{"order": [], "enabled": false}'::text),
                     revision = revision + 1
                 WHERE uid = $1
                 """,
@@ -2516,22 +2518,21 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
         async with pool.acquire() as observer:
             assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "revoked"
 
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE ella_managed_cloud_consent_authority
-                SET policy_version = $2,
-                    processor_set_hash = $3,
-                    scope_version = $4,
-                    scope_hash = $5
-                WHERE user_id = $1
-                """,
-                user_id,
-                current_lineage.policy_version,
-                current_lineage.processor_set_hash,
-                current_lineage.scope_version,
-                current_lineage.scope_hash,
-            )
+        current_lineage_grant = managed_cloud_consent.ManagedCloudGrant(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-receipt-current-lineage-recovery",
+            profile_binding_id=initial_grant.profile_binding_id,
+            policy_version=current_lineage.policy_version,
+            processor_set_hash=current_lineage.processor_set_hash,
+            scope_version=current_lineage.scope_version,
+            scope_hash=current_lineage.scope_hash,
+        )
+        current_lineage_authority = await managed_cloud_consent.synchronize_grant(
+            grant=current_lineage_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
 
         assert (
             await repository.seed_voice_entitlement_if_absent(
@@ -2549,15 +2550,34 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 "SELECT receipts FROM ella_provisioning_jobs WHERE id = $1",
                 job_id,
             )
+            recovered_authority_revision = current_lineage_authority["revision"]
         if isinstance(recovery_receipts, str):
             recovery_receipts = json.loads(recovery_receipts)
         assert dict(recovered_entitlement) == {"status": "active", "revision": 5}
-        assert {"type": "retained_entitlement_recovered", "content_free": True} in recovery_receipts
+        expected_recovery_receipt = {
+            "type": "retained_entitlement_recovered",
+            "content_free": True,
+            "policy_version": current_lineage.policy_version,
+            "processor_set_hash": current_lineage.processor_set_hash,
+            "scope_version": current_lineage.scope_version,
+            "scope_hash": current_lineage.scope_hash,
+            "authority_revision": recovered_authority_revision,
+        }
+        assert expected_recovery_receipt in recovery_receipts
 
         # A later operator revocation is authoritative. The consumed recovery
         # receipt prevents the old quarantine marker from rearming it.
         revoked = await voice_canary.update_entitlement_status(uid=uid, status="revoked")
         assert revoked is not None and revoked["status"] == "revoked"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET updated_at = CURRENT_TIMESTAMP - INTERVAL '1 day'
+                WHERE uid = $1
+                """,
+                uid,
+            )
         assert (
             await repository.seed_voice_entitlement_if_absent(
                 uid=uid,
@@ -2571,6 +2591,56 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 uid,
             )
         assert dict(final_entitlement) == {"status": "revoked", "revision": 6}
+
+        # A later receipt for the same exact contract is a new consent-driven
+        # transition, not an operator override. Its authority revision must
+        # make the recovery receipt unique even though all lineage hashes stay
+        # byte-identical.
+        same_lineage_grant = managed_cloud_consent.ManagedCloudGrant(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-receipt-same-lineage-recovery",
+            profile_binding_id=initial_grant.profile_binding_id,
+            policy_version=current_lineage.policy_version,
+            processor_set_hash=current_lineage.processor_set_hash,
+            scope_version=current_lineage.scope_version,
+            scope_hash=current_lineage.scope_hash,
+        )
+        same_lineage_authority = await managed_cloud_consent.synchronize_grant(
+            grant=same_lineage_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        assert same_lineage_authority["revision"] == recovered_authority_revision + 1
+
+        assert (
+            await repository.seed_voice_entitlement_if_absent(
+                uid=uid,
+                retained_authority_lineage=current_lineage,
+            )
+            is True
+        )
+        async with pool.acquire() as observer:
+            rotated_entitlement = await observer.fetchrow(
+                "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
+                uid,
+            )
+            rotated_receipts = await observer.fetchval(
+                "SELECT receipts FROM ella_provisioning_jobs WHERE id = $1",
+                job_id,
+            )
+        if isinstance(rotated_receipts, str):
+            rotated_receipts = json.loads(rotated_receipts)
+        assert dict(rotated_entitlement) == {"status": "active", "revision": 7}
+        assert {
+            "type": "retained_entitlement_recovered",
+            "content_free": True,
+            "policy_version": current_lineage.policy_version,
+            "processor_set_hash": current_lineage.processor_set_hash,
+            "scope_version": current_lineage.scope_version,
+            "scope_hash": current_lineage.scope_hash,
+            "authority_revision": same_lineage_authority["revision"],
+        } in rotated_receipts
 
     asyncio.run(_run_with_database(scenario))
 

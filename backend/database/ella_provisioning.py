@@ -124,6 +124,7 @@ REQUIRED_CLOUD_VOICE_ENTITLEMENT_COLUMNS = (
     "consent_processor_set_hash",
     "consent_scope_version",
     "consent_scope_hash",
+    "consent_authority_revision",
 )
 REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "ella_runtime_bindings_claim_job_id_fkey",
@@ -142,6 +143,7 @@ REQUIRED_SELF_HOSTED_INVITE_COLUMNS = (
     ("ella_invitation_redemptions", "user_mapping_state"),
     ("ella_invitation_targets", "revoked_at"),
     ("voice_entitlements", "invitation_consent_pending"),
+    ("voice_entitlements", "consent_authority_revision"),
     ("ella_runtime_targets", "invitation_target_id"),
 )
 
@@ -3094,7 +3096,9 @@ class EllaProvisioningRepository:
                 else:
                     recovery_candidates = await connection.fetch(
                         """
-                        SELECT job.id AS job_id, binding.id AS binding_id
+                        SELECT job.id AS job_id,
+                               binding.id AS binding_id,
+                               authority.revision AS authority_revision
                         FROM users account
                         JOIN ella_provisioning_jobs job
                           ON job.user_id = account.id
@@ -3117,6 +3121,9 @@ class EllaProvisioningRepository:
                          AND authority.processor_set_hash = $3
                          AND authority.scope_version = $4
                          AND authority.scope_hash = $5
+                        JOIN voice_entitlements entitlement
+                          ON entitlement.uid = account.omi_uid
+                         AND authority.revision > COALESCE(entitlement.consent_authority_revision, 0)
                         WHERE account.omi_uid = $1
                           AND account.status = 'ACTIVE'
                           AND account.profile_class = 'real'
@@ -3125,7 +3132,6 @@ class EllaProvisioningRepository:
                           AND job.retryable = FALSE
                           AND job.error_code = 'invitation_authority_revoked'
                           AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
-                          AND NOT job.receipts @> '[{"type":"retained_entitlement_recovered","content_free":true}]'::jsonb
                           AND binding.status = 'disabled'
                           AND binding.active = FALSE
                           AND binding.health_state = 'unhealthy'
@@ -3158,6 +3164,7 @@ class EllaProvisioningRepository:
                     UPDATE voice_entitlements
                     SET status = 'active',
                         revision = revision + 1,
+                        consent_authority_revision = COALESCE($2, consent_authority_revision),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE uid = $1
                       AND status = 'revoked'
@@ -3170,7 +3177,13 @@ class EllaProvisioningRepository:
                       AND provider_allowlist = ARRAY['grok-voice']::text[]
                       AND model_allowlist = ARRAY[]::text[]
                       AND mode_allowlist = ARRAY['v4']::text[]
-                      AND fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                      AND (
+                          fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                          OR (
+                              jsonb_typeof(fallback_policy) = 'string'
+                              AND fallback_policy #>> '{}' = '{"order": [], "enabled": false}'
+                          )
+                      )
                       AND operator_note IN (
                           'auto-provision self-hosted grok voice',
                           'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31'
@@ -3180,8 +3193,20 @@ class EllaProvisioningRepository:
                     RETURNING revision
                     """,
                     uid,
+                    int(recovery_candidates[0]["authority_revision"]) if lineage is not None else None,
                 )
                 if row is not None and lineage is not None:
+                    recovery_receipt = [
+                        {
+                            "type": "retained_entitlement_recovered",
+                            "content_free": True,
+                            "policy_version": lineage.policy_version,
+                            "processor_set_hash": lineage.processor_set_hash,
+                            "scope_version": lineage.scope_version,
+                            "scope_hash": lineage.scope_hash,
+                            "authority_revision": int(recovery_candidates[0]["authority_revision"]),
+                        }
+                    ]
                     consumed = await connection.fetchval(
                         """
                         UPDATE ella_provisioning_jobs
@@ -3192,7 +3217,7 @@ class EllaProvisioningRepository:
                         RETURNING TRUE
                         """,
                         recovery_candidates[0]["job_id"],
-                        json.dumps([{"type": "retained_entitlement_recovered", "content_free": True}]),
+                        json.dumps(recovery_receipt),
                     )
                     if not consumed:
                         raise RuntimeError("retained_entitlement_recovery_receipt_conflict")
