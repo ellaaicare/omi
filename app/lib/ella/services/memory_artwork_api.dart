@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/http/shared.dart';
@@ -30,6 +31,7 @@ class MemoryArtworkResult {
   const MemoryArtworkResult({
     required this.status,
     this.url,
+    this.cacheKey = '',
     this.styleVersion = '',
     this.enrichmentRevision = '',
     this.failureCode = '',
@@ -37,6 +39,7 @@ class MemoryArtworkResult {
 
   final MemoryArtworkResultStatus status;
   final Uri? url;
+  final String cacheKey;
   final String styleVersion;
   final String enrichmentRevision;
   final String failureCode;
@@ -74,11 +77,49 @@ class MemoryArtworkApi {
   Future<MemoryArtworkResult> fetch(String memoryId) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
+    return _fetchWithAuthority(authority, memoryId);
+  }
+
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    final authority = _authorityProvider();
+    if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
+
+    var result = await _fetchWithAuthority(authority, memoryId);
+    if (result.isReady || result.status == MemoryArtworkResultStatus.declined || !authority.isExactCurrent()) {
+      return result;
+    }
+    if (enqueueIfMissing) {
+      result = await _enqueueWithAuthority(authority, memoryId);
+      if (result.status != MemoryArtworkResultStatus.generating || !authority.isExactCurrent()) {
+        return result;
+      }
+    }
+
+    for (var attempt = 0; attempt < pollAttempts && authority.isExactCurrent(); attempt++) {
+      await Future<void>.delayed(pollInterval);
+      if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+      result = await _fetchWithAuthority(authority, memoryId);
+      if (result.status != MemoryArtworkResultStatus.generating) return result;
+    }
+    return result;
+  }
+
+  Future<MemoryArtworkResult> _fetchWithAuthority(
+    ExactAccountAuthorityVerifier authority,
+    String memoryId,
+  ) async {
+    if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     final response = await _call(
       authority,
       method: 'GET',
       path: 'v1/ella/memories/${Uri.encodeComponent(memoryId)}/artwork',
     );
+    if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     if (response == null || response.statusCode != 200) return _unavailable(_safeFailureCode(response?.body));
     final payload = _jsonObject(response.body);
     if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) {
@@ -94,9 +135,42 @@ class MemoryArtworkApi {
     return MemoryArtworkResult(
       status: status,
       url: status == MemoryArtworkResultStatus.ready ? url : null,
+      cacheKey: status == MemoryArtworkResultStatus.ready
+          ? _cacheKey(
+              authority: authority,
+              memoryId: memoryId,
+              styleVersion: payload['style_version']?.toString().trim() ?? '',
+              enrichmentRevision: payload['enrichment_revision']?.toString().trim() ?? '',
+            )
+          : '',
       styleVersion: payload['style_version']?.toString().trim() ?? '',
       enrichmentRevision: payload['enrichment_revision']?.toString().trim() ?? '',
       failureCode: payload['failure_code']?.toString().trim() ?? '',
+    );
+  }
+
+  Future<MemoryArtworkResult> _enqueueWithAuthority(
+    ExactAccountAuthorityVerifier authority,
+    String memoryId,
+  ) async {
+    if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+    final response = await _call(
+      authority,
+      method: 'POST',
+      path: 'v1/ella/memories/${Uri.encodeComponent(memoryId)}/artwork',
+    );
+    if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+    if (response == null || response.statusCode < 200 || response.statusCode >= 300) {
+      return _unavailable(_safeFailureCode(response?.body));
+    }
+    final payload = _jsonObject(response.body);
+    final status = MemoryArtworkResultStatus.values.asNameMap()[payload?['status']?.toString() ?? ''] ??
+        MemoryArtworkResultStatus.unavailable;
+    return MemoryArtworkResult(
+      status: status,
+      failureCode: status == MemoryArtworkResultStatus.unavailable
+          ? (payload?['outcome']?.toString().trim() ?? 'memory_artwork_unavailable')
+          : '',
     );
   }
 
@@ -184,6 +258,24 @@ class MemoryArtworkApi {
 
   static MemoryArtworkResult _unavailable(String code) =>
       MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable, failureCode: code);
+
+  static String _cacheKey({
+    required ExactAccountAuthorityVerifier authority,
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) {
+    final ownerNamespace = authority is ActiveWalAuthority
+        ? authority.owner.storageNamespace
+        : sha256.convert(utf8.encode(authority.uid)).toString().substring(0, 24);
+    return sha256
+        .convert(
+          utf8.encode(
+            'ella-memory-artwork-cache-v1\n$ownerNamespace\n$memoryId\n$styleVersion\n$enrichmentRevision',
+          ),
+        )
+        .toString();
+  }
 }
 
 const _supportedStyles = {

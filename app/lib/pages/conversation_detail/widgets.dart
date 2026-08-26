@@ -949,6 +949,8 @@ class _TypeCorrectionLink extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         onTap: () {
           HapticFeedback.lightImpact();
+          final messenger = ScaffoldMessenger.of(context);
+          final acceptedMessage = context.l10n.memoryCorrectionPending;
           showModalBottomSheet(
             context: context,
             isScrollControlled: true,
@@ -956,6 +958,14 @@ class _TypeCorrectionLink extends StatelessWidget {
             builder: (context) => CorrectSummarySheet(
               conversation: conversation,
               appSummary: appSummary,
+              onAccepted: () async {
+                messenger.showSnackBar(
+                  SnackBar(
+                    key: const ValueKey('type-correction-accepted'),
+                    content: Text(acceptedMessage),
+                  ),
+                );
+              },
               onApplied: context.read<ConversationDetailProvider>().refreshConversation,
             ),
           );
@@ -999,6 +1009,36 @@ typedef CorrectionReceiptPoller = Future<ConversationCorrectionReceipt?> Functio
   required Duration pollBudget,
 });
 
+Future<void> _observeAcceptedCorrection({
+  required ConversationCorrectionSubmission submission,
+  required ExactAccountAuthorityVerifier authority,
+  required Duration pollBudget,
+  required CorrectionReceiptPoller receiptPoller,
+  required PendingConversationCorrectionIdentityStore identityStore,
+  required Future<void> Function()? onApplied,
+}) async {
+  try {
+    final receipt = await receiptPoller(
+      conversationId: submission.conversationId,
+      correctionId: submission.correctionId,
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      pollBudget: pollBudget,
+    ).timeout(pollBudget);
+    if (receipt == null || receipt.isPending || !authority.isExactCurrent()) return;
+    await identityStore.clearIfTerminal(
+      uid: authority.uid,
+      conversationId: submission.conversationId,
+      correctionId: submission.correctionId,
+    );
+    if (receipt.isApplied && onApplied != null && authority.isExactCurrent()) {
+      await onApplied();
+    }
+  } catch (_) {
+    // The durable pending identity allows receipt discovery to resume later.
+  }
+}
+
 class CorrectSummarySheet extends StatefulWidget {
   final ServerConversation conversation;
   final String appSummary;
@@ -1006,6 +1046,7 @@ class CorrectSummarySheet extends StatefulWidget {
   final CorrectionReceiptPoller receiptPoller;
   final PendingConversationCorrectionIdentityStore correctionIdentityStore;
   final ExactAccountAuthorityVerifier? Function() authorityProvider;
+  final Future<void> Function()? onAccepted;
   final Future<void> Function()? onApplied;
 
   const CorrectSummarySheet({
@@ -1015,6 +1056,7 @@ class CorrectSummarySheet extends StatefulWidget {
     this.receiptPoller = pollConversationCorrectionReceipt,
     this.correctionIdentityStore = const PendingConversationCorrectionIdentityStore(),
     this.authorityProvider = WalOwnerAuthority.operationEntry,
+    this.onAccepted,
     this.onApplied,
     super.key,
   });
@@ -1026,6 +1068,7 @@ class CorrectSummarySheet extends StatefulWidget {
 class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
+  String? _submissionError;
 
   @override
   void dispose() {
@@ -1039,9 +1082,11 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
 
     final operationStopwatch = Stopwatch()..start();
     Duration remainingBudget() => conversationCorrectionClientPollBudget - operationStopwatch.elapsed;
-    setState(() => _isSubmitting = true);
+    setState(() {
+      _isSubmitting = true;
+      _submissionError = null;
+    });
     final authority = widget.authorityProvider();
-    ConversationCorrectionReceipt? terminalReceipt;
     try {
       if (authority != null && authority.uid.isNotEmpty && authority.isExactCurrent()) {
         final correctionId = await widget.correctionIdentityStore.acquire(
@@ -1074,22 +1119,27 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
         if (submission != null && submission.conversationId == widget.conversation.id && authority.isExactCurrent()) {
           final pollBudget = remainingBudget();
           if (pollBudget <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
-          terminalReceipt = await widget
-              .receiptPoller(
-                conversationId: submission.conversationId,
-                correctionId: submission.correctionId,
-                expectedAuthenticatedUid: authority.uid,
-                exactAuthority: authority,
-                pollBudget: pollBudget,
-              )
-              .timeout(pollBudget);
-          if (terminalReceipt != null && !terminalReceipt.isPending) {
-            await widget.correctionIdentityStore.clearIfTerminal(
-              uid: authority.uid,
-              conversationId: widget.conversation.id,
-              correctionId: correctionId,
-            );
-          }
+          final receiptPoller = widget.receiptPoller;
+          final identityStore = widget.correctionIdentityStore;
+          final onApplied = widget.onApplied;
+          unawaited(
+            _observeAcceptedCorrection(
+              submission: submission,
+              authority: authority,
+              pollBudget: pollBudget,
+              receiptPoller: receiptPoller,
+              identityStore: identityStore,
+              onApplied: onApplied,
+            ),
+          );
+
+          if (!mounted) return;
+          setState(() => _isSubmitting = false);
+          HapticFeedback.mediumImpact();
+          await widget.onAccepted?.call();
+          if (!mounted) return;
+          Navigator.of(context).pop();
+          return;
         }
       }
     } catch (_) {
@@ -1097,24 +1147,10 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
     }
 
     if (!mounted) return;
-    if (terminalReceipt?.isApplied == true) {
-      if (widget.onApplied != null) await widget.onApplied!();
-      if (!mounted) return;
-      setState(() => _isSubmitting = false);
-      HapticFeedback.mediumImpact();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.memoryCorrectionApplied)));
-      Navigator.of(context).pop();
-      return;
-    }
-
-    setState(() => _isSubmitting = false);
-    HapticFeedback.lightImpact();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        key: ValueKey('type-correction-terminal-${terminalReceipt?.status ?? 'unavailable'}'),
-        content: Text(correctionTerminalFailureMessage(context.l10n, terminalReceipt)),
-      ),
-    );
+    setState(() {
+      _isSubmitting = false;
+      _submissionError = correctionTerminalFailureMessage(context.l10n, null);
+    });
   }
 
   @override
@@ -1180,6 +1216,14 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
                   ),
                 ),
               ),
+              if (_submissionError != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _submissionError!,
+                  key: const ValueKey('type-correction-submit-error'),
+                  style: const TextStyle(color: EllaColors.error, fontSize: 14, height: 1.3),
+                ),
+              ],
               const SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,
