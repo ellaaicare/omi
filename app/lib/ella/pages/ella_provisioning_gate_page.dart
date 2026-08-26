@@ -198,7 +198,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
 
     return Consumer<EllaProvisioningProvider>(
       builder: (context, provider, _) {
-        if (provider.isOperational) {
+        if (provider.isOperational || provider.isRevalidatingOperational) {
           return widget.readyChild;
         }
 
