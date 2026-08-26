@@ -563,6 +563,28 @@ class ConversationCorrectionSubmission {
   }
 }
 
+enum ConversationCorrectionSubmitDisposition { accepted, uncertain, rejected }
+
+class ConversationCorrectionSubmitResult {
+  const ConversationCorrectionSubmitResult._({required this.disposition, this.submission});
+
+  const ConversationCorrectionSubmitResult.accepted(ConversationCorrectionSubmission submission)
+      : this._(disposition: ConversationCorrectionSubmitDisposition.accepted, submission: submission);
+
+  const ConversationCorrectionSubmitResult.uncertain()
+      : this._(disposition: ConversationCorrectionSubmitDisposition.uncertain);
+
+  const ConversationCorrectionSubmitResult.rejected()
+      : this._(disposition: ConversationCorrectionSubmitDisposition.rejected);
+
+  final ConversationCorrectionSubmitDisposition disposition;
+  final ConversationCorrectionSubmission? submission;
+
+  bool get wasAcceptedOrMayHaveBeenAccepted =>
+      disposition == ConversationCorrectionSubmitDisposition.accepted ||
+      disposition == ConversationCorrectionSubmitDisposition.uncertain;
+}
+
 class PendingConversationCorrectionIdentityStore {
   const PendingConversationCorrectionIdentityStore({
     this.maxEntriesPerConversation = 8,
@@ -766,7 +788,7 @@ class PendingConversationCorrectionIdentityStore {
   }
 }
 
-Future<ConversationCorrectionSubmission?> submitConversationCorrection({
+Future<ConversationCorrectionSubmitResult> submitConversationCorrectionResult({
   required String conversationId,
   required String correctionId,
   required String correctionText,
@@ -779,12 +801,14 @@ Future<ConversationCorrectionSubmission?> submitConversationCorrection({
   ConversationCorrectionTransport transport = _defaultConversationCorrectionTransport,
   void Function(String message) debugLog = Logger.debug,
 }) async {
-  if (!SharedPreferencesUtil().aiConsentAccepted) return null;
+  if (!SharedPreferencesUtil().aiConsentAccepted) return const ConversationCorrectionSubmitResult.rejected();
   final authority = exactAuthority ?? WalOwnerAuthority.operationEntry();
   final expectedUid = expectedAuthenticatedUid ?? authority?.uid;
-  if (authority == null || expectedUid == null || expectedUid.isEmpty || authority.uid != expectedUid) return null;
+  if (authority == null || expectedUid == null || expectedUid.isEmpty || authority.uid != expectedUid) {
+    return const ConversationCorrectionSubmitResult.rejected();
+  }
   final encodedConversationId = Uri.encodeComponent(conversationId);
-  if (requestTimeout <= Duration.zero) return null;
+  if (requestTimeout <= Duration.zero) return const ConversationCorrectionSubmitResult.rejected();
   http.Response? response;
   try {
     response = await transport(
@@ -804,21 +828,55 @@ Future<ConversationCorrectionSubmission?> submitConversationCorrection({
       exactAuthority: authority,
       timeout: requestTimeout,
     ).timeout(requestTimeout);
-  } on TimeoutException {
-    return null;
+  } on Exception {
+    // Once the authenticated request starts, a transport failure cannot prove
+    // that the server did not durably accept the idempotent correction.
+    return const ConversationCorrectionSubmitResult.uncertain();
   }
-  if (response == null) return null;
+  if (response == null) return const ConversationCorrectionSubmitResult.uncertain();
   debugLog('submitConversationCorrection: status=${response.statusCode}');
-  if (response.statusCode != 200 && response.statusCode != 201 && response.statusCode != 202) return null;
+  if (response.statusCode >= 500) return const ConversationCorrectionSubmitResult.uncertain();
+  if (response.statusCode != 200 && response.statusCode != 201 && response.statusCode != 202) {
+    return const ConversationCorrectionSubmitResult.rejected();
+  }
   try {
     final submission = ConversationCorrectionSubmission.tryParse(jsonDecode(response.body));
     if (submission == null || submission.conversationId != conversationId || submission.correctionId != correctionId) {
-      return null;
+      return const ConversationCorrectionSubmitResult.uncertain();
     }
-    return submission;
+    return ConversationCorrectionSubmitResult.accepted(submission);
   } on FormatException {
-    return null;
+    return const ConversationCorrectionSubmitResult.uncertain();
   }
+}
+
+Future<ConversationCorrectionSubmission?> submitConversationCorrection({
+  required String conversationId,
+  required String correctionId,
+  required String correctionText,
+  String? summaryTitle,
+  String? summaryOverview,
+  String? appSummary,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  Duration requestTimeout = conversationCorrectionSubmitBudget,
+  ConversationCorrectionTransport transport = _defaultConversationCorrectionTransport,
+  void Function(String message) debugLog = Logger.debug,
+}) async {
+  final result = await submitConversationCorrectionResult(
+    conversationId: conversationId,
+    correctionId: correctionId,
+    correctionText: correctionText,
+    summaryTitle: summaryTitle,
+    summaryOverview: summaryOverview,
+    appSummary: appSummary,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+    requestTimeout: requestTimeout,
+    transport: transport,
+    debugLog: debugLog,
+  );
+  return result.submission;
 }
 
 class ConversationCorrectionSummary {
