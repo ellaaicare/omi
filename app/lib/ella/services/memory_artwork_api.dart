@@ -74,6 +74,21 @@ class MemoryArtworkApi {
   final MemoryArtworkAuthorityProvider _authorityProvider;
   final String _baseUrl;
 
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) {
+    final authority = _authorityProvider();
+    if (authority == null || memoryId.trim().isEmpty || !authority.isExactCurrent()) return '';
+    return _cacheKey(
+      authority: authority,
+      memoryId: memoryId,
+      styleVersion: styleVersion,
+      enrichmentRevision: enrichmentRevision,
+    );
+  }
+
   Future<MemoryArtworkResult> fetch(String memoryId) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
@@ -109,10 +124,7 @@ class MemoryArtworkApi {
     return result;
   }
 
-  Future<MemoryArtworkResult> _fetchWithAuthority(
-    ExactAccountAuthorityVerifier authority,
-    String memoryId,
-  ) async {
+  Future<MemoryArtworkResult> _fetchWithAuthority(ExactAccountAuthorityVerifier authority, String memoryId) async {
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     final response = await _call(
       authority,
@@ -149,10 +161,7 @@ class MemoryArtworkApi {
     );
   }
 
-  Future<MemoryArtworkResult> _enqueueWithAuthority(
-    ExactAccountAuthorityVerifier authority,
-    String memoryId,
-  ) async {
+  Future<MemoryArtworkResult> _enqueueWithAuthority(ExactAccountAuthorityVerifier authority, String memoryId) async {
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     final response = await _call(
       authority,
@@ -270,9 +279,7 @@ class MemoryArtworkApi {
         : sha256.convert(utf8.encode(authority.uid)).toString().substring(0, 24);
     return sha256
         .convert(
-          utf8.encode(
-            'ella-memory-artwork-cache-v1\n$ownerNamespace\n$memoryId\n$styleVersion\n$enrichmentRevision',
-          ),
+          utf8.encode('ella-memory-artwork-cache-v1\n$ownerNamespace\n$memoryId\n$styleVersion\n$enrichmentRevision'),
         )
         .toString();
   }

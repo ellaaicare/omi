@@ -106,6 +106,53 @@ void main() {
     expect(otherOwner.cacheKey, isNot(first.cacheKey));
   });
 
+  test('display cache identity matches the authenticated fetch identity', () async {
+    final authority = _Authority('owner-a');
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': memoryArtworkSchemaVersion,
+          'status': 'ready',
+          'url': 'https://private-storage.example/signed',
+          'style_version': memoryArtworkDefaultStyle,
+          'enrichment_revision': 'summary-a',
+        }),
+        200,
+      ),
+    );
+
+    final fetched = await api.fetch('memory-a');
+    final displayKey = api.cacheKeyForDisplay(
+      memoryId: 'memory-a',
+      styleVersion: memoryArtworkDefaultStyle,
+      enrichmentRevision: 'summary-a',
+    );
+
+    expect(displayKey, fetched.cacheKey);
+    authority.current = false;
+    expect(
+      api.cacheKeyForDisplay(
+        memoryId: 'memory-a',
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'summary-a',
+      ),
+      isEmpty,
+    );
+  });
+
   test('visible historical memory is enqueued once and polled until artwork is ready', () async {
     final authority = _Authority('owner-a');
     final methods = <String>[];
@@ -131,10 +178,11 @@ void main() {
         getCalls += 1;
         if (getCalls == 1) {
           return http.Response(
-              jsonEncode({
-                'detail': {'code': 'memory_artwork_not_found'}
-              }),
-              404);
+            jsonEncode({
+              'detail': {'code': 'memory_artwork_not_found'},
+            }),
+            404,
+          );
         }
         return http.Response(
           jsonEncode({
@@ -177,7 +225,11 @@ void main() {
         exactAuthority,
       }) async =>
           http.Response(
-        jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'ready', 'url': 'http://vendor.invalid/a'}),
+        jsonEncode({
+          'schema_version': memoryArtworkSchemaVersion,
+          'status': 'ready',
+          'url': 'http://vendor.invalid/a',
+        }),
         200,
       ),
     );
