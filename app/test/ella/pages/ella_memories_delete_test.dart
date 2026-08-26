@@ -32,10 +32,7 @@ class _MutableAuthority implements AccountCommitAuthority {
 
 class _FakeArtworkApi extends MemoryArtworkApi {
   _FakeArtworkApi({this.releaseEnabled = true})
-      : super(
-          baseUrl: 'https://api.example.test',
-          authorityProvider: () => null,
-        );
+      : super(baseUrl: 'https://api.example.test', authorityProvider: () => null);
 
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
@@ -73,29 +70,27 @@ void main() {
   });
 
   setUp(() async {
-    SharedPreferences.setMockInitialValues({
-      'uid': 'test-user',
-      'aiConsentProfileBindingId': 'profile-test-user',
-    });
+    SharedPreferences.setMockInitialValues({'uid': 'test-user', 'aiConsentProfileBindingId': 'profile-test-user'});
     await SharedPreferencesUtil.init();
   });
 
-  ServerConversation memory(String id, {String title = 'A test memory', DateTime? at}) {
+  ServerConversation memory(
+    String id, {
+    String title = 'A test memory',
+    String overview = 'A short transcript created this memory.',
+    DateTime? at,
+  }) {
     final startedAt = at ?? DateTime.parse('2026-08-10T18:00:00Z');
     return ServerConversation(
       id: id,
       createdAt: startedAt,
       startedAt: startedAt,
       finishedAt: startedAt.add(const Duration(minutes: 3)),
-      structured: Structured(title, 'A short transcript created this memory.'),
+      structured: Structured(title, overview),
     );
   }
 
-  Future<void> pumpPage(
-    WidgetTester tester,
-    ConversationProvider provider, {
-    MemoryArtworkApi? artworkApi,
-  }) async {
+  Future<void> pumpPage(WidgetTester tester, ConversationProvider provider, {MemoryArtworkApi? artworkApi}) async {
     await tester.pumpWidget(
       MultiProvider(
         providers: [
@@ -174,6 +169,60 @@ void main() {
     expect(opens, 1);
     expect(deletes, 0);
     expect(find.byKey(const Key('memory-card-memory-gesture')), findsOneWidget);
+  });
+
+  testWidgets('gallery replaces Ella enrichment prefixes with the source indicator', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryGalleryCard(
+            conversation: memory(
+              'memory-enriched',
+              title: '[Ella] Family dinner',
+              overview: '[Ella] A grounded summary of the evening.',
+            ),
+            layout: MemoryGalleryLayout.list,
+            onOpen: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('[Ella]'), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome_rounded), findsNWidgets(2));
+    expect(find.textContaining('Family dinner'), findsOneWidget);
+    expect(find.textContaining('A grounded summary'), findsOneWidget);
+  });
+
+  testWidgets('shortened Home title preserves Ella enrichment provenance', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryGalleryCard(
+            conversation: memory(
+              'memory-enriched-home',
+              title: '[Ella] Family dinner and plans',
+              overview: 'A grounded summary of the evening.',
+            ),
+            displayTitle: 'Family dinner',
+            layout: MemoryGalleryLayout.list,
+            onOpen: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('[Ella]'), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome_rounded), findsOneWidget);
+    expect(find.textContaining('Family dinner'), findsOneWidget);
   });
 
   testWidgets('gallery swipe affordances follow start and end in right-to-left layouts', (tester) async {

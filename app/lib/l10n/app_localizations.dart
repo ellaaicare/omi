@@ -17798,6 +17798,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Record a moment and Ella will gather the memories you choose.'**
   String get todayMemoryCanvasEmptyBody;
+
+  /// No description provided for @memoryArtworkUnavailableLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Illustration unavailable'**
+  String get memoryArtworkUnavailableLabel;
+
+  /// No description provided for @memoryArtworkPreparingShort.
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing illustration…'**
+  String get memoryArtworkPreparingShort;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

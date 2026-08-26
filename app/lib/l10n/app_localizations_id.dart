@@ -9566,4 +9566,10 @@ class AppLocalizationsId extends AppLocalizations {
 
   @override
   String get todayMemoryCanvasEmptyBody => 'Record a moment and Ella will gather the memories you choose.';
+
+  @override
+  String get memoryArtworkUnavailableLabel => 'Illustration unavailable';
+
+  @override
+  String get memoryArtworkPreparingShort => 'Preparing illustration…';
 }

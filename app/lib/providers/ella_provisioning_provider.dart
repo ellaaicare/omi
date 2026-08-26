@@ -53,8 +53,12 @@ class EllaProvisioningProvider extends ChangeNotifier {
   int _requestContextEpoch = 0;
   bool _requestInFlight = false;
   bool _retryEnsureAfterCurrentRequest = false;
+  bool _revalidatingOperationalReceipt = false;
 
   bool get isOperational => state == EllaProvisioningState.ready && receipt?.isOperational == true;
+
+  bool get isRevalidatingOperational =>
+      _revalidatingOperationalReceipt && state == EllaProvisioningState.checking && receipt?.isOperational == true;
 
   String get supportCode => receipt?.supportCode ?? '';
 
@@ -97,6 +101,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _pollAttempts = 0;
     _requestInFlight = false;
     _retryEnsureAfterCurrentRequest = false;
+    _revalidatingOperationalReceipt = false;
     state = EllaProvisioningState.checking;
     errorCode = '';
 
@@ -113,15 +118,23 @@ class EllaProvisioningProvider extends ChangeNotifier {
     await _ensure(generation);
   }
 
-  Future<void> retry() async {
+  Future<void> retry({bool preserveOperationalReceipt = true}) async {
     if (_activeUid.isEmpty || _requestContext == null) return;
+    if (!preserveOperationalReceipt && _revalidatingOperationalReceipt) {
+      _revalidatingOperationalReceipt = false;
+      state = EllaProvisioningState.checking;
+      errorCode = '';
+      notifyListeners();
+    }
     if (_requestInFlight) {
       _retryEnsureAfterCurrentRequest = true;
       return;
     }
+    final wasOperational = isOperational;
     final generation = ++_generation;
     _cancelPoll();
     _pollAttempts = 0;
+    _revalidatingOperationalReceipt = preserveOperationalReceipt && wasOperational;
     state = EllaProvisioningState.checking;
     errorCode = '';
     notifyListeners();
@@ -133,7 +146,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
     _requestContext = context.copyWithConsentReceiptId(receiptId);
     _requestContextEpoch++;
-    unawaited(retry());
+    unawaited(retry(preserveOperationalReceipt: false));
   }
 
   void setForeground(bool value) {
@@ -158,6 +171,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _pollAttempts = 0;
     _requestInFlight = false;
     _retryEnsureAfterCurrentRequest = false;
+    _revalidatingOperationalReceipt = false;
     receipt = null;
     errorCode = '';
     state = EllaProvisioningState.idle;
@@ -253,6 +267,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } else {
       state = nextReceipt.state;
     }
+    _revalidatingOperationalReceipt = false;
     if (isOperational) {
       await _preferences.markEllaProvisioningVerified(_activeUid);
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
@@ -274,6 +289,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   }
 
   void _setFailure(String code, {bool blocked = false}) {
+    _revalidatingOperationalReceipt = false;
     errorCode = code;
     state = blocked ? EllaProvisioningState.blocked : EllaProvisioningState.degraded;
     notifyListeners();

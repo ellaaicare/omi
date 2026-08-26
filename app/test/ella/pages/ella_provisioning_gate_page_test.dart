@@ -118,6 +118,95 @@ void main() {
     expect(find.byKey(const Key('ready-child')), findsOneWidget);
   });
 
+  testWidgets('foreground revalidation preserves Home while an operational receipt is checked', (tester) async {
+    final transport = _DelayedResumeTransport();
+    final provider = EllaProvisioningProvider(transport: transport);
+    addTearDown(provider.dispose);
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.552+831',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+      ),
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaProvisioningGatePage(
+            readyChild: const SizedBox(key: Key('ready-child')),
+            startOnMount: false,
+            authenticatedUidProvider: () => 'uid-a',
+            appVersionProvider: () => '1.0.552+831',
+            consentAuthorityRefresher: (_) async => true,
+            timezoneProvider: () async => 'America/Los_Angeles',
+          ),
+        ),
+      ),
+    );
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+
+    expect(transport.ensureCalls, 2);
+    expect(provider.isRevalidatingOperational, isTrue);
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+    expect(find.text('Setting up'), findsNothing);
+
+    transport.revalidation.complete(_readyResponse());
+    await tester.pumpAndSettle();
+
+    expect(provider.isOperational, isTrue);
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+  });
+
+  testWidgets('replacement consent receipt closes Home until provisioning recaptures authority', (tester) async {
+    final transport = _DelayedResumeTransport();
+    final provider = EllaProvisioningProvider(transport: transport);
+    addTearDown(provider.dispose);
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.552+831',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        consentReceiptId: 'receipt-a',
+      ),
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaProvisioningGatePage(
+            readyChild: SizedBox(key: Key('ready-child')),
+            startOnMount: false,
+          ),
+        ),
+      ),
+    );
+
+    provider.setConsentReceiptId('receipt-b');
+    await tester.pump();
+
+    expect(provider.isRevalidatingOperational, isFalse);
+    expect(find.byKey(const Key('ready-child')), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    transport.revalidation.complete(_readyResponse());
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+  });
+
   testWidgets('foreground revalidation cannot provision after the authenticated account changes', (tester) async {
     final transport = _CountingReadyTransport();
     final provider = EllaProvisioningProvider(transport: transport);
@@ -183,3 +272,27 @@ class _CountingReadyTransport implements EllaProvisioningTransport {
   @override
   Future<EllaProvisioningResponse> status() async => throw UnimplementedError();
 }
+
+class _DelayedResumeTransport implements EllaProvisioningTransport {
+  int ensureCalls = 0;
+  final revalidation = Completer<EllaProvisioningResponse>();
+
+  @override
+  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) {
+    ensureCalls++;
+    return ensureCalls == 1 ? Future.value(_readyResponse()) : revalidation.future;
+  }
+
+  @override
+  Future<EllaProvisioningResponse> status() async => throw UnimplementedError();
+}
+
+EllaProvisioningResponse _readyResponse() => EllaProvisioningResponse(
+      statusCode: 200,
+      receipt: EllaProvisioningReceipt.fromJson({
+        'state': 'ready',
+        'binding_state': 'active',
+        'binding_revision': 1,
+        'effective_policy_revision': 'policy-1',
+      }),
+    );

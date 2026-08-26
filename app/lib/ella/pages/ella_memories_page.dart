@@ -9,11 +9,13 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/ella/widgets/ella_source_indicator.dart';
 import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -513,9 +515,7 @@ class MemoryGalleryCard extends StatelessWidget {
   final String? displayTitle;
   final Future<bool> Function()? onDelete;
 
-  String get _title =>
-      displayTitle ??
-      conversation.structured.title.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
+  String get _title => displayTitle ?? conversation.structured.title;
 
   @override
   Widget build(BuildContext context) {
@@ -609,6 +609,7 @@ class _MemoryDetails extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final titleIsEllaGenerated = parseEllaDisplayValue(conversation.structured.title).isEllaGenerated;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -617,14 +618,15 @@ class _MemoryDetails extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
+              EllaSourceText(
                 title,
+                isEllaGenerated: titleIsEllaGenerated,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
-              Text(
+              EllaSourceText(
                 conversation.structured.overview,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
