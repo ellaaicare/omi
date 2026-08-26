@@ -187,6 +187,52 @@ def current_self_hosted_runtime_lineage() -> RuntimeTargetLineage:
     ).validate()
 
 
+def _retained_runtime_rearm_authority_revision(job: dict[str, Any]) -> Optional[int]:
+    receipts = job.get("receipts") or []
+    if isinstance(receipts, str):
+        try:
+            receipts = json.loads(receipts)
+        except json.JSONDecodeError as exc:
+            raise ProvisioningError("retained_runtime_rearm_receipt_invalid", retryable=False) from exc
+    if not isinstance(receipts, list):
+        raise ProvisioningError("retained_runtime_rearm_receipt_invalid", retryable=False)
+    lineage = current_self_hosted_runtime_lineage()
+    rearm_receipts = [
+        receipt
+        for receipt in receipts
+        if isinstance(receipt, dict) and receipt.get("type") == "retained_runtime_rearmed"
+    ]
+    if not rearm_receipts:
+        return None
+    rearm_revisions = {
+        int(receipt["authority_revision"])
+        for receipt in rearm_receipts
+        if receipt.get("type") == "retained_runtime_rearmed"
+        and receipt.get("content_free") is True
+        and type(receipt.get("authority_revision")) is int
+        and int(receipt["authority_revision"]) > 0
+    }
+    entitlement_revisions = {
+        int(receipt["authority_revision"])
+        for receipt in receipts
+        if isinstance(receipt, dict)
+        and receipt.get("type") == "retained_entitlement_recovered"
+        and receipt.get("content_free") is True
+        and receipt.get("policy_version") == lineage.policy_version
+        and receipt.get("processor_set_hash") == lineage.processor_set_hash
+        and receipt.get("scope_version") == lineage.scope_version
+        and receipt.get("scope_hash") == lineage.scope_hash
+        and type(receipt.get("authority_revision")) is int
+        and int(receipt["authority_revision"]) > 0
+    }
+    if len(rearm_revisions) != len(rearm_receipts):
+        raise ProvisioningError("retained_runtime_rearm_receipt_invalid", retryable=False)
+    current = rearm_revisions & entitlement_revisions
+    if not current:
+        raise ProvisioningError("retained_runtime_rearm_receipt_invalid", retryable=False)
+    return max(current)
+
+
 def self_hosted_provisioning_enabled(
     uid: Optional[str] = None,
     *,
@@ -1252,6 +1298,10 @@ class ProvisioningCoordinator:
         authority_snapshot = self._authority_snapshot(authority_snapshot)
         progress["authority_snapshot"] = authority_snapshot
         try:
+            retained_authority_revision = _retained_runtime_rearm_authority_revision(job)
+            retained_authority_lineage = (
+                current_self_hosted_runtime_lineage() if retained_authority_revision is not None else None
+            )
             invitation_admission = None
             invitation_owned = False
             legacy_required = provisioning_enabled(identity.uid)
@@ -1355,11 +1405,20 @@ class ProvisioningCoordinator:
             if binding_data.get("runtime_target_mode") is None and binding_data.get("role", "user") == "user":
                 binding_data["runtime_target_mode"] = "hermes-chat"
             deadline_check()
+            stage_arguments: dict[str, Any] = {
+                "uid": identity.uid,
+                "binding": binding_data,
+            }
+            if retained_authority_revision is not None:
+                stage_arguments.update(
+                    retained_rearm_job_id=str(job["id"]),
+                    retained_authority_lineage=retained_authority_lineage,
+                    retained_authority_revision=retained_authority_revision,
+                )
             binding = await self._repository_call(
                 authority_snapshot,
                 self.repository.stage_runtime_binding,
-                uid=identity.uid,
-                binding=binding_data,
+                **stage_arguments,
             )
             deadline_check()
             await self._repository_call(
@@ -1394,14 +1453,23 @@ class ProvisioningCoordinator:
             )
             deadline_check()
             invitation_target_required = invitation_admission is not None
+            activation_arguments: dict[str, Any] = {
+                "uid": identity.uid,
+                "provider": "hermes",
+                "require_invitation_target": invitation_target_required,
+                "authority_lineage": (current_self_hosted_runtime_lineage() if invitation_target_required else None),
+                "model": SELF_HOSTED_RUNTIME_MODEL,
+            }
+            if retained_authority_revision is not None:
+                activation_arguments.update(
+                    retained_rearm_job_id=str(job["id"]),
+                    retained_authority_lineage=retained_authority_lineage,
+                    retained_authority_revision=retained_authority_revision,
+                )
             activated = await self._repository_call(
                 authority_snapshot,
                 self.repository.activate_runtime_binding,
-                uid=identity.uid,
-                provider="hermes",
-                require_invitation_target=invitation_target_required,
-                authority_lineage=(current_self_hosted_runtime_lineage() if invitation_target_required else None),
-                model=SELF_HOSTED_RUNTIME_MODEL,
+                **activation_arguments,
             )
             deadline_check()
             await self._repository_call(

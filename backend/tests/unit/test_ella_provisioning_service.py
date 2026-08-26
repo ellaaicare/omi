@@ -246,6 +246,7 @@ class FakeRepository:
         self.runtime_rearm_calls = []
         self.runtime_rearm_lineages = []
         self.runtime_rearm_result = False
+        self.last_stage_arguments = None
         self.last_activation_arguments = None
 
     async def assert_schema_ready(self):
@@ -318,7 +319,20 @@ class FakeRepository:
         self.runtime_rearm_lineages.append(authority_lineage)
         return self.runtime_rearm_result
 
-    async def stage_runtime_binding(self, *, uid, binding):
+    async def stage_runtime_binding(
+        self,
+        *,
+        uid,
+        binding,
+        retained_rearm_job_id=None,
+        retained_authority_lineage=None,
+        retained_authority_revision=None,
+    ):
+        self.last_stage_arguments = {
+            "retained_rearm_job_id": retained_rearm_job_id,
+            "retained_authority_lineage": retained_authority_lineage,
+            "retained_authority_revision": retained_authority_revision,
+        }
         self.staged = dict(
             binding,
             id=binding["binding_id"],
@@ -339,12 +353,21 @@ class FakeRepository:
         require_invitation_target=False,
         authority_lineage=None,
         model=SELF_HOSTED_RUNTIME_MODEL,
+        retained_rearm_job_id=None,
+        retained_authority_lineage=None,
+        retained_authority_revision=None,
     ):
         self.last_activation_arguments = {
             "require_invitation_target": require_invitation_target,
             "authority_lineage": authority_lineage,
             "model": model,
         }
+        if retained_rearm_job_id is not None:
+            self.last_activation_arguments.update(
+                retained_rearm_job_id=retained_rearm_job_id,
+                retained_authority_lineage=retained_authority_lineage,
+                retained_authority_revision=retained_authority_revision,
+            )
         self.activation_calls += 1
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
@@ -3391,6 +3414,54 @@ def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypat
     assert invitation_repository.job["state"] == "ready"
     assert invitation_repository.last_activation_arguments["require_invitation_target"] is True
     assert invitation_repository.last_activation_arguments["authority_lineage"] == current_self_hosted_runtime_lineage()
+
+
+def test_retained_rearm_carries_exact_authority_through_stage_and_activation(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
+    lineage = current_self_hosted_runtime_lineage()
+    authority_revision = 7
+    job = _job(
+        state="provisioning",
+        stage="profile_ready",
+        receipts=[
+            {
+                "type": "retained_entitlement_recovered",
+                "content_free": True,
+                **lineage.as_dict(),
+                "authority_revision": authority_revision,
+            },
+            {
+                "type": "retained_runtime_rearmed",
+                "content_free": True,
+                "authority_revision": authority_revision,
+            },
+        ],
+    )
+    repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+    repository.job = dict(job)
+
+    asyncio.run(
+        ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt())).process_claimed_job(
+            job=job,
+            identity=identity,
+        )
+    )
+
+    expected = {
+        "retained_rearm_job_id": str(job["id"]),
+        "retained_authority_lineage": lineage,
+        "retained_authority_revision": authority_revision,
+    }
+    assert repository.last_stage_arguments == expected
+    assert repository.last_activation_arguments == {
+        "require_invitation_target": False,
+        "authority_lineage": None,
+        "model": SELF_HOSTED_RUNTIME_MODEL,
+        **expected,
+    }
+    assert repository.binding is not None and repository.binding["active"] is True
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):

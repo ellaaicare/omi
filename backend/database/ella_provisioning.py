@@ -2893,7 +2893,122 @@ class EllaProvisioningRepository:
         if not job or (str(job["state"]), str(job["stage"])) not in allowed_job_states:
             raise RuntimePoolClaimError("honcho_attestation_job_mismatch")
 
-    async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
+    async def _require_retained_runtime_rearm_authority_on_connection(
+        self,
+        connection,
+        *,
+        uid: str,
+        job_id: str,
+        authority_lineage: RuntimeTargetLineage,
+        authority_revision: int,
+        expected_job_stage: str,
+    ) -> None:
+        """Lock and revalidate one retained recovery authority generation."""
+        lineage = authority_lineage.validate()
+        if authority_revision <= 0:
+            raise ValueError("retained_runtime_authority_revision_invalid")
+        try:
+            parsed_job_id = uuid.UUID(str(job_id))
+        except ValueError as exc:
+            raise ValueError("retained_runtime_rearm_job_invalid") from exc
+        candidates = await connection.fetch(
+            """
+            SELECT job.id
+            FROM users account
+            JOIN ella_provisioning_jobs job
+              ON job.user_id = account.id
+             AND job.id = $2
+            JOIN ella_managed_cloud_consent_authority authority
+              ON authority.user_id = account.id
+             AND authority.decision = 'granted'
+             AND authority.consent_receipt_ref IS NOT NULL
+             AND authority.profile_binding_id IS NOT NULL
+             AND authority.policy_version = $3
+             AND authority.processor_set_hash = $4
+             AND authority.scope_version = $5
+             AND authority.scope_hash = $6
+             AND authority.revision = $7
+            JOIN voice_entitlements entitlement
+              ON entitlement.uid = account.omi_uid
+             AND entitlement.status = 'active'
+             AND entitlement.consent_authority_revision = authority.revision
+            WHERE account.omi_uid = $1
+              AND account.status = 'ACTIVE'
+              AND account.profile_class = 'real'
+              AND job.state = 'provisioning'
+              AND job.stage = $8
+              AND job.retryable = TRUE
+              AND job.error_code IS NULL
+              AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                  'type', 'retained_entitlement_recovered',
+                  'content_free', TRUE,
+                  'policy_version', $3::text,
+                  'processor_set_hash', $4::text,
+                  'scope_version', $5::text,
+                  'scope_hash', $6::text,
+                  'authority_revision', authority.revision
+              ))
+              AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                  'type', 'retained_runtime_rearmed',
+                  'content_free', TRUE,
+                  'authority_revision', authority.revision
+              ))
+              AND entitlement.invitation_id IS NULL
+              AND entitlement.plan = 'canary'
+              AND entitlement.daily_limit_s = 2700
+              AND entitlement.monthly_limit_s = 43200
+              AND entitlement.max_session_s = 1200
+              AND entitlement.max_concurrent = 1
+              AND entitlement.provider_allowlist = ARRAY['grok-voice']::text[]
+              AND entitlement.model_allowlist = ARRAY[]::text[]
+              AND entitlement.mode_allowlist = ARRAY['v4']::text[]
+              AND (
+                  entitlement.fallback_policy = '{"enabled":false,"order":[]}'::jsonb
+                  OR (
+                      jsonb_typeof(entitlement.fallback_policy) = 'string'
+                      AND entitlement.fallback_policy #>> '{}' = '{"order": [], "enabled": false}'
+                  )
+              )
+              AND entitlement.operator_note IN (
+                  'auto-provision self-hosted grok voice',
+                  'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31'
+              )
+              AND entitlement.consent_authority_epoch IS NULL
+              AND entitlement.invitation_consent_pending = FALSE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ella_invitation_redemptions redemption
+                  WHERE redemption.user_id = account.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ella_runtime_bindings active_binding
+                  WHERE active_binding.user_id = account.id
+                    AND active_binding.active = TRUE
+              )
+            FOR UPDATE OF job, authority, entitlement
+            """,
+            uid,
+            parsed_job_id,
+            lineage.policy_version,
+            lineage.processor_set_hash,
+            lineage.scope_version,
+            lineage.scope_hash,
+            authority_revision,
+            expected_job_stage,
+        )
+        if len(candidates) != 1:
+            raise RuntimePoolClaimError("retained_runtime_authority_stale")
+
+    async def stage_runtime_binding(
+        self,
+        *,
+        uid: str,
+        binding: dict[str, Any],
+        retained_rearm_job_id: Optional[str] = None,
+        retained_authority_lineage: Optional[RuntimeTargetLineage] = None,
+        retained_authority_revision: Optional[int] = None,
+    ) -> dict[str, Any]:
         requested_binding_id = str(binding.get("binding_id") or uuid.uuid4())
         runtime_target_mode = binding.get("runtime_target_mode") or None
         if runtime_target_mode is None and binding.get("role", "user") == "user":
@@ -2919,6 +3034,22 @@ class EllaProvisioningRepository:
                     owner=owner,
                     proof=owner_lock,
                 )
+                retained_authority_values = (
+                    retained_rearm_job_id,
+                    retained_authority_lineage,
+                    retained_authority_revision,
+                )
+                if any(value is not None for value in retained_authority_values):
+                    if not all(value is not None for value in retained_authority_values):
+                        raise ValueError("retained_runtime_authority_incomplete")
+                    await self._require_retained_runtime_rearm_authority_on_connection(
+                        connection,
+                        uid=uid,
+                        job_id=str(retained_rearm_job_id),
+                        authority_lineage=retained_authority_lineage,
+                        authority_revision=int(retained_authority_revision),
+                        expected_job_stage="profile_ready",
+                    )
                 row = await connection.fetchrow(
                     """
                     INSERT INTO ella_runtime_bindings (
@@ -3137,6 +3268,22 @@ class EllaProvisioningRepository:
                           AND binding.health_state = 'unhealthy'
                           AND binding.runtime_target_mode = 'hermes-chat'
                           AND binding.quarantine_reason = 'managed_cloud_consent_grant_changed'
+                          AND (
+                              entitlement.status = 'revoked'
+                              OR (
+                                  entitlement.status = 'active'
+                                  AND entitlement.consent_authority_revision IS NOT NULL
+                                  AND job.receipts @> jsonb_build_array(jsonb_build_object(
+                                      'type', 'retained_entitlement_recovered',
+                                      'content_free', TRUE,
+                                      'policy_version', $2::text,
+                                      'processor_set_hash', $3::text,
+                                      'scope_version', $4::text,
+                                      'scope_hash', $5::text,
+                                      'authority_revision', entitlement.consent_authority_revision
+                                  ))
+                              )
+                          )
                           AND NOT EXISTS (
                               SELECT 1
                               FROM ella_invitation_redemptions redemption
@@ -3148,7 +3295,7 @@ class EllaProvisioningRepository:
                               WHERE active_binding.user_id = account.id
                                 AND active_binding.active = TRUE
                           )
-                        FOR UPDATE OF job, binding, cluster, authority
+                        FOR UPDATE OF job, binding, cluster, authority, entitlement
                         """,
                         uid,
                         lineage.policy_version,
@@ -3167,7 +3314,14 @@ class EllaProvisioningRepository:
                         consent_authority_revision = COALESCE($2, consent_authority_revision),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE uid = $1
-                      AND status = 'revoked'
+                      AND (
+                          ($2::integer IS NULL AND status = 'revoked')
+                          OR (
+                              $2::integer IS NOT NULL
+                              AND status IN ('revoked', 'active')
+                              AND COALESCE(consent_authority_revision, 0) < $2
+                          )
+                      )
                       AND invitation_id IS NULL
                       AND plan = 'canary'
                       AND daily_limit_s = 2700
@@ -3422,6 +3576,9 @@ class EllaProvisioningRepository:
         require_invitation_target: bool = False,
         authority_lineage: Optional[RuntimeTargetLineage] = None,
         model: str = SELF_HOSTED_RUNTIME_MODEL,
+        retained_rearm_job_id: Optional[str] = None,
+        retained_authority_lineage: Optional[RuntimeTargetLineage] = None,
+        retained_authority_revision: Optional[int] = None,
     ) -> dict[str, Any]:
         lineage = None
         if require_invitation_target:
@@ -3454,6 +3611,24 @@ class EllaProvisioningRepository:
                     provider=provider,
                     mode="hermes-chat" if require_invitation_target else None,
                 )
+                retained_authority_values = (
+                    retained_rearm_job_id,
+                    retained_authority_lineage,
+                    retained_authority_revision,
+                )
+                if any(value is not None for value in retained_authority_values):
+                    if require_invitation_target or provider != SELF_HOSTED_RUNTIME_PROVIDER:
+                        raise ValueError("retained_runtime_authority_mode_invalid")
+                    if not all(value is not None for value in retained_authority_values):
+                        raise ValueError("retained_runtime_authority_incomplete")
+                    await self._require_retained_runtime_rearm_authority_on_connection(
+                        connection,
+                        uid=uid,
+                        job_id=str(retained_rearm_job_id),
+                        authority_lineage=retained_authority_lineage,
+                        authority_revision=int(retained_authority_revision),
+                        expected_job_stage="smoke_passed",
+                    )
                 selected = await connection.fetchrow(
                     """
                     SELECT b.*
