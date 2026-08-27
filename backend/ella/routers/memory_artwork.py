@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from ella.services.memory_artwork import (
@@ -15,6 +15,8 @@ from ella.services.memory_artwork import (
     MemoryArtworkService,
     MemoryArtworkWorker,
 )
+from ella.services.memory_artwork_recovery import claim_memory_artwork_enrichment_recovery
+from ella.services.summary_recovery import recover_failed_conversation_summary
 from utils.ella.exact_firebase_auth import (
     ELLA_SUBJECT_UID_HEADER,
     EllaRequestAuthority,
@@ -94,10 +96,34 @@ async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_fireba
 
 
 @router.post("/memories/{memory_id}/artwork")
-async def retry_memory_artwork(memory_id: str, uid: str = Depends(get_exact_firebase_uid)):
+async def retry_memory_artwork(
+    memory_id: str,
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(get_exact_firebase_uid),
+):
+    service = MemoryArtworkService()
     try:
-        return await MemoryArtworkService().enqueue(uid, memory_id)
+        return await service.enqueue(uid, memory_id)
     except MemoryArtworkError as exc:
+        if exc.code == "memory_artwork_enrichment_not_terminal":
+            claim = await claim_memory_artwork_enrichment_recovery(uid, memory_id)
+            outcome = str(claim.get("outcome") or "")
+            if outcome == "completed":
+                return await service.enqueue(uid, memory_id)
+            if outcome == "claimed":
+                background_tasks.add_task(
+                    recover_failed_conversation_summary,
+                    uid=uid,
+                    conversation_id=memory_id,
+                    request_id=str(claim["request_id"]),
+                    attempt_count=int(claim.get("attempt_count") or 1),
+                )
+            if outcome in {"claimed", "processing", "busy"}:
+                return {
+                    "schema_version": "ella.memory_artwork.v1",
+                    "outcome": "enrichment_queued" if outcome == "claimed" else "enrichment_in_progress",
+                    "status": "generating",
+                }
         raise _http_error(exc) from exc
 
 

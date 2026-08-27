@@ -2374,6 +2374,11 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
         "record_conversation_processing_retry_enrichment",
         lambda *args, **kwargs: events.append(f"enrichment:{args[3]}") or True,
     )
+    monkeypatch.setattr(
+        summary_recovery,
+        "enqueue_after_terminal_enrichment",
+        lambda uid, conversation_id: _async_event(events, "artwork:queued"),
+    )
 
     outcome = asyncio.run(
         summary_recovery.recover_failed_conversation_summary(
@@ -2398,6 +2403,7 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
         "enrichment:canonical_completed",
         "vector:Enriched",
         "enrichment:completed",
+        "artwork:queued",
     ]
 
 

@@ -14,6 +14,7 @@ import httpx
 
 import database.conversations as conversations_db
 from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.memory_artwork import enqueue_after_terminal_enrichment
 from ella.services.runtime_resolver import (
     CloudRuntimeAuthorityIdentity,
     cloud_runtime_authority_identity,
@@ -1089,4 +1090,5 @@ async def recover_failed_conversation_summary(
     )
     if not recorded:
         return 'superseded'
+    await enqueue_after_terminal_enrichment(uid, conversation_id)
     return ConversationStatus.completed.value
