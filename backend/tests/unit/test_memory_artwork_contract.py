@@ -2502,6 +2502,10 @@ def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unpro
 def _load_memory_artwork_router_module(router_name: str):
     service_module_name = "ella.services.memory_artwork"
     saved_service = sys.modules.get(service_module_name)
+    recovery_module_name = "ella.services.memory_artwork_recovery"
+    saved_recovery = sys.modules.get(recovery_module_name)
+    summary_module_name = "ella.services.summary_recovery"
+    saved_summary = sys.modules.get(summary_module_name)
     auth_module_name = "utils.ella.exact_firebase_auth"
     saved_auth = sys.modules.get(auth_module_name)
     parent_auth = sys.modules.get("utils.ella")
@@ -2521,7 +2525,14 @@ def _load_memory_artwork_router_module(router_name: str):
     auth_stub.get_exact_firebase_uid = reject_unauthenticated
     auth_stub.get_exact_service_authority = lambda **kwargs: TestAuthority()
 
+    recovery_stub = types.ModuleType(recovery_module_name)
+    recovery_stub.claim_memory_artwork_enrichment_recovery = lambda uid, memory_id: None
+    summary_stub = types.ModuleType(summary_module_name)
+    summary_stub.recover_failed_conversation_summary = lambda **kwargs: None
+
     sys.modules[service_module_name] = artwork
+    sys.modules[recovery_module_name] = recovery_stub
+    sys.modules[summary_module_name] = summary_stub
     sys.modules[auth_module_name] = auth_stub
     if parent_auth is not None:
         setattr(parent_auth, "exact_firebase_auth", auth_stub)
@@ -2539,6 +2550,14 @@ def _load_memory_artwork_router_module(router_name: str):
             sys.modules.pop(service_module_name, None)
         else:
             sys.modules[service_module_name] = saved_service
+        if saved_recovery is None:
+            sys.modules.pop(recovery_module_name, None)
+        else:
+            sys.modules[recovery_module_name] = saved_recovery
+        if saved_summary is None:
+            sys.modules.pop(summary_module_name, None)
+        else:
+            sys.modules[summary_module_name] = saved_summary
         if saved_auth is None:
             sys.modules.pop(auth_module_name, None)
         else:
@@ -2571,6 +2590,78 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
     response = client.get("/v1/ella/memories/memory-1/artwork")
     assert response.status_code == 401
     assert fake.calls == 0
+
+
+def test_retry_route_queues_missing_terminal_enrichment_once(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_recovery_router_test_module")
+    recovery_calls = []
+
+    class Service:
+        async def enqueue(self, uid, memory_id):
+            raise artwork.MemoryArtworkError("memory_artwork_enrichment_not_terminal", retryable=True)
+
+    async def claim(uid, memory_id):
+        return {
+            "outcome": "claimed",
+            "request_id": "84eb13fa-31d9-40ba-a742-c4de4757dc10",
+            "attempt_count": 1,
+        }
+
+    async def recover(**kwargs):
+        recovery_calls.append(kwargs)
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    monkeypatch.setattr(router_module, "claim_memory_artwork_enrichment_recovery", claim)
+    monkeypatch.setattr(router_module, "recover_failed_conversation_summary", recover)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+    client = TestClient(app)
+
+    response = client.post("/v1/ella/memories/memory-1/artwork")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "ella.memory_artwork.v1",
+        "outcome": "enrichment_queued",
+        "status": "generating",
+    }
+    assert recovery_calls == [
+        {
+            "uid": "owner-a",
+            "conversation_id": "memory-1",
+            "request_id": "84eb13fa-31d9-40ba-a742-c4de4757dc10",
+            "attempt_count": 1,
+        }
+    ]
+
+
+def test_retry_route_observes_existing_enrichment_without_duplicate_work(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_existing_recovery_router_test_module")
+
+    class Service:
+        async def enqueue(self, uid, memory_id):
+            raise artwork.MemoryArtworkError("memory_artwork_enrichment_not_terminal", retryable=True)
+
+    async def claim(uid, memory_id):
+        return {"outcome": "processing", "request_id": "existing", "attempt_count": 1}
+
+    async def never_recover(**kwargs):
+        raise AssertionError("an active recovery must not be scheduled twice")
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    monkeypatch.setattr(router_module, "claim_memory_artwork_enrichment_recovery", claim)
+    monkeypatch.setattr(router_module, "recover_failed_conversation_summary", never_recover)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+    client = TestClient(app)
+
+    response = client.post("/v1/ella/memories/memory-1/artwork")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "generating"
+    assert response.json()["outcome"] == "enrichment_in_progress"
 
 
 def test_mounted_internal_process_route_uses_durable_worker_job_claim(monkeypatch):
