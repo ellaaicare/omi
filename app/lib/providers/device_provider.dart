@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/http/api/device.dart';
@@ -26,7 +25,7 @@ typedef DeviceConnectionResolver = Future<BtDevice?> Function(String deviceId);
 typedef DeviceScanConnector = Future<BtDevice?> Function();
 typedef DeviceStorageListResolver = Future<List<int>> Function(String deviceId);
 
-class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption {
+class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implements IDeviceServiceSubsciption {
   DeviceProvider({
     IDeviceService? deviceService,
     DeviceConnectionResolver? connectionResolver,
@@ -34,6 +33,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     @visibleForTesting DeviceStorageListResolver? storageListResolver,
     @visibleForTesting Duration reconnectionInterval = const Duration(seconds: 15),
     @visibleForTesting int maxAutomaticReconnectAttempts = 3,
+    @visibleForTesting Duration automaticReconnectCooldown = const Duration(minutes: 1),
     @visibleForTesting Duration deviceCaptureRetryDelay = const Duration(milliseconds: 500),
     @visibleForTesting int maxDeviceCaptureStartAttempts = 3,
   })  : _deviceService = deviceService ?? ServiceManager.instance().device,
@@ -42,8 +42,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         _storageListResolver = storageListResolver,
         _reconnectionInterval = reconnectionInterval,
         _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts,
+        _automaticReconnectCooldown = automaticReconnectCooldown,
         _deviceCaptureRetryDelay = deviceCaptureRetryDelay,
         _maxDeviceCaptureStartAttempts = maxDeviceCaptureStartAttempts {
+    WidgetsBinding.instance.addObserver(this);
     _deviceService.subscribe(this, this);
   }
 
@@ -67,10 +69,12 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   DateTime? _reconnectAt;
   final Duration _reconnectionInterval;
   final int _maxAutomaticReconnectAttempts;
+  final Duration _automaticReconnectCooldown;
   final Duration _deviceCaptureRetryDelay;
   final int _maxDeviceCaptureStartAttempts;
   int _automaticReconnectAttempts = 0;
   bool _automaticReconnectExhausted = false;
+  DateTime? _automaticReconnectCooldownUntil;
 
   int get automaticReconnectAttempts => _automaticReconnectAttempts;
   bool get automaticReconnectExhausted => _automaticReconnectExhausted;
@@ -373,6 +377,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _reconnectionTimer?.cancel();
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
+    _automaticReconnectCooldownUntil = null;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
         t.cancel();
@@ -398,11 +403,12 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
           return;
         }
         if (_automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
-          t.cancel();
-          isConnecting = false;
-          _automaticReconnectExhausted = true;
+          final cooldownUntil = _automaticReconnectCooldownUntil;
+          if (cooldownUntil != null && cooldownUntil.isAfter(DateTime.now())) return;
+          _automaticReconnectAttempts = 0;
+          _automaticReconnectExhausted = false;
+          _automaticReconnectCooldownUntil = null;
           notifyListeners();
-          return;
         }
         _automaticReconnectAttempts++;
         try {
@@ -419,9 +425,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
         }
         if (!_isDeviceOperationCurrent(generation)) return;
         if (!isConnected && _automaticReconnectAttempts >= _maxAutomaticReconnectAttempts) {
-          t.cancel();
           isConnecting = false;
           _automaticReconnectExhausted = true;
+          _automaticReconnectCooldownUntil = DateTime.now().add(_automaticReconnectCooldown);
           notifyListeners();
         }
       } else {
@@ -533,12 +539,14 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
       _reconnectionTimer?.cancel();
       _automaticReconnectAttempts = 0;
       _automaticReconnectExhausted = false;
+      _automaticReconnectCooldownUntil = null;
     }
     notifyListeners();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     captureProvider?.removeListener(_onCaptureProviderChanged);
     _clearDeferredDeviceCapture();
     _bleBatteryLevelListener?.cancel();
@@ -547,6 +555,29 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     _connectDebouncer.cancel();
     _deviceService.unsubscribe(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(resumeKnownDeviceConnection(reason: 'app resumed'));
+    }
+  }
+
+  Future<void> resumeKnownDeviceConnection({required String reason}) async {
+    if (!_deviceServiceReady || isConnected) return;
+    final stored = SharedPreferencesUtil().btDevice;
+    if (stored.id.isEmpty) return;
+    await _captureTeardown;
+    if (!_deviceServiceReady || isConnected) return;
+    final generation = ++_deviceOperationGeneration;
+    pairedDevice = stored;
+    _automaticReconnectCooldownUntil = null;
+    await periodicConnect(
+      reason,
+      boundDeviceOnly: true,
+      operationGeneration: generation,
+    );
   }
 
   Future<void> onDeviceDisconnected({int? operationGeneration, String? deviceId}) async {

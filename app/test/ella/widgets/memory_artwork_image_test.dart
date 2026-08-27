@@ -66,6 +66,41 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
+  _RecoveringEnrichmentArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    if (loadCalls == 1) {
+      return const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_enrichment_not_terminal',
+      );
+    }
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/recovered.png'),
+      cacheKey: 'recovered-artwork-cache-key',
+    );
+  }
+}
+
 void main() {
   testWidgets('renders owner-scoped disk artwork before signed URL refresh completes', (tester) async {
     final api = _DelayedArtworkApi();
@@ -246,6 +281,38 @@ void main() {
 
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-eventually-ready')), findsOneWidget);
+  });
+
+  testWidgets('continues refreshing while Hermes enrichment is being recovered', (tester) async {
+    final api = _RecoveringEnrichmentArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-awaiting-enrichment',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(api.loadCalls, 1);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-awaiting-enrichment')), findsOneWidget);
   });
 
   testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {
