@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -505,6 +506,66 @@ void main() {
     expect(provider.automaticReconnectAttempts, 3);
     expect(provider.automaticReconnectExhausted, isTrue);
     expect(provider.isConnecting, isFalse);
+  });
+
+  test('automatic reconnect keeps a low-power watchdog after the initial burst', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async => ++scanCalls > 3 ? necklace : null,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+      automaticReconnectCooldown: const Duration(milliseconds: 5),
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test persistent reconnect');
+    for (var attempt = 0; attempt < 40 && !provider.presentationIsConnected; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, greaterThanOrEqualTo(4));
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.automaticReconnectAttempts, 0);
+    expect(provider.automaticReconnectExhausted, isFalse);
+  });
+
+  test('foreground resume immediately retries an exhausted saved necklace', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async => ++scanCalls > 3 ? necklace : null,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+      automaticReconnectCooldown: const Duration(hours: 1),
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test resume reconnect');
+    for (var attempt = 0; attempt < 20 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    expect(provider.automaticReconnectExhausted, isTrue);
+
+    await SharedPreferencesUtil().btDeviceSet(necklace);
+    provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    for (var attempt = 0; attempt < 100 && !provider.presentationIsConnected; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, greaterThanOrEqualTo(4));
+    expect(provider.presentationIsConnected, isTrue);
   });
 
   test('automatic reconnect clears a partially assigned device and exhausts after storage failure', () async {

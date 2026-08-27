@@ -129,6 +129,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       'memory_artwork_unavailable',
       'memory_artwork_not_found',
       'memory_artwork_generation_not_queued',
+      'memory_artwork_enrichment_not_terminal',
       'memory_artwork_provider_unavailable',
       'memory_artwork_provider_failed',
       'memory_artwork_runtime_authority_unavailable',
