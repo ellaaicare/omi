@@ -12,6 +12,7 @@ import 'package:omi/ella/services/memory_artwork_cache.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryArtworkCachedFileLookup = Future<File?> Function(String cacheKey);
+typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
 
@@ -21,6 +22,7 @@ class MemoryArtworkImage extends StatefulWidget {
     required this.conversation,
     this.api,
     this.cachedFileLookup,
+    this.cacheEvictor,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
   });
@@ -28,6 +30,7 @@ class MemoryArtworkImage extends StatefulWidget {
   final ServerConversation conversation;
   final MemoryArtworkApi? api;
   final MemoryArtworkCachedFileLookup? cachedFileLookup;
+  final MemoryArtworkCacheEvictor? cacheEvictor;
   final BoxFit fit;
   final Duration retryDelay;
 
@@ -41,6 +44,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   String _cacheKey = '';
   int _requestGeneration = 0;
   Timer? _retryTimer;
+  bool _imageRetryScheduled = false;
 
   @override
   void initState() {
@@ -68,6 +72,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   void _refreshRequest() {
     _retryTimer?.cancel();
     _retryTimer = null;
+    _imageRetryScheduled = false;
     final generation = ++_requestGeneration;
     final api = widget.api ?? MemoryArtworkApi();
     final artwork = widget.conversation.artwork;
@@ -107,19 +112,56 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Future<void> _loadRemoteResult(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) async {
     MemoryArtworkResult result;
     try {
-      result = await api.loadForDisplay(
-        widget.conversation.id,
-        enqueueIfMissing: artwork == null ||
-            artwork.status == MemoryArtworkStatus.generating ||
-            artwork.status == MemoryArtworkStatus.unavailable,
-      );
+      result = await api.loadForDisplay(widget.conversation.id, enqueueIfMissing: true);
     } catch (_) {
       _scheduleRetry(api, artwork, generation);
       return;
     }
     if (!mounted || generation != _requestGeneration) return;
-    setState(() => _remoteResult = result);
+    final readyCacheKey = result.isReady ? result.cacheKey : '';
+    setState(() {
+      _remoteResult = result;
+      if (readyCacheKey.isNotEmpty && readyCacheKey != _cacheKey) {
+        _cacheKey = readyCacheKey;
+        _cachedFile = null;
+      }
+    });
+    if (readyCacheKey.isNotEmpty) {
+      unawaited(_loadCachedFile(readyCacheKey, generation));
+    }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation);
+  }
+
+  void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
+    if (!mounted || generation != _requestGeneration || _imageRetryScheduled) return;
+    _imageRetryScheduled = true;
+    unawaited(_recoverImageDownload(api, artwork, generation, cacheKey));
+  }
+
+  Future<void> _recoverImageDownload(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation,
+    String cacheKey,
+  ) async {
+    try {
+      final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
+      if (cacheKey.isNotEmpty) await evict(cacheKey);
+    } catch (_) {
+      // A cache eviction failure must not stop signed URL recovery.
+    }
+    if (!mounted || generation != _requestGeneration) return;
+    setState(() {
+      _remoteResult = null;
+      _cachedFile = null;
+    });
+    _retryTimer?.cancel();
+    _retryTimer = Timer(widget.retryDelay, () {
+      _retryTimer = null;
+      if (!mounted || generation != _requestGeneration) return;
+      _imageRetryScheduled = false;
+      unawaited(_loadRemoteResult(api, artwork, generation));
+    });
   }
 
   bool _shouldRetry(MemoryArtworkResult result) {
@@ -179,7 +221,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           fit: widget.fit,
           useOldImageOnUrlChange: true,
           placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
-          errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.unavailable),
+          errorListener: (_) => _handleImageLoadFailure(
+            widget.api ?? MemoryArtworkApi(),
+            widget.conversation.artwork,
+            _requestGeneration,
+            result.cacheKey,
+          ),
+          errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
         ),
       );
     }

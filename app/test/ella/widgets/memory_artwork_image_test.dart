@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -15,6 +16,7 @@ class _DelayedArtworkApi extends MemoryArtworkApi {
 
   final remoteResult = Completer<MemoryArtworkResult>();
   int loadCalls = 0;
+  bool? lastEnqueueIfMissing;
 
   @override
   String cacheKeyForDisplay({
@@ -32,6 +34,7 @@ class _DelayedArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) {
     loadCalls += 1;
+    lastEnqueueIfMissing = enqueueIfMissing;
     return remoteResult.future;
   }
 }
@@ -169,11 +172,7 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(
-          conversation: conversation,
-          api: api,
-          cachedFileLookup: (_) async => cachedFile,
-        ),
+        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => cachedFile),
       ),
     );
     await tester.pump();
@@ -187,6 +186,31 @@ void main() {
 
     expect(find.byKey(const Key('memory-cached-artwork-memory-transient')), findsOneWidget);
     expect(find.text('Illustration unavailable'), findsNothing);
+  });
+
+  testWidgets('visible ready metadata still requests the authenticated artwork ensure', (tester) async {
+    final api = _DelayedArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-ready-metadata',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'summary-revision-1',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => null),
+      ),
+    );
+    await tester.pump();
+
+    expect(api.lastEnqueueIfMissing, isTrue);
   });
 
   testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
@@ -207,11 +231,7 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(
-          conversation: conversation,
-          api: api,
-          cachedFileLookup: (_) async => cachedFile,
-        ),
+        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => cachedFile),
       ),
     );
     await tester.pump();
@@ -283,6 +303,48 @@ void main() {
     expect(find.byKey(const Key('memory-generated-artwork-memory-eventually-ready')), findsOneWidget);
   });
 
+  testWidgets('failed signed image load evicts cache and refreshes the signed URL', (tester) async {
+    final api = _RefreshingArtworkApi();
+    final evictedKeys = <String>[];
+    final conversation = ServerConversation(
+      id: 'memory-expired-signed-url',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+          retryDelay: const Duration(milliseconds: 10),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    final image = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-memory-expired-signed-url')),
+    );
+    image.errorListener!(Exception('expired signed URL'));
+    await tester.pump();
+
+    expect(evictedKeys, ['ready-artwork-cache-key']);
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 3, reason: 'a failed image download must obtain a fresh signed URL');
+  });
+
   testWidgets('continues refreshing while Hermes enrichment is being recovered', (tester) async {
     final api = _RecoveringEnrichmentArtworkApi();
     final conversation = ServerConversation(
@@ -334,11 +396,7 @@ void main() {
             child: SizedBox(
               width: 112,
               height: 112,
-              child: MemoryArtworkImage(
-                conversation: conversation,
-                api: api,
-                cachedFileLookup: (_) async => null,
-              ),
+              child: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => null),
             ),
           ),
         ),
