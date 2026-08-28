@@ -977,7 +977,7 @@ def _background_boundaries():
     return boundaries
 
 
-def test_affected_background_boundaries_are_exact_and_owned_tasks_are_inventoried():
+def test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task():
     assert _background_boundaries() == Counter(
         {
             ("chat", "_stream_level_4_openclaw", "asyncio.create_task"): 1,
