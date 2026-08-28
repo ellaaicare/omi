@@ -82,6 +82,7 @@ HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").stri
 HERMES_CHAT_SESSION_SCOPE = os.getenv("ELLA_CHAT_HERMES_SESSION_SCOPE", "canonical").strip().lower()
 HERMES_CHAT_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ELLA_CHAT_HERMES_REQUEST_TIMEOUT_SECONDS", "60"))
 HERMES_CHAT_KEEPALIVE_SECONDS = max(1.0, float(os.getenv("ELLA_CHAT_HERMES_KEEPALIVE_SECONDS", "5")))
+HERMES_CHAT_REPLAY_SECONDS = max(5.0, float(os.getenv("ELLA_CHAT_HERMES_REPLAY_SECONDS", "90")))
 CHAT_STREAM_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
     "X-Accel-Buffering": "no",
@@ -99,7 +100,7 @@ CHAT_CONTEXT_CHANNELS = [
     if channel.strip()
 ]
 _canonical_event_store = PostgresCanonicalEventStore()
-_hermes_chat_turn_tasks: dict[tuple[str, str], asyncio.Task[list[str]]] = {}
+_hermes_chat_turn_tasks: dict[tuple[str, str], tuple[str, asyncio.Task[list[str]]]] = {}
 
 ELLA_SYSTEM_PROMPT = (
     "You are Ella, a warm and caring AI companion for elderly users. "
@@ -953,15 +954,46 @@ async def _collect_hermes_chat_events(*args, **kwargs) -> list[str]:
     return errors[-1:] or ["data: Error: hermes_stream_incomplete\n\n"]
 
 
-def _release_hermes_chat_turn(key: tuple[str, str], task: asyncio.Task[list[str]]) -> None:
-    if _hermes_chat_turn_tasks.get(key) is task:
+def _expire_hermes_chat_turn(key: tuple[str, str], fingerprint: str, task: asyncio.Task[list[str]]) -> None:
+    if _hermes_chat_turn_tasks.get(key) == (fingerprint, task):
         _hermes_chat_turn_tasks.pop(key, None)
+
+
+def _release_hermes_chat_turn(key: tuple[str, str], fingerprint: str, task: asyncio.Task[list[str]]) -> None:
     try:
         failure = task.exception()
     except asyncio.CancelledError:
+        _expire_hermes_chat_turn(key, fingerprint, task)
         return
     if failure is not None:
+        _expire_hermes_chat_turn(key, fingerprint, task)
         logger.error("Detached Hermes chat turn failed: %s", type(failure).__name__)
+        return
+    asyncio.get_running_loop().call_later(
+        HERMES_CHAT_REPLAY_SECONDS,
+        _expire_hermes_chat_turn,
+        key,
+        fingerprint,
+        task,
+    )
+
+
+def _hermes_chat_turn_fingerprint(
+    user_message: str,
+    client_info: dict | None,
+    runtime: IsolatedRuntime | None,
+) -> str:
+    authority_digest = runtime_authority_identity(runtime).digest if runtime is not None else "retained-owner"
+    material = json.dumps(
+        {
+            "authority": authority_digest,
+            "client": client_info or {},
+            "message": user_message,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 async def _stream_hermes_chat(
@@ -977,8 +1009,16 @@ async def _stream_hermes_chat(
 
     turn_id = turn_id or f"server-{uuid4()}"
     key = (uid, turn_id)
-    task = _hermes_chat_turn_tasks.get(key)
-    if task is None:
+    try:
+        fingerprint = _hermes_chat_turn_fingerprint(user_message, client_info, runtime)
+    except ProvisioningError as exc:
+        yield f"data: Error: {exc.code}\n\n"
+        return
+    retained = _hermes_chat_turn_tasks.get(key)
+    if retained is not None and retained[0] != fingerprint:
+        yield "data: Error: hermes_turn_conflict\n\n"
+        return
+    if retained is None:
         task = asyncio.create_task(
             _collect_hermes_chat_events(
                 user_message,
@@ -989,8 +1029,16 @@ async def _stream_hermes_chat(
                 runtime=runtime,
             )
         )
-        _hermes_chat_turn_tasks[key] = task
-        task.add_done_callback(lambda completed, task_key=key: _release_hermes_chat_turn(task_key, completed))
+        _hermes_chat_turn_tasks[key] = (fingerprint, task)
+        task.add_done_callback(
+            lambda completed, task_key=key, request_fingerprint=fingerprint: _release_hermes_chat_turn(
+                task_key,
+                request_fingerprint,
+                completed,
+            )
+        )
+    else:
+        task = retained[1]
 
     while not task.done():
         try:
