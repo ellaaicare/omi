@@ -81,6 +81,12 @@ HERMES_MODEL = os.getenv("HERMES_MODEL", "").strip()
 HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
 HERMES_CHAT_SESSION_SCOPE = os.getenv("ELLA_CHAT_HERMES_SESSION_SCOPE", "canonical").strip().lower()
 HERMES_CHAT_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ELLA_CHAT_HERMES_REQUEST_TIMEOUT_SECONDS", "60"))
+HERMES_CHAT_KEEPALIVE_SECONDS = max(1.0, float(os.getenv("ELLA_CHAT_HERMES_KEEPALIVE_SECONDS", "5")))
+HERMES_CHAT_REPLAY_SECONDS = max(5.0, float(os.getenv("ELLA_CHAT_HERMES_REPLAY_SECONDS", "90")))
+CHAT_STREAM_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
@@ -94,6 +100,7 @@ CHAT_CONTEXT_CHANNELS = [
     if channel.strip()
 ]
 _canonical_event_store = PostgresCanonicalEventStore()
+_hermes_chat_turn_tasks: dict[tuple[str, str], tuple[str, asyncio.Task[list[str]]]] = {}
 
 ELLA_SYSTEM_PROMPT = (
     "You are Ella, a warm and caring AI companion for elderly users. "
@@ -710,7 +717,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         yield "data: Error: OpenClaw request failed\n\n"
 
 
-async def _stream_hermes_chat(
+async def _produce_hermes_chat_events(
     user_message: str,
     uid: str,
     client_info: dict = None,
@@ -719,7 +726,7 @@ async def _stream_hermes_chat(
     client_sent_at: datetime = None,
     runtime: IsolatedRuntime | None = None,
 ):
-    """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
+    """Finish one Hermes turn and collect only terminal-safe SSE events."""
     _start = _time.time()
     if runtime is None and not _retained_owner_chat_configured(uid):
         yield "data: Error: hermes_runtime_required\n\n"
@@ -822,15 +829,16 @@ async def _stream_hermes_chat(
                 },
             ) as response:
                 if response.status_code != 200:
-                    body = await response.aread()
+                    await response.aread()
                     _elapsed = int((_time.time() - _start) * 1000)
                     print(
-                        f"[FLOW:CHAT-HERMES] ERROR status={response.status_code} latency={_elapsed}ms body={body[:120]!r}",
+                        f"[FLOW:CHAT-HERMES] ERROR status={response.status_code} latency={_elapsed}ms",
                         flush=True,
                     )
                     yield f"data: Error: Hermes API returned {response.status_code}\n\n"
                     return
 
+                terminal_seen = False
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -844,11 +852,19 @@ async def _stream_hermes_chat(
                     choices = data.get("choices") or []
                     if not choices:
                         continue
+                    finish_reason = choices[0].get("finish_reason")
+                    if finish_reason is not None:
+                        terminal_seen = True
+                        if finish_reason != "stop":
+                            raise RuntimeError("hermes_stream_incomplete")
                     delta = choices[0].get("delta") or {}
                     content = delta.get("content") or ""
                     if content:
                         text.append(content)
                         yield f"data: {content.replace(chr(10), '__CRLF__')}\n\n"
+
+                if text and not terminal_seen:
+                    raise RuntimeError("hermes_stream_missing_terminal")
 
         full_text = "".join(text).strip()
         if not full_text:
@@ -879,6 +895,10 @@ async def _stream_hermes_chat(
                     flush=True,
                 )
         if full_text:
+            if runtime_identity is not None:
+                completion_runtime = await revalidate_runtime_authority(runtime_identity)
+                if completion_runtime.provider != "hermes":
+                    raise ProvisioningError("self_hosted_runtime_required", retryable=False)
             assistant_started_at = datetime.now(timezone.utc)
             await _write_ios_chat_canonical_event(
                 _ios_chat_event(
@@ -920,10 +940,117 @@ async def _stream_hermes_chat(
         _elapsed = int((_time.time() - _start) * 1000)
         print(f"[FLOW:CHAT-HERMES] TIMEOUT uid={uid} latency={_elapsed}ms", flush=True)
         yield "data: Error: Hermes request timed out\n\n"
-    except Exception as e:
+    except Exception:
         _elapsed = int((_time.time() - _start) * 1000)
-        print(f"[FLOW:CHAT-HERMES] ERROR uid={uid} error={e} latency={_elapsed}ms", flush=True)
-        yield f"data: Error: {str(e)}\n\n"
+        print(f"[FLOW:CHAT-HERMES] ERROR uid={uid} error=unexpected latency={_elapsed}ms", flush=True)
+        yield "data: Error: hermes_unavailable\n\n"
+
+
+async def _collect_hermes_chat_events(*args, **kwargs) -> list[str]:
+    events = [event async for event in _produce_hermes_chat_events(*args, **kwargs)]
+    if any(event.startswith("done: ") for event in events):
+        return events
+    errors = [event for event in events if event.startswith("data: Error: ")]
+    return errors[-1:] or ["data: Error: hermes_stream_incomplete\n\n"]
+
+
+def _expire_hermes_chat_turn(key: tuple[str, str], fingerprint: str, task: asyncio.Task[list[str]]) -> None:
+    if _hermes_chat_turn_tasks.get(key) == (fingerprint, task):
+        _hermes_chat_turn_tasks.pop(key, None)
+
+
+def _release_hermes_chat_turn(key: tuple[str, str], fingerprint: str, task: asyncio.Task[list[str]]) -> None:
+    try:
+        failure = task.exception()
+    except asyncio.CancelledError:
+        _expire_hermes_chat_turn(key, fingerprint, task)
+        return
+    if failure is not None:
+        _expire_hermes_chat_turn(key, fingerprint, task)
+        logger.error("Detached Hermes chat turn failed: %s", type(failure).__name__)
+        return
+    asyncio.get_running_loop().call_later(
+        HERMES_CHAT_REPLAY_SECONDS,
+        _expire_hermes_chat_turn,
+        key,
+        fingerprint,
+        task,
+    )
+
+
+def _hermes_chat_turn_fingerprint(
+    user_message: str,
+    client_info: dict | None,
+    runtime: IsolatedRuntime | None,
+) -> str:
+    authority_digest = runtime_authority_identity(runtime).digest if runtime is not None else "retained-owner"
+    material = json.dumps(
+        {
+            "authority": authority_digest,
+            "client": client_info or {},
+            "message": user_message,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+async def _stream_hermes_chat(
+    user_message: str,
+    uid: str,
+    client_info: dict = None,
+    *,
+    turn_id: str = "",
+    client_sent_at: datetime = None,
+    runtime: IsolatedRuntime | None = None,
+):
+    """Keep an authenticated Hermes turn alive if its SSE subscriber disconnects."""
+
+    turn_id = turn_id or f"server-{uuid4()}"
+    key = (uid, turn_id)
+    try:
+        fingerprint = _hermes_chat_turn_fingerprint(user_message, client_info, runtime)
+    except ProvisioningError as exc:
+        yield f"data: Error: {exc.code}\n\n"
+        return
+    retained = _hermes_chat_turn_tasks.get(key)
+    if retained is not None and retained[0] != fingerprint:
+        yield "data: Error: hermes_turn_conflict\n\n"
+        return
+    if retained is None:
+        task = asyncio.create_task(
+            _collect_hermes_chat_events(
+                user_message,
+                uid,
+                client_info,
+                turn_id=turn_id,
+                client_sent_at=client_sent_at,
+                runtime=runtime,
+            )
+        )
+        _hermes_chat_turn_tasks[key] = (fingerprint, task)
+        task.add_done_callback(
+            lambda completed, task_key=key, request_fingerprint=fingerprint: _release_hermes_chat_turn(
+                task_key,
+                request_fingerprint,
+                completed,
+            )
+        )
+    else:
+        task = retained[1]
+
+    while not task.done():
+        try:
+            events = await asyncio.wait_for(asyncio.shield(task), timeout=HERMES_CHAT_KEEPALIVE_SECONDS)
+            break
+        except asyncio.TimeoutError:
+            yield ": keepalive\n\n"
+    else:
+        events = await asyncio.shield(task)
+
+    for event in events:
+        yield event
 
 
 async def _stream_hermes_cloud_chat(
@@ -1102,6 +1229,7 @@ async def ella_chat_stream(
         return StreamingResponse(
             stream,
             media_type="text/event-stream",
+            headers=CHAT_STREAM_HEADERS,
         )
 
     if debug_level == 1:

@@ -16,6 +16,7 @@ pytest tests/unit/test_voice_message_language.py -v
 pytest tests/unit/test_speaker_assignment.py -v
 pytest tests/unit/test_voice_canary.py -v
 pytest tests/unit/test_voice_proxy_auth.py -v
+pytest tests/unit/test_ella_chat_stream_resilience.py -v
 pytest tests/unit/test_memory_artwork_contract.py -v
 pytest tests/unit/test_memory_artwork_firestore.py -v
 pytest tests/postgres/test_voice_canary_postgres.py -v
