@@ -910,6 +910,49 @@ void main() {
     expect(preferences.memoryArtworkBackfillCursor(memoryArtworkDefaultStyle), isEmpty);
   });
 
+  testWidgets('Home restarts artwork backfill after the HTTP authority boundary rejects a stale account',
+      (tester) async {
+    final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    var activeAuthority = authorityA;
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      authorityThrowRequests: const {0},
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 4, existing: 0, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => activeAuthority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    expect(artwork.backfillCursors, [null]);
+    authorityA.current = false;
+    activeAuthority = await _installArtworkAuthority(uid: 'account-b', profileBindingId: 'profile-b');
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(artwork.backfillCursors, [null, null]);
+    final preferences = SharedPreferencesUtil();
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      isEmpty,
+    );
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-b:profile-b'),
+      '__complete__',
+    );
+  });
+
   testWidgets('style change waits for active backfill and restarts the selected style', (tester) async {
     final authority = await _installArtworkAuthority();
     final gate = Completer<void>();
@@ -1165,12 +1208,15 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
       MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
     ],
     this.firstBackfillGate,
-  }) : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages);
+    Set<int> authorityThrowRequests = const {},
+  })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
+        _authorityThrowRequests = Set<int>.of(authorityThrowRequests);
 
   int preferenceRequests = 0;
   final List<String?> backfillCursors = [];
   final List<String> selectedStyles = [];
   final List<MemoryArtworkBackfillPage> _backfillPages;
+  final Set<int> _authorityThrowRequests;
   final Completer<void>? firstBackfillGate;
   int _backfillRequests = 0;
 
@@ -1190,6 +1236,9 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     backfillCursors.add(cursor);
     final request = _backfillRequests++;
     if (request == 0 && firstBackfillGate != null) await firstBackfillGate!.future;
+    if (_authorityThrowRequests.contains(request)) {
+      throw ExactAccountAuthorityChangedException('test artwork authority changed during transport');
+    }
     if (_backfillPages.isEmpty) {
       return const MemoryArtworkBackfillPage(queued: 0, existing: 0, skipped: 0, hasMore: false);
     }

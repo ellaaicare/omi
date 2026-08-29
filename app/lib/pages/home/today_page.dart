@@ -194,7 +194,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _updatingWhispers = false;
   bool _showBackToRecent = false;
   bool _homeMemoryPrefetchScheduled = false;
+  bool _homeArtworkReloadScheduled = false;
   Future<MemoryArtworkBackfillPage?>? _homeArtworkBackfillInFlight;
+  _HomeArtworkAuthoritySnapshot? _homeArtworkBackfillAuthority;
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
   MemoryArtworkPreferences? _homeArtworkPreferences;
@@ -412,80 +414,122 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (mounted && _homeArtworkPreferences != null) setState(() => _homeArtworkPreferences = null);
       return;
     }
-    final preferences = await _memoryArtworkApi.preferences();
+    MemoryArtworkPreferences? preferences;
+    try {
+      preferences = await _memoryArtworkApi.preferences();
+    } on ExactAccountAuthorityChangedException {
+      _scheduleHomeArtworkReload();
+      return;
+    }
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     setState(() => _homeArtworkPreferences = preferences);
     if (preferences?.releaseEnabled == true) unawaited(_advanceHomeArtworkBackfill());
   }
 
+  void _scheduleHomeArtworkReload() {
+    if (!mounted || _homeArtworkReloadScheduled) return;
+    _homeArtworkReloadScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _homeArtworkReloadScheduled = false;
+      if (mounted) unawaited(_loadHomeArtworkPreferences());
+    });
+  }
+
   Future<MemoryArtworkBackfillPage?> _advanceHomeArtworkBackfill({bool restart = false}) async {
-    final preferences = _homeArtworkPreferences;
-    if (preferences == null || !preferences.releaseEnabled || _captureHomeArtworkAuthority() == null) return null;
-    while (_homeArtworkBackfillInFlight != null) {
-      if (!restart) return null;
-      await _homeArtworkBackfillInFlight;
+    while (true) {
+      final preferences = _homeArtworkPreferences;
+      final authority = _captureHomeArtworkAuthority();
+      if (preferences == null || !preferences.releaseEnabled || authority == null) return null;
+      final active = _homeArtworkBackfillInFlight;
+      if (active == null) {
+        return _startHomeArtworkBackfill(preferences: preferences, authority: authority, restart: restart);
+      }
+      final activeAuthority = _homeArtworkBackfillAuthority;
+      if (!restart && activeAuthority != null && _isHomeArtworkAuthorityCurrent(activeAuthority)) return null;
+      await active;
     }
-    final rawOperation = _runHomeArtworkBackfill(restart: restart);
+  }
+
+  Future<MemoryArtworkBackfillPage?> _startHomeArtworkBackfill({
+    required MemoryArtworkPreferences preferences,
+    required _HomeArtworkAuthoritySnapshot authority,
+    required bool restart,
+  }) {
+    final rawOperation = _runHomeArtworkBackfill(
+      preferences: preferences,
+      authority: authority,
+      restart: restart,
+    );
     late final Future<MemoryArtworkBackfillPage?> operation;
     operation = rawOperation.whenComplete(() {
-      if (identical(_homeArtworkBackfillInFlight, operation)) _homeArtworkBackfillInFlight = null;
+      if (identical(_homeArtworkBackfillInFlight, operation)) {
+        _homeArtworkBackfillInFlight = null;
+        _homeArtworkBackfillAuthority = null;
+      }
     });
+    _homeArtworkBackfillAuthority = authority;
     _homeArtworkBackfillInFlight = operation;
     return operation;
   }
 
-  Future<MemoryArtworkBackfillPage?> _runHomeArtworkBackfill({required bool restart}) async {
-    final preferences = _homeArtworkPreferences;
-    final authority = _captureHomeArtworkAuthority();
-    if (preferences == null || !preferences.releaseEnabled || authority == null) return null;
-    final storage = SharedPreferencesUtil();
-    if (restart) {
-      await storage.clearMemoryArtworkBackfillCursor(
-        preferences.styleVersion,
-        expectedUid: authority.uid,
-        expectedProfileBindingId: authority.profileBindingId,
-        expectedAuthorityGeneration: authority.generation,
-      );
-      if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
-    }
-    final savedCursor = storage.memoryArtworkBackfillCursor(
-      preferences.styleVersion,
-      expectedUid: authority.uid,
-      expectedProfileBindingId: authority.profileBindingId,
-      expectedAuthorityGeneration: authority.generation,
-    );
-    if (savedCursor == _artworkBackfillComplete) return null;
-    final page = await _memoryArtworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor);
-    if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
-    if (page == null) {
-      if (savedCursor.isNotEmpty) {
+  Future<MemoryArtworkBackfillPage?> _runHomeArtworkBackfill({
+    required MemoryArtworkPreferences preferences,
+    required _HomeArtworkAuthoritySnapshot authority,
+    required bool restart,
+  }) async {
+    try {
+      final storage = SharedPreferencesUtil();
+      if (restart) {
         await storage.clearMemoryArtworkBackfillCursor(
           preferences.styleVersion,
           expectedUid: authority.uid,
           expectedProfileBindingId: authority.profileBindingId,
           expectedAuthorityGeneration: authority.generation,
         );
+        if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
       }
-      return null;
-    }
-    final nextCursor = page.nextCursor?.trim() ?? '';
-    if (page.hasMore && nextCursor.isEmpty) {
-      await storage.clearMemoryArtworkBackfillCursor(
+      final savedCursor = storage.memoryArtworkBackfillCursor(
         preferences.styleVersion,
         expectedUid: authority.uid,
         expectedProfileBindingId: authority.profileBindingId,
         expectedAuthorityGeneration: authority.generation,
       );
+      if (savedCursor == _artworkBackfillComplete) return null;
+      final page = await _memoryArtworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor);
+      if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
+      if (page == null) {
+        if (savedCursor.isNotEmpty) {
+          await storage.clearMemoryArtworkBackfillCursor(
+            preferences.styleVersion,
+            expectedUid: authority.uid,
+            expectedProfileBindingId: authority.profileBindingId,
+            expectedAuthorityGeneration: authority.generation,
+          );
+        }
+        return null;
+      }
+      final nextCursor = page.nextCursor?.trim() ?? '';
+      if (page.hasMore && nextCursor.isEmpty) {
+        await storage.clearMemoryArtworkBackfillCursor(
+          preferences.styleVersion,
+          expectedUid: authority.uid,
+          expectedProfileBindingId: authority.profileBindingId,
+          expectedAuthorityGeneration: authority.generation,
+        );
+        return null;
+      }
+      final committed = await storage.saveMemoryArtworkBackfillCursor(
+        preferences.styleVersion,
+        page.hasMore ? nextCursor : _artworkBackfillComplete,
+        expectedUid: authority.uid,
+        expectedProfileBindingId: authority.profileBindingId,
+        expectedAuthorityGeneration: authority.generation,
+      );
+      return committed && _isHomeArtworkAuthorityCurrent(authority) ? page : null;
+    } on ExactAccountAuthorityChangedException {
+      _scheduleHomeArtworkReload();
       return null;
     }
-    final committed = await storage.saveMemoryArtworkBackfillCursor(
-      preferences.styleVersion,
-      page.hasMore ? nextCursor : _artworkBackfillComplete,
-      expectedUid: authority.uid,
-      expectedProfileBindingId: authority.profileBindingId,
-      expectedAuthorityGeneration: authority.generation,
-    );
-    return committed && _isHomeArtworkAuthorityCurrent(authority) ? page : null;
   }
 
   Future<void> _selectHomeArtworkStyle(String styleVersion) async {
@@ -495,10 +539,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    final saved = await _memoryArtworkApi.setStyle(
-      consentVersion: preferences.consentVersion,
-      styleVersion: styleVersion,
-    );
+    bool saved;
+    try {
+      saved = await _memoryArtworkApi.setStyle(
+        consentVersion: preferences.consentVersion,
+        styleVersion: styleVersion,
+      );
+    } on ExactAccountAuthorityChangedException {
+      _scheduleHomeArtworkReload();
+      return;
+    }
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     if (!saved) {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
