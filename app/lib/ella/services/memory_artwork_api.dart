@@ -11,6 +11,9 @@ const memoryArtworkSchemaVersion = 'ella.memory_artwork.v1';
 const memoryArtworkDefaultStyle = 'ella.memory_artwork.style.soft-gouache.v1';
 const memoryArtworkPaperCollageStyle = 'ella.memory_artwork.style.paper-collage.v1';
 const memoryArtworkGraphicLandscapeStyle = 'ella.memory_artwork.style.graphic-landscape.v1';
+const memoryArtworkWatercolorJournalStyle = 'ella.memory_artwork.style.watercolor-journal.v1';
+const memoryArtworkAnimeStorybookStyle = 'ella.memory_artwork.style.anime-storybook.v1';
+const memoryArtworkCinematicStillStyle = 'ella.memory_artwork.style.cinematic-still.v1';
 
 typedef MemoryArtworkHttpCall = Future<http.Response?> Function({
   required String url,
@@ -59,6 +62,22 @@ class MemoryArtworkPreferences {
   final String consentVersion;
   final String styleVersion;
   final bool releaseEnabled;
+}
+
+class MemoryArtworkBackfillPage {
+  const MemoryArtworkBackfillPage({
+    required this.queued,
+    required this.existing,
+    required this.skipped,
+    required this.hasMore,
+    this.nextCursor,
+  });
+
+  final int queued;
+  final int existing;
+  final int skipped;
+  final bool hasMore;
+  final String? nextCursor;
 }
 
 class MemoryArtworkApi {
@@ -211,12 +230,32 @@ class MemoryArtworkApi {
     return response?.statusCode == 200;
   }
 
-  Future<bool> backfillRecent() async {
+  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
     final authority = _authorityProvider();
-    if (authority == null) return false;
-    final response = await _call(authority, method: 'POST', path: 'v1/ella/memory-artwork/backfill');
-    return response?.statusCode == 200;
+    final normalizedCursor = cursor?.trim() ?? '';
+    if (authority == null || normalizedCursor.contains('/')) return null;
+    final response = await _call(
+      authority,
+      method: 'POST',
+      path: 'v1/ella/memory-artwork/backfill',
+      body: jsonEncode({if (normalizedCursor.isNotEmpty) 'cursor': normalizedCursor}),
+    );
+    if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
+    final payload = _jsonObject(response!.body);
+    if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) return null;
+    final hasMore = payload['has_more'];
+    final nextCursor = payload['next_cursor']?.toString().trim() ?? '';
+    if (hasMore is! bool || (hasMore && (nextCursor.isEmpty || nextCursor.contains('/')))) return null;
+    return MemoryArtworkBackfillPage(
+      queued: _nonNegativeInt(payload['queued']),
+      existing: _nonNegativeInt(payload['existing']),
+      skipped: _nonNegativeInt(payload['skipped']),
+      hasMore: hasMore,
+      nextCursor: hasMore ? nextCursor : null,
+    );
   }
+
+  Future<bool> backfillRecent() async => await backfillNext() != null;
 
   Future<http.Response?> _call(
     ExactAccountAuthorityVerifier authority, {
@@ -266,6 +305,8 @@ class MemoryArtworkApi {
     return RegExp(r'^[a-z0-9_]{1,80}$').hasMatch(raw) ? raw : 'memory_artwork_unavailable';
   }
 
+  static int _nonNegativeInt(Object? value) => value is int && value >= 0 ? value : 0;
+
   static MemoryArtworkResult _unavailable(String code) =>
       MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable, failureCode: code);
 
@@ -290,4 +331,7 @@ const _supportedStyles = {
   memoryArtworkDefaultStyle,
   memoryArtworkPaperCollageStyle,
   memoryArtworkGraphicLandscapeStyle,
+  memoryArtworkWatercolorJournalStyle,
+  memoryArtworkAnimeStorybookStyle,
+  memoryArtworkCinematicStillStyle,
 };

@@ -54,9 +54,9 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   }
 
   @override
-  Future<bool> backfillRecent() async {
+  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
     backfillCalls += 1;
-    return true;
+    return const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false);
   }
 }
 
@@ -343,13 +343,44 @@ void main() {
     await pumpPage(tester, provider, artworkApi: artworkApi);
     expect(find.byKey(const Key('memory-layout-journal-memory-layout')), findsOneWidget);
 
+    final backfillCallsBeforeStyleChange = artworkApi.backfillCalls;
     await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Paper collage'));
     await tester.pumpAndSettle();
     expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
-    expect(artworkApi.backfillCalls, 1);
+    expect(artworkApi.backfillCalls, backfillCallsBeforeStyleChange + 1);
     expect(find.textContaining('Recent memories are being refreshed'), findsOneWidget);
+  });
+
+  testWidgets('days layout groups a local day into one comic-style tile', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [
+        memory('morning', title: 'Morning walk', at: DateTime.parse('2026-08-10T08:00:00Z')),
+        memory('evening', title: 'Evening dinner', at: DateTime.parse('2026-08-10T18:00:00Z')),
+      ]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi();
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    await tester.tap(find.byKey(const Key('memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-evening')), findsOneWidget);
+    expect(find.text('2 memories'), findsOneWidget);
+    expect(find.textContaining('Morning walk'), findsOneWidget);
+    expect(find.byKey(const Key('memory-card-morning')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('memory-day-evening')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
+    expect(find.byKey(const Key('memory-card-morning')), findsOneWidget);
+    expect(find.byKey(const Key('memory-card-evening')), findsOneWidget);
   });
 
   testWidgets('Painter style control is disabled while real generation is unavailable', (tester) async {

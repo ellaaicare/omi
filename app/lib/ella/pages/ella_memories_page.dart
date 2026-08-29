@@ -19,7 +19,7 @@ import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
-enum MemoryGalleryLayout { journal, grid, list }
+enum MemoryGalleryLayout { journal, grid, list, days }
 
 enum MemoryGallerySort { recent, oldest }
 
@@ -40,6 +40,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   MemoryGalleryLayout _layout = MemoryGalleryLayout.journal;
   MemoryGallerySort _sort = MemoryGallerySort.recent;
   bool _showBackToRecent = false;
+  bool _artworkBackfillInFlight = false;
+
+  static const _backfillComplete = '__complete__';
 
   @override
   void initState() {
@@ -76,6 +79,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     if (provider.loadMoreConversationsFailed) return;
     if (_scrollController.position.extentAfter < 720) {
       unawaited(provider.getMoreConversationsFromServer());
+      unawaited(_advanceArtworkBackfill());
     }
   }
 
@@ -102,6 +106,31 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Future<void> _loadArtworkPreferences() async {
     final preferences = await _artworkApi.preferences();
     if (mounted) setState(() => _artworkPreferences = preferences);
+    if (preferences?.releaseEnabled == true) unawaited(_advanceArtworkBackfill());
+  }
+
+  Future<MemoryArtworkBackfillPage?> _advanceArtworkBackfill({bool restart = false}) async {
+    final preferences = _artworkPreferences;
+    if (preferences == null || !preferences.releaseEnabled || _artworkBackfillInFlight) return null;
+    final storage = SharedPreferencesUtil();
+    if (restart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
+    final savedCursor = storage.memoryArtworkBackfillCursor(preferences.styleVersion);
+    if (savedCursor == _backfillComplete) return null;
+    _artworkBackfillInFlight = true;
+    try {
+      final page = await _artworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor);
+      if (page == null) {
+        if (savedCursor.isNotEmpty) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
+        return null;
+      }
+      await storage.saveMemoryArtworkBackfillCursor(
+        preferences.styleVersion,
+        page.hasMore ? page.nextCursor! : _backfillComplete,
+      );
+      return page;
+    } finally {
+      _artworkBackfillInFlight = false;
+    }
   }
 
   Future<void> _selectArtworkStyle(String styleVersion) async {
@@ -111,7 +140,6 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       return;
     }
     final saved = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
-    final queued = saved && await _artworkApi.backfillRecent();
     if (!mounted) return;
     if (!saved) {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
@@ -125,11 +153,16 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         releaseEnabled: preferences.releaseEnabled,
       ),
     );
-    _showMessage(queued ? context.l10n.memoryArtworkStyleUpdated : context.l10n.memoryArtworkStyleUnavailable);
+    final queued = await _advanceArtworkBackfill(restart: true);
+    if (!mounted) return;
+    _showMessage(queued != null ? context.l10n.memoryArtworkStyleUpdated : context.l10n.memoryArtworkStyleUnavailable);
   }
 
   void _loadGalleryLayout() {
-    final saved = SharedPreferencesUtil().memoryGalleryLayout;
+    final preferences = SharedPreferencesUtil();
+    final saved = preferences.memoryArchiveGalleryLayout.isNotEmpty
+        ? preferences.memoryArchiveGalleryLayout
+        : preferences.memoryGalleryLayout;
     for (final layout in MemoryGalleryLayout.values) {
       if (layout.name == saved && mounted) {
         setState(() => _layout = layout);
@@ -140,7 +173,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   Future<void> _selectGalleryLayout(MemoryGalleryLayout layout) async {
     if (mounted) setState(() => _layout = layout);
-    await SharedPreferencesUtil().saveMemoryGalleryLayout(layout.name);
+    await SharedPreferencesUtil().saveMemoryArchiveGalleryLayout(layout.name);
   }
 
   void _showMessage(String message) {
@@ -184,6 +217,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
               PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
               PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
+              PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
             ],
           ),
           PopupMenuButton<MemoryGallerySort>(
@@ -219,6 +253,18 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               PopupMenuItem(
                 value: memoryArtworkGraphicLandscapeStyle,
                 child: Text(context.l10n.memoryArtworkGraphicLandscape),
+              ),
+              PopupMenuItem(
+                value: memoryArtworkWatercolorJournalStyle,
+                child: Text(context.l10n.memoryArtworkWatercolorJournal),
+              ),
+              PopupMenuItem(
+                value: memoryArtworkAnimeStorybookStyle,
+                child: Text(context.l10n.memoryArtworkAnimeStorybook),
+              ),
+              PopupMenuItem(
+                value: memoryArtworkCinematicStillStyle,
+                child: Text(context.l10n.memoryArtworkCinematicStill),
               ),
             ],
           ),
@@ -353,6 +399,30 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   List<Widget> _memoryGroupSlivers(MapEntry<String, List<ServerConversation>> entry) {
+    if (_layout == MemoryGalleryLayout.days) {
+      return [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
+          sliver: SliverToBoxAdapter(
+            child: MemoryDayGalleryCard(
+              dayLabel: entry.key,
+              memories: entry.value,
+              artworkApi: _artworkApi,
+              onOpen: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => EllaMemoryDayPage(
+                    dayLabel: entry.key,
+                    memories: entry.value,
+                    artworkApi: _artworkApi,
+                    onDelete: _deleteMemory,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ];
+    }
     final children = <Widget>[
       SliverPadding(
         padding: const EdgeInsets.fromLTRB(20, 24, 20, EllaSizes.cardGap),
@@ -426,6 +496,174 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final deleted = await provider.deleteConversationPermanently(conversation);
     if (!deleted && mounted) _showMessage(l10n.failedToDeleteConversations);
     return deleted;
+  }
+}
+
+class MemoryDayGalleryCard extends StatelessWidget {
+  const MemoryDayGalleryCard({
+    super.key,
+    required this.dayLabel,
+    required this.memories,
+    required this.onOpen,
+    this.artworkApi,
+  });
+
+  final String dayLabel;
+  final List<ServerConversation> memories;
+  final VoidCallback onOpen;
+  final MemoryArtworkApi? artworkApi;
+
+  @override
+  Widget build(BuildContext context) {
+    final titles = memories
+        .take(3)
+        .map((memory) => parseEllaDisplayValue(memory.structured.title).text.trim())
+        .where((title) => title.isNotEmpty)
+        .join(' · ');
+    return Semantics(
+      button: true,
+      label: context.l10n.memoryDayOpen(dayLabel, memories.length),
+      child: Material(
+        key: Key('memory-day-${memories.first.id}'),
+        color: EllaColors.card,
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onOpen,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AspectRatio(
+                aspectRatio: 1.75,
+                child: _MemoryDayArtworkCollage(memories: memories, artworkApi: artworkApi),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(dayLabel, style: EllaTextStyles.display),
+                          const SizedBox(height: 4),
+                          Text(context.l10n.memoryDayCount(memories.length), style: EllaTextStyles.secondary),
+                          if (titles.isNotEmpty) ...[
+                            const SizedBox(height: 6),
+                            Text(titles, maxLines: 2, overflow: TextOverflow.ellipsis, style: EllaTextStyles.body),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MemoryDayArtworkCollage extends StatelessWidget {
+  const _MemoryDayArtworkCollage({required this.memories, this.artworkApi});
+
+  final List<ServerConversation> memories;
+  final MemoryArtworkApi? artworkApi;
+
+  Widget _art(ServerConversation memory) => MemoryArtworkImage(conversation: memory, api: artworkApi);
+
+  @override
+  Widget build(BuildContext context) {
+    final panels = memories.take(4).toList(growable: false);
+    if (panels.length == 1) return _art(panels.first);
+    if (panels.length == 2) {
+      return Row(
+        children: [
+          Expanded(child: _art(panels[0])),
+          const SizedBox(width: 2),
+          Expanded(child: _art(panels[1])),
+        ],
+      );
+    }
+    return Row(
+      children: [
+        Expanded(child: _art(panels[0])),
+        const SizedBox(width: 2),
+        Expanded(
+          child: Column(
+            children: [
+              Expanded(child: _art(panels[1])),
+              const SizedBox(height: 2),
+              Expanded(
+                child: panels.length == 3
+                    ? _art(panels[2])
+                    : Row(
+                        children: [
+                          Expanded(child: _art(panels[2])),
+                          const SizedBox(width: 2),
+                          Expanded(child: _art(panels[3])),
+                        ],
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class EllaMemoryDayPage extends StatefulWidget {
+  const EllaMemoryDayPage({
+    super.key,
+    required this.dayLabel,
+    required this.memories,
+    required this.onDelete,
+    this.artworkApi,
+  });
+
+  final String dayLabel;
+  final List<ServerConversation> memories;
+  final Future<bool> Function(ServerConversation conversation) onDelete;
+  final MemoryArtworkApi? artworkApi;
+
+  @override
+  State<EllaMemoryDayPage> createState() => _EllaMemoryDayPageState();
+}
+
+class _EllaMemoryDayPageState extends State<EllaMemoryDayPage> {
+  late final List<ServerConversation> _memories = List.of(widget.memories);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.dayLabel)),
+      body: ListView.separated(
+        key: const Key('memory-day-list'),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
+        itemCount: _memories.length,
+        separatorBuilder: (_, __) => const SizedBox(height: EllaSizes.cardGap),
+        itemBuilder: (context, index) {
+          final memory = _memories[index];
+          return MemoryGalleryCard(
+            conversation: memory,
+            layout: MemoryGalleryLayout.journal,
+            onOpen: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: memory))),
+            onDelete: () async {
+              final deleted = await widget.onDelete(memory);
+              if (deleted && mounted) setState(() => _memories.remove(memory));
+              return deleted;
+            },
+          );
+        },
+      ),
+    );
   }
 }
 
