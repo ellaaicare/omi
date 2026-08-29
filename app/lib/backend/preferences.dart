@@ -938,6 +938,10 @@ class SharedPreferencesUtil {
         receipt?['effective_policy_revision'] == _verifiedEllaProvisioningPolicyRevision;
   }
 
+  /// Invalidates process-local provisioning authority without deleting the
+  /// cached receipt used to render an already-established account shell.
+  void invalidateEllaProvisioningServerVerification() => _clearEllaProvisioningServerVerification();
+
   static void _clearEllaProvisioningServerVerification() {
     _verifiedEllaProvisioningUid = '';
     _verifiedEllaProvisioningBindingRevision = 0;

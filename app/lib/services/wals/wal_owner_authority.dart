@@ -62,73 +62,6 @@ class AccountGenerationAuthority implements AccountCommitAuthority {
   bool isExactCurrent() => isCurrent();
 }
 
-class AccountOperationEntryAuthority implements AccountCommitAuthority {
-  const AccountOperationEntryAuthority({
-    required this.preferences,
-    required this.uid,
-    required this.authenticatedUid,
-    required this.verifiedPersonaId,
-    required this.profileBindingId,
-    required this.consentReceiptId,
-    required this.consentReceiptUid,
-    required this.consentAccepted,
-    required this.consentContractVersion,
-    required this.consentProcessorSetHash,
-    required this.consentScopeVersion,
-    required this.consentScopeHash,
-    required this.generation,
-    required this.provisioningState,
-    required this.bindingState,
-    required this.bindingRevision,
-    required this.policyRevision,
-  });
-
-  final SharedPreferencesUtil preferences;
-  @override
-  final String uid;
-  final String authenticatedUid;
-  final String? verifiedPersonaId;
-  final String profileBindingId;
-  final String consentReceiptId;
-  final String consentReceiptUid;
-  final bool consentAccepted;
-  final String consentContractVersion;
-  final String consentProcessorSetHash;
-  final String consentScopeVersion;
-  final String consentScopeHash;
-  final int generation;
-  final String provisioningState;
-  final String bindingState;
-  final int bindingRevision;
-  final String policyRevision;
-
-  @override
-  bool isCurrent() {
-    final receipt = preferences.getEllaProvisioningReceipt(uid);
-    return uid.isNotEmpty &&
-        authenticatedUid.isNotEmpty &&
-        WalOwnerAuthority.authenticatedUid == authenticatedUid &&
-        preferences.uid == uid &&
-        preferences.verifiedPersonaId?.trim() == verifiedPersonaId &&
-        preferences.aiConsentProfileBindingId == profileBindingId &&
-        preferences.aiConsentReceiptId == consentReceiptId &&
-        preferences.aiConsentReceiptUid == consentReceiptUid &&
-        preferences.aiConsentAccepted == consentAccepted &&
-        preferences.aiConsentContractVersion == consentContractVersion &&
-        preferences.aiConsentProcessorSetHash == consentProcessorSetHash &&
-        preferences.aiConsentScopeVersion == consentScopeVersion &&
-        preferences.aiConsentScopeHash == consentScopeHash &&
-        preferences.aiConsentAuthorityGeneration == generation &&
-        (receipt?['state']?.toString() ?? '') == provisioningState &&
-        (receipt?['binding_state']?.toString() ?? '') == bindingState &&
-        (receipt?['binding_revision'] as int? ?? 0) == bindingRevision &&
-        (receipt?['effective_policy_revision']?.toString() ?? '') == policyRevision;
-  }
-
-  @override
-  bool isExactCurrent() => isCurrent();
-}
-
 class WalOwnerAuthority {
   const WalOwnerAuthority._();
 
@@ -182,33 +115,14 @@ class WalOwnerAuthority {
     final currentAuthenticatedUid = authenticatedUid ?? WalOwnerAuthority.authenticatedUid;
     final operational = active(preferences: prefs, authenticatedUid: currentAuthenticatedUid);
     if (operational != null) return operational;
-    if (currentAuthenticatedUid.isEmpty || prefs.uid != currentAuthenticatedUid) {
-      if (SharedPreferencesUtil.isPublicBuild) return null;
-      return AccountGenerationAuthority(
-        preferences: prefs,
-        uid: prefs.uid,
-        generation: prefs.aiConsentAuthorityGeneration,
-      );
-    }
-    final receipt = prefs.getEllaProvisioningReceipt(currentAuthenticatedUid);
-    return AccountOperationEntryAuthority(
+    // A cached receipt is shell context, not server-verified authority. Public
+    // and authenticated operations must wait for a fresh provisioning proof.
+    if (currentAuthenticatedUid.isNotEmpty && prefs.uid == currentAuthenticatedUid) return null;
+    if (SharedPreferencesUtil.isPublicBuild) return null;
+    return AccountGenerationAuthority(
       preferences: prefs,
-      uid: currentAuthenticatedUid,
-      authenticatedUid: currentAuthenticatedUid,
-      verifiedPersonaId: prefs.verifiedPersonaId?.trim(),
-      profileBindingId: prefs.aiConsentProfileBindingId,
-      consentReceiptId: prefs.aiConsentReceiptId,
-      consentReceiptUid: prefs.aiConsentReceiptUid,
-      consentAccepted: prefs.aiConsentAccepted,
-      consentContractVersion: prefs.aiConsentContractVersion,
-      consentProcessorSetHash: prefs.aiConsentProcessorSetHash,
-      consentScopeVersion: prefs.aiConsentScopeVersion,
-      consentScopeHash: prefs.aiConsentScopeHash,
+      uid: prefs.uid,
       generation: prefs.aiConsentAuthorityGeneration,
-      provisioningState: receipt?['state']?.toString() ?? '',
-      bindingState: receipt?['binding_state']?.toString() ?? '',
-      bindingRevision: receipt?['binding_revision'] as int? ?? 0,
-      policyRevision: receipt?['effective_policy_revision']?.toString() ?? '',
     );
   }
 

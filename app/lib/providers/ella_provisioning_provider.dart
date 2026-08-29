@@ -58,7 +58,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
   bool get isOperational => state == EllaProvisioningState.ready && receipt?.isOperational == true;
 
   bool get isRevalidatingOperational =>
-      _revalidatingOperationalReceipt && state == EllaProvisioningState.checking && receipt?.isOperational == true;
+      _revalidatingOperationalReceipt &&
+      (state == EllaProvisioningState.checking || state == EllaProvisioningState.degraded) &&
+      receipt?.isOperational == true;
 
   String get supportCode => receipt?.supportCode ?? '';
 
@@ -105,6 +107,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
     state = EllaProvisioningState.checking;
     errorCode = '';
 
+    // A cached receipt may keep the established shell visible, but it must not
+    // authorize protected work until this exact request verifies it again.
+    _preferences.invalidateEllaProvisioningServerVerification();
+
     await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: _preferences);
     if (generation != _generation) return;
 
@@ -120,6 +126,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> retry({bool preserveOperationalReceipt = true}) async {
     if (_activeUid.isEmpty || _requestContext == null) return;
+    _preferences.invalidateEllaProvisioningServerVerification();
     if (!preserveOperationalReceipt && _revalidatingOperationalReceipt) {
       _revalidatingOperationalReceipt = false;
       state = EllaProvisioningState.checking;
@@ -130,11 +137,11 @@ class EllaProvisioningProvider extends ChangeNotifier {
       _retryEnsureAfterCurrentRequest = true;
       return;
     }
-    final wasOperational = isOperational;
+    final hadOperationalReceipt = receipt?.isOperational == true && (isOperational || _revalidatingOperationalReceipt);
     final generation = ++_generation;
     _cancelPoll();
     _pollAttempts = 0;
-    _revalidatingOperationalReceipt = preserveOperationalReceipt && wasOperational;
+    _revalidatingOperationalReceipt = preserveOperationalReceipt && hadOperationalReceipt;
     state = EllaProvisioningState.checking;
     errorCode = '';
     notifyListeners();
@@ -172,6 +179,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _requestInFlight = false;
     _retryEnsureAfterCurrentRequest = false;
     _revalidatingOperationalReceipt = false;
+    _preferences.invalidateEllaProvisioningServerVerification();
     receipt = null;
     errorCode = '';
     state = EllaProvisioningState.idle;
@@ -190,7 +198,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } catch (error) {
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
       Logger.debug('[ProvisioningGate] Ensure failed: $error');
-      _setFailure('network_unavailable');
+      _setFailure('network_unavailable', preserveOperationalReceipt: true);
       _schedulePoll(generation, _backoffDelay);
     } finally {
       _finishRequest(generation);
@@ -200,7 +208,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   Future<void> _poll(int generation) async {
     if (generation != _generation || _requestInFlight || !isForeground) return;
     if (_pollAttempts >= maxPollAttempts) {
-      _setFailure('provisioning_timeout');
+      _setFailure('provisioning_timeout', preserveOperationalReceipt: true);
       return;
     }
 
@@ -214,7 +222,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } catch (error) {
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
       Logger.debug('[ProvisioningGate] Status failed: $error');
-      _setFailure('network_unavailable');
+      _setFailure('network_unavailable', preserveOperationalReceipt: true);
       _schedulePoll(generation, _backoffDelay);
     } finally {
       _finishRequest(generation);
@@ -223,6 +231,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> _applyResponse(EllaProvisioningResponse response, int generation, int requestContextEpoch) async {
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
+    _preferences.invalidateEllaProvisioningServerVerification();
     final nextReceipt = response.receipt;
     if (!response.isAccepted || nextReceipt == null) {
       if (nextReceipt != null) {
@@ -245,7 +254,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
           response.statusCode == 409 ||
           response.statusCode == 426 ||
           (nextReceipt?.state == EllaProvisioningState.blocked && nextReceipt?.retryable != true);
-      _setFailure(code, blocked: blocked);
+      _setFailure(code, blocked: blocked, preserveOperationalReceipt: !blocked);
       if (_shouldPoll) _schedulePoll(generation, _backoffDelay);
       return;
     }
@@ -288,8 +297,13 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
   }
 
-  void _setFailure(String code, {bool blocked = false}) {
-    _revalidatingOperationalReceipt = false;
+  void _setFailure(String code, {bool blocked = false, bool preserveOperationalReceipt = false}) {
+    // A transient foreground refresh must not replace an already-working Home
+    // with setup UI. The provider still reports isOperational=false, so
+    // protected operations remain fail-closed until fresh authority succeeds.
+    _revalidatingOperationalReceipt =
+        !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt && receipt?.isOperational == true;
+    _preferences.invalidateEllaProvisioningServerVerification();
     errorCode = code;
     state = blocked ? EllaProvisioningState.blocked : EllaProvisioningState.degraded;
     notifyListeners();
@@ -350,6 +364,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _preferences.invalidateEllaProvisioningServerVerification();
     super.dispose();
   }
 }
