@@ -28,6 +28,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/widgets/transcript.dart';
@@ -803,11 +804,13 @@ void main() {
   });
 
   testWidgets('Home exposes day grouping and artwork style on the production entrypoint', (tester) async {
+    final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi();
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.manyMemories(),
       memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
     );
     addTearDown(harness.dispose);
     await tester.pumpAndSettle();
@@ -838,9 +841,7 @@ void main() {
   });
 
   testWidgets('Home continues artwork backfill when the memory feed nears its end', (tester) async {
-    final preferences = SharedPreferencesUtil();
-    preferences.uid = 'test-user';
-    await preferences.saveString('aiConsentProfileBindingId', 'profile-test-user');
+    final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
         MemoryArtworkBackfillPage(
@@ -857,6 +858,7 @@ void main() {
       tester,
       conversations: _ConversationFixtures.manyMemories(),
       memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
     );
     addTearDown(harness.dispose);
     await tester.pumpAndSettle();
@@ -867,6 +869,108 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(artwork.backfillCursors, [null, 'older-artwork-page']);
+  });
+
+  testWidgets('Home discards a delayed artwork cursor after account authority changes', (tester) async {
+    final authority = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      backfillPages: const [
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'account-a-older',
+        ),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    expect(artwork.backfillCursors, [null]);
+    authority.current = false;
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      isEmpty,
+    );
+    expect(preferences.memoryArtworkBackfillCursor(memoryArtworkDefaultStyle), isEmpty);
+  });
+
+  testWidgets('style change waits for active backfill and restarts the selected style', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+    expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null, null]);
+    expect(
+      find.text('New memories will use this illustration style. Recent memories are being refreshed.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('open day dismisses and clears its snapshot when the profile authority changes', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi();
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('memory-day-memory-1')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
+
+    authority.current = false;
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-list')), findsNothing);
+    expect(find.byKey(const Key('today-scroll')), findsOneWidget);
   });
 
   testWidgets('Home requests the next memory page only when the lazy feed nears its end', (tester) async {
@@ -1024,17 +1128,51 @@ class _HomeHarness {
   }
 }
 
+class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
+  _MutableExactAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isExactCurrent() => current;
+}
+
+Future<_MutableExactAuthority> _installArtworkAuthority({
+  String uid = 'test-user',
+  String profileBindingId = 'profile-test-user',
+}) async {
+  final preferences = SharedPreferencesUtil();
+  preferences.uid = uid;
+  await preferences.saveString('aiConsentProfileBindingId', profileBindingId);
+  for (final style in const [
+    memoryArtworkDefaultStyle,
+    memoryArtworkPaperCollageStyle,
+    memoryArtworkGraphicLandscapeStyle,
+    memoryArtworkWatercolorJournalStyle,
+    memoryArtworkAnimeStorybookStyle,
+    memoryArtworkCinematicStillStyle,
+  ]) {
+    await preferences.clearMemoryArtworkBackfillCursor(style);
+  }
+  return _MutableExactAuthority(uid);
+}
+
 class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   _FakeMemoryArtworkApi({
     List<MemoryArtworkBackfillPage> backfillPages = const [
       MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
     ],
+    this.firstBackfillGate,
   }) : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages);
 
   int preferenceRequests = 0;
   final List<String?> backfillCursors = [];
   final List<String> selectedStyles = [];
   final List<MemoryArtworkBackfillPage> _backfillPages;
+  final Completer<void>? firstBackfillGate;
+  int _backfillRequests = 0;
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async {
@@ -1050,6 +1188,8 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   @override
   Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
     backfillCursors.add(cursor);
+    final request = _backfillRequests++;
+    if (request == 0 && firstBackfillGate != null) await firstBackfillGate!.future;
     if (_backfillPages.isEmpty) {
       return const MemoryArtworkBackfillPage(queued: 0, existing: 0, skipped: 0, hasMore: false);
     }
@@ -1083,6 +1223,7 @@ Future<_HomeHarness> _pumpHome(
   List<ActionItemWithMetadata> actionItems = const [],
   List<List<ServerConversation>> olderConversationPages = const [],
   MemoryArtworkApi? memoryArtworkApi,
+  MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -1156,6 +1297,7 @@ Future<_HomeHarness> _pumpHome(
                   todayCardTalkRouteOpener: todayCardTalkRouteOpener,
                   guardianAvailability: () => false,
                   memoryArtworkApi: memoryArtworkApi,
+                  memoryArtworkAuthorityProvider: memoryArtworkAuthorityProvider,
                 ),
                 if (includeBottomNav) BottomNavBar(onTabTap: (_, __) {}),
               ],

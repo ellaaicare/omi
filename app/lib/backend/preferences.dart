@@ -788,18 +788,64 @@ class SharedPreferencesUtil {
     return key != null && await saveString(key, layout);
   }
 
-  String memoryArtworkBackfillCursor(String styleVersion) {
-    final key = _accountProfileScopedKey('ellaMemoryArtworkBackfillCursor:$styleVersion');
+  String? _memoryArtworkBackfillKey(
+    String styleVersion, {
+    String? expectedUid,
+    String? expectedProfileBindingId,
+    int? expectedAuthorityGeneration,
+  }) {
+    final currentUid = uid.trim();
+    final currentProfileBindingId = aiConsentProfileBindingId.trim();
+    if (currentUid.isEmpty || currentProfileBindingId.isEmpty) return null;
+    if (expectedUid != null && expectedUid != currentUid) return null;
+    if (expectedProfileBindingId != null && expectedProfileBindingId != currentProfileBindingId) return null;
+    if (expectedAuthorityGeneration != null && expectedAuthorityGeneration != aiConsentAuthorityGeneration) return null;
+    return 'ellaMemoryArtworkBackfillCursor:$styleVersion:$currentUid:$currentProfileBindingId';
+  }
+
+  String memoryArtworkBackfillCursor(
+    String styleVersion, {
+    String? expectedUid,
+    String? expectedProfileBindingId,
+    int? expectedAuthorityGeneration,
+  }) {
+    final key = _memoryArtworkBackfillKey(
+      styleVersion,
+      expectedUid: expectedUid,
+      expectedProfileBindingId: expectedProfileBindingId,
+      expectedAuthorityGeneration: expectedAuthorityGeneration,
+    );
     return key == null ? '' : getString(key);
   }
 
-  Future<bool> saveMemoryArtworkBackfillCursor(String styleVersion, String cursor) async {
-    final key = _accountProfileScopedKey('ellaMemoryArtworkBackfillCursor:$styleVersion');
+  Future<bool> saveMemoryArtworkBackfillCursor(
+    String styleVersion,
+    String cursor, {
+    String? expectedUid,
+    String? expectedProfileBindingId,
+    int? expectedAuthorityGeneration,
+  }) async {
+    final key = _memoryArtworkBackfillKey(
+      styleVersion,
+      expectedUid: expectedUid,
+      expectedProfileBindingId: expectedProfileBindingId,
+      expectedAuthorityGeneration: expectedAuthorityGeneration,
+    );
     return key != null && await saveString(key, cursor);
   }
 
-  Future<bool> clearMemoryArtworkBackfillCursor(String styleVersion) async {
-    final key = _accountProfileScopedKey('ellaMemoryArtworkBackfillCursor:$styleVersion');
+  Future<bool> clearMemoryArtworkBackfillCursor(
+    String styleVersion, {
+    String? expectedUid,
+    String? expectedProfileBindingId,
+    int? expectedAuthorityGeneration,
+  }) async {
+    final key = _memoryArtworkBackfillKey(
+      styleVersion,
+      expectedUid: expectedUid,
+      expectedProfileBindingId: expectedProfileBindingId,
+      expectedAuthorityGeneration: expectedAuthorityGeneration,
+    );
     return key != null && await remove(key);
   }
 

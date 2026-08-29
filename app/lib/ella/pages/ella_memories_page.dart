@@ -15,6 +15,7 @@ import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -414,6 +415,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                     dayLabel: entry.key,
                     memories: entry.value,
                     artworkApi: _artworkApi,
+                    exactAuthority: WalOwnerAuthority.active(),
+                    authorityChanges: SharedPreferencesUtil.aiConsentAuthorityChanges,
                     onDelete: _deleteMemory,
                   ),
                 ),
@@ -624,19 +627,60 @@ class EllaMemoryDayPage extends StatefulWidget {
     required this.memories,
     required this.onDelete,
     this.artworkApi,
+    this.exactAuthority,
+    this.authorityChanges,
   });
 
   final String dayLabel;
   final List<ServerConversation> memories;
   final Future<bool> Function(ServerConversation conversation) onDelete;
   final MemoryArtworkApi? artworkApi;
+  final ExactAccountAuthorityVerifier? exactAuthority;
+  final Listenable? authorityChanges;
 
   @override
   State<EllaMemoryDayPage> createState() => _EllaMemoryDayPageState();
 }
 
 class _EllaMemoryDayPageState extends State<EllaMemoryDayPage> {
-  late final List<ServerConversation> _memories = List.of(widget.memories);
+  late final List<ServerConversation> _memories;
+  late final ExactAccountAuthorityVerifier? _exactAuthority;
+  late final Listenable _authorityChanges;
+
+  @override
+  void initState() {
+    super.initState();
+    _memories = List.of(widget.memories);
+    _exactAuthority = widget.exactAuthority ?? WalOwnerAuthority.active();
+    _authorityChanges = widget.authorityChanges ?? SharedPreferencesUtil.aiConsentAuthorityChanges;
+    _authorityChanges.addListener(_handleAuthorityChanged);
+    if (_exactAuthority == null && SharedPreferencesUtil.isPublicBuild) {
+      _memories.clear();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _dismissIfMounted());
+    }
+  }
+
+  void _handleAuthorityChanged() {
+    final authority = _exactAuthority;
+    if (authority == null || authority.isExactCurrent()) return;
+    if (mounted) setState(_memories.clear);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _dismissIfMounted());
+  }
+
+  void _dismissIfMounted() {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    final navigator = Navigator.of(context);
+    navigator.popUntil((candidate) => identical(candidate, route));
+    if (route.isCurrent) navigator.pop();
+  }
+
+  @override
+  void dispose() {
+    _authorityChanges.removeListener(_handleAuthorityChanged);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

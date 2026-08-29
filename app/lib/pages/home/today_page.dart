@@ -45,6 +45,12 @@ typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
 typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
 typedef GuardianNativeLifecycle = Future<void> Function();
 typedef GuardianAvailability = bool Function();
+typedef _HomeArtworkAuthoritySnapshot = ({
+  ExactAccountAuthorityVerifier authority,
+  String uid,
+  String profileBindingId,
+  int generation,
+});
 
 enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
 
@@ -126,6 +132,7 @@ class TodayPage extends StatefulWidget {
     this.guardianNativeStop,
     this.guardianAvailability,
     this.memoryArtworkApi,
+    this.memoryArtworkAuthorityProvider,
   });
 
   final TodayCardRepository? todayCardRepository;
@@ -143,6 +150,7 @@ class TodayPage extends StatefulWidget {
   final GuardianNativeLifecycle? guardianNativeStop;
   final GuardianAvailability? guardianAvailability;
   final MemoryArtworkApi? memoryArtworkApi;
+  final MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider;
 
   @visibleForTesting
   static V2VSessionScope sessionScopeFor(TodayCard card) =>
@@ -186,7 +194,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _updatingWhispers = false;
   bool _showBackToRecent = false;
   bool _homeMemoryPrefetchScheduled = false;
-  bool _homeArtworkBackfillInFlight = false;
+  Future<MemoryArtworkBackfillPage?>? _homeArtworkBackfillInFlight;
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
   MemoryArtworkPreferences? _homeArtworkPreferences;
@@ -195,6 +203,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   static const _artworkBackfillComplete = '__complete__';
 
   late final MemoryArtworkApi _memoryArtworkApi = widget.memoryArtworkApi ?? MemoryArtworkApi();
+  late final MemoryArtworkAuthorityProvider _memoryArtworkAuthorityProvider =
+      widget.memoryArtworkAuthorityProvider ?? WalOwnerAuthority.active;
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
@@ -368,45 +378,120 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     await SharedPreferencesUtil().saveMemoryGalleryLayout(layout.name);
   }
 
+  _HomeArtworkAuthoritySnapshot? _captureHomeArtworkAuthority() {
+    final storage = SharedPreferencesUtil();
+    final authority = _memoryArtworkAuthorityProvider();
+    final uid = storage.uid.trim();
+    final profileBindingId = storage.aiConsentProfileBindingId.trim();
+    if (authority == null ||
+        uid.isEmpty ||
+        profileBindingId.isEmpty ||
+        authority.uid != uid ||
+        !authority.isExactCurrent()) {
+      return null;
+    }
+    return (
+      authority: authority,
+      uid: uid,
+      profileBindingId: profileBindingId,
+      generation: storage.aiConsentAuthorityGeneration,
+    );
+  }
+
+  bool _isHomeArtworkAuthorityCurrent(_HomeArtworkAuthoritySnapshot snapshot) {
+    final storage = SharedPreferencesUtil();
+    return snapshot.authority.isExactCurrent() &&
+        storage.uid.trim() == snapshot.uid &&
+        storage.aiConsentProfileBindingId.trim() == snapshot.profileBindingId &&
+        storage.aiConsentAuthorityGeneration == snapshot.generation;
+  }
+
   Future<void> _loadHomeArtworkPreferences() async {
+    final authority = _captureHomeArtworkAuthority();
+    if (authority == null) {
+      if (mounted && _homeArtworkPreferences != null) setState(() => _homeArtworkPreferences = null);
+      return;
+    }
     final preferences = await _memoryArtworkApi.preferences();
-    if (!mounted) return;
+    if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     setState(() => _homeArtworkPreferences = preferences);
     if (preferences?.releaseEnabled == true) unawaited(_advanceHomeArtworkBackfill());
   }
 
   Future<MemoryArtworkBackfillPage?> _advanceHomeArtworkBackfill({bool restart = false}) async {
     final preferences = _homeArtworkPreferences;
-    if (preferences == null || !preferences.releaseEnabled || _homeArtworkBackfillInFlight) return null;
-    final storage = SharedPreferencesUtil();
-    if (restart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
-    final savedCursor = storage.memoryArtworkBackfillCursor(preferences.styleVersion);
-    if (savedCursor == _artworkBackfillComplete) return null;
-    _homeArtworkBackfillInFlight = true;
-    try {
-      final page = await _memoryArtworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor);
-      if (page == null) {
-        if (savedCursor.isNotEmpty) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
-        return null;
-      }
-      final nextCursor = page.nextCursor?.trim() ?? '';
-      if (page.hasMore && nextCursor.isEmpty) {
-        await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
-        return null;
-      }
-      await storage.saveMemoryArtworkBackfillCursor(
-        preferences.styleVersion,
-        page.hasMore ? nextCursor : _artworkBackfillComplete,
-      );
-      return page;
-    } finally {
-      _homeArtworkBackfillInFlight = false;
+    if (preferences == null || !preferences.releaseEnabled || _captureHomeArtworkAuthority() == null) return null;
+    while (_homeArtworkBackfillInFlight != null) {
+      if (!restart) return null;
+      await _homeArtworkBackfillInFlight;
     }
+    final rawOperation = _runHomeArtworkBackfill(restart: restart);
+    late final Future<MemoryArtworkBackfillPage?> operation;
+    operation = rawOperation.whenComplete(() {
+      if (identical(_homeArtworkBackfillInFlight, operation)) _homeArtworkBackfillInFlight = null;
+    });
+    _homeArtworkBackfillInFlight = operation;
+    return operation;
+  }
+
+  Future<MemoryArtworkBackfillPage?> _runHomeArtworkBackfill({required bool restart}) async {
+    final preferences = _homeArtworkPreferences;
+    final authority = _captureHomeArtworkAuthority();
+    if (preferences == null || !preferences.releaseEnabled || authority == null) return null;
+    final storage = SharedPreferencesUtil();
+    if (restart) {
+      await storage.clearMemoryArtworkBackfillCursor(
+        preferences.styleVersion,
+        expectedUid: authority.uid,
+        expectedProfileBindingId: authority.profileBindingId,
+        expectedAuthorityGeneration: authority.generation,
+      );
+      if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
+    }
+    final savedCursor = storage.memoryArtworkBackfillCursor(
+      preferences.styleVersion,
+      expectedUid: authority.uid,
+      expectedProfileBindingId: authority.profileBindingId,
+      expectedAuthorityGeneration: authority.generation,
+    );
+    if (savedCursor == _artworkBackfillComplete) return null;
+    final page = await _memoryArtworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor);
+    if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
+    if (page == null) {
+      if (savedCursor.isNotEmpty) {
+        await storage.clearMemoryArtworkBackfillCursor(
+          preferences.styleVersion,
+          expectedUid: authority.uid,
+          expectedProfileBindingId: authority.profileBindingId,
+          expectedAuthorityGeneration: authority.generation,
+        );
+      }
+      return null;
+    }
+    final nextCursor = page.nextCursor?.trim() ?? '';
+    if (page.hasMore && nextCursor.isEmpty) {
+      await storage.clearMemoryArtworkBackfillCursor(
+        preferences.styleVersion,
+        expectedUid: authority.uid,
+        expectedProfileBindingId: authority.profileBindingId,
+        expectedAuthorityGeneration: authority.generation,
+      );
+      return null;
+    }
+    final committed = await storage.saveMemoryArtworkBackfillCursor(
+      preferences.styleVersion,
+      page.hasMore ? nextCursor : _artworkBackfillComplete,
+      expectedUid: authority.uid,
+      expectedProfileBindingId: authority.profileBindingId,
+      expectedAuthorityGeneration: authority.generation,
+    );
+    return committed && _isHomeArtworkAuthorityCurrent(authority) ? page : null;
   }
 
   Future<void> _selectHomeArtworkStyle(String styleVersion) async {
     final preferences = _homeArtworkPreferences;
-    if (preferences == null || !preferences.releaseEnabled) {
+    final authority = _captureHomeArtworkAuthority();
+    if (preferences == null || !preferences.releaseEnabled || authority == null) {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
@@ -414,7 +499,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       consentVersion: preferences.consentVersion,
       styleVersion: styleVersion,
     );
-    if (!mounted) return;
+    if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     if (!saved) {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
@@ -1264,16 +1349,24 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 dayLabel: entry.key,
                 memories: entry.value,
                 artworkApi: _memoryArtworkApi,
-                onOpen: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => EllaMemoryDayPage(
-                      dayLabel: entry.key,
-                      memories: entry.value,
-                      artworkApi: _memoryArtworkApi,
-                      onDelete: _deleteMemory,
+                onOpen: () {
+                  final authority = _memoryArtworkAuthorityProvider();
+                  if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
+                    return;
+                  }
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => EllaMemoryDayPage(
+                        dayLabel: entry.key,
+                        memories: entry.value,
+                        artworkApi: _memoryArtworkApi,
+                        exactAuthority: authority,
+                        authorityChanges: _todayCardAuthorityChanges,
+                        onDelete: _deleteMemory,
+                      ),
                     ),
-                  ),
-                ),
+                  );
+                },
               ),
             ),
           ),
