@@ -17,6 +17,7 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -27,6 +28,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/widgets/transcript.dart';
@@ -159,10 +161,7 @@ void main() {
       id: 'sensitive-memory',
       createdAt: DateTime(2026, 8, 8, 9),
       startedAt: DateTime(2026, 8, 8, 9),
-      structured: Structured(
-        '[MED] Doctor appointment and Emergency monitoring',
-        'A private memory overview.',
-      ),
+      structured: Structured('[MED] Doctor appointment and Emergency monitoring', 'A private memory overview.'),
     );
     final harness = await _pumpHome(tester, conversations: [sensitiveMemory]);
     addTearDown(harness.dispose);
@@ -214,13 +213,10 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation',
-      (tester) async {
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      initialRecordingState: RecordingState.record,
-    );
+  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation', (
+    tester,
+  ) async {
+    final harness = await _pumpHome(tester, conversations: const [], initialRecordingState: RecordingState.record);
     addTearDown(harness.dispose);
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
@@ -250,8 +246,9 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('failed external finalization keeps a retryable Finish target across transcript navigation',
-      (tester) async {
+  testWidgets('failed external finalization keeps a retryable Finish target across transcript navigation', (
+    tester,
+  ) async {
     final harness = await _pumpHome(
       tester,
       conversations: const [],
@@ -402,8 +399,9 @@ void main() {
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
   });
 
-  testWidgets('Home Record suspends ambient necklace capture for the iPhone and restores it after finish',
-      (tester) async {
+  testWidgets('Home Record suspends ambient necklace capture for the iPhone and restores it after finish', (
+    tester,
+  ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -435,8 +433,9 @@ void main() {
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
-  testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds',
-      (tester) async {
+  testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds', (
+    tester,
+  ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -484,11 +483,7 @@ void main() {
   });
 
   testWidgets('capture transport failure remains actionable and retries with the iPhone microphone', (tester) async {
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      initialRecordingState: RecordingState.error,
-    );
+    final harness = await _pumpHome(tester, conversations: const [], initialRecordingState: RecordingState.error);
     addTearDown(harness.dispose);
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
@@ -554,11 +549,7 @@ void main() {
 
   testWidgets('failed Home phone processing retries without restarting or re-stopping capture', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      finalizationResults: [false, true],
-    );
+    final harness = await _pumpHome(tester, conversations: const [], finalizationResults: [false, true]);
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -592,11 +583,7 @@ void main() {
   testWidgets('rapid Process Now taps share one Home finalization', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final finalizationGate = Completer<void>();
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      finalizationGate: finalizationGate,
-    );
+    final harness = await _pumpHome(tester, conversations: const [], finalizationGate: finalizationGate);
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -662,18 +649,17 @@ void main() {
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
-    expect(harness.capture.phoneStarts, 1,
-        reason: 'a failed routed moment must be retried before a new capture starts');
+    expect(
+      harness.capture.phoneStarts,
+      1,
+      reason: 'a failed routed moment must be retried before a new capture starts',
+    );
     expect(harness.capture.finalizationCalls, 2);
   });
 
   testWidgets('account authority change invalidates a pending Home finalization retry', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      finalizationResults: [false, true],
-    );
+    final harness = await _pumpHome(tester, conversations: const [], finalizationResults: [false, true]);
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -817,11 +803,221 @@ void main() {
     expect(find.byKey(const Key('memory-card-memory-4')), findsOneWidget);
   });
 
-  testWidgets('Home requests the next memory page only when the lazy feed nears its end', (tester) async {
-    final initial = List.generate(
-      16,
-      (index) => _ConversationFixtures.memory('memory-$index', daysAgo: index),
+  testWidgets('Home exposes day grouping and artwork style on the production entrypoint', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi();
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
     );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('home-memory-artwork-style-menu')), findsOneWidget);
+    expect(artwork.preferenceRequests, 1);
+    expect(artwork.backfillCursors, contains(null));
+
+    await tester.tap(find.byKey(const Key('home-memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-layout-journal-memory-1')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pumpAndSettle();
+
+    expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
+    expect(artwork.backfillCursors.where((cursor) => cursor == null).length, greaterThanOrEqualTo(2));
+    expect(
+      find.text('New memories will use this illustration style. Recent memories are being refreshed.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Home continues artwork backfill when the memory feed nears its end', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      backfillPages: const [
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'older-artwork-page',
+        ),
+        MemoryArtworkBackfillPage(queued: 8, existing: 2, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null]);
+
+    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -900));
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null, 'older-artwork-page']);
+  });
+
+  testWidgets('Home discards a delayed artwork cursor after account authority changes', (tester) async {
+    final authority = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      backfillPages: const [
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'account-a-older',
+        ),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    expect(artwork.backfillCursors, [null]);
+    authority.current = false;
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      isEmpty,
+    );
+    expect(preferences.memoryArtworkBackfillCursor(memoryArtworkDefaultStyle), isEmpty);
+  });
+
+  testWidgets('Home restarts artwork backfill after the HTTP authority boundary rejects a stale account',
+      (tester) async {
+    final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    var activeAuthority = authorityA;
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      authorityThrowRequests: const {0},
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 4, existing: 0, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => activeAuthority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    expect(artwork.backfillCursors, [null]);
+    authorityA.current = false;
+    activeAuthority = await _installArtworkAuthority(uid: 'account-b', profileBindingId: 'profile-b');
+    harness.authorityChanges.value += 1;
+    await tester.pump();
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(artwork.backfillCursors, [null, null]);
+    final preferences = SharedPreferencesUtil();
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      isEmpty,
+    );
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-b:profile-b'),
+      '__complete__',
+    );
+  });
+
+  testWidgets('style change waits for active backfill and restarts the selected style', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+    expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null, null]);
+    expect(
+      find.text('New memories will use this illustration style. Recent memories are being refreshed.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('open day dismisses and clears its snapshot when the profile authority changes', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi();
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('memory-day-memory-1')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
+
+    authority.current = false;
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-list')), findsNothing);
+    expect(find.byKey(const Key('today-scroll')), findsOneWidget);
+  });
+
+  testWidgets('Home requests the next memory page only when the lazy feed nears its end', (tester) async {
+    final initial = List.generate(16, (index) => _ConversationFixtures.memory('memory-$index', daysAgo: index));
     final older = _ConversationFixtures.memory('memory-older', daysAgo: 30);
     final harness = await _pumpHome(
       tester,
@@ -845,10 +1041,7 @@ void main() {
   });
 
   testWidgets('Home resets oldest sorting when a refresh restores incomplete pagination', (tester) async {
-    final memories = List.generate(
-      16,
-      (index) => _ConversationFixtures.memory('memory-sort-$index', daysAgo: index),
-    );
+    final memories = List.generate(16, (index) => _ConversationFixtures.memory('memory-sort-$index', daysAgo: index));
     final harness = await _pumpHome(tester, conversations: memories);
     addTearDown(harness.dispose);
 
@@ -978,6 +1171,87 @@ class _HomeHarness {
   }
 }
 
+class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
+  _MutableExactAuthority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isExactCurrent() => current;
+}
+
+Future<_MutableExactAuthority> _installArtworkAuthority({
+  String uid = 'test-user',
+  String profileBindingId = 'profile-test-user',
+}) async {
+  final preferences = SharedPreferencesUtil();
+  preferences.uid = uid;
+  await preferences.saveString('aiConsentProfileBindingId', profileBindingId);
+  for (final style in const [
+    memoryArtworkDefaultStyle,
+    memoryArtworkPaperCollageStyle,
+    memoryArtworkGraphicLandscapeStyle,
+    memoryArtworkWatercolorJournalStyle,
+    memoryArtworkAnimeStorybookStyle,
+    memoryArtworkCinematicStillStyle,
+  ]) {
+    await preferences.clearMemoryArtworkBackfillCursor(style);
+  }
+  return _MutableExactAuthority(uid);
+}
+
+class _FakeMemoryArtworkApi extends MemoryArtworkApi {
+  _FakeMemoryArtworkApi({
+    List<MemoryArtworkBackfillPage> backfillPages = const [
+      MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
+    ],
+    this.firstBackfillGate,
+    Set<int> authorityThrowRequests = const {},
+  })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
+        _authorityThrowRequests = Set<int>.of(authorityThrowRequests);
+
+  int preferenceRequests = 0;
+  final List<String?> backfillCursors = [];
+  final List<String> selectedStyles = [];
+  final List<MemoryArtworkBackfillPage> _backfillPages;
+  final Set<int> _authorityThrowRequests;
+  final Completer<void>? firstBackfillGate;
+  int _backfillRequests = 0;
+
+  @override
+  Future<MemoryArtworkPreferences?> preferences() async {
+    preferenceRequests += 1;
+    return const MemoryArtworkPreferences(
+      consent: 'accepted',
+      consentVersion: 'ai-data-processors-v10',
+      styleVersion: memoryArtworkDefaultStyle,
+      releaseEnabled: true,
+    );
+  }
+
+  @override
+  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
+    backfillCursors.add(cursor);
+    final request = _backfillRequests++;
+    if (request == 0 && firstBackfillGate != null) await firstBackfillGate!.future;
+    if (_authorityThrowRequests.contains(request)) {
+      throw ExactAccountAuthorityChangedException('test artwork authority changed during transport');
+    }
+    if (_backfillPages.isEmpty) {
+      return const MemoryArtworkBackfillPage(queued: 0, existing: 0, skipped: 0, hasMore: false);
+    }
+    return _backfillPages.removeAt(0);
+  }
+
+  @override
+  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+    selectedStyles.add(styleVersion);
+    return true;
+  }
+}
+
 Future<_HomeHarness> _pumpHome(
   WidgetTester tester, {
   required List<ServerConversation> conversations,
@@ -997,6 +1271,8 @@ Future<_HomeHarness> _pumpHome(
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
   List<ActionItemWithMetadata> actionItems = const [],
   List<List<ServerConversation>> olderConversationPages = const [],
+  MemoryArtworkApi? memoryArtworkApi,
+  MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -1069,6 +1345,8 @@ Future<_HomeHarness> _pumpHome(
                   todayCardAuthorityChanges: authorityChanges,
                   todayCardTalkRouteOpener: todayCardTalkRouteOpener,
                   guardianAvailability: () => false,
+                  memoryArtworkApi: memoryArtworkApi,
+                  memoryArtworkAuthorityProvider: memoryArtworkAuthorityProvider,
                 ),
                 if (includeBottomNav) BottomNavBar(onTabTap: (_, __) {}),
               ],

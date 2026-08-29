@@ -15,6 +15,7 @@ import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -191,7 +192,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         final result = (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt);
         return _sort == MemoryGallerySort.recent ? result : -result;
       });
-    final groups = _group(context, orderedConversations);
+    final groups = groupMemoryConversationsByDay(context, orderedConversations);
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
     _checkPaginationAfterLayout(conversationProvider);
@@ -414,6 +415,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                     dayLabel: entry.key,
                     memories: entry.value,
                     artworkApi: _artworkApi,
+                    exactAuthority: WalOwnerAuthority.active(),
+                    authorityChanges: SharedPreferencesUtil.aiConsentAuthorityChanges,
                     onDelete: _deleteMemory,
                   ),
                 ),
@@ -624,19 +627,60 @@ class EllaMemoryDayPage extends StatefulWidget {
     required this.memories,
     required this.onDelete,
     this.artworkApi,
+    this.exactAuthority,
+    this.authorityChanges,
   });
 
   final String dayLabel;
   final List<ServerConversation> memories;
   final Future<bool> Function(ServerConversation conversation) onDelete;
   final MemoryArtworkApi? artworkApi;
+  final ExactAccountAuthorityVerifier? exactAuthority;
+  final Listenable? authorityChanges;
 
   @override
   State<EllaMemoryDayPage> createState() => _EllaMemoryDayPageState();
 }
 
 class _EllaMemoryDayPageState extends State<EllaMemoryDayPage> {
-  late final List<ServerConversation> _memories = List.of(widget.memories);
+  late final List<ServerConversation> _memories;
+  late final ExactAccountAuthorityVerifier? _exactAuthority;
+  late final Listenable _authorityChanges;
+
+  @override
+  void initState() {
+    super.initState();
+    _memories = List.of(widget.memories);
+    _exactAuthority = widget.exactAuthority ?? WalOwnerAuthority.active();
+    _authorityChanges = widget.authorityChanges ?? SharedPreferencesUtil.aiConsentAuthorityChanges;
+    _authorityChanges.addListener(_handleAuthorityChanged);
+    if (_exactAuthority == null && SharedPreferencesUtil.isPublicBuild) {
+      _memories.clear();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _dismissIfMounted());
+    }
+  }
+
+  void _handleAuthorityChanged() {
+    final authority = _exactAuthority;
+    if (authority == null || authority.isExactCurrent()) return;
+    if (mounted) setState(_memories.clear);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _dismissIfMounted());
+  }
+
+  void _dismissIfMounted() {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    final navigator = Navigator.of(context);
+    navigator.popUntil((candidate) => identical(candidate, route));
+    if (route.isCurrent) navigator.pop();
+  }
+
+  @override
+  void dispose() {
+    _authorityChanges.removeListener(_handleAuthorityChanged);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -880,9 +924,13 @@ class _MemoryDetails extends StatelessWidget {
   }
 }
 
-Map<String, List<ServerConversation>> _group(BuildContext context, List<ServerConversation> conversations) {
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
+Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
+  BuildContext context,
+  List<ServerConversation> conversations, {
+  DateTime? now,
+}) {
+  final current = now ?? DateTime.now();
+  final today = DateTime(current.year, current.month, current.day);
   final result = <String, List<ServerConversation>>{};
   for (final conversation in conversations) {
     final value = (conversation.startedAt ?? conversation.createdAt).toLocal();
