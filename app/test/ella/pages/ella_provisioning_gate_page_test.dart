@@ -167,6 +167,55 @@ void main() {
     expect(find.byKey(const Key('ready-child')), findsOneWidget);
   });
 
+  testWidgets('transient foreground revalidation failure does not replace an operational Home', (tester) async {
+    final transport = _DelayedResumeTransport();
+    final provider = EllaProvisioningProvider(
+      transport: transport,
+      scheduler: (delay, callback) => _InertPollHandle(),
+    );
+    addTearDown(provider.dispose);
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.556+837',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+      ),
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaProvisioningGatePage(
+            readyChild: const SizedBox(key: Key('ready-child')),
+            startOnMount: false,
+            authenticatedUidProvider: () => 'uid-a',
+            appVersionProvider: () => '1.0.556+837',
+            consentAuthorityRefresher: (_) async => true,
+            timezoneProvider: () async => 'America/Los_Angeles',
+          ),
+        ),
+      ),
+    );
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    transport.revalidation.completeError(StateError('connection reset'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(provider.state, EllaProvisioningState.degraded);
+    expect(provider.isOperational, isFalse);
+    expect(provider.isRevalidatingOperational, isTrue);
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+    expect(find.text('Setup is waiting for a connection'), findsNothing);
+  });
+
   testWidgets('replacement consent receipt closes Home until provisioning recaptures authority', (tester) async {
     final transport = _DelayedResumeTransport();
     final provider = EllaProvisioningProvider(transport: transport);
@@ -285,6 +334,11 @@ class _DelayedResumeTransport implements EllaProvisioningTransport {
 
   @override
   Future<EllaProvisioningResponse> status() async => throw UnimplementedError();
+}
+
+class _InertPollHandle implements EllaProvisioningPollHandle {
+  @override
+  void cancel() {}
 }
 
 EllaProvisioningResponse _readyResponse() => EllaProvisioningResponse(

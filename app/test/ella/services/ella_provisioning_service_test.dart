@@ -332,6 +332,72 @@ void main() {
     expect(provider.isOperational, isTrue);
   });
 
+  test('transient foreground exception preserves an operational receipt without claiming fresh authority', () async {
+    final transport = _ReadyThenRevalidationTransport(error: StateError('connection reset'));
+    final scheduled = <_FakePollHandle>[];
+    final provider = EllaProvisioningProvider(
+      transport: transport,
+      scheduler: (delay, callback) {
+        final handle = _FakePollHandle(delay, callback);
+        scheduled.add(handle);
+        return handle;
+      },
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    expect(provider.isOperational, isTrue);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+
+    expect(provider.isOperational, isFalse);
+    expect(provider.isRevalidatingOperational, isTrue);
+    expect(provider.state, EllaProvisioningState.degraded);
+    expect(provider.errorCode, 'network_unavailable');
+    expect(provider.receipt?.isOperational, isTrue);
+    expect(scheduled, hasLength(1));
+  });
+
+  test('retryable provider response preserves an operational receipt during foreground revalidation', () async {
+    final transport = _ReadyThenRevalidationTransport(response: const EllaProvisioningResponse(statusCode: 503));
+    final provider = EllaProvisioningProvider(transport: transport, scheduler: _discardedPollScheduler);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+
+    expect(provider.isOperational, isFalse);
+    expect(provider.isRevalidatingOperational, isTrue);
+    expect(provider.state, EllaProvisioningState.degraded);
+    expect(provider.errorCode, 'provider_unavailable');
+    expect(provider.receipt?.isOperational, isTrue);
+  });
+
+  test('hard auth failure still closes an operational foreground session', () async {
+    final transport = _ReadyThenRevalidationTransport(response: const EllaProvisioningResponse(statusCode: 401));
+    final provider = EllaProvisioningProvider(transport: transport);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+
+    expect(provider.state, EllaProvisioningState.blocked);
+    expect(provider.errorCode, 'auth_required');
+    expect(provider.isOperational, isFalse);
+    expect(provider.isRevalidatingOperational, isFalse);
+  });
+
+  test('fresh account transient failure remains gated without cached operational authority', () async {
+    final provider = EllaProvisioningProvider(
+      transport: _AlwaysFailingProvisioningTransport(),
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+
+    expect(provider.state, EllaProvisioningState.degraded);
+    expect(provider.errorCode, 'network_unavailable');
+    expect(provider.isOperational, isFalse);
+    expect(provider.isRevalidatingOperational, isFalse);
+  });
+
   test('provisioning writes only a safe receipt and leaves retained compatibility values unchanged', () async {
     SharedPreferences.setMockInitialValues({
       'ellaProvisioningAccountUid': 'uid-a',
@@ -1007,6 +1073,37 @@ class _FakePollHandle implements EllaProvisioningPollHandle {
 
   @override
   void cancel() => canceled = true;
+}
+
+EllaProvisioningPollHandle _discardedPollScheduler(Duration delay, VoidCallback callback) =>
+    _FakePollHandle(delay, callback);
+
+class _ReadyThenRevalidationTransport implements EllaProvisioningTransport {
+  _ReadyThenRevalidationTransport({this.response, this.error});
+
+  final EllaProvisioningResponse? response;
+  final Object? error;
+  int ensureCalls = 0;
+
+  @override
+  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) async {
+    ensureCalls++;
+    if (ensureCalls == 1) return _readyProvisioningResponse(bindingRevision: 1);
+    if (error != null) throw error!;
+    return response!;
+  }
+
+  @override
+  Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
+}
+
+class _AlwaysFailingProvisioningTransport implements EllaProvisioningTransport {
+  @override
+  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) =>
+      throw StateError('connection reset');
+
+  @override
+  Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
 }
 
 class _DeferredEnsureTransport implements EllaProvisioningTransport {
