@@ -57,16 +57,25 @@ def get_conversation(uid: str, memory_id: str) -> Optional[dict[str, Any]]:
     return snapshot.to_dict() if snapshot.exists else None
 
 
-def list_recent_conversations(uid: str, *, limit: int) -> list[dict[str, Any]]:
-    query = (
-        db.collection("users")
-        .document(uid)
-        .collection("conversations")
-        .where("discarded", "==", False)
-        .order_by("created_at", direction=firestore.Query.DESCENDING)
-        .limit(limit)
-    )
+def list_conversations_page(
+    uid: str,
+    *,
+    limit: int,
+    cursor_memory_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    conversations = db.collection("users").document(uid).collection("conversations")
+    query = conversations.where("discarded", "==", False).order_by("created_at", direction=firestore.Query.DESCENDING)
+    if cursor_memory_id:
+        cursor = conversations.document(cursor_memory_id).get()
+        if not cursor.exists:
+            raise ValueError("memory_artwork_backfill_cursor_invalid")
+        query = query.start_after(cursor)
+    query = query.limit(limit)
     return [{**(snapshot.to_dict() or {}), "id": snapshot.id} for snapshot in query.stream()]
+
+
+def list_recent_conversations(uid: str, *, limit: int) -> list[dict[str, Any]]:
+    return list_conversations_page(uid, limit=limit)
 
 
 def _terminal_enrichment_matches(conversation: dict[str, Any], enrichment_revision: str) -> bool:

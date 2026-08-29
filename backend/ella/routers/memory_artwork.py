@@ -6,7 +6,7 @@ import os
 from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ella.services.memory_artwork import (
     ARTWORK_CONSENT_VERSION,
@@ -32,6 +32,10 @@ class MemoryArtworkPreferencesUpdate(BaseModel):
     consent: Literal["accepted", "declined"]
     consent_version: str = ARTWORK_CONSENT_VERSION
     style_version: str = DEFAULT_STYLE_VERSION
+
+
+class MemoryArtworkBackfillRequest(BaseModel):
+    cursor: Optional[str] = Field(default=None, min_length=1, max_length=256, pattern=r"^[^/]+$")
 
 
 def require_memory_artwork_service(
@@ -128,9 +132,32 @@ async def retry_memory_artwork(
 
 
 @router.post("/memory-artwork/backfill")
-async def backfill_memory_artwork(uid: str = Depends(get_exact_firebase_uid)):
+async def backfill_memory_artwork(
+    background_tasks: BackgroundTasks,
+    payload: Optional[MemoryArtworkBackfillRequest] = None,
+    uid: str = Depends(get_exact_firebase_uid),
+):
     try:
-        return await MemoryArtworkService().backfill(uid)
+        service = MemoryArtworkService()
+        result = await service.backfill(uid, cursor_memory_id=payload.cursor if payload else None)
+        recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+        recovery_queued = 0
+        for memory_id in recovery_memory_ids:
+            claim = await claim_memory_artwork_enrichment_recovery(uid, memory_id)
+            outcome = str(claim.get("outcome") or "")
+            if outcome == "completed":
+                await service.enqueue(uid, memory_id)
+            elif outcome == "claimed":
+                background_tasks.add_task(
+                    recover_failed_conversation_summary,
+                    uid=uid,
+                    conversation_id=memory_id,
+                    request_id=str(claim["request_id"]),
+                    attempt_count=int(claim.get("attempt_count") or 1),
+                )
+                recovery_queued += 1
+        result["enrichment_recovery_queued"] = recovery_queued
+        return result
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 
