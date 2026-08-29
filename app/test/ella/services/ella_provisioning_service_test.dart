@@ -350,6 +350,7 @@ void main() {
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(provider.isOperational, isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
@@ -359,6 +360,7 @@ void main() {
     expect(provider.errorCode, 'network_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(scheduled, hasLength(1));
   });
 
@@ -373,6 +375,7 @@ void main() {
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
     expect(provider.isOperational, isFalse);
@@ -381,6 +384,7 @@ void main() {
     expect(provider.errorCode, 'provider_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
   test('hard auth and update failures close operational authority', () async {
@@ -395,6 +399,7 @@ void main() {
 
       await provider.start(uid: 'uid-a', requestContext: _requestContext);
       expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+      expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
       await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
       expect(provider.state, EllaProvisioningState.blocked, reason: 'HTTP $statusCode');
@@ -402,6 +407,11 @@ void main() {
       expect(provider.isRevalidatingOperational, isFalse, reason: 'HTTP $statusCode');
       expect(
         WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'),
+        isNull,
+        reason: 'HTTP $statusCode',
+      );
+      expect(
+        WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'),
         isNull,
         reason: 'HTTP $statusCode',
       );
@@ -428,11 +438,13 @@ void main() {
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
     expect(provider.state, EllaProvisioningState.provisioning);
     expect(provider.isRevalidatingOperational, isFalse);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
   test('disposing the provisioning owner closes protected authority', () async {
@@ -444,10 +456,12 @@ void main() {
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     provider.dispose();
 
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
   test('fresh account transient failure remains gated without cached operational authority', () async {
@@ -624,6 +638,7 @@ void main() {
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     final signalSnapshots = <({String receiptId, bool consentCurrent, bool provisioningCurrent})>[];
     void onAuthorityChanged() {
@@ -658,6 +673,7 @@ void main() {
     expect(preferences.aiConsentReceiptId, 'aicr_receipt-b');
     expect(preferences.aiConsentAccepted, isFalse);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
 
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
@@ -730,6 +746,9 @@ void main() {
 
     final staleEnsure = provider.retry();
     await transport.staleEnsureStarted.future;
+    expect(provider.state, EllaProvisioningState.checking);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     preferences.acceptAiConsent(
       receiptId: 'aicr_receipt-b',
       uid: 'uid-a',
@@ -762,6 +781,8 @@ void main() {
     ]);
     expect(provider.receipt?.bindingRevision, 2);
     expect(preferences.getEllaProvisioningReceipt('uid-a')?['binding_revision'], 2);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     provider.dispose();
   });
 
