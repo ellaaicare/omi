@@ -51,6 +51,9 @@ SUPPORTED_STYLE_VERSIONS = {
     DEFAULT_STYLE_VERSION,
     "ella.memory_artwork.style.paper-collage.v1",
     "ella.memory_artwork.style.graphic-landscape.v1",
+    "ella.memory_artwork.style.watercolor-journal.v1",
+    "ella.memory_artwork.style.anime-storybook.v1",
+    "ella.memory_artwork.style.cinematic-still.v1",
 }
 STYLE_PROMPT_BRIEFS = {
     "ella.memory_artwork.style.soft-gouache.v1": (
@@ -65,11 +68,26 @@ STYLE_PROMPT_BRIEFS = {
         "A bold graphic landscape illustration with simplified architectural or natural forms, clean shapes, "
         "confident negative space, and an editorial travel-poster sensibility."
     ),
+    "ella.memory_artwork.style.watercolor-journal.v1": (
+        "A luminous watercolor journal painting with transparent washes, selective crisp detail, soft paper texture, "
+        "and color grounded only in the remembered scene."
+    ),
+    "ella.memory_artwork.style.anime-storybook.v1": (
+        "A contemporary anime-inspired storybook illustration with expressive environmental storytelling, clean "
+        "draftsmanship, gentle cinematic light, and no imitation of a named artist, franchise, or character."
+    ),
+    "ella.memory_artwork.style.cinematic-still.v1": (
+        "A restrained cinematic editorial still with natural light, believable materials, quiet human gesture, and "
+        "a composed widescreen sense of place without photorealistic identity detail."
+    ),
 }
 DESIGNER_STYLE_NAMES = {
     "ella.memory_artwork.style.soft-gouache.v1": "gouache",
     "ella.memory_artwork.style.paper-collage.v1": "paper-collage",
     "ella.memory_artwork.style.graphic-landscape.v1": "graphic-landscape",
+    "ella.memory_artwork.style.watercolor-journal.v1": "watercolor",
+    "ella.memory_artwork.style.anime-storybook.v1": "anime-storybook",
+    "ella.memory_artwork.style.cinematic-still.v1": "cinematic",
 }
 COMPOSITION_DIRECTIONS = (
     "Use layered depth led by a concrete subject already named in the memory, adding no new foreground object.",
@@ -97,6 +115,7 @@ TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024
 MAX_BACKFILL_MEMORIES = 10
 BACKFILL_SCAN_LIMIT = 50
+MAX_BACKFILL_ENRICHMENT_RECOVERIES = 3
 PROVIDER_TIMEOUT_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TIMEOUT_SECONDS"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
 MIN_PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -207,7 +226,13 @@ class MemoryArtworkRepository(Protocol):
 
     def get_conversation(self, uid: str, memory_id: str) -> Optional[dict[str, Any]]: ...
 
-    def list_recent_conversations(self, uid: str, *, limit: int) -> list[dict[str, Any]]: ...
+    def list_conversations_page(
+        self,
+        uid: str,
+        *,
+        limit: int,
+        cursor_memory_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]: ...
 
     def reserve_generation(self, uid: str, memory_id: str, **kwargs) -> dict[str, Any]: ...
 
@@ -238,7 +263,7 @@ class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
     set_preferences = staticmethod(artwork_db.set_preferences)
     get_conversation = staticmethod(artwork_db.get_conversation)
-    list_recent_conversations = staticmethod(artwork_db.list_recent_conversations)
+    list_conversations_page = staticmethod(artwork_db.list_conversations_page)
     reserve_generation = staticmethod(artwork_db.reserve_generation)
     claim_generation = staticmethod(artwork_db.claim_generation)
     finalize_generation = staticmethod(artwork_db.finalize_generation)
@@ -1423,20 +1448,41 @@ class MemoryArtworkService:
             "expires_in_seconds": 300,
         }
 
-    async def backfill(self, uid: str) -> dict[str, Any]:
+    async def backfill(self, uid: str, *, cursor_memory_id: Optional[str] = None) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
         if not (self.config.enabled and self.config.release_enabled and self.config.backfill_enabled):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
-        recent = self.repository.list_recent_conversations(uid, limit=BACKFILL_SCAN_LIMIT)
+        try:
+            recent = self.repository.list_conversations_page(
+                uid,
+                limit=BACKFILL_SCAN_LIMIT + 1,
+                cursor_memory_id=cursor_memory_id,
+            )
+        except ValueError as exc:
+            raise MemoryArtworkError("memory_artwork_backfill_cursor_invalid") from exc
+        has_more = len(recent) > BACKFILL_SCAN_LIMIT
+        page = recent[:BACKFILL_SCAN_LIMIT]
         queued = existing = skipped = 0
         memory_ids: list[str] = []
-        for conversation in recent:
-            if len(memory_ids) >= MAX_BACKFILL_MEMORIES:
-                break
+        recovery_memory_ids: list[str] = []
+        next_cursor: Optional[str] = None
+        for index, conversation in enumerate(page):
             memory_id = str(conversation.get("id") or "")
-            if not memory_id or _terminal_enrichment(conversation) is None:
+            if not memory_id:
                 skipped += 1
+                continue
+            next_cursor = memory_id
+            if _terminal_enrichment(conversation) is None:
+                skipped += 1
+                if (
+                    conversation.get("status") == "completed"
+                    and len(recovery_memory_ids) < MAX_BACKFILL_ENRICHMENT_RECOVERIES
+                ):
+                    recovery_memory_ids.append(memory_id)
+                    if len(recovery_memory_ids) >= MAX_BACKFILL_ENRICHMENT_RECOVERIES:
+                        has_more = has_more or index < len(page) - 1
+                        break
                 continue
             result = await self.enqueue(uid, memory_id)
             if result.get("outcome") == "reserved":
@@ -1444,16 +1490,24 @@ class MemoryArtworkService:
                 memory_ids.append(memory_id)
             elif result.get("outcome") == "existing":
                 existing += 1
-                memory_ids.append(memory_id)
             else:
                 skipped += 1
+            if queued >= MAX_BACKFILL_MEMORIES:
+                has_more = has_more or index < len(page) - 1
+                break
+        if not has_more:
+            next_cursor = None
         return {
             "schema_version": ARTWORK_SCHEMA_VERSION,
             "limit": MAX_BACKFILL_MEMORIES,
+            "scan_limit": BACKFILL_SCAN_LIMIT,
             "queued": queued,
             "existing": existing,
             "skipped": skipped,
             "memory_ids": memory_ids,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "_recovery_memory_ids": recovery_memory_ids,
         }
 
 

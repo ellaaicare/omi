@@ -37,6 +37,7 @@ def _load_service_module():
         "get_preferences",
         "set_preferences",
         "get_conversation",
+        "list_conversations_page",
         "list_recent_conversations",
         "reserve_generation",
         "claim_generation",
@@ -164,9 +165,21 @@ class FakeRepository:
         value = self.conversations.get((uid, memory_id))
         return copy.deepcopy(value) if value is not None else None
 
-    def list_recent_conversations(self, uid, *, limit):
+    def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
         values = [copy.deepcopy(value) for (owner, _), value in self.conversations.items() if owner == uid]
-        return sorted(values, key=lambda value: value["created_at"], reverse=True)[:limit]
+        values = sorted(values, key=lambda value: value["created_at"], reverse=True)
+        if cursor_memory_id:
+            cursor_index = next(
+                (index for index, value in enumerate(values) if value.get("id") == cursor_memory_id),
+                None,
+            )
+            if cursor_index is None:
+                raise ValueError("memory_artwork_backfill_cursor_invalid")
+            values = values[cursor_index + 1 :]
+        return values[:limit]
+
+    def list_recent_conversations(self, uid, *, limit):
+        return self.list_conversations_page(uid, limit=limit)
 
     def reserve_generation(
         self,
@@ -544,6 +557,21 @@ def test_prompt_contract_is_deterministic_and_style_specific():
     assert first_hash == second_hash
     assert "cut-paper collage" in first_prompt.lower()
     assert "quiet walk near a garden" in first_prompt.lower()
+
+
+@pytest.mark.parametrize(
+    ("style_version", "designer_style", "prompt_fragment"),
+    [
+        ("ella.memory_artwork.style.watercolor-journal.v1", "watercolor", "watercolor journal"),
+        ("ella.memory_artwork.style.anime-storybook.v1", "anime-storybook", "anime-inspired storybook"),
+        ("ella.memory_artwork.style.cinematic-still.v1", "cinematic", "cinematic editorial still"),
+    ],
+)
+def test_expanded_styles_are_bounded_to_reviewed_designer_modes(style_version, designer_style, prompt_fragment):
+    prompt, _ = artwork._prompt_for(_terminal_memory("style-memory"), style_version)
+
+    assert artwork.DESIGNER_STYLE_NAMES[style_version] == designer_style
+    assert prompt_fragment in prompt.lower()
 
 
 def test_prompt_does_not_invent_time_weather_or_palette():
@@ -1398,7 +1426,7 @@ def test_release_off_is_a_signed_url_kill_switch():
     assert store.signed == []
 
 
-def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
+def test_backfill_advances_past_existing_artwork_with_bounded_cursor(monkeypatch):
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
     for index in range(14):
@@ -1414,14 +1442,57 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
     )
 
     first = asyncio.run(service.backfill("owner-a"))
-    second = asyncio.run(service.backfill("owner-a"))
+    second = asyncio.run(service.backfill("owner-a", cursor_memory_id=first["next_cursor"]))
     assert first["queued"] == 10
     assert first["existing"] == 0
-    assert second["queued"] == 0
-    assert second["existing"] == 10
+    assert first["has_more"] is True
+    assert second["queued"] == 3
+    assert second["existing"] == 0
+    assert second["has_more"] is False
+    assert second["next_cursor"] is None
     assert first["memory_ids"] == [f"memory-{index:02d}" for index in range(12, 2, -1)]
-    assert repository.reserve_writes == 10
-    assert len(repository.jobs) == 10
+    assert second["memory_ids"] == ["memory-02", "memory-01", "memory-00"]
+    assert repository.reserve_writes == 13
+    assert len(repository.jobs) == 13
+
+    retry = asyncio.run(service.backfill("owner-a"))
+    assert retry["queued"] == 0
+    assert retry["existing"] == 13
+
+
+def test_backfill_limits_enrichment_recovery_candidates_and_rejects_stale_cursor():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    for index in range(6):
+        memory_id = f"memory-{index}"
+        memory = _terminal_memory(memory_id, created_at=datetime(2026, 8, 22, 12, index, tzinfo=timezone.utc))
+        memory["enrichment_state"] = {"status": "pending"}
+        repository.conversations[("owner-a", memory_id)] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.backfill("owner-a"))
+    remaining = asyncio.run(service.backfill("owner-a", cursor_memory_id=result["next_cursor"]))
+    assert result["queued"] == 0
+    assert result["skipped"] == 3
+    assert result["_recovery_memory_ids"] == ["memory-5", "memory-4", "memory-3"]
+    assert result["next_cursor"] == "memory-3"
+    assert result["has_more"] is True
+    assert remaining["skipped"] == 3
+    assert remaining["_recovery_memory_ids"] == ["memory-2", "memory-1", "memory-0"]
+    assert remaining["next_cursor"] is None
+    assert remaining["has_more"] is False
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.backfill("owner-a", cursor_memory_id="missing-memory"))
+    assert failure.value.code == "memory_artwork_backfill_cursor_invalid"
+
+
+def test_firestore_backfill_cursor_is_owner_scoped_and_uses_snapshot(monkeypatch):
 
     class Snapshot:
         id = "memory-visible"
@@ -1445,15 +1516,34 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
             self.operations.append(("limit", value))
             return self
 
+        def start_after(self, snapshot):
+            self.operations.append(("start_after", snapshot.id))
+            return self
+
         def stream(self):
             return iter([Snapshot()])
 
     query = Query()
 
+    class CursorDocument:
+        def __init__(self, memory_id):
+            self.id = memory_id
+            self.exists = True
+
+        def get(self):
+            return self
+
     class Conversations:
         def collection(self, name):
             assert name == "conversations"
-            return query
+            return self
+
+        def where(self, field, operator, value):
+            return query.where(field, operator, value)
+
+        def document(self, memory_id):
+            assert memory_id == "memory-cursor"
+            return CursorDocument(memory_id)
 
     class Users:
         def document(self, uid):
@@ -1466,12 +1556,15 @@ def test_backfill_is_bounded_to_newest_ten_and_retry_is_idempotent(monkeypatch):
             return Users()
 
     monkeypatch.setattr(artwork_database, "db", Database())
-    assert artwork_database.list_recent_conversations("owner-a", limit=10) == [
-        {"id": "memory-visible", "discarded": False}
-    ]
+    assert artwork_database.list_conversations_page(
+        "owner-a",
+        limit=10,
+        cursor_memory_id="memory-cursor",
+    ) == [{"id": "memory-visible", "discarded": False}]
     assert query.operations == [
         ("where", "discarded", "==", False),
         ("order_by", "created_at", artwork_database.firestore.Query.DESCENDING),
+        ("start_after", "memory-cursor"),
         ("limit", 10),
     ]
 
@@ -2662,6 +2755,85 @@ def test_retry_route_observes_existing_enrichment_without_duplicate_work(monkeyp
     assert response.status_code == 200
     assert response.json()["status"] == "generating"
     assert response.json()["outcome"] == "enrichment_in_progress"
+
+
+def test_backfill_route_advances_cursor_and_schedules_bounded_recovery(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_backfill_router_test_module")
+    recoveries = []
+
+    class Service:
+        async def backfill(self, uid, *, cursor_memory_id=None):
+            assert uid == "owner-a"
+            assert cursor_memory_id == "memory-cursor"
+            return {
+                "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+                "queued": 2,
+                "existing": 7,
+                "skipped": 1,
+                "next_cursor": "memory-next",
+                "has_more": True,
+                "_recovery_memory_ids": ["memory-recovery"],
+            }
+
+        async def enqueue(self, uid, memory_id):
+            raise AssertionError("claimed recovery must finish asynchronously")
+
+    async def claim(uid, memory_id):
+        assert (uid, memory_id) == ("owner-a", "memory-recovery")
+        return {"outcome": "claimed", "request_id": "recovery-request", "attempt_count": 2}
+
+    async def recover(**kwargs):
+        recoveries.append(kwargs)
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    monkeypatch.setattr(router_module, "claim_memory_artwork_enrichment_recovery", claim)
+    monkeypatch.setattr(router_module, "recover_failed_conversation_summary", recover)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).post("/v1/ella/memory-artwork/backfill", json={"cursor": "memory-cursor"})
+
+    assert response.status_code == 200
+    assert "_recovery_memory_ids" not in response.json()
+    assert response.json()["enrichment_recovery_queued"] == 1
+    assert recoveries == [
+        {
+            "uid": "owner-a",
+            "conversation_id": "memory-recovery",
+            "request_id": "recovery-request",
+            "attempt_count": 2,
+        }
+    ]
+
+
+def test_backfill_route_preserves_legacy_empty_body_clients(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_legacy_backfill_router_test_module")
+
+    class Service:
+        async def backfill(self, uid, *, cursor_memory_id=None):
+            assert uid == "owner-a"
+            assert cursor_memory_id is None
+            return {
+                "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+                "queued": 0,
+                "existing": 0,
+                "skipped": 0,
+                "next_cursor": None,
+                "has_more": False,
+                "_recovery_memory_ids": [],
+            }
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).post("/v1/ella/memory-artwork/backfill")
+
+    assert response.status_code == 200
+    assert response.json()["has_more"] is False
+    assert response.json()["enrichment_recovery_queued"] == 0
 
 
 def test_mounted_internal_process_route_uses_durable_worker_job_claim(monkeypatch):
