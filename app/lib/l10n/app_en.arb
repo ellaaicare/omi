@@ -10762,10 +10762,27 @@
   "memoryGalleryJournal": "Large images",
   "memoryGalleryGrid": "Cards",
   "memoryGalleryList": "Compact list",
+  "memoryGalleryDays": "Days",
+  "memoryDayCount": "{count, plural, =1{1 memory} other{{count} memories}}",
+  "@memoryDayCount": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "memoryDayOpen": "Open {day}, {count, plural, =1{1 memory} other{{count} memories}}",
+  "@memoryDayOpen": {
+    "placeholders": {
+      "day": {"type": "String"},
+      "count": {"type": "int"}
+    }
+  },
   "memoryArtworkStyle": "Illustration style",
   "memoryArtworkSoftGouache": "Soft gouache",
   "memoryArtworkPaperCollage": "Paper collage",
-  "memoryArtworkGraphicLandscape": "Graphic landscape",
+  "memoryArtworkGraphicLandscape": "Modern graphic",
+  "memoryArtworkWatercolorJournal": "Watercolor journal",
+  "memoryArtworkAnimeStorybook": "Anime storybook",
+  "memoryArtworkCinematicStill": "Cinematic still",
   "memoryArtworkStyleUpdated": "New memories will use this illustration style. Recent memories are being refreshed.",
   "memoryArtworkStyleUnavailable": "Ella couldn't update the illustration style right now.",
   "memoryGeneratedArtworkLabel": "Illustration created for this memory",

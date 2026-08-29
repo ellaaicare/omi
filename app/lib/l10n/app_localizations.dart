@@ -156,7 +156,7 @@ abstract class AppLocalizations {
     Locale('tr'),
     Locale('uk'),
     Locale('vi'),
-    Locale('zh')
+    Locale('zh'),
   ];
 
   /// The app title displayed in various places
@@ -9019,7 +9019,10 @@ abstract class AppLocalizations {
   ///
   /// In en, this message translates to:
   /// **'{accessDescription} and is {triggerDescription}.'**
-  String accessesAndTriggeredBy(String accessDescription, String triggerDescription);
+  String accessesAndTriggeredBy(
+    String accessDescription,
+    String triggerDescription,
+  );
 
   /// Sentence starting with 'Is' for trigger description
   ///
@@ -17649,6 +17652,24 @@ abstract class AppLocalizations {
   /// **'Compact list'**
   String get memoryGalleryList;
 
+  /// No description provided for @memoryGalleryDays.
+  ///
+  /// In en, this message translates to:
+  /// **'Days'**
+  String get memoryGalleryDays;
+
+  /// No description provided for @memoryDayCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 memory} other{{count} memories}}'**
+  String memoryDayCount(int count);
+
+  /// No description provided for @memoryDayOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Open {day}, {count, plural, =1{1 memory} other{{count} memories}}'**
+  String memoryDayOpen(String day, int count);
+
   /// No description provided for @memoryArtworkStyle.
   ///
   /// In en, this message translates to:
@@ -17670,8 +17691,26 @@ abstract class AppLocalizations {
   /// No description provided for @memoryArtworkGraphicLandscape.
   ///
   /// In en, this message translates to:
-  /// **'Graphic landscape'**
+  /// **'Modern graphic'**
   String get memoryArtworkGraphicLandscape;
+
+  /// No description provided for @memoryArtworkWatercolorJournal.
+  ///
+  /// In en, this message translates to:
+  /// **'Watercolor journal'**
+  String get memoryArtworkWatercolorJournal;
+
+  /// No description provided for @memoryArtworkAnimeStorybook.
+  ///
+  /// In en, this message translates to:
+  /// **'Anime storybook'**
+  String get memoryArtworkAnimeStorybook;
+
+  /// No description provided for @memoryArtworkCinematicStill.
+  ///
+  /// In en, this message translates to:
+  /// **'Cinematic still'**
+  String get memoryArtworkCinematicStill;
 
   /// No description provided for @memoryArtworkStyleUpdated.
   ///
@@ -17855,7 +17894,7 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
         'tr',
         'uk',
         'vi',
-        'zh'
+        'zh',
       ].contains(locale.languageCode);
 
   @override
@@ -17935,8 +17974,10 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsZh();
   }
 
-  throw FlutterError('AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-      'an issue with the localizations generation tool. Please file an issue '
-      'on GitHub with a reproducible sample app and the gen-l10n configuration '
-      'that was used.');
+  throw FlutterError(
+    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+    'an issue with the localizations generation tool. Please file an issue '
+    'on GitHub with a reproducible sample app and the gen-l10n configuration '
+    'that was used.',
+  );
 }

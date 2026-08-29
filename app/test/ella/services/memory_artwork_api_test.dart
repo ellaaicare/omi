@@ -372,6 +372,19 @@ void main() {
         methods.add(method);
         urls.add(url);
         bodies.add(body);
+        if (url.endsWith('/memory-artwork/backfill')) {
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'queued': 3,
+              'existing': 7,
+              'skipped': 1,
+              'has_more': true,
+              'next_cursor': 'memory-cursor',
+            }),
+            200,
+          );
+        }
         return http.Response('{}', 200);
       },
     );
@@ -387,5 +400,47 @@ void main() {
       'https://api.example/v1/ella/memory-artwork/backfill',
     ]);
     expect(jsonDecode(bodies.first)['style_version'], memoryArtworkPaperCollageStyle);
+    expect(jsonDecode(bodies.last), isEmpty);
+  });
+
+  test('progressive backfill validates and forwards the opaque cursor', () async {
+    var requestBody = '';
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        requestBody = body;
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'queued': 10,
+            'existing': 12,
+            'skipped': 2,
+            'has_more': true,
+            'next_cursor': 'memory-older-42',
+          }),
+          200,
+        );
+      },
+    );
+
+    final page = await api.backfillNext(cursor: 'memory-current-42');
+
+    expect(jsonDecode(requestBody), {'cursor': 'memory-current-42'});
+    expect(page?.queued, 10);
+    expect(page?.existing, 12);
+    expect(page?.hasMore, isTrue);
+    expect(page?.nextCursor, 'memory-older-42');
+    expect(await api.backfillNext(cursor: 'bad/cursor'), isNull);
   });
 }

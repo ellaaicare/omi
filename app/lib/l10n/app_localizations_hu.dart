@@ -4779,7 +4779,10 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
-  String accessesAndTriggeredBy(String accessDescription, String triggerDescription) {
+  String accessesAndTriggeredBy(
+    String accessDescription,
+    String triggerDescription,
+  ) {
     return '$accessDescription és $triggerDescription.';
   }
 
@@ -9517,6 +9520,31 @@ class AppLocalizationsHu extends AppLocalizations {
   String get memoryGalleryList => 'Compact list';
 
   @override
+  String get memoryGalleryDays => 'Days';
+
+  @override
+  String memoryDayCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count memories',
+      one: '1 memory',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String memoryDayOpen(String day, int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count memories',
+      one: '1 memory',
+    );
+    return 'Open $day, $_temp0';
+  }
+
+  @override
   String get memoryArtworkStyle => 'Illustration style';
 
   @override
@@ -9526,7 +9554,16 @@ class AppLocalizationsHu extends AppLocalizations {
   String get memoryArtworkPaperCollage => 'Paper collage';
 
   @override
-  String get memoryArtworkGraphicLandscape => 'Graphic landscape';
+  String get memoryArtworkGraphicLandscape => 'Modern graphic';
+
+  @override
+  String get memoryArtworkWatercolorJournal => 'Watercolor journal';
+
+  @override
+  String get memoryArtworkAnimeStorybook => 'Anime storybook';
+
+  @override
+  String get memoryArtworkCinematicStill => 'Cinematic still';
 
   @override
   String get memoryArtworkStyleUpdated =>

@@ -778,6 +778,31 @@ class SharedPreferencesUtil {
     return key != null && await saveString(key, layout);
   }
 
+  String get memoryArchiveGalleryLayout {
+    final key = _accountProfileScopedKey('ellaMemoryArchiveGalleryLayout');
+    return key == null ? '' : getString(key);
+  }
+
+  Future<bool> saveMemoryArchiveGalleryLayout(String layout) async {
+    final key = _accountProfileScopedKey('ellaMemoryArchiveGalleryLayout');
+    return key != null && await saveString(key, layout);
+  }
+
+  String memoryArtworkBackfillCursor(String styleVersion) {
+    final key = _accountProfileScopedKey('ellaMemoryArtworkBackfillCursor:$styleVersion');
+    return key == null ? '' : getString(key);
+  }
+
+  Future<bool> saveMemoryArtworkBackfillCursor(String styleVersion, String cursor) async {
+    final key = _accountProfileScopedKey('ellaMemoryArtworkBackfillCursor:$styleVersion');
+    return key != null && await saveString(key, cursor);
+  }
+
+  Future<bool> clearMemoryArtworkBackfillCursor(String styleVersion) async {
+    final key = _accountProfileScopedKey('ellaMemoryArtworkBackfillCursor:$styleVersion');
+    return key != null && await remove(key);
+  }
+
   Future<void> quarantineLegacyAccountCaches() async {
     for (final key in const ['pendingMemories', 'cachedPeople']) {
       final values = getStringList(key);
