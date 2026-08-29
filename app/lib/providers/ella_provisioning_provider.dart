@@ -107,6 +107,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
     state = EllaProvisioningState.checking;
     errorCode = '';
 
+    // A cached receipt may keep the established shell visible, but it must not
+    // authorize protected work until this exact request verifies it again.
+    _preferences.invalidateEllaProvisioningServerVerification();
+
     await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: _preferences);
     if (generation != _generation) return;
 
@@ -122,6 +126,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> retry({bool preserveOperationalReceipt = true}) async {
     if (_activeUid.isEmpty || _requestContext == null) return;
+    _preferences.invalidateEllaProvisioningServerVerification();
     if (!preserveOperationalReceipt && _revalidatingOperationalReceipt) {
       _revalidatingOperationalReceipt = false;
       state = EllaProvisioningState.checking;
@@ -174,6 +179,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _requestInFlight = false;
     _retryEnsureAfterCurrentRequest = false;
     _revalidatingOperationalReceipt = false;
+    _preferences.invalidateEllaProvisioningServerVerification();
     receipt = null;
     errorCode = '';
     state = EllaProvisioningState.idle;
@@ -225,6 +231,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> _applyResponse(EllaProvisioningResponse response, int generation, int requestContextEpoch) async {
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
+    _preferences.invalidateEllaProvisioningServerVerification();
     final nextReceipt = response.receipt;
     if (!response.isAccepted || nextReceipt == null) {
       if (nextReceipt != null) {
@@ -296,6 +303,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     // protected operations remain fail-closed until fresh authority succeeds.
     _revalidatingOperationalReceipt =
         !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt && receipt?.isOperational == true;
+    _preferences.invalidateEllaProvisioningServerVerification();
     errorCode = code;
     state = blocked ? EllaProvisioningState.blocked : EllaProvisioningState.degraded;
     notifyListeners();
@@ -356,6 +364,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _preferences.invalidateEllaProvisioningServerVerification();
     super.dispose();
   }
 }

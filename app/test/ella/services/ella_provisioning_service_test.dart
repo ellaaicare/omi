@@ -11,6 +11,7 @@ import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -333,10 +334,12 @@ void main() {
   });
 
   test('transient foreground exception preserves an operational receipt without claiming fresh authority', () async {
+    final preferences = await _prepareOperationalConsent();
     final transport = _ReadyThenRevalidationTransport(error: StateError('connection reset'));
     final scheduled = <_FakePollHandle>[];
     final provider = EllaProvisioningProvider(
       transport: transport,
+      preferences: preferences,
       scheduler: (delay, callback) {
         final handle = _FakePollHandle(delay, callback);
         scheduled.add(handle);
@@ -346,6 +349,7 @@ void main() {
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(provider.isOperational, isTrue);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
@@ -354,14 +358,21 @@ void main() {
     expect(provider.state, EllaProvisioningState.degraded);
     expect(provider.errorCode, 'network_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(scheduled, hasLength(1));
   });
 
   test('retryable provider response preserves an operational receipt during foreground revalidation', () async {
+    final preferences = await _prepareOperationalConsent();
     final transport = _ReadyThenRevalidationTransport(response: const EllaProvisioningResponse(statusCode: 503));
-    final provider = EllaProvisioningProvider(transport: transport, scheduler: _discardedPollScheduler);
+    final provider = EllaProvisioningProvider(
+      transport: transport,
+      preferences: preferences,
+      scheduler: _discardedPollScheduler,
+    );
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
     expect(provider.isOperational, isFalse);
@@ -369,19 +380,74 @@ void main() {
     expect(provider.state, EllaProvisioningState.degraded);
     expect(provider.errorCode, 'provider_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
-  test('hard auth failure still closes an operational foreground session', () async {
-    final transport = _ReadyThenRevalidationTransport(response: const EllaProvisioningResponse(statusCode: 401));
-    final provider = EllaProvisioningProvider(transport: transport);
+  test('hard auth and update failures close operational authority', () async {
+    for (final statusCode in const [401, 403, 409, 426]) {
+      SharedPreferences.setMockInitialValues({});
+      await SharedPreferencesUtil.init();
+      final preferences = await _prepareOperationalConsent();
+      final transport = _ReadyThenRevalidationTransport(
+        response: EllaProvisioningResponse(statusCode: statusCode),
+      );
+      final provider = EllaProvisioningProvider(transport: transport, preferences: preferences);
+
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+      await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+
+      expect(provider.state, EllaProvisioningState.blocked, reason: 'HTTP $statusCode');
+      expect(provider.isOperational, isFalse, reason: 'HTTP $statusCode');
+      expect(provider.isRevalidatingOperational, isFalse, reason: 'HTTP $statusCode');
+      expect(
+        WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'),
+        isNull,
+        reason: 'HTTP $statusCode',
+      );
+      provider.dispose();
+    }
+  });
+
+  test('authoritative non-operational receipt closes protected authority', () async {
+    final preferences = await _prepareOperationalConsent();
+    final transport = _ReadyThenRevalidationTransport(
+      response: const EllaProvisioningResponse(
+        statusCode: 202,
+        receipt: EllaProvisioningReceipt(
+          state: EllaProvisioningState.provisioning,
+          retryable: true,
+        ),
+      ),
+    );
+    final provider = EllaProvisioningProvider(
+      transport: transport,
+      preferences: preferences,
+      scheduler: _discardedPollScheduler,
+    );
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
-    expect(provider.state, EllaProvisioningState.blocked);
-    expect(provider.errorCode, 'auth_required');
-    expect(provider.isOperational, isFalse);
+    expect(provider.state, EllaProvisioningState.provisioning);
     expect(provider.isRevalidatingOperational, isFalse);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+  });
+
+  test('disposing the provisioning owner closes protected authority', () async {
+    final preferences = await _prepareOperationalConsent();
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(),
+      preferences: preferences,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+
+    provider.dispose();
+
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
   test('fresh account transient failure remains gated without cached operational authority', () async {
@@ -557,6 +623,7 @@ void main() {
     expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1), isTrue);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     final signalSnapshots = <({String receiptId, bool consentCurrent, bool provisioningCurrent})>[];
     void onAuthorityChanged() {
@@ -590,6 +657,7 @@ void main() {
     ]);
     expect(preferences.aiConsentReceiptId, 'aicr_receipt-b');
     expect(preferences.aiConsentAccepted, isFalse);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
 
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
@@ -1038,6 +1106,27 @@ final _requestContext = EllaProvisioningRequestContext(
   timezone: 'America/Los_Angeles',
   clientRequestId: 'request-1',
 );
+
+Future<SharedPreferencesUtil> _prepareOperationalConsent() async {
+  final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+  await preferences.saveString('ellaProvisioningAccountUid', 'uid-a');
+  preferences.acceptAiConsent(
+    receiptId: 'aicr_receipt-a',
+    uid: 'uid-a',
+    profileBindingId: 'profile-binding-a',
+    serverDecidedAt: '2026-08-29T00:00:00Z',
+  );
+  preferences.markAiConsentServerVerified(
+    uid: 'uid-a',
+    receiptId: 'aicr_receipt-a',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-binding-a',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+  return preferences;
+}
 
 class _FakeTransport implements EllaProvisioningTransport {
   _FakeTransport({required this.ensureResponses, this.statusResponses = const []});
