@@ -191,7 +191,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         final result = (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt);
         return _sort == MemoryGallerySort.recent ? result : -result;
       });
-    final groups = _group(context, orderedConversations);
+    final groups = groupMemoryConversationsByDay(context, orderedConversations);
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
     _checkPaginationAfterLayout(conversationProvider);
@@ -880,9 +880,13 @@ class _MemoryDetails extends StatelessWidget {
   }
 }
 
-Map<String, List<ServerConversation>> _group(BuildContext context, List<ServerConversation> conversations) {
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
+Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
+  BuildContext context,
+  List<ServerConversation> conversations, {
+  DateTime? now,
+}) {
+  final current = now ?? DateTime.now();
+  final today = DateTime(current.year, current.month, current.day);
   final result = <String, List<ServerConversation>>{};
   for (final conversation in conversations) {
     final value = (conversation.startedAt ?? conversation.createdAt).toLocal();

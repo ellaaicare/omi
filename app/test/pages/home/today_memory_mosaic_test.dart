@@ -17,6 +17,7 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -159,10 +160,7 @@ void main() {
       id: 'sensitive-memory',
       createdAt: DateTime(2026, 8, 8, 9),
       startedAt: DateTime(2026, 8, 8, 9),
-      structured: Structured(
-        '[MED] Doctor appointment and Emergency monitoring',
-        'A private memory overview.',
-      ),
+      structured: Structured('[MED] Doctor appointment and Emergency monitoring', 'A private memory overview.'),
     );
     final harness = await _pumpHome(tester, conversations: [sensitiveMemory]);
     addTearDown(harness.dispose);
@@ -214,13 +212,10 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation',
-      (tester) async {
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      initialRecordingState: RecordingState.record,
-    );
+  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation', (
+    tester,
+  ) async {
+    final harness = await _pumpHome(tester, conversations: const [], initialRecordingState: RecordingState.record);
     addTearDown(harness.dispose);
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
@@ -250,8 +245,9 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('failed external finalization keeps a retryable Finish target across transcript navigation',
-      (tester) async {
+  testWidgets('failed external finalization keeps a retryable Finish target across transcript navigation', (
+    tester,
+  ) async {
     final harness = await _pumpHome(
       tester,
       conversations: const [],
@@ -402,8 +398,9 @@ void main() {
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
   });
 
-  testWidgets('Home Record suspends ambient necklace capture for the iPhone and restores it after finish',
-      (tester) async {
+  testWidgets('Home Record suspends ambient necklace capture for the iPhone and restores it after finish', (
+    tester,
+  ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -435,8 +432,9 @@ void main() {
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
-  testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds',
-      (tester) async {
+  testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds', (
+    tester,
+  ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
@@ -484,11 +482,7 @@ void main() {
   });
 
   testWidgets('capture transport failure remains actionable and retries with the iPhone microphone', (tester) async {
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      initialRecordingState: RecordingState.error,
-    );
+    final harness = await _pumpHome(tester, conversations: const [], initialRecordingState: RecordingState.error);
     addTearDown(harness.dispose);
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
@@ -554,11 +548,7 @@ void main() {
 
   testWidgets('failed Home phone processing retries without restarting or re-stopping capture', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      finalizationResults: [false, true],
-    );
+    final harness = await _pumpHome(tester, conversations: const [], finalizationResults: [false, true]);
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -592,11 +582,7 @@ void main() {
   testWidgets('rapid Process Now taps share one Home finalization', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final finalizationGate = Completer<void>();
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      finalizationGate: finalizationGate,
-    );
+    final harness = await _pumpHome(tester, conversations: const [], finalizationGate: finalizationGate);
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -662,18 +648,17 @@ void main() {
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
-    expect(harness.capture.phoneStarts, 1,
-        reason: 'a failed routed moment must be retried before a new capture starts');
+    expect(
+      harness.capture.phoneStarts,
+      1,
+      reason: 'a failed routed moment must be retried before a new capture starts',
+    );
     expect(harness.capture.finalizationCalls, 2);
   });
 
   testWidgets('account authority change invalidates a pending Home finalization retry', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
-    final harness = await _pumpHome(
-      tester,
-      conversations: const [],
-      finalizationResults: [false, true],
-    );
+    final harness = await _pumpHome(tester, conversations: const [], finalizationResults: [false, true]);
     addTearDown(harness.dispose);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -817,11 +802,75 @@ void main() {
     expect(find.byKey(const Key('memory-card-memory-4')), findsOneWidget);
   });
 
-  testWidgets('Home requests the next memory page only when the lazy feed nears its end', (tester) async {
-    final initial = List.generate(
-      16,
-      (index) => _ConversationFixtures.memory('memory-$index', daysAgo: index),
+  testWidgets('Home exposes day grouping and artwork style on the production entrypoint', (tester) async {
+    final artwork = _FakeMemoryArtworkApi();
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
     );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('home-memory-artwork-style-menu')), findsOneWidget);
+    expect(artwork.preferenceRequests, 1);
+    expect(artwork.backfillCursors, contains(null));
+
+    await tester.tap(find.byKey(const Key('home-memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-layout-journal-memory-1')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pumpAndSettle();
+
+    expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
+    expect(artwork.backfillCursors.where((cursor) => cursor == null).length, greaterThanOrEqualTo(2));
+    expect(
+      find.text('New memories will use this illustration style. Recent memories are being refreshed.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Home continues artwork backfill when the memory feed nears its end', (tester) async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'test-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-test-user');
+    final artwork = _FakeMemoryArtworkApi(
+      backfillPages: const [
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'older-artwork-page',
+        ),
+        MemoryArtworkBackfillPage(queued: 8, existing: 2, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null]);
+
+    await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -900));
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null, 'older-artwork-page']);
+  });
+
+  testWidgets('Home requests the next memory page only when the lazy feed nears its end', (tester) async {
+    final initial = List.generate(16, (index) => _ConversationFixtures.memory('memory-$index', daysAgo: index));
     final older = _ConversationFixtures.memory('memory-older', daysAgo: 30);
     final harness = await _pumpHome(
       tester,
@@ -845,10 +894,7 @@ void main() {
   });
 
   testWidgets('Home resets oldest sorting when a refresh restores incomplete pagination', (tester) async {
-    final memories = List.generate(
-      16,
-      (index) => _ConversationFixtures.memory('memory-sort-$index', daysAgo: index),
-    );
+    final memories = List.generate(16, (index) => _ConversationFixtures.memory('memory-sort-$index', daysAgo: index));
     final harness = await _pumpHome(tester, conversations: memories);
     addTearDown(harness.dispose);
 
@@ -978,6 +1024,45 @@ class _HomeHarness {
   }
 }
 
+class _FakeMemoryArtworkApi extends MemoryArtworkApi {
+  _FakeMemoryArtworkApi({
+    List<MemoryArtworkBackfillPage> backfillPages = const [
+      MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
+    ],
+  }) : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages);
+
+  int preferenceRequests = 0;
+  final List<String?> backfillCursors = [];
+  final List<String> selectedStyles = [];
+  final List<MemoryArtworkBackfillPage> _backfillPages;
+
+  @override
+  Future<MemoryArtworkPreferences?> preferences() async {
+    preferenceRequests += 1;
+    return const MemoryArtworkPreferences(
+      consent: 'accepted',
+      consentVersion: 'ai-data-processors-v10',
+      styleVersion: memoryArtworkDefaultStyle,
+      releaseEnabled: true,
+    );
+  }
+
+  @override
+  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
+    backfillCursors.add(cursor);
+    if (_backfillPages.isEmpty) {
+      return const MemoryArtworkBackfillPage(queued: 0, existing: 0, skipped: 0, hasMore: false);
+    }
+    return _backfillPages.removeAt(0);
+  }
+
+  @override
+  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+    selectedStyles.add(styleVersion);
+    return true;
+  }
+}
+
 Future<_HomeHarness> _pumpHome(
   WidgetTester tester, {
   required List<ServerConversation> conversations,
@@ -997,6 +1082,7 @@ Future<_HomeHarness> _pumpHome(
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
   List<ActionItemWithMetadata> actionItems = const [],
   List<List<ServerConversation>> olderConversationPages = const [],
+  MemoryArtworkApi? memoryArtworkApi,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -1069,6 +1155,7 @@ Future<_HomeHarness> _pumpHome(
                   todayCardAuthorityChanges: authorityChanges,
                   todayCardTalkRouteOpener: todayCardTalkRouteOpener,
                   guardianAvailability: () => false,
+                  memoryArtworkApi: memoryArtworkApi,
                 ),
                 if (includeBottomNav) BottomNavBar(onTabTap: (_, __) {}),
               ],
