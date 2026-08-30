@@ -143,6 +143,8 @@ INTERNAL_OWNER_UIDS_ENV = "ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS"
 WORKER_INTERVAL_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS"
 WORKER_BATCH_SIZE = 10
 WORKER_MAX_ATTEMPTS = 5
+ENRICHMENT_RECOVERY_PENDING_OUTCOMES = frozenset({"claimed", "processing", "busy", "superseded"})
+ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES = frozenset({"not_found", "invalid_state", "not_retryable", "failed"})
 PROVIDER_KIND_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER"
 XAI_API_KEY_ENV = "XAI_API_KEY"
 XAI_IMAGE_MODEL_ENV = "ELLA_MEMORY_ARTWORK_XAI_MODEL"
@@ -1827,8 +1829,10 @@ class MemoryArtworkWorker:
                         if exc.code != "memory_artwork_enrichment_not_terminal":
                             raise
                         recovery_pending = True
-                elif recovery_outcome != "not_found":
+                elif recovery_outcome in ENRICHMENT_RECOVERY_PENDING_OUTCOMES:
                     recovery_pending = True
+                elif recovery_outcome not in ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES:
+                    raise MemoryArtworkError("memory_artwork_enrichment_recovery_outcome_invalid")
             has_more = result.get("has_more") is True
             now = datetime.now(timezone.utc)
             if recovery_pending:

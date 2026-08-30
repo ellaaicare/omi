@@ -1044,6 +1044,49 @@ def test_reconciliation_retains_page_until_nonterminal_enrichment_recovers():
     assert len(repository.jobs) == 1
 
 
+@pytest.mark.parametrize("terminal_outcome", ["not_found", "invalid_state", "not_retryable", "failed"])
+def test_reconciliation_advances_past_terminal_enrichment_recovery_outcomes(terminal_outcome):
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    pending = _terminal_memory("memory-pending", created_at=datetime.now(timezone.utc))
+    pending["enrichment_state"] = {"status": "pending"}
+    repository.conversations[("owner-a", "memory-pending")] = pending
+    repository.conversations[("owner-a", "memory-older")] = _terminal_memory(
+        "memory-older",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    async def recover_enrichment(uid, memory_id):
+        assert (uid, memory_id) == ("owner-a", "memory-pending")
+        return {"outcome": terminal_outcome}
+
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+        enrichment_recovery=recover_enrichment,
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+
+    result = asyncio.run(worker.run_reconciliation_job(repository.get_reconciliation_job("owner-a", started["job_id"])))
+    completed = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert result == {"outcome": "completed", "status": "completed"}
+    assert completed["pages_processed"] == 1
+    assert completed["scanned"] == 2
+    assert completed["queued"] == 1
+    assert completed["skipped"] == 1
+    assert len(repository.jobs) == 1
+    assert next(iter(repository.jobs.values()))["memory_id"] == "memory-older"
+
+
 def test_reconciliation_claim_deletes_stale_job_for_deleted_owner():
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
