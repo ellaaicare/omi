@@ -348,6 +348,9 @@ class FakeRepository:
 
     def claim_reconciliation_job(self, uid, job_id, *, lease_token, now, lease_seconds):
         job = self.reconciliation_jobs.get(job_id)
+        if uid in self.deletion_pending:
+            self.reconciliation_jobs.pop(job_id, None)
+            return None
         if not job or job.get("uid") != uid or job.get("status") != "pending":
             return None
         job.update(
@@ -988,6 +991,81 @@ def test_reconciliation_job_advances_durably_until_every_terminal_memory_is_queu
     assert status["existing"] == 0
     assert status["skipped"] == 0
     assert len(repository.jobs) == 23
+
+
+def test_reconciliation_retains_page_until_nonterminal_enrichment_recovers():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    memory = _terminal_memory("memory-1")
+    memory["enrichment_state"] = {"status": "pending"}
+    repository.conversations[("owner-a", "memory-1")] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    recovery_calls = []
+
+    async def recover_enrichment(uid, memory_id):
+        recovery_calls.append((uid, memory_id))
+        recovered = repository.conversations[(uid, memory_id)]
+        recovered["enrichment_state"] = {"status": "writeback_applied", "kind": "hermes_enriched"}
+        return {"outcome": "processing"}
+
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+        enrichment_recovery=recover_enrichment,
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+
+    first = asyncio.run(worker.run_reconciliation_job(repository.get_reconciliation_job("owner-a", started["job_id"])))
+    held = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert first == {"outcome": "enrichment_recovery_pending", "status": "pending"}
+    assert recovery_calls == [("owner-a", "memory-1")]
+    assert held["cursor"] is None
+    assert held["pages_processed"] == 0
+    assert held["scanned"] == 0
+    assert repository.jobs == {}
+
+    held["available_at"] = datetime.now(timezone.utc)
+    repository.reconciliation_jobs[started["job_id"]] = held
+    second = asyncio.run(worker.run_reconciliation_job(held))
+    completed = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert second == {"outcome": "completed", "status": "completed"}
+    assert completed["pages_processed"] == 1
+    assert completed["scanned"] == 1
+    assert completed["queued"] == 1
+    assert len(repository.jobs) == 1
+
+
+def test_reconciliation_claim_deletes_stale_job_for_deleted_owner():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+    repository.deletion_pending.add("owner-a")
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(worker.run_reconciliation_job(repository.get_reconciliation_job("owner-a", started["job_id"])))
+
+    assert result == {"outcome": "not_claimed", "status": "unavailable"}
+    assert started["job_id"] not in repository.reconciliation_jobs
 
 
 def test_reconciliation_fails_closed_when_style_authority_changes_before_worker_claim():
@@ -2611,6 +2689,120 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
     }
     assert (("status", "ASCENDING"), ("available_at", "ASCENDING")) in reconciliation_indexes
     assert (("status", "ASCENDING"), ("lease_expires_at", "ASCENDING")) in reconciliation_indexes
+
+
+def test_reconciliation_claim_deletes_job_when_owner_is_missing():
+    class Snapshot:
+        def __init__(self, *, exists, payload=None):
+            self.exists = exists
+            self.payload = payload or {}
+
+        def to_dict(self):
+            return copy.deepcopy(self.payload)
+
+    class Reference:
+        def __init__(self, snapshot):
+            self.snapshot = snapshot
+
+        def get(self, transaction=None):
+            return self.snapshot
+
+    class Transaction:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, reference):
+            self.deleted.append(reference)
+
+    transaction = Transaction()
+    user_ref = Reference(Snapshot(exists=False))
+    job_ref = Reference(Snapshot(exists=True, payload={"status": "pending"}))
+
+    claimed = artwork_database._claim_reconciliation_job_transaction(
+        transaction,
+        user_ref,
+        job_ref,
+        lease_token="lease-a",
+        now=datetime.now(timezone.utc),
+        lease_seconds=30,
+    )
+
+    assert claimed is None
+    assert transaction.deleted == [job_ref]
+
+
+def test_delete_jobs_for_uid_removes_generation_and_reconciliation_jobs(monkeypatch):
+    class Reference:
+        def __init__(self, collection_name, document_id):
+            self.collection_name = collection_name
+            self.document_id = document_id
+
+    class Snapshot:
+        def __init__(self, reference):
+            self.reference = reference
+
+    class Query:
+        def __init__(self, database, collection_name):
+            self.database = database
+            self.collection_name = collection_name
+            self.query_uid = None
+            self.query_limit = None
+
+        def where(self, field, operator, value):
+            assert (field, operator) == ("uid", "==")
+            self.query_uid = value
+            return self
+
+        def limit(self, value):
+            self.query_limit = value
+            return self
+
+        def stream(self):
+            matches = [
+                Snapshot(Reference(self.collection_name, document_id))
+                for document_id, uid in self.database.documents[self.collection_name].items()
+                if uid == self.query_uid
+            ]
+            return iter(matches[: self.query_limit])
+
+    class Batch:
+        def __init__(self, database):
+            self.database = database
+            self.references = []
+
+        def delete(self, reference):
+            self.references.append(reference)
+
+        def commit(self):
+            for reference in self.references:
+                self.database.documents[reference.collection_name].pop(reference.document_id)
+
+    class Database:
+        def __init__(self):
+            self.documents = {
+                artwork_database.JOB_COLLECTION: {"generation-a": "owner-a", "generation-b": "owner-b"},
+                artwork_database.RECONCILIATION_COLLECTION: {
+                    "reconciliation-a": "owner-a",
+                    "reconciliation-b": "owner-b",
+                },
+            }
+
+        def collection(self, collection_name):
+            return Query(self, collection_name)
+
+        def batch(self):
+            return Batch(self)
+
+    database = Database()
+    monkeypatch.setattr(artwork_database, "db", database)
+
+    deleted = artwork_database.delete_jobs_for_uid("owner-a", batch_size=1)
+
+    assert deleted == 2
+    assert database.documents == {
+        artwork_database.JOB_COLLECTION: {"generation-b": "owner-b"},
+        artwork_database.RECONCILIATION_COLLECTION: {"reconciliation-b": "owner-b"},
+    }
 
 
 def test_processing_job_activity_requires_a_future_lease():

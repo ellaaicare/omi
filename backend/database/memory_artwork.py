@@ -154,12 +154,13 @@ def _claim_reconciliation_job_transaction(
     now: datetime,
     lease_seconds: int,
 ) -> Optional[dict[str, Any]]:
+    snapshot = job_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return None
     user_snapshot = user_ref.get(transaction=transaction)
     user = user_snapshot.to_dict() if user_snapshot.exists else {}
     if not user_snapshot.exists or bool(user.get(DELETION_PENDING_FIELD)):
-        return None
-    snapshot = job_ref.get(transaction=transaction)
-    if not snapshot.exists:
+        transaction.delete(job_ref)
         return None
     job = snapshot.to_dict() or {}
     status = job.get("status")
@@ -791,15 +792,17 @@ def has_processing_jobs_for_memory(uid: str, memory_id: str, *, now: Optional[da
 
 def delete_jobs_for_uid(uid: str, *, batch_size: int = 450) -> int:
     deleted = 0
-    while True:
-        snapshots = list(db.collection(JOB_COLLECTION).where("uid", "==", uid).limit(max(1, batch_size)).stream())
-        if not snapshots:
-            return deleted
-        batch = db.batch()
-        for snapshot in snapshots:
-            batch.delete(snapshot.reference)
-        batch.commit()
-        deleted += len(snapshots)
+    for collection_name in (JOB_COLLECTION, RECONCILIATION_COLLECTION):
+        while True:
+            snapshots = list(db.collection(collection_name).where("uid", "==", uid).limit(max(1, batch_size)).stream())
+            if not snapshots:
+                break
+            batch = db.batch()
+            for snapshot in snapshots:
+                batch.delete(snapshot.reference)
+            batch.commit()
+            deleted += len(snapshots)
+    return deleted
 
 
 def delete_jobs_for_memory(uid: str, memory_id: str, *, batch_size: int = 450) -> int:

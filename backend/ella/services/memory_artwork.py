@@ -13,7 +13,7 @@ import os
 import secrets
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol
 from urllib.parse import urlparse
@@ -90,6 +90,18 @@ DESIGNER_STYLE_NAMES = {
     "ella.memory_artwork.style.anime-storybook.v1": "anime-storybook",
     "ella.memory_artwork.style.cinematic-still.v1": "cinematic",
 }
+
+MemoryArtworkEnrichmentRecovery = Callable[[str, str], Awaitable[dict[str, Any]]]
+_memory_artwork_enrichment_recovery: Optional[MemoryArtworkEnrichmentRecovery] = None
+
+
+def register_memory_artwork_enrichment_recovery(handler: MemoryArtworkEnrichmentRecovery) -> None:
+    """Register canonical enrichment recovery without introducing a service import cycle."""
+
+    global _memory_artwork_enrichment_recovery
+    _memory_artwork_enrichment_recovery = handler
+
+
 COMPOSITION_DIRECTIONS = (
     "Use layered depth led by a concrete subject already named in the memory, adding no new foreground object.",
     "Use an intimate eye-level view, placing the most specific named subject near one third of the frame.",
@@ -1642,10 +1654,12 @@ class MemoryArtworkWorker:
         repository: Optional[MemoryArtworkRepository] = None,
         service_factory: Callable[[], MemoryArtworkService] = MemoryArtworkService,
         config: Optional[MemoryArtworkConfig] = None,
+        enrichment_recovery: Optional[MemoryArtworkEnrichmentRecovery] = None,
     ):
         self.repository = repository or FirestoreMemoryArtworkRepository()
         self.service_factory = service_factory
         self.config = config or MemoryArtworkConfig.from_env()
+        self.enrichment_recovery = enrichment_recovery
 
     async def run_job(
         self,
@@ -1798,8 +1812,40 @@ class MemoryArtworkWorker:
                     "failure_code": "memory_artwork_preference_authority_stale",
                 }
             result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
+            recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+            recovery_pending = False
+            recovery_handler = self.enrichment_recovery or _memory_artwork_enrichment_recovery
+            if recovery_memory_ids and recovery_handler is None:
+                raise MemoryArtworkError("memory_artwork_enrichment_recovery_unavailable", retryable=True)
+            for memory_id in recovery_memory_ids:
+                recovery = await recovery_handler(uid, memory_id)
+                recovery_outcome = str(recovery.get("outcome") or "")
+                if recovery_outcome == "completed":
+                    try:
+                        await service.enqueue(uid, memory_id)
+                    except MemoryArtworkError as exc:
+                        if exc.code != "memory_artwork_enrichment_not_terminal":
+                            raise
+                        recovery_pending = True
+                elif recovery_outcome != "not_found":
+                    recovery_pending = True
             has_more = result.get("has_more") is True
             now = datetime.now(timezone.utc)
+            if recovery_pending:
+                self.repository.finish_reconciliation_job(
+                    job_id,
+                    lease_token=lease_token,
+                    update={
+                        "status": "pending",
+                        "cursor": claimed.get("cursor"),
+                        "available_at": now + timedelta(seconds=5),
+                        "failure_code": None,
+                    },
+                )
+                return {
+                    "outcome": "enrichment_recovery_pending",
+                    "status": "pending",
+                }
             update = {
                 "status": "pending" if has_more else "completed",
                 "cursor": result.get("next_cursor") if has_more else None,
