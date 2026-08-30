@@ -1834,6 +1834,13 @@ class MemoryArtworkWorker:
         if claimed is None:
             return {"outcome": "not_claimed", "status": "unavailable"}
         service = self.service_factory()
+        result: dict[str, Any] | None = None
+        recovery_memory_ids: list[str] = []
+        remaining_recovery_memory_ids: list[str] = []
+        recovery_index = 0
+        recovery_queued = 0
+        recovery_existing = 0
+        recovery_accounting_applied = False
         try:
             authority = await service.authority_resolver(uid)
             preferences = service.repository.get_preferences(uid)
@@ -1877,11 +1884,9 @@ class MemoryArtworkWorker:
                 result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
                 recovery_memory_ids = result.pop("_recovery_memory_ids", [])
             recovery_pending = False
-            remaining_recovery_memory_ids: list[str] = []
-            recovery_queued = 0
-            recovery_existing = 0
             recovery_handler = self.enrichment_recovery or _memory_artwork_enrichment_recovery
-            for memory_id in recovery_memory_ids:
+            for index, memory_id in enumerate(recovery_memory_ids):
+                recovery_index = index
                 enqueue_result = None
                 try:
                     enqueue_result = await service.enqueue(uid, memory_id)
@@ -1919,12 +1924,14 @@ class MemoryArtworkWorker:
                         "sensitive_source_excluded",
                     }:
                         raise MemoryArtworkError("memory_artwork_enqueue_outcome_invalid")
+                recovery_index = index + 1
             result["queued"] = int(result.get("queued") or 0) + recovery_queued
             result["existing"] = int(result.get("existing") or 0) + recovery_existing
             result["skipped"] = max(
                 0,
                 int(result.get("skipped") or 0) - recovery_queued - recovery_existing,
             )
+            recovery_accounting_applied = True
             has_more = result.get("has_more") is True
             now = datetime.now(timezone.utc)
             if recovery_pending:
@@ -1935,6 +1942,7 @@ class MemoryArtworkWorker:
                         "status": "pending",
                         "cursor": claimed.get("cursor"),
                         "available_at": now + timedelta(seconds=5),
+                        "attempt_count": 0,
                         "failure_code": None,
                         "recovery_page": {
                             "result": result,
@@ -1955,6 +1963,7 @@ class MemoryArtworkWorker:
                 "existing": int(claimed.get("existing") or 0) + int(result.get("existing") or 0),
                 "skipped": int(claimed.get("skipped") or 0) + int(result.get("skipped") or 0),
                 "available_at": now,
+                "attempt_count": 0,
                 "failure_code": None,
                 "recovery_page": None,
             }
@@ -1972,6 +1981,23 @@ class MemoryArtworkWorker:
                 "available_at": now + timedelta(seconds=min(300, 2**attempts)),
                 "failure_code": exc.code,
             }
+            if isinstance(result, dict):
+                checkpoint_result = dict(result)
+                if not recovery_accounting_applied:
+                    checkpoint_result["queued"] = int(checkpoint_result.get("queued") or 0) + recovery_queued
+                    checkpoint_result["existing"] = int(checkpoint_result.get("existing") or 0) + recovery_existing
+                    checkpoint_result["skipped"] = max(
+                        0,
+                        int(checkpoint_result.get("skipped") or 0) - recovery_queued - recovery_existing,
+                    )
+                outstanding_memory_ids = list(
+                    dict.fromkeys(remaining_recovery_memory_ids + recovery_memory_ids[recovery_index:])
+                )
+                update["cursor"] = claimed.get("cursor")
+                update["recovery_page"] = {
+                    "result": checkpoint_result,
+                    "memory_ids": outstanding_memory_ids,
+                }
             if not retryable:
                 update["completed_at"] = now
             self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
@@ -1987,6 +2013,23 @@ class MemoryArtworkWorker:
                 "available_at": now + timedelta(seconds=min(300, 2**attempts)),
                 "failure_code": failure_code,
             }
+            if isinstance(result, dict):
+                checkpoint_result = dict(result)
+                if not recovery_accounting_applied:
+                    checkpoint_result["queued"] = int(checkpoint_result.get("queued") or 0) + recovery_queued
+                    checkpoint_result["existing"] = int(checkpoint_result.get("existing") or 0) + recovery_existing
+                    checkpoint_result["skipped"] = max(
+                        0,
+                        int(checkpoint_result.get("skipped") or 0) - recovery_queued - recovery_existing,
+                    )
+                outstanding_memory_ids = list(
+                    dict.fromkeys(remaining_recovery_memory_ids + recovery_memory_ids[recovery_index:])
+                )
+                update["cursor"] = claimed.get("cursor")
+                update["recovery_page"] = {
+                    "result": checkpoint_result,
+                    "memory_ids": outstanding_memory_ids,
+                }
             if not retryable:
                 update["completed_at"] = now
             self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)

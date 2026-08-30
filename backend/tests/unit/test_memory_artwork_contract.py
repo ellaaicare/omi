@@ -1229,6 +1229,103 @@ def test_reconciliation_checkpoints_mixed_recovery_page_without_losing_or_double
     ]
 
 
+def test_reconciliation_checkpoints_partial_page_before_retryable_recovery_error():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    for index, memory_id in enumerate(("memory-first", "memory-second")):
+        memory = _terminal_memory(
+            memory_id,
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=index),
+        )
+        memory["enrichment_state"] = {"status": "pending"}
+        repository.conversations[("owner-a", memory_id)] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    recovery_calls = []
+
+    async def recover_enrichment(uid, memory_id):
+        recovery_calls.append((uid, memory_id))
+        if memory_id == "memory-second" and recovery_calls.count((uid, memory_id)) == 1:
+            raise artwork.MemoryArtworkError("provider_busy", retryable=True)
+        recovered = repository.conversations[(uid, memory_id)]
+        recovered["enrichment_state"] = {"status": "writeback_applied", "kind": "hermes_enriched"}
+        return {"outcome": "completed"}
+
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+        enrichment_recovery=recover_enrichment,
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+
+    first = asyncio.run(worker.run_reconciliation_job(repository.get_reconciliation_job("owner-a", started["job_id"])))
+    held = repository.get_reconciliation_job("owner-a", started["job_id"])
+    assert first == {"outcome": "retry", "status": "pending", "failure_code": "provider_busy"}
+    assert held["attempt_count"] == 1
+    assert held["recovery_page"]["result"]["queued"] == 1
+    assert held["recovery_page"]["result"]["existing"] == 0
+    assert held["recovery_page"]["result"]["skipped"] == 1
+    assert held["recovery_page"]["memory_ids"] == ["memory-second"]
+
+    held["available_at"] = datetime.now(timezone.utc)
+    repository.reconciliation_jobs[started["job_id"]] = held
+    second = asyncio.run(worker.run_reconciliation_job(held))
+    completed = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert second == {"outcome": "completed", "status": "completed"}
+    assert completed["attempt_count"] == 0
+    assert completed["pages_processed"] == 1
+    assert completed["queued"] == 2
+    assert completed["existing"] == 0
+    assert completed["skipped"] == 0
+    assert recovery_calls == [
+        ("owner-a", "memory-first"),
+        ("owner-a", "memory-second"),
+        ("owner-a", "memory-second"),
+    ]
+
+
+def test_reconciliation_resets_retry_budget_after_successful_page_progress():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    for index in range(11):
+        memory_id = f"memory-{index:02d}"
+        repository.conversations[("owner-a", memory_id)] = _terminal_memory(
+            memory_id,
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=index),
+        )
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+    pending = repository.get_reconciliation_job("owner-a", started["job_id"])
+    pending["attempt_count"] = 3
+    repository.reconciliation_jobs[started["job_id"]] = pending
+
+    result = asyncio.run(worker.run_reconciliation_job(pending))
+    continued = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert result == {"outcome": "continued", "status": "pending"}
+    assert continued["attempt_count"] == 0
+    assert continued["pages_processed"] == 1
+    assert continued["queued"] == 10
+
+
 @pytest.mark.parametrize(
     ("queue_before_return", "expected_queued", "expected_existing"),
     [(False, 1, 0), (True, 0, 1)],
