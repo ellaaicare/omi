@@ -517,4 +517,188 @@ void main() {
     expect(page?.nextCursor, 'memory-older-42');
     expect(await api.backfillNext(cursor: 'bad/cursor'), isNull);
   });
+
+  test('queue status separates active work from queued, retrying, and failed memories', () async {
+    final generationId = 'a' * 64;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': 'ella.memory_artwork.queue.v1',
+          'generation_id': generationId,
+          'style_version': memoryArtworkDefaultStyle,
+          'state': 'running',
+          'control_state': 'running',
+          'scan_status': 'completed',
+          'scanned': 166,
+          'pages_processed': 4,
+          'ready': 35,
+          'active': 1,
+          'queued': 128,
+          'retrying': 2,
+          'failed': 0,
+          'total': 166,
+          'remaining': 131,
+          'updated_at': '2026-08-30T09:49:36Z',
+          'styles': [
+            {
+              'style_version': memoryArtworkDefaultStyle,
+              'state': 'running',
+              'ready': 35,
+              'active': 1,
+              'queued': 128,
+              'retrying': 2,
+              'failed': 0,
+              'total': 166,
+              'remaining': 131,
+            },
+            {
+              'style_version': memoryArtworkPaperCollageStyle,
+              'state': 'paused',
+              'ready': 10,
+              'active': 0,
+              'queued': 5,
+              'retrying': 0,
+              'failed': 0,
+              'total': 15,
+              'remaining': 5,
+            },
+          ],
+        }),
+        200,
+      ),
+    );
+
+    final status = await api.queueStatus();
+
+    expect(status?.ready, 35);
+    expect(status?.active, 1);
+    expect(status?.queued, 128);
+    expect(status?.retrying, 2);
+    expect(status?.remaining, 131);
+    expect(status?.progress, closeTo(35 / 166, 0.0001));
+    expect(status?.canPause, isTrue);
+    expect(status?.styles.last.styleVersion, memoryArtworkPaperCollageStyle);
+    expect(status?.styles.last.state, MemoryArtworkQueueState.paused);
+  });
+
+  test('pause is exact-owner authenticated and generation fenced', () async {
+    final generationId = 'b' * 64;
+    late Map<String, dynamic> requestBody;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        expect(url, 'https://api.example/v1/ella/memory-artwork/queue/control');
+        expect(method, 'POST');
+        expect(requireAuthCheck, isTrue);
+        expect(expectedAuthenticatedUid, 'owner-a');
+        requestBody = Map<String, dynamic>.from(jsonDecode(body));
+        return http.Response(
+          jsonEncode({
+            'schema_version': 'ella.memory_artwork.queue.v1',
+            'generation_id': generationId,
+            'style_version': memoryArtworkDefaultStyle,
+            'state': 'paused',
+            'control_state': 'paused',
+            'scan_status': 'pending',
+            'scanned': 20,
+            'pages_processed': 1,
+            'ready': 5,
+            'active': 1,
+            'queued': 14,
+            'retrying': 0,
+            'failed': 0,
+            'total': 20,
+            'remaining': 15,
+            'styles': [
+              {
+                'style_version': memoryArtworkDefaultStyle,
+                'state': 'paused',
+                'ready': 5,
+                'active': 1,
+                'queued': 14,
+                'retrying': 0,
+                'failed': 0,
+                'total': 20,
+                'remaining': 15,
+              },
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    final status = await api.controlQueue(action: MemoryArtworkQueueAction.pause, generationId: generationId);
+
+    expect(requestBody, {'action': 'pause', 'generation_id': generationId});
+    expect(status?.controlState, MemoryArtworkQueueState.paused);
+    expect(status?.canResume, isTrue);
+    expect(status?.active, 1, reason: 'the already-active image is allowed to finish');
+    expect(await api.controlQueue(action: MemoryArtworkQueueAction.pause, generationId: 'not-a-generation'), isNull);
+  });
+
+  test('malformed queue totals fail closed instead of showing false progress', () async {
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': 'ella.memory_artwork.queue.v1',
+          'generation_id': 'c' * 64,
+          'style_version': memoryArtworkDefaultStyle,
+          'state': 'running',
+          'control_state': 'running',
+          'scan_status': 'completed',
+          'scanned': 1,
+          'pages_processed': 1,
+          'ready': 1,
+          'active': 0,
+          'queued': 1,
+          'retrying': 0,
+          'failed': 0,
+          'total': 99,
+          'remaining': 1,
+          'styles': [],
+        }),
+        200,
+      ),
+    );
+
+    expect(await api.queueStatus(), isNull);
+  });
 }

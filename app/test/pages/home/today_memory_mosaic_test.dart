@@ -1061,10 +1061,12 @@ void main() {
       memoryArtworkAuthorityProvider: () => authority,
     );
     addTearDown(harness.dispose);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.text('Paper collage'));
     await tester.pumpAndSettle();
 
@@ -1113,6 +1115,96 @@ void main() {
     expect(find.text('Artwork is up to date.'), findsOneWidget);
     final button = tester.widget<OutlinedButton>(find.byKey(const Key('home-artwork-continue')));
     expect(button.onPressed, isNotNull);
+  });
+
+  testWidgets('Artwork Studio shows exact queue progress and progress by style', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(
+        ready: 35,
+        active: 1,
+        queued: 128,
+        retrying: 2,
+        styles: [
+          _artworkStyleProgress(
+            styleVersion: memoryArtworkDefaultStyle,
+            ready: 35,
+            active: 1,
+            queued: 128,
+            retrying: 2,
+          ),
+          _artworkStyleProgress(styleVersion: memoryArtworkPaperCollageStyle, ready: 10, queued: 10),
+        ],
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('35 of 166 illustrations ready'), findsOneWidget);
+    expect(find.text('1 creating · 128 queued · 2 retrying'), findsOneWidget);
+    expect(find.text('35 ready · 131 left'), findsOneWidget);
+    expect(find.text('10 ready · 10 left'), findsOneWidget);
+    final indicator = tester.widget<LinearProgressIndicator>(
+      find.byKey(const Key('home-artwork-queue-progress-bar')),
+    );
+    expect(indicator.value, closeTo(35 / 166, 0.0001));
+  });
+
+  testWidgets('Artwork Studio pauses, stops, and resumes the exact artwork generation', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 35, active: 1, queued: 128, retrying: 2),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.byKey(const Key('home-artwork-pause')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(artwork.queueActions, [MemoryArtworkQueueAction.pause]);
+    expect(find.textContaining('Illustration work is paused.'), findsOneWidget);
+    expect(find.text('The illustration already being created may finish.'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-resume')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('home-artwork-stop')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Stop this illustration update?'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('home-artwork-confirm-stop')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(artwork.queueActions, [MemoryArtworkQueueAction.pause, MemoryArtworkQueueAction.cancel]);
+    expect(find.textContaining('This illustration update was stopped.'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('home-artwork-resume')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      artwork.queueActions,
+      [MemoryArtworkQueueAction.pause, MemoryArtworkQueueAction.cancel, MemoryArtworkQueueAction.resume],
+    );
+    expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
   });
 
   testWidgets('account turnover clears a pending style latch for the replacement account', (tester) async {
@@ -1442,6 +1534,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     this.secondStyleGate,
     Set<int> authorityThrowRequests = const {},
     Set<int> failedBackfillRequests = const {},
+    this.queue,
   })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
         _authorityThrowRequests = Set<int>.of(authorityThrowRequests),
         _failedBackfillRequests = Set<int>.of(failedBackfillRequests);
@@ -1455,6 +1548,8 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final Completer<void>? firstBackfillGate;
   final Completer<void>? firstStyleGate;
   final Completer<void>? secondStyleGate;
+  MemoryArtworkQueueStatus? queue;
+  final List<MemoryArtworkQueueAction> queueActions = [];
   int _backfillRequests = 0;
   int _styleRequests = 0;
 
@@ -1492,6 +1587,110 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     if (request == 1 && secondStyleGate != null) await secondStyleGate!.future;
     return const MemoryArtworkPreferenceUpdate(saved: true);
   }
+
+  @override
+  Future<MemoryArtworkQueueStatus?> queueStatus() async => queue;
+
+  @override
+  Future<MemoryArtworkQueueStatus?> controlQueue({
+    required MemoryArtworkQueueAction action,
+    required String generationId,
+  }) async {
+    final current = queue;
+    if (current == null || current.generationId != generationId) return null;
+    queueActions.add(action);
+    final controlState = switch (action) {
+      MemoryArtworkQueueAction.pause => MemoryArtworkQueueState.paused,
+      MemoryArtworkQueueAction.resume => MemoryArtworkQueueState.running,
+      MemoryArtworkQueueAction.cancel => MemoryArtworkQueueState.cancelled,
+    };
+    return queue = _copyArtworkQueueStatus(current, controlState: controlState);
+  }
+}
+
+MemoryArtworkStyleProgress _artworkStyleProgress({
+  required String styleVersion,
+  int ready = 0,
+  int active = 0,
+  int queued = 0,
+  int retrying = 0,
+  int failed = 0,
+}) {
+  final remaining = active + queued + retrying + failed;
+  return MemoryArtworkStyleProgress(
+    styleVersion: styleVersion,
+    state: remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running,
+    ready: ready,
+    active: active,
+    queued: queued,
+    retrying: retrying,
+    failed: failed,
+    total: ready + remaining,
+    remaining: remaining,
+  );
+}
+
+MemoryArtworkQueueStatus _artworkQueueStatus({
+  int ready = 0,
+  int active = 0,
+  int queued = 0,
+  int retrying = 0,
+  int failed = 0,
+  MemoryArtworkQueueState controlState = MemoryArtworkQueueState.running,
+  List<MemoryArtworkStyleProgress>? styles,
+}) {
+  final remaining = active + queued + retrying + failed;
+  return MemoryArtworkQueueStatus(
+    generationId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    styleVersion: memoryArtworkDefaultStyle,
+    state: remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running,
+    controlState: controlState,
+    scanStatus: 'complete',
+    scanned: ready + remaining,
+    pagesProcessed: 4,
+    ready: ready,
+    active: active,
+    queued: queued,
+    retrying: retrying,
+    failed: failed,
+    total: ready + remaining,
+    remaining: remaining,
+    styles: styles ??
+        [
+          _artworkStyleProgress(
+            styleVersion: memoryArtworkDefaultStyle,
+            ready: ready,
+            active: active,
+            queued: queued,
+            retrying: retrying,
+            failed: failed,
+          ),
+        ],
+  );
+}
+
+MemoryArtworkQueueStatus _copyArtworkQueueStatus(
+  MemoryArtworkQueueStatus current, {
+  required MemoryArtworkQueueState controlState,
+}) {
+  return MemoryArtworkQueueStatus(
+    generationId: current.generationId,
+    styleVersion: current.styleVersion,
+    state: current.state,
+    controlState: controlState,
+    scanStatus: current.scanStatus,
+    scanned: current.scanned,
+    pagesProcessed: current.pagesProcessed,
+    ready: current.ready,
+    active: current.active,
+    queued: current.queued,
+    retrying: current.retrying,
+    failed: current.failed,
+    total: current.total,
+    remaining: current.remaining,
+    styles: current.styles,
+    updatedAt: current.updatedAt,
+  );
 }
 
 Future<_HomeHarness> _pumpHome(

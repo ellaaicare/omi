@@ -10823,5 +10823,69 @@
   "memoryArtworkBackfillReady": "Artwork is ready to continue in the background.",
   "memoryArtworkContinueOlder": "Continue older artwork",
   "memoryArtworkCheckMissing": "Check for missing artwork",
-  "memoryArtworkRetry": "Try artwork again"
+  "memoryArtworkRetry": "Try artwork again",
+  "memoryArtworkQueueProgress": "{ready} of {total} illustrations ready",
+  "@memoryArtworkQueueProgress": {
+    "placeholders": {
+      "ready": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueCreating": "{count, plural, =1{1 creating} other{{count} creating}}",
+  "@memoryArtworkQueueCreating": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueQueued": "{count} queued",
+  "@memoryArtworkQueueQueued": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueRetrying": "{count} retrying",
+  "@memoryArtworkQueueRetrying": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueFailed": "{count} need attention",
+  "@memoryArtworkQueueFailed": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueStyleProgress": "{ready} ready · {remaining} left",
+  "@memoryArtworkQueueStyleProgress": {
+    "placeholders": {
+      "ready": {
+        "type": "int"
+      },
+      "remaining": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueuePaused": "Illustration work is paused.",
+  "memoryArtworkQueueStopped": "This illustration update was stopped.",
+  "memoryArtworkQueueComplete": "This illustration style is ready.",
+  "memoryArtworkQueuePause": "Pause",
+  "memoryArtworkQueueResume": "Resume",
+  "memoryArtworkQueueStop": "Stop",
+  "memoryArtworkQueueStopTitle": "Stop this illustration update?",
+  "memoryArtworkQueueStopDetail": "Finished illustrations will stay. The illustration already being created may finish, and you can resume later.",
+  "memoryArtworkQueueActiveMayFinish": "The illustration already being created may finish.",
+  "memoryArtworkQueueControlFailed": "Ella couldn't update illustration work right now."
 }

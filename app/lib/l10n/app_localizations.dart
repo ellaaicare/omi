@@ -17918,6 +17918,102 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Try artwork again'**
   String get memoryArtworkRetry;
+
+  /// No description provided for @memoryArtworkQueueProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'{ready} of {total} illustrations ready'**
+  String memoryArtworkQueueProgress(int ready, int total);
+
+  /// No description provided for @memoryArtworkQueueCreating.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 creating} other{{count} creating}}'**
+  String memoryArtworkQueueCreating(int count);
+
+  /// No description provided for @memoryArtworkQueueQueued.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} queued'**
+  String memoryArtworkQueueQueued(int count);
+
+  /// No description provided for @memoryArtworkQueueRetrying.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} retrying'**
+  String memoryArtworkQueueRetrying(int count);
+
+  /// No description provided for @memoryArtworkQueueFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} need attention'**
+  String memoryArtworkQueueFailed(int count);
+
+  /// No description provided for @memoryArtworkQueueStyleProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'{ready} ready · {remaining} left'**
+  String memoryArtworkQueueStyleProgress(int ready, int remaining);
+
+  /// No description provided for @memoryArtworkQueuePaused.
+  ///
+  /// In en, this message translates to:
+  /// **'Illustration work is paused.'**
+  String get memoryArtworkQueuePaused;
+
+  /// No description provided for @memoryArtworkQueueStopped.
+  ///
+  /// In en, this message translates to:
+  /// **'This illustration update was stopped.'**
+  String get memoryArtworkQueueStopped;
+
+  /// No description provided for @memoryArtworkQueueComplete.
+  ///
+  /// In en, this message translates to:
+  /// **'This illustration style is ready.'**
+  String get memoryArtworkQueueComplete;
+
+  /// No description provided for @memoryArtworkQueuePause.
+  ///
+  /// In en, this message translates to:
+  /// **'Pause'**
+  String get memoryArtworkQueuePause;
+
+  /// No description provided for @memoryArtworkQueueResume.
+  ///
+  /// In en, this message translates to:
+  /// **'Resume'**
+  String get memoryArtworkQueueResume;
+
+  /// No description provided for @memoryArtworkQueueStop.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop'**
+  String get memoryArtworkQueueStop;
+
+  /// No description provided for @memoryArtworkQueueStopTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop this illustration update?'**
+  String get memoryArtworkQueueStopTitle;
+
+  /// No description provided for @memoryArtworkQueueStopDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Finished illustrations will stay. The illustration already being created may finish, and you can resume later.'**
+  String get memoryArtworkQueueStopDetail;
+
+  /// No description provided for @memoryArtworkQueueActiveMayFinish.
+  ///
+  /// In en, this message translates to:
+  /// **'The illustration already being created may finish.'**
+  String get memoryArtworkQueueActiveMayFinish;
+
+  /// No description provided for @memoryArtworkQueueControlFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t update illustration work right now.'**
+  String get memoryArtworkQueueControlFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

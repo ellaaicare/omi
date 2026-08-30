@@ -30,6 +30,10 @@ typedef MemoryArtworkAuthorityProvider = ExactAccountAuthorityVerifier? Function
 
 enum MemoryArtworkResultStatus { generating, ready, unavailable, declined }
 
+enum MemoryArtworkQueueState { running, paused, cancelled, completed, needsAttention }
+
+enum MemoryArtworkQueueAction { pause, resume, cancel }
+
 class MemoryArtworkResult {
   const MemoryArtworkResult({
     required this.status,
@@ -91,6 +95,66 @@ class MemoryArtworkBackfillPage {
   final int skipped;
   final bool hasMore;
   final String? nextCursor;
+}
+
+class MemoryArtworkStyleProgress {
+  const MemoryArtworkStyleProgress({
+    required this.styleVersion,
+    required this.state,
+    required this.ready,
+    required this.active,
+    required this.queued,
+    required this.retrying,
+    required this.failed,
+    required this.total,
+    required this.remaining,
+  });
+
+  final String styleVersion;
+  final MemoryArtworkQueueState state;
+  final int ready;
+  final int active;
+  final int queued;
+  final int retrying;
+  final int failed;
+  final int total;
+  final int remaining;
+
+  double get progress => total == 0 ? 0 : (ready / total).clamp(0, 1);
+}
+
+class MemoryArtworkQueueStatus extends MemoryArtworkStyleProgress {
+  const MemoryArtworkQueueStatus({
+    required this.generationId,
+    required super.styleVersion,
+    required super.state,
+    required this.controlState,
+    required this.scanStatus,
+    required this.scanned,
+    required this.pagesProcessed,
+    required super.ready,
+    required super.active,
+    required super.queued,
+    required super.retrying,
+    required super.failed,
+    required super.total,
+    required super.remaining,
+    required this.styles,
+    this.updatedAt,
+  });
+
+  final String generationId;
+  final MemoryArtworkQueueState controlState;
+  final String scanStatus;
+  final int scanned;
+  final int pagesProcessed;
+  final List<MemoryArtworkStyleProgress> styles;
+  final DateTime? updatedAt;
+
+  bool get canPause => controlState == MemoryArtworkQueueState.running && remaining > 0;
+  bool get canResume =>
+      controlState == MemoryArtworkQueueState.paused || controlState == MemoryArtworkQueueState.cancelled;
+  bool get canCancel => controlState != MemoryArtworkQueueState.cancelled && remaining > 0;
 }
 
 class MemoryArtworkApi {
@@ -284,6 +348,30 @@ class MemoryArtworkApi {
 
   Future<bool> backfillRecent() async => await backfillNext() != null;
 
+  Future<MemoryArtworkQueueStatus?> queueStatus() async {
+    final authority = _authorityProvider();
+    if (authority == null) return null;
+    final response = await _call(authority, method: 'GET', path: 'v1/ella/memory-artwork/queue');
+    if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
+    return _queueStatusFromPayload(_jsonObject(response!.body));
+  }
+
+  Future<MemoryArtworkQueueStatus?> controlQueue({
+    required MemoryArtworkQueueAction action,
+    required String generationId,
+  }) async {
+    final authority = _authorityProvider();
+    if (authority == null || !_generationId.hasMatch(generationId)) return null;
+    final response = await _call(
+      authority,
+      method: 'POST',
+      path: 'v1/ella/memory-artwork/queue/control',
+      body: jsonEncode({'action': action.name, 'generation_id': generationId}),
+    );
+    if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
+    return _queueStatusFromPayload(_jsonObject(response!.body));
+  }
+
   Future<http.Response?> _call(
     ExactAccountAuthorityVerifier authority, {
     required String method,
@@ -334,6 +422,110 @@ class MemoryArtworkApi {
 
   static int _nonNegativeInt(Object? value) => value is int && value >= 0 ? value : 0;
 
+  static MemoryArtworkQueueStatus? _queueStatusFromPayload(Map<String, dynamic>? payload) {
+    if (payload == null || payload['schema_version'] != 'ella.memory_artwork.queue.v1') return null;
+    final generationId = payload['generation_id']?.toString().trim() ?? '';
+    final styleVersion = payload['style_version']?.toString().trim() ?? '';
+    final state = _queueState(payload['state']);
+    final controlState = _queueState(payload['control_state']);
+    if (!_generationId.hasMatch(generationId) || !_supportedStyles.contains(styleVersion)) return null;
+    if (state == null || controlState == null) return null;
+    final ready = _strictNonNegativeInt(payload['ready']);
+    final active = _strictNonNegativeInt(payload['active']);
+    final queued = _strictNonNegativeInt(payload['queued']);
+    final retrying = _strictNonNegativeInt(payload['retrying']);
+    final failed = _strictNonNegativeInt(payload['failed']);
+    final total = _strictNonNegativeInt(payload['total']);
+    final remaining = _strictNonNegativeInt(payload['remaining']);
+    final scanned = _strictNonNegativeInt(payload['scanned']);
+    final pagesProcessed = _strictNonNegativeInt(payload['pages_processed']);
+    if (ready == null ||
+        active == null ||
+        queued == null ||
+        retrying == null ||
+        failed == null ||
+        total == null ||
+        remaining == null ||
+        scanned == null ||
+        pagesProcessed == null ||
+        total != ready + active + queued + retrying + failed ||
+        remaining != active + queued + retrying + failed) {
+      return null;
+    }
+    final stylePayloads = payload['styles'];
+    if (stylePayloads is! List) return null;
+    final styles = <MemoryArtworkStyleProgress>[];
+    for (final raw in stylePayloads) {
+      if (raw is! Map) return null;
+      final item = Map<String, dynamic>.from(raw);
+      final itemStyle = item['style_version']?.toString().trim() ?? '';
+      final itemState = _queueState(item['state']);
+      final itemReady = _strictNonNegativeInt(item['ready']);
+      final itemActive = _strictNonNegativeInt(item['active']);
+      final itemQueued = _strictNonNegativeInt(item['queued']);
+      final itemRetrying = _strictNonNegativeInt(item['retrying']);
+      final itemFailed = _strictNonNegativeInt(item['failed']);
+      final itemTotal = _strictNonNegativeInt(item['total']);
+      final itemRemaining = _strictNonNegativeInt(item['remaining']);
+      if (!_supportedStyles.contains(itemStyle) ||
+          itemState == null ||
+          itemReady == null ||
+          itemActive == null ||
+          itemQueued == null ||
+          itemRetrying == null ||
+          itemFailed == null ||
+          itemTotal == null ||
+          itemRemaining == null ||
+          itemTotal != itemReady + itemActive + itemQueued + itemRetrying + itemFailed ||
+          itemRemaining != itemActive + itemQueued + itemRetrying + itemFailed) {
+        return null;
+      }
+      styles.add(
+        MemoryArtworkStyleProgress(
+          styleVersion: itemStyle,
+          state: itemState,
+          ready: itemReady,
+          active: itemActive,
+          queued: itemQueued,
+          retrying: itemRetrying,
+          failed: itemFailed,
+          total: itemTotal,
+          remaining: itemRemaining,
+        ),
+      );
+    }
+    final updatedAt = DateTime.tryParse(payload['updated_at']?.toString() ?? '')?.toUtc();
+    return MemoryArtworkQueueStatus(
+      generationId: generationId,
+      styleVersion: styleVersion,
+      state: state,
+      controlState: controlState,
+      scanStatus: payload['scan_status']?.toString().trim() ?? 'idle',
+      scanned: scanned,
+      pagesProcessed: pagesProcessed,
+      ready: ready,
+      active: active,
+      queued: queued,
+      retrying: retrying,
+      failed: failed,
+      total: total,
+      remaining: remaining,
+      styles: List.unmodifiable(styles),
+      updatedAt: updatedAt,
+    );
+  }
+
+  static int? _strictNonNegativeInt(Object? value) => value is int && value >= 0 ? value : null;
+
+  static MemoryArtworkQueueState? _queueState(Object? value) => switch (value?.toString()) {
+        'running' => MemoryArtworkQueueState.running,
+        'paused' => MemoryArtworkQueueState.paused,
+        'cancelled' => MemoryArtworkQueueState.cancelled,
+        'completed' => MemoryArtworkQueueState.completed,
+        'needs_attention' => MemoryArtworkQueueState.needsAttention,
+        _ => null,
+      };
+
   static MemoryArtworkResult _unavailable(String code) =>
       MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable, failureCode: code);
 
@@ -353,6 +545,8 @@ class MemoryArtworkApi {
         .toString();
   }
 }
+
+final _generationId = RegExp(r'^[0-9a-f]{64}$');
 
 const _supportedStyles = {
   memoryArtworkDefaultStyle,
