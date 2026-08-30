@@ -41,6 +41,11 @@ class MemoryArtworkBackfillRequest(BaseModel):
     cursor: Optional[str] = Field(default=None, min_length=1, max_length=256, pattern=r"^[^/]+$")
 
 
+class MemoryArtworkQueueControlRequest(BaseModel):
+    action: Literal["pause", "resume", "cancel"]
+    generation_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
 def require_memory_artwork_service(
     service_key: Optional[str] = Header(default=None, alias=MEMORY_ARTWORK_SERVICE_HEADER),
     subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
@@ -56,15 +61,16 @@ def require_memory_artwork_service(
 def _http_error(exc: MemoryArtworkError) -> HTTPException:
     if exc.code == "memory_artwork_memory_not_found":
         status_code = 404
-    elif exc.code.endswith("_invalid") or exc.code.endswith("_stale"):
-        status_code = 422
     elif exc.code in {
         "memory_artwork_authority_changed",
         "memory_artwork_source_changed",
         "memory_artwork_prompt_changed",
         "memory_artwork_preference_authority_stale",
+        "memory_artwork_queue_generation_stale",
     }:
         status_code = 409
+    elif exc.code.endswith("_invalid") or exc.code.endswith("_stale"):
+        status_code = 422
     else:
         status_code = 503 if exc.retryable or "disabled" in exc.code or "not_ready" in exc.code else 409
     return HTTPException(status_code=status_code, detail={"code": exc.code, "retryable": exc.retryable})
@@ -206,6 +212,29 @@ async def start_memory_artwork_reconciliation(uid: str = Depends(get_exact_fireb
 async def get_memory_artwork_reconciliation(uid: str = Depends(get_exact_firebase_uid)):
     try:
         return await MemoryArtworkService().reconciliation_status(uid)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/memory-artwork/queue")
+async def get_memory_artwork_queue(uid: str = Depends(get_exact_firebase_uid)):
+    try:
+        return await MemoryArtworkService().queue_status(uid)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/memory-artwork/queue/control")
+async def control_memory_artwork_queue(
+    payload: MemoryArtworkQueueControlRequest,
+    uid: str = Depends(get_exact_firebase_uid),
+):
+    try:
+        return await MemoryArtworkService().set_queue_control(
+            uid,
+            action=payload.action,
+            generation_id=payload.generation_id,
+        )
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 

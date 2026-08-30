@@ -44,6 +44,7 @@ from utils.ella.memory_artwork_storage import (
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
+ARTWORK_QUEUE_SCHEMA_VERSION = "ella.memory_artwork.queue.v1"
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
 ARTWORK_PROVIDER_CONTRACT_VERSION = "ella.artwork.service.v1"
 ARTWORK_RECONCILIATION_SCHEMA_VERSION = "ella.memory_artwork.reconciliation.v1"
@@ -243,7 +244,13 @@ class MemoryArtworkConfig:
 class MemoryArtworkRepository(Protocol):
     def get_preferences(self, uid: str) -> dict[str, Any]: ...
 
-    def set_preferences(self, uid: str, preferences: dict[str, Any]) -> None: ...
+    def set_preferences(self, uid: str, preferences: dict[str, Any], **kwargs) -> None: ...
+
+    def get_backfill_control(self, uid: str) -> dict[str, Any]: ...
+
+    def set_backfill_control(self, uid: str, **kwargs) -> dict[str, Any]: ...
+
+    def list_jobs_for_uid(self, uid: str) -> list[dict[str, Any]]: ...
 
     def get_conversation(self, uid: str, memory_id: str) -> Optional[dict[str, Any]]: ...
 
@@ -295,6 +302,9 @@ class MemoryArtworkRepository(Protocol):
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
     set_preferences = staticmethod(artwork_db.set_preferences)
+    get_backfill_control = staticmethod(artwork_db.get_backfill_control)
+    set_backfill_control = staticmethod(artwork_db.set_backfill_control)
+    list_jobs_for_uid = staticmethod(artwork_db.list_jobs_for_uid)
     get_conversation = staticmethod(artwork_db.get_conversation)
     list_conversations_page = staticmethod(artwork_db.list_conversations_page)
     reserve_generation = staticmethod(artwork_db.reserve_generation)
@@ -857,6 +867,7 @@ class MemoryArtworkService:
                 "authority_digest": authority.authority_digest,
                 "updated_at": datetime.now(timezone.utc),
             },
+            backfill_control_state="running" if consent == "accepted" else "cancelled",
         )
         return await self.preferences(uid)
 
@@ -933,6 +944,142 @@ class MemoryArtworkService:
         job_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
         return self._public_reconciliation(self.repository.get_reconciliation_job(uid, job_id))
 
+    @staticmethod
+    def _queue_counts(jobs: list[dict[str, Any]], *, authority_digest: str, style_version: str) -> dict[str, int]:
+        counts = {"ready": 0, "active": 0, "queued": 0, "retrying": 0, "failed": 0}
+        now = datetime.now(timezone.utc)
+        for job in jobs:
+            if job.get("authority_digest") != authority_digest or job.get("style_version") != style_version:
+                continue
+            status = str(job.get("status") or "")
+            attempts = int(job.get("attempt_count") or 0)
+            if status == "completed":
+                counts["ready"] += 1
+            elif status == "processing":
+                lease_expires_at = job.get("lease_expires_at")
+                if isinstance(lease_expires_at, datetime) and lease_expires_at > now:
+                    counts["active"] += 1
+                else:
+                    counts["retrying" if attempts else "queued"] += 1
+            elif status == "pending":
+                counts["retrying" if attempts else "queued"] += 1
+            elif status == "failed":
+                counts["failed"] += 1
+        counts["total"] = sum(counts.values())
+        counts["remaining"] = counts["active"] + counts["queued"] + counts["retrying"] + counts["failed"]
+        return counts
+
+    async def queue_status(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        generation_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
+        control = self.repository.get_backfill_control(uid)
+        control_is_current = bool(
+            control.get("generation_id") == generation_id
+            and control.get("authority_digest") == authority.authority_digest
+            and control.get("style_version") == style_version
+            and control.get("state") in {"running", "paused", "cancelled"}
+        )
+        state = str(control.get("state")) if control_is_current else "running"
+        jobs = self.repository.list_jobs_for_uid(uid)
+        current_counts = self._queue_counts(
+            jobs,
+            authority_digest=authority.authority_digest,
+            style_version=style_version,
+        )
+        reconciliation = self.repository.get_reconciliation_job(uid, generation_id)
+        scan_status = str((reconciliation or {}).get("status") or "idle")
+        style_progress = []
+        for supported_style in sorted(SUPPORTED_STYLE_VERSIONS):
+            counts = self._queue_counts(
+                jobs,
+                authority_digest=authority.authority_digest,
+                style_version=supported_style,
+            )
+            if supported_style == style_version or counts["total"] > 0:
+                style_progress.append(
+                    {
+                        "style_version": supported_style,
+                        "state": state if supported_style == style_version else "paused",
+                        **counts,
+                    }
+                )
+        effective_state = state
+        if state == "running" and scan_status == "completed" and current_counts["remaining"] == 0:
+            effective_state = "completed"
+        elif state == "running" and current_counts["failed"] > 0:
+            effective_state = "needs_attention"
+        return {
+            "schema_version": ARTWORK_QUEUE_SCHEMA_VERSION,
+            "generation_id": generation_id,
+            "style_version": style_version,
+            "state": effective_state,
+            "control_state": state,
+            "scan_status": scan_status,
+            "scanned": int((reconciliation or {}).get("scanned") or 0),
+            "pages_processed": int((reconciliation or {}).get("pages_processed") or 0),
+            **current_counts,
+            "styles": style_progress,
+            "updated_at": max(
+                [
+                    value
+                    for value in (
+                        control.get("updated_at") if control_is_current else None,
+                        (reconciliation or {}).get("updated_at"),
+                        *[job.get("updated_at") for job in jobs],
+                    )
+                    if isinstance(value, datetime)
+                ],
+                default=None,
+            ),
+        }
+
+    async def set_queue_control(self, uid: str, *, action: str, generation_id: str) -> dict[str, Any]:
+        states = {"pause": "paused", "resume": "running", "cancel": "cancelled"}
+        state = states.get(action)
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        if state is None or len(generation_id) != 64 or any(char not in "0123456789abcdef" for char in generation_id):
+            raise MemoryArtworkError("memory_artwork_queue_control_invalid")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        expected_generation_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
+        if generation_id != expected_generation_id:
+            raise MemoryArtworkError("memory_artwork_queue_generation_stale")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        update = self.repository.set_backfill_control(
+            uid,
+            expected_generation_id=generation_id,
+            state=state,
+        )
+        outcome = str(update.get("outcome") or "")
+        if outcome == "deletion_pending":
+            raise MemoryArtworkError("memory_artwork_deletion_pending")
+        if outcome != "updated":
+            raise MemoryArtworkError("memory_artwork_queue_generation_stale")
+        if action == "resume":
+            self.repository.create_reconciliation_job(
+                uid,
+                authority_digest=authority.authority_digest,
+                style_version=style_version,
+            )
+        return await self.queue_status(uid)
+
     async def enqueue(
         self,
         uid: str,
@@ -983,6 +1130,7 @@ class MemoryArtworkService:
                     "authority_digest": authority.authority_digest,
                     "updated_at": datetime.now(timezone.utc),
                 },
+                backfill_control_state="running",
             )
             preferences = self.repository.get_preferences(uid)
         if preferences.get("consent") != "accepted" or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION:

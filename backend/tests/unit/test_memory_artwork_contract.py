@@ -37,6 +37,9 @@ def _load_service_module():
     for name in (
         "get_preferences",
         "set_preferences",
+        "get_backfill_control",
+        "set_backfill_control",
+        "list_jobs_for_uid",
         "get_conversation",
         "list_conversations_page",
         "list_recent_conversations",
@@ -65,6 +68,7 @@ def _load_service_module():
     database_stub.DELETION_PENDING_FIELD = "memory_artwork_deletion_pending"
     database_stub.ARTWORK_FIELD = "artwork"
     database_stub.PUBLISHED_ARTWORK_FIELD = "published_artwork"
+    database_stub.BACKFILL_CONTROL_FIELD = "memory_artwork_backfill_control"
     database_stub.reconciliation_job_id = lambda uid, authority_digest, style_version: hashlib.sha256(
         f"{uid}\0{authority_digest}\0{style_version}".encode("utf-8")
     ).hexdigest()
@@ -165,14 +169,57 @@ class FakeRepository:
         self.storage_cleanup_required = set()
         self.deletion_pending = set()
         self.reconciliation_jobs = {}
+        self.backfill_controls = {}
 
     def get_preferences(self, uid):
         result = copy.deepcopy(self.preferences_by_uid.get(uid, {}))
         result[artwork.artwork_db.DELETION_PENDING_FIELD] = uid in self.deletion_pending
         return result
 
-    def set_preferences(self, uid, preferences):
+    def set_preferences(self, uid, preferences, *, backfill_control_state=None):
         self.preferences_by_uid[uid] = copy.deepcopy(preferences)
+        if backfill_control_state is not None:
+            generation_id = artwork.artwork_db.reconciliation_job_id(
+                uid,
+                preferences["authority_digest"],
+                preferences["style_version"],
+            )
+            self.backfill_controls[uid] = {
+                "schema_version": "ella.memory_artwork.queue_control.v1",
+                "generation_id": generation_id,
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "state": backfill_control_state,
+                "updated_at": datetime.now(timezone.utc),
+            }
+
+    def get_backfill_control(self, uid):
+        return copy.deepcopy(self.backfill_controls.get(uid, {}))
+
+    def set_backfill_control(self, uid, *, expected_generation_id, state):
+        preferences = self.preferences_by_uid.get(uid) or {}
+        generation_id = artwork.artwork_db.reconciliation_job_id(
+            uid,
+            str(preferences.get("authority_digest") or ""),
+            str(preferences.get("style_version") or ""),
+        )
+        if uid in self.deletion_pending:
+            return {"outcome": "deletion_pending"}
+        if generation_id != expected_generation_id:
+            return {"outcome": "generation_stale"}
+        control = {
+            "schema_version": "ella.memory_artwork.queue_control.v1",
+            "generation_id": generation_id,
+            "authority_digest": preferences["authority_digest"],
+            "style_version": preferences["style_version"],
+            "state": state,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.backfill_controls[uid] = control
+        return {"outcome": "updated", "control": copy.deepcopy(control)}
+
+    def list_jobs_for_uid(self, uid):
+        return [copy.deepcopy(job) for (owner, _, _), job in self.jobs.items() if owner == uid]
 
     def get_conversation(self, uid, memory_id):
         value = self.conversations.get((uid, memory_id))
@@ -363,6 +410,9 @@ class FakeRepository:
         if uid in self.deletion_pending:
             self.reconciliation_jobs.pop(job_id, None)
             return None
+        control = self.backfill_controls.get(uid)
+        if control and (control.get("generation_id") != job_id or control.get("state") != "running"):
+            return None
         if not job or job.get("uid") != uid or job.get("status") != "pending":
             return None
         job.update(
@@ -388,6 +438,14 @@ class FakeRepository:
             return None
         job = self.jobs.get((uid, memory_id, generation_key))
         if job is None:
+            return None
+        control = self.backfill_controls.get(uid)
+        expected_generation_id = artwork.artwork_db.reconciliation_job_id(
+            uid,
+            str(job.get("authority_digest") or ""),
+            str(job.get("style_version") or ""),
+        )
+        if control and (control.get("generation_id") != expected_generation_id or control.get("state") != "running"):
             return None
         if job.get("status") == "processing":
             lease_expires_at = job.get("lease_expires_at")
@@ -614,6 +672,179 @@ def _accepted_preferences(authority):
         "profile_id": authority.profile_id,
         "authority_digest": authority.authority_digest,
     }
+
+
+def _queue_job(
+    *,
+    status,
+    style=artwork.DEFAULT_STYLE_VERSION,
+    attempt_count=0,
+    lease_expires_at=None,
+):
+    return {
+        "uid": "owner-a",
+        "memory_id": f"memory-{status}-{attempt_count}-{style}",
+        "generation_key": hashlib.sha256(f"{status}-{attempt_count}-{style}".encode()).hexdigest(),
+        "authority_digest": "digest-a",
+        "style_version": style,
+        "status": status,
+        "attempt_count": attempt_count,
+        "available_at": datetime.now(timezone.utc),
+        "lease_expires_at": lease_expires_at,
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+
+def test_queue_status_separates_active_queued_retrying_failed_and_style_generations():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    jobs = [
+        _queue_job(status="completed"),
+        _queue_job(status="processing", lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1)),
+        _queue_job(status="pending"),
+        _queue_job(status="pending", attempt_count=2),
+        _queue_job(status="failed", attempt_count=5),
+        _queue_job(status="completed", style="ella.memory_artwork.style.paper-collage.v1"),
+    ]
+    for index, job in enumerate(jobs):
+        repository.jobs[("owner-a", f"memory-{index}", job["generation_key"])] = job
+    job_id = artwork.artwork_db.reconciliation_job_id("owner-a", "digest-a", artwork.DEFAULT_STYLE_VERSION)
+    repository.reconciliation_jobs[job_id] = {
+        "job_id": job_id,
+        "uid": "owner-a",
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "status": "completed",
+        "scanned": 5,
+        "pages_processed": 1,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    status = asyncio.run(service.queue_status("owner-a"))
+
+    assert status["schema_version"] == artwork.ARTWORK_QUEUE_SCHEMA_VERSION
+    assert status["generation_id"] == job_id
+    assert status["state"] == "needs_attention"
+    assert status["control_state"] == "running"
+    assert status["ready"] == 1
+    assert status["active"] == 1
+    assert status["queued"] == 1
+    assert status["retrying"] == 1
+    assert status["failed"] == 1
+    assert status["total"] == 5
+    assert status["remaining"] == 4
+    assert status["scanned"] == 5
+    by_style = {item["style_version"]: item for item in status["styles"]}
+    assert by_style["ella.memory_artwork.style.paper-collage.v1"]["ready"] == 1
+    assert by_style["ella.memory_artwork.style.paper-collage.v1"]["state"] == "paused"
+
+
+def test_pause_blocks_new_reconciliation_and_generation_leases_but_does_not_revoke_active_claim():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    memory = _terminal_memory("memory-1")
+    repository.conversations[("owner-a", "memory-1")] = memory
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+    generation_key = repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"]
+    reconciliation = asyncio.run(service.start_reconciliation("owner-a"))
+    generation_id = reconciliation["job_id"]
+    claimed = repository.claim_job(
+        "owner-a",
+        "memory-1",
+        generation_key,
+        lease_token="active-lease",
+        now=datetime.now(timezone.utc),
+        lease_seconds=120,
+    )
+    assert claimed is not None
+
+    paused = asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=generation_id))
+
+    assert paused["control_state"] == "paused"
+    assert (
+        repository.claim_reconciliation_job(
+            "owner-a",
+            generation_id,
+            lease_token="scan-lease",
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        )
+        is None
+    )
+    assert (
+        repository.claim_job(
+            "owner-a",
+            "memory-1",
+            generation_key,
+            lease_token="replacement-lease",
+            now=datetime.now(timezone.utc) + timedelta(minutes=3),
+            lease_seconds=120,
+        )
+        is None
+    )
+    assert repository.complete_job(
+        "owner-a",
+        "memory-1",
+        generation_key,
+        lease_token="active-lease",
+    )
+
+
+def test_cancel_is_non_destructive_and_resume_restarts_exact_style_generation():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    ready = _queue_job(status="completed")
+    pending = _queue_job(status="pending")
+    repository.jobs[("owner-a", "ready", ready["generation_key"])] = ready
+    repository.jobs[("owner-a", "pending", pending["generation_key"])] = pending
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+    generation_id = started["job_id"]
+    repository.reconciliation_jobs[generation_id]["status"] = "completed"
+
+    cancelled = asyncio.run(service.set_queue_control("owner-a", action="cancel", generation_id=generation_id))
+    assert cancelled["control_state"] == "cancelled"
+    assert cancelled["ready"] == 1
+    assert cancelled["queued"] == 1
+    assert repository.jobs[("owner-a", "ready", ready["generation_key"])]["status"] == "completed"
+
+    resumed = asyncio.run(service.set_queue_control("owner-a", action="resume", generation_id=generation_id))
+    assert resumed["control_state"] == "running"
+    assert repository.reconciliation_jobs[generation_id]["status"] == "pending"
+
+
+def test_queue_control_rejects_stale_generation_after_style_switch():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    stale_generation = artwork.artwork_db.reconciliation_job_id(
+        "owner-a",
+        "digest-a",
+        "ella.memory_artwork.style.paper-collage.v1",
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=stale_generation))
+
+    assert failure.value.code == "memory_artwork_queue_generation_stale"
 
 
 def test_prompt_is_semantically_specific_and_varies_composition_by_memory():
@@ -3929,6 +4160,61 @@ def test_backfill_route_preserves_hexadecimal_legacy_memory_cursor(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [("owner-a", legacy_cursor)]
+
+
+def test_queue_routes_bind_status_and_control_to_authenticated_owner(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_queue_router_test_module")
+    calls = []
+
+    class Service:
+        async def queue_status(self, uid):
+            calls.append(("status", uid))
+            return {"schema_version": artwork.ARTWORK_QUEUE_SCHEMA_VERSION, "generation_id": "a" * 64}
+
+        async def set_queue_control(self, uid, *, action, generation_id):
+            calls.append(("control", uid, action, generation_id))
+            return {
+                "schema_version": artwork.ARTWORK_QUEUE_SCHEMA_VERSION,
+                "generation_id": generation_id,
+                "control_state": "paused",
+            }
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+    client = TestClient(app)
+
+    status_response = client.get("/v1/ella/memory-artwork/queue")
+    control_response = client.post(
+        "/v1/ella/memory-artwork/queue/control",
+        json={"action": "pause", "generation_id": "a" * 64},
+    )
+
+    assert status_response.status_code == 200
+    assert control_response.status_code == 200
+    assert calls == [("status", "owner-a"), ("control", "owner-a", "pause", "a" * 64)]
+
+
+def test_queue_control_route_returns_conflict_for_stale_generation(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_queue_stale_router_test_module")
+
+    class Service:
+        async def set_queue_control(self, uid, *, action, generation_id):
+            raise artwork.MemoryArtworkError("memory_artwork_queue_generation_stale")
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).post(
+        "/v1/ella/memory-artwork/queue/control",
+        json={"action": "resume", "generation_id": "a" * 64},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "memory_artwork_queue_generation_stale"
 
 
 def test_mounted_internal_process_route_uses_durable_worker_job_claim(monkeypatch):
