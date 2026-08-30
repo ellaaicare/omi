@@ -1061,10 +1061,12 @@ void main() {
       memoryArtworkAuthorityProvider: () => authority,
     );
     addTearDown(harness.dispose);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.text('Paper collage'));
     await tester.pumpAndSettle();
 
@@ -1113,6 +1115,295 @@ void main() {
     expect(find.text('Artwork is up to date.'), findsOneWidget);
     final button = tester.widget<OutlinedButton>(find.byKey(const Key('home-artwork-continue')));
     expect(button.onPressed, isNotNull);
+  });
+
+  testWidgets('Artwork Studio shows exact queue progress and progress by style', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(
+        ready: 35,
+        active: 1,
+        queued: 128,
+        retrying: 2,
+        styles: [
+          _artworkStyleProgress(
+            styleVersion: memoryArtworkDefaultStyle,
+            ready: 35,
+            active: 1,
+            queued: 128,
+            retrying: 2,
+          ),
+          _artworkStyleProgress(styleVersion: memoryArtworkPaperCollageStyle, ready: 10, queued: 10),
+        ],
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('35 of 166 illustrations ready'), findsOneWidget);
+    expect(find.text('7 left in this batch · 1 creating · 128 queued · 2 retrying'), findsOneWidget);
+    expect(find.text('35 ready · 131 left'), findsOneWidget);
+    expect(find.text('10 ready · 10 left'), findsOneWidget);
+    final indicator = tester.widget<LinearProgressIndicator>(
+      find.byKey(const Key('home-artwork-queue-progress-bar')),
+    );
+    expect(indicator.value, closeTo(35 / 166, 0.0001));
+  });
+
+  testWidgets('Artwork Studio pauses, stops, and resumes the exact artwork generation', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 35, active: 1, queued: 128, retrying: 2),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.byKey(const Key('home-artwork-pause')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(artwork.queueActions, [MemoryArtworkQueueAction.pause]);
+    expect(find.textContaining('Illustration work is paused.'), findsOneWidget);
+    expect(find.text('The illustration already being created may finish.'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-resume')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('home-artwork-stop')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Stop this illustration update?'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('home-artwork-confirm-stop')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(artwork.queueActions, [MemoryArtworkQueueAction.pause, MemoryArtworkQueueAction.cancel]);
+    expect(find.textContaining('This illustration update was stopped.'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('home-artwork-resume')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      artwork.queueActions,
+      [MemoryArtworkQueueAction.pause, MemoryArtworkQueueAction.cancel, MemoryArtworkQueueAction.resume],
+    );
+    expect(artwork.queueAutoContinue, [false, false, false]);
+    expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
+  });
+
+  testWidgets('Artwork Studio requires explicit opt-in before generating the whole historical backlog', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(
+        ready: 10,
+        queued: 20,
+        controlState: MemoryArtworkQueueState.paused,
+        batchRemaining: 0,
+        pauseReason: 'batch_complete',
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('A batch of up to 10 is complete. · 20 queued'), findsOneWidget);
+    expect(find.text('Generate up to 10'), findsOneWidget);
+    expect(find.text('Generate all automatically'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-continue')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('home-artwork-auto-resume')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(artwork.queueActions, [MemoryArtworkQueueAction.resume]);
+    expect(artwork.queueAutoContinue, [true]);
+    expect(find.textContaining('Automatic generation is on.'), findsOneWidget);
+  });
+
+  testWidgets('a transient queue status failure keeps polling the last known running queue', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 2, queued: 8),
+      failedQueueStatusRequests: const {1},
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    final initialRequests = artwork.queueStatusRequests;
+    artwork.failNextQueueStatus();
+
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+    expect(artwork.queueStatusRequests, initialRequests + 1);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+
+    expect(artwork.queueStatusRequests, initialRequests + 2);
+  });
+
+  testWidgets('a slower older queue refresh cannot overwrite a newer refresh in the same generation', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final oldRefresh = Completer<void>();
+    final running = _artworkQueueStatus(ready: 2, active: 1, queued: 7);
+    final paused = _copyArtworkQueueStatus(
+      running,
+      controlState: MemoryArtworkQueueState.paused,
+      batchRemaining: 0,
+      pauseReason: 'user_paused',
+    );
+    final artwork = _FakeMemoryArtworkApi(queue: running);
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    artwork.gateNextQueueStatus(oldRefresh, result: paused);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    oldRefresh.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-resume')), findsNothing);
+  });
+
+  testWidgets('a failed queue control restores polling for the retained running queue', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 2, queued: 8),
+      failQueueControls: true,
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(const Key('home-artwork-pause')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    final requestsAfterFailure = artwork.queueStatusRequests;
+
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+
+    expect(artwork.queueStatusRequests, requestsAfterFailure + 1);
+  });
+
+  testWidgets('a failed style update restores polling for the retained running queue', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 2, queued: 8),
+      failStyleUpdates: true,
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    final requestsAfterFailure = artwork.queueStatusRequests;
+
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+
+    expect(artwork.queueStatusRequests, requestsAfterFailure + 1);
+  });
+
+  testWidgets('a delayed status response cannot overwrite a newer pause result', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final delayedStatus = Completer<void>();
+    final running = _artworkQueueStatus(ready: 2, active: 1, queued: 7);
+    final artwork = _FakeMemoryArtworkApi(queue: running);
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    artwork.gateNextQueueStatus(delayedStatus, result: running);
+    final initialRequests = artwork.queueStatusRequests;
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+    expect(artwork.queueStatusRequests, initialRequests + 1);
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(const Key('home-artwork-pause')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('home-artwork-resume')), findsOneWidget);
+
+    delayedStatus.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const Key('home-artwork-resume')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-pause')), findsNothing);
   });
 
   testWidgets('account turnover clears a pending style latch for the replacement account', (tester) async {
@@ -1442,9 +1733,18 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     this.secondStyleGate,
     Set<int> authorityThrowRequests = const {},
     Set<int> failedBackfillRequests = const {},
+    Map<int, Completer<void>> queueStatusGates = const {},
+    Map<int, MemoryArtworkQueueStatus?> queueStatusResults = const {},
+    Set<int> failedQueueStatusRequests = const {},
+    this.failQueueControls = false,
+    this.failStyleUpdates = false,
+    this.queue,
   })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
         _authorityThrowRequests = Set<int>.of(authorityThrowRequests),
-        _failedBackfillRequests = Set<int>.of(failedBackfillRequests);
+        _failedBackfillRequests = Set<int>.of(failedBackfillRequests),
+        _queueStatusGates = Map<int, Completer<void>>.of(queueStatusGates),
+        _queueStatusResults = Map<int, MemoryArtworkQueueStatus?>.of(queueStatusResults),
+        _failedQueueStatusRequests = Set<int>.of(failedQueueStatusRequests);
 
   int preferenceRequests = 0;
   final List<String?> backfillCursors = [];
@@ -1452,11 +1752,27 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final List<MemoryArtworkBackfillPage> _backfillPages;
   final Set<int> _authorityThrowRequests;
   final Set<int> _failedBackfillRequests;
+  final Map<int, Completer<void>> _queueStatusGates;
+  final Map<int, MemoryArtworkQueueStatus?> _queueStatusResults;
+  final Set<int> _failedQueueStatusRequests;
   final Completer<void>? firstBackfillGate;
   final Completer<void>? firstStyleGate;
   final Completer<void>? secondStyleGate;
+  final bool failQueueControls;
+  final bool failStyleUpdates;
+  MemoryArtworkQueueStatus? queue;
+  final List<MemoryArtworkQueueAction> queueActions = [];
+  final List<bool> queueAutoContinue = [];
   int _backfillRequests = 0;
   int _styleRequests = 0;
+  int queueStatusRequests = 0;
+
+  void failNextQueueStatus() => _failedQueueStatusRequests.add(queueStatusRequests);
+
+  void gateNextQueueStatus(Completer<void> gate, {MemoryArtworkQueueStatus? result}) {
+    _queueStatusGates[queueStatusRequests] = gate;
+    _queueStatusResults[queueStatusRequests] = result ?? queue;
+  }
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async {
@@ -1490,8 +1806,147 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     final request = _styleRequests++;
     if (request == 0 && firstStyleGate != null) await firstStyleGate!.future;
     if (request == 1 && secondStyleGate != null) await secondStyleGate!.future;
-    return const MemoryArtworkPreferenceUpdate(saved: true);
+    return MemoryArtworkPreferenceUpdate(saved: !failStyleUpdates);
   }
+
+  @override
+  Future<MemoryArtworkQueueStatus?> queueStatus() async {
+    final request = queueStatusRequests++;
+    final result = _queueStatusResults.containsKey(request) ? _queueStatusResults[request] : queue;
+    final gate = _queueStatusGates[request];
+    if (gate != null) await gate.future;
+    if (_failedQueueStatusRequests.contains(request)) return null;
+    return result;
+  }
+
+  @override
+  Future<MemoryArtworkQueueStatus?> controlQueue({
+    required MemoryArtworkQueueAction action,
+    required String generationId,
+    bool autoContinue = false,
+  }) async {
+    final current = queue;
+    if (current == null || current.generationId != generationId) return null;
+    queueActions.add(action);
+    queueAutoContinue.add(autoContinue);
+    if (failQueueControls) return null;
+    final controlState = switch (action) {
+      MemoryArtworkQueueAction.pause => MemoryArtworkQueueState.paused,
+      MemoryArtworkQueueAction.resume => MemoryArtworkQueueState.running,
+      MemoryArtworkQueueAction.cancel => MemoryArtworkQueueState.cancelled,
+    };
+    return queue = _copyArtworkQueueStatus(
+      current,
+      controlState: controlState,
+      autoContinue: action == MemoryArtworkQueueAction.resume && autoContinue,
+      batchRemaining: action == MemoryArtworkQueueAction.resume && !autoContinue ? current.batchSize : 0,
+      pauseReason: action == MemoryArtworkQueueAction.pause
+          ? 'user_paused'
+          : action == MemoryArtworkQueueAction.cancel
+              ? 'user_cancelled'
+              : '',
+    );
+  }
+}
+
+MemoryArtworkStyleProgress _artworkStyleProgress({
+  required String styleVersion,
+  int ready = 0,
+  int active = 0,
+  int queued = 0,
+  int retrying = 0,
+  int failed = 0,
+}) {
+  final remaining = active + queued + retrying + failed;
+  return MemoryArtworkStyleProgress(
+    styleVersion: styleVersion,
+    state: remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running,
+    ready: ready,
+    active: active,
+    queued: queued,
+    retrying: retrying,
+    failed: failed,
+    total: ready + remaining,
+    remaining: remaining,
+  );
+}
+
+MemoryArtworkQueueStatus _artworkQueueStatus({
+  int ready = 0,
+  int active = 0,
+  int queued = 0,
+  int retrying = 0,
+  int failed = 0,
+  MemoryArtworkQueueState controlState = MemoryArtworkQueueState.running,
+  bool autoContinue = false,
+  int batchSize = 10,
+  int batchRemaining = 7,
+  String pauseReason = '',
+  List<MemoryArtworkStyleProgress>? styles,
+}) {
+  final remaining = active + queued + retrying + failed;
+  return MemoryArtworkQueueStatus(
+    generationId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    styleVersion: memoryArtworkDefaultStyle,
+    state: remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running,
+    controlState: controlState,
+    scanStatus: 'complete',
+    scanned: ready + remaining,
+    pagesProcessed: 4,
+    autoContinue: autoContinue,
+    batchSize: batchSize,
+    batchRemaining: batchRemaining,
+    pauseReason: pauseReason,
+    ready: ready,
+    active: active,
+    queued: queued,
+    retrying: retrying,
+    failed: failed,
+    total: ready + remaining,
+    remaining: remaining,
+    styles: styles ??
+        [
+          _artworkStyleProgress(
+            styleVersion: memoryArtworkDefaultStyle,
+            ready: ready,
+            active: active,
+            queued: queued,
+            retrying: retrying,
+            failed: failed,
+          ),
+        ],
+  );
+}
+
+MemoryArtworkQueueStatus _copyArtworkQueueStatus(
+  MemoryArtworkQueueStatus current, {
+  required MemoryArtworkQueueState controlState,
+  bool? autoContinue,
+  int? batchRemaining,
+  String? pauseReason,
+}) {
+  return MemoryArtworkQueueStatus(
+    generationId: current.generationId,
+    styleVersion: current.styleVersion,
+    state: current.state,
+    controlState: controlState,
+    scanStatus: current.scanStatus,
+    scanned: current.scanned,
+    pagesProcessed: current.pagesProcessed,
+    autoContinue: autoContinue ?? current.autoContinue,
+    batchSize: current.batchSize,
+    batchRemaining: batchRemaining ?? current.batchRemaining,
+    pauseReason: pauseReason ?? current.pauseReason,
+    ready: current.ready,
+    active: current.active,
+    queued: current.queued,
+    retrying: current.retrying,
+    failed: current.failed,
+    total: current.total,
+    remaining: current.remaining,
+    styles: current.styles,
+    updatedAt: current.updatedAt,
+  );
 }
 
 Future<_HomeHarness> _pumpHome(

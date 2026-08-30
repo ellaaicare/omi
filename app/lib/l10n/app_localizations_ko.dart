@@ -9497,4 +9497,98 @@ class AppLocalizationsKo extends AppLocalizations {
 
   @override
   String get memoryArtworkRetry => 'Try artwork again';
+
+  @override
+  String memoryArtworkQueueProgress(int ready, int total) {
+    return '$ready of $total illustrations ready';
+  }
+
+  @override
+  String memoryArtworkQueueCreating(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count creating',
+      one: '1 creating',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String memoryArtworkQueueQueued(int count) {
+    return '$count queued';
+  }
+
+  @override
+  String memoryArtworkQueueRetrying(int count) {
+    return '$count retrying';
+  }
+
+  @override
+  String memoryArtworkQueueFailed(int count) {
+    return '$count need attention';
+  }
+
+  @override
+  String memoryArtworkQueueStyleProgress(int ready, int remaining) {
+    return '$ready ready · $remaining left';
+  }
+
+  @override
+  String get memoryArtworkQueuePaused => 'Illustration work is paused.';
+
+  @override
+  String get memoryArtworkQueueStopped => 'This illustration update was stopped.';
+
+  @override
+  String get memoryArtworkQueueComplete => 'This illustration style is ready.';
+
+  @override
+  String get memoryArtworkQueuePause => 'Pause';
+
+  @override
+  String get memoryArtworkQueueResume => 'Resume';
+
+  @override
+  String memoryArtworkQueueNextBatch(int count) {
+    return 'Generate up to $count';
+  }
+
+  @override
+  String get memoryArtworkQueueGenerateAll => 'Generate all automatically';
+
+  @override
+  String memoryArtworkQueueBatchComplete(int count) {
+    return 'A batch of up to $count is complete.';
+  }
+
+  @override
+  String memoryArtworkQueueBatchRemaining(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count left in this batch',
+      one: '1 left in this batch',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get memoryArtworkQueueAutomatic => 'Automatic generation is on.';
+
+  @override
+  String get memoryArtworkQueueStop => 'Stop';
+
+  @override
+  String get memoryArtworkQueueStopTitle => 'Stop this illustration update?';
+
+  @override
+  String get memoryArtworkQueueStopDetail =>
+      'Finished illustrations will stay. The illustration already being created may finish, and you can resume later.';
+
+  @override
+  String get memoryArtworkQueueActiveMayFinish => 'The illustration already being created may finish.';
+
+  @override
+  String get memoryArtworkQueueControlFailed => 'Ella couldn\'t update illustration work right now.';
 }
