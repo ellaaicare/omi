@@ -9707,6 +9707,33 @@ class AppLocalizationsNl extends AppLocalizations {
   String get memoryArtworkQueueResume => 'Resume';
 
   @override
+  String memoryArtworkQueueNextBatch(int count) {
+    return 'Generate up to $count';
+  }
+
+  @override
+  String get memoryArtworkQueueGenerateAll => 'Generate all automatically';
+
+  @override
+  String memoryArtworkQueueBatchComplete(int count) {
+    return 'A batch of up to $count is complete.';
+  }
+
+  @override
+  String memoryArtworkQueueBatchRemaining(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count left in this batch',
+      one: '1 left in this batch',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get memoryArtworkQueueAutomatic => 'Automatic generation is on.';
+
+  @override
   String get memoryArtworkQueueStop => 'Stop';
 
   @override

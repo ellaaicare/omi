@@ -132,6 +132,10 @@ class MemoryArtworkQueueStatus extends MemoryArtworkStyleProgress {
     required this.scanStatus,
     required this.scanned,
     required this.pagesProcessed,
+    required this.autoContinue,
+    required this.batchSize,
+    required this.batchRemaining,
+    required this.pauseReason,
     required super.ready,
     required super.active,
     required super.queued,
@@ -148,6 +152,10 @@ class MemoryArtworkQueueStatus extends MemoryArtworkStyleProgress {
   final String scanStatus;
   final int scanned;
   final int pagesProcessed;
+  final bool autoContinue;
+  final int batchSize;
+  final int batchRemaining;
+  final String pauseReason;
   final List<MemoryArtworkStyleProgress> styles;
   final DateTime? updatedAt;
 
@@ -359,6 +367,7 @@ class MemoryArtworkApi {
   Future<MemoryArtworkQueueStatus?> controlQueue({
     required MemoryArtworkQueueAction action,
     required String generationId,
+    bool autoContinue = false,
   }) async {
     final authority = _authorityProvider();
     if (authority == null || !_generationId.hasMatch(generationId)) return null;
@@ -366,7 +375,11 @@ class MemoryArtworkApi {
       authority,
       method: 'POST',
       path: 'v1/ella/memory-artwork/queue/control',
-      body: jsonEncode({'action': action.name, 'generation_id': generationId}),
+      body: jsonEncode({
+        'action': action.name,
+        'generation_id': generationId,
+        if (action == MemoryArtworkQueueAction.resume) 'auto_continue': autoContinue,
+      }),
     );
     if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
     return _queueStatusFromPayload(_jsonObject(response!.body));
@@ -439,6 +452,10 @@ class MemoryArtworkApi {
     final remaining = _strictNonNegativeInt(payload['remaining']);
     final scanned = _strictNonNegativeInt(payload['scanned']);
     final pagesProcessed = _strictNonNegativeInt(payload['pages_processed']);
+    final autoContinue = payload['auto_continue'];
+    final batchSize = _strictNonNegativeInt(payload['batch_size']);
+    final batchRemaining = _strictNonNegativeInt(payload['batch_remaining']);
+    final pauseReason = payload['pause_reason']?.toString().trim() ?? '';
     if (ready == null ||
         active == null ||
         queued == null ||
@@ -448,6 +465,11 @@ class MemoryArtworkApi {
         remaining == null ||
         scanned == null ||
         pagesProcessed == null ||
+        autoContinue is! bool ||
+        batchSize == null ||
+        batchSize < 1 ||
+        batchRemaining == null ||
+        (!autoContinue && batchRemaining > batchSize) ||
         total != ready + active + queued + retrying + failed ||
         remaining != active + queued + retrying + failed) {
       return null;
@@ -503,6 +525,10 @@ class MemoryArtworkApi {
       scanStatus: payload['scan_status']?.toString().trim() ?? 'idle',
       scanned: scanned,
       pagesProcessed: pagesProcessed,
+      autoContinue: autoContinue,
+      batchSize: batchSize,
+      batchRemaining: batchRemaining,
+      pauseReason: pauseReason,
       ready: ready,
       active: active,
       queued: queued,

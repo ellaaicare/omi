@@ -212,6 +212,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _homeArtworkStyleSaving = false;
   bool _homeArtworkQueueControlBusy = false;
   int _homeArtworkStyleOperationGeneration = 0;
+  int _homeArtworkQueueOperationGeneration = 0;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
@@ -324,6 +325,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkBackfillPollTimer?.cancel();
     _homeArtworkQueuePollTimer?.cancel();
     _homeArtworkStyleOperationGeneration++;
+    _homeArtworkQueueOperationGeneration++;
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -500,6 +502,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _refreshHomeArtworkQueueStatus() async {
     final authority = _captureHomeArtworkAuthority();
     if (authority == null || _homeArtworkPreferences?.releaseEnabled != true) return;
+    final operationGeneration = _homeArtworkQueueOperationGeneration;
     MemoryArtworkQueueStatus? status;
     try {
       status = await _memoryArtworkApi.queueStatus();
@@ -509,15 +512,24 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     } catch (_) {
       status = null;
     }
-    if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
-    if (status != null) {
-      setState(() {
-        _homeArtworkQueueStatus = status;
-        _homeArtworkBackfillState = _queueUiState(status!);
-      });
-      _publishHomeArtworkStudioState();
+    if (!mounted ||
+        !_isHomeArtworkAuthorityCurrent(authority) ||
+        operationGeneration != _homeArtworkQueueOperationGeneration) {
+      return;
     }
-    if (status?.controlState == MemoryArtworkQueueState.running && status!.remaining > 0) {
+    if (status == null) {
+      final previous = _homeArtworkQueueStatus;
+      if (previous?.controlState == MemoryArtworkQueueState.running && previous!.remaining > 0) {
+        _scheduleHomeArtworkQueuePoll();
+      }
+      return;
+    }
+    setState(() {
+      _homeArtworkQueueStatus = status;
+      _homeArtworkBackfillState = _queueUiState(status!);
+    });
+    _publishHomeArtworkStudioState();
+    if (status.controlState == MemoryArtworkQueueState.running && status.remaining > 0) {
       _scheduleHomeArtworkQueuePoll();
     } else {
       _homeArtworkQueuePollTimer?.cancel();
@@ -531,26 +543,41 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _controlHomeArtworkQueue(MemoryArtworkQueueAction action) async {
+  Future<void> _controlHomeArtworkQueue(
+    MemoryArtworkQueueAction action, {
+    bool autoContinue = false,
+  }) async {
     final authority = _captureHomeArtworkAuthority();
     final current = _homeArtworkQueueStatus;
     if (authority == null || current == null || _homeArtworkQueueControlBusy) return;
+    _homeArtworkQueuePollTimer?.cancel();
+    final operationGeneration = ++_homeArtworkQueueOperationGeneration;
     setState(() => _homeArtworkQueueControlBusy = true);
     _publishHomeArtworkStudioState();
     MemoryArtworkQueueStatus? updated;
     try {
-      updated = await _memoryArtworkApi.controlQueue(action: action, generationId: current.generationId);
+      updated = await _memoryArtworkApi.controlQueue(
+        action: action,
+        generationId: current.generationId,
+        autoContinue: autoContinue,
+      );
     } on ExactAccountAuthorityChangedException {
       _scheduleHomeArtworkReload();
     } catch (_) {
       updated = null;
     } finally {
-      if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+      if (mounted &&
+          _isHomeArtworkAuthorityCurrent(authority) &&
+          operationGeneration == _homeArtworkQueueOperationGeneration) {
         setState(() => _homeArtworkQueueControlBusy = false);
         _publishHomeArtworkStudioState();
       }
     }
-    if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
+    if (!mounted ||
+        !_isHomeArtworkAuthorityCurrent(authority) ||
+        operationGeneration != _homeArtworkQueueOperationGeneration) {
+      return;
+    }
     if (updated == null) {
       _showHomeMessage(context.l10n.memoryArtworkQueueControlFailed);
       return;
@@ -752,6 +779,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     if (_homeArtworkStyleSaving) return;
     final operationGeneration = ++_homeArtworkStyleOperationGeneration;
+    _homeArtworkQueueOperationGeneration++;
+    _homeArtworkQueuePollTimer?.cancel();
     setState(() => _homeArtworkStyleSaving = true);
     _publishHomeArtworkStudioState();
     MemoryArtworkPreferenceUpdate result;
@@ -827,6 +856,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             },
             onPause: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.pause)),
             onResume: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume)),
+            onAutoResume: () => unawaited(
+              _controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, autoContinue: true),
+            ),
             onStop: () => unawaited(_confirmStopHomeArtworkQueue()),
           );
         },
@@ -1982,6 +2014,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
     required this.onContinue,
     required this.onPause,
     required this.onResume,
+    required this.onAutoResume,
     required this.onStop,
   });
 
@@ -1994,6 +2027,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
   final VoidCallback onContinue;
   final VoidCallback onPause;
   final VoidCallback onResume;
+  final VoidCallback onAutoResume;
   final VoidCallback onStop;
 
   @override
@@ -2120,7 +2154,14 @@ class _ArtworkStudioSheet extends StatelessWidget {
                               key: const Key('home-artwork-resume'),
                               onPressed: queueControlBusy ? null : onResume,
                               icon: const Icon(Icons.play_arrow_rounded),
-                              label: Text(context.l10n.memoryArtworkQueueResume),
+                              label: Text(context.l10n.memoryArtworkQueueNextBatch(queue.batchSize)),
+                            ),
+                          if (queue.canResume)
+                            OutlinedButton.icon(
+                              key: const Key('home-artwork-auto-resume'),
+                              onPressed: queueControlBusy ? null : onAutoResume,
+                              icon: const Icon(Icons.all_inclusive_rounded),
+                              label: Text(context.l10n.memoryArtworkQueueGenerateAll),
                             ),
                           if (queue.canCancel)
                             TextButton.icon(
@@ -2172,17 +2213,16 @@ class _ArtworkStudioSheet extends StatelessWidget {
               );
             }),
             const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                key: const Key('home-artwork-continue'),
-                onPressed: styleSaving || queueControlBusy || queue?.controlState == MemoryArtworkQueueState.running
-                    ? null
-                    : onContinue,
-                icon: const Icon(Icons.history_rounded),
-                label: Text(action),
+            if (queue == null)
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  key: const Key('home-artwork-continue'),
+                  onPressed: styleSaving || queueControlBusy ? null : onContinue,
+                  icon: const Icon(Icons.history_rounded),
+                  label: Text(action),
+                ),
               ),
-            ),
           ],
         ),
       ),
@@ -2192,9 +2232,17 @@ class _ArtworkStudioSheet extends StatelessWidget {
   String _queueDetail(BuildContext context, MemoryArtworkQueueStatus queue) {
     final parts = <String>[];
     if (queue.controlState == MemoryArtworkQueueState.paused) {
-      parts.add(context.l10n.memoryArtworkQueuePaused);
+      parts.add(
+        queue.pauseReason == 'batch_complete'
+            ? context.l10n.memoryArtworkQueueBatchComplete(queue.batchSize)
+            : context.l10n.memoryArtworkQueuePaused,
+      );
     } else if (queue.controlState == MemoryArtworkQueueState.cancelled) {
       parts.add(context.l10n.memoryArtworkQueueStopped);
+    } else if (queue.autoContinue) {
+      parts.add(context.l10n.memoryArtworkQueueAutomatic);
+    } else if (queue.controlState == MemoryArtworkQueueState.running) {
+      parts.add(context.l10n.memoryArtworkQueueBatchRemaining(queue.batchRemaining));
     }
     if (queue.active > 0) parts.add(context.l10n.memoryArtworkQueueCreating(queue.active));
     if (queue.queued > 0) parts.add(context.l10n.memoryArtworkQueueQueued(queue.queued));

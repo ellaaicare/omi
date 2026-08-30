@@ -17985,6 +17985,36 @@ abstract class AppLocalizations {
   /// **'Resume'**
   String get memoryArtworkQueueResume;
 
+  /// No description provided for @memoryArtworkQueueNextBatch.
+  ///
+  /// In en, this message translates to:
+  /// **'Generate up to {count}'**
+  String memoryArtworkQueueNextBatch(int count);
+
+  /// No description provided for @memoryArtworkQueueGenerateAll.
+  ///
+  /// In en, this message translates to:
+  /// **'Generate all automatically'**
+  String get memoryArtworkQueueGenerateAll;
+
+  /// No description provided for @memoryArtworkQueueBatchComplete.
+  ///
+  /// In en, this message translates to:
+  /// **'A batch of up to {count} is complete.'**
+  String memoryArtworkQueueBatchComplete(int count);
+
+  /// No description provided for @memoryArtworkQueueBatchRemaining.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 left in this batch} other{{count} left in this batch}}'**
+  String memoryArtworkQueueBatchRemaining(int count);
+
+  /// No description provided for @memoryArtworkQueueAutomatic.
+  ///
+  /// In en, this message translates to:
+  /// **'Automatic generation is on.'**
+  String get memoryArtworkQueueAutomatic;
+
   /// No description provided for @memoryArtworkQueueStop.
   ///
   /// In en, this message translates to:

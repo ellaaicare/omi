@@ -10883,6 +10883,32 @@
   "memoryArtworkQueueComplete": "This illustration style is ready.",
   "memoryArtworkQueuePause": "Pause",
   "memoryArtworkQueueResume": "Resume",
+  "memoryArtworkQueueNextBatch": "Generate up to {count}",
+  "@memoryArtworkQueueNextBatch": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueGenerateAll": "Generate all automatically",
+  "memoryArtworkQueueBatchComplete": "A batch of up to {count} is complete.",
+  "@memoryArtworkQueueBatchComplete": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueBatchRemaining": "{count, plural, =1{1 left in this batch} other{{count} left in this batch}}",
+  "@memoryArtworkQueueBatchRemaining": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkQueueAutomatic": "Automatic generation is on.",
   "memoryArtworkQueueStop": "Stop",
   "memoryArtworkQueueStopTitle": "Stop this illustration update?",
   "memoryArtworkQueueStopDetail": "Finished illustrations will stay. The illustration already being created may finish, and you can resume later.",
