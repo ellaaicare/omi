@@ -10,6 +10,7 @@ import types
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import httpx
@@ -285,8 +286,19 @@ class FakeRepository:
         effective_job["created_at"] = existing_job.get("created_at") or effective_job.get("created_at")
         current = conversation.get("artwork") or {}
         if current.get("generation_key") == generation_key and current.get("status") in {"generating", "ready"}:
-            if current.get("status") == "generating" and existing_job.get("status") not in {"pending", "processing"}:
-                self.jobs[job_key] = effective_job
+            if current.get("status") == "generating":
+                if (
+                    existing_job.get("status") == "pending"
+                    and existing_job.get("origin") != artwork.TERMINAL_ENRICHMENT_ORIGIN
+                    and job_state.get("origin") == artwork.TERMINAL_ENRICHMENT_ORIGIN
+                ):
+                    self.jobs[job_key] = {
+                        **existing_job,
+                        "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                        "updated_at": job_state.get("updated_at"),
+                    }
+                elif existing_job.get("status") not in {"pending", "processing"}:
+                    self.jobs[job_key] = effective_job
             return {"outcome": "existing", "artwork": copy.deepcopy(current)}
         published = conversation.get("published_artwork") or {}
         if current.get("status") == "ready" and current.get("enrichment_revision") == enrichment_revision:
@@ -977,6 +989,26 @@ def test_historical_backfill_stops_after_ten_claims_while_new_enrichment_remains
         now=datetime.now(timezone.utc),
         lease_seconds=120,
     )
+
+
+def test_terminal_event_promotes_an_existing_pending_historical_job():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.HISTORICAL_BACKFILL_ORIGIN))
+    first_job = next(iter(repository.jobs.values()))
+    assert first_job["origin"] == artwork.HISTORICAL_BACKFILL_ORIGIN
+
+    result = asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.TERMINAL_ENRICHMENT_ORIGIN))
+
+    assert result["outcome"] == "existing"
+    assert next(iter(repository.jobs.values()))["origin"] == artwork.TERMINAL_ENRICHMENT_ORIGIN
 
 
 def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit_opt_in():
@@ -3210,6 +3242,67 @@ def test_firestore_reservation_writes_generation_and_dispatch_in_one_transaction
     assert job_ref.state == job_state
 
 
+def test_firestore_terminal_reservation_promotes_existing_pending_historical_job():
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def update(self, reference, payload):
+            reference.state.update(copy.deepcopy(payload))
+
+        def set(self, reference, payload):
+            reference.state = copy.deepcopy(payload)
+
+    generation_key = "a" * 64
+    conversation = _terminal_memory("memory-1")
+    conversation[artwork_database.ARTWORK_FIELD] = {
+        "status": "generating",
+        "generation_key": generation_key,
+        "enrichment_revision": "summary-memory-1",
+    }
+    job_ref = Reference(
+        {
+            "status": "pending",
+            "uid": "owner-a",
+            "memory_id": "memory-1",
+            "generation_key": generation_key,
+            "origin": artwork.HISTORICAL_BACKFILL_ORIGIN,
+        }
+    )
+    now = datetime.now(timezone.utc)
+
+    result = artwork_database._reserve_generation_transaction(
+        Transaction(),
+        Reference({"id": "owner-a"}),
+        Reference(conversation),
+        enrichment_revision="summary-memory-1",
+        generation_key=generation_key,
+        artwork_state=conversation[artwork_database.ARTWORK_FIELD],
+        job_ref=job_ref,
+        job_state={
+            **job_ref.state,
+            "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+            "updated_at": now,
+        },
+    )
+
+    assert result["outcome"] == "existing"
+    assert job_ref.state["origin"] == artwork.TERMINAL_ENRICHMENT_ORIGIN
+    assert job_ref.state["updated_at"] == now
+
+
 def test_firestore_style_refresh_keeps_published_art_until_atomic_finalize():
     class Snapshot:
         def __init__(self, state, *, exists=True):
@@ -3392,7 +3485,7 @@ def test_firestore_retry_reservation_preserves_attempt_history():
     assert job_ref.state["attempt_count"] == 0
 
 
-def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
+def test_pending_job_query_filters_control_before_applying_worker_limit(monkeypatch):
     now = datetime.now(timezone.utc)
 
     class Snapshot:
@@ -3427,7 +3520,15 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
         [
             Snapshot(
                 "pending-first",
-                {"status": "pending", "memory_id": "memory-1", "available_at": now - timedelta(minutes=2)},
+                {
+                    "status": "pending",
+                    "uid": "owner-a",
+                    "memory_id": "memory-1",
+                    "authority_digest": "digest-a",
+                    "style_version": artwork.DEFAULT_STYLE_VERSION,
+                    "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                    "available_at": now - timedelta(minutes=2),
+                },
             )
         ]
     )
@@ -3437,7 +3538,11 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
                 "processing-first",
                 {
                     "status": "processing",
+                    "uid": "owner-a",
                     "memory_id": "memory-2",
+                    "authority_digest": "digest-a",
+                    "style_version": artwork.DEFAULT_STYLE_VERSION,
+                    "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
                     "lease_expires_at": now - timedelta(minutes=1),
                 },
             )
@@ -3446,13 +3551,29 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
 
     class Database:
         def collection(self, name):
-            assert name == artwork_database.JOB_COLLECTION
-            return Collection()
+            if name == artwork_database.JOB_COLLECTION:
+                return Collection()
+            assert name == "users"
+            return UserCollection()
 
     class Collection:
         def where(self, field, operator, value):
             query = pending_query if value == "pending" else processing_query
             return query.where(field, operator, value)
+
+    class UserDocument:
+        id = "owner-a"
+
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {artwork_database.PREFERENCES_FIELD: _accepted_preferences(_authority())},
+            )
+
+    class UserCollection:
+        def document(self, uid):
+            assert uid == "owner-a"
+            return UserDocument()
 
     monkeypatch.setattr(artwork_database, "db", Database())
 
@@ -3463,13 +3584,11 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
         ("where", "status", "==", "pending"),
         ("where", "available_at", "<=", now),
         ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
     ]
     assert processing_query.operations == [
         ("where", "status", "==", "processing"),
         ("where", "lease_expires_at", "<=", now),
         ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
     ]
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     artwork_indexes = {
@@ -3485,6 +3604,188 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
         ("status", "ASCENDING"),
         ("lease_expires_at", "ASCENDING"),
     ) in artwork_indexes
+
+
+def test_pending_job_selection_skips_paused_history_to_reach_terminal_work(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class Snapshot:
+        def __init__(self, identifier, payload):
+            self.id = identifier
+            self._payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    paused_preferences = _accepted_preferences(_authority())
+    terminal_preferences = {
+        **paused_preferences,
+        "authority_digest": "digest-b",
+        "binding_id": "binding-b",
+        "profile_id": "profile-b",
+    }
+    pending = [
+        Snapshot(
+            f"paused-{index}",
+            {
+                "status": "pending",
+                "uid": "owner-paused",
+                "memory_id": f"history-{index}",
+                "authority_digest": "digest-a",
+                "style_version": artwork.DEFAULT_STYLE_VERSION,
+                "origin": artwork.HISTORICAL_BACKFILL_ORIGIN,
+                "available_at": now - timedelta(minutes=10 - index),
+            },
+        )
+        for index in range(3)
+    ]
+    pending.append(
+        Snapshot(
+            "terminal-new",
+            {
+                "status": "pending",
+                "uid": "owner-terminal",
+                "memory_id": "new-memory",
+                "authority_digest": "digest-b",
+                "style_version": artwork.DEFAULT_STYLE_VERSION,
+                "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                "available_at": now - timedelta(minutes=1),
+            },
+        )
+    )
+
+    class Query:
+        def __init__(self, values):
+            self.values = values
+
+        def where(self, *args):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def stream(self):
+            return iter(self.values)
+
+    class JobCollection:
+        def where(self, field, operator, value):
+            return Query(pending if value == "pending" else [])
+
+    class UserDocument:
+        def __init__(self, uid):
+            self.id = uid
+
+        def get(self):
+            preferences = paused_preferences if self.id == "owner-paused" else terminal_preferences
+            control = {
+                "schema_version": "ella.memory_artwork.queue_control.v1",
+                "generation_id": artwork_database.reconciliation_job_id(
+                    self.id,
+                    preferences["authority_digest"],
+                    preferences["style_version"],
+                ),
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "state": "paused" if self.id == "owner-paused" else "running",
+            }
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.PREFERENCES_FIELD: preferences,
+                    artwork_database.BACKFILL_CONTROL_FIELD: control,
+                },
+            )
+
+    class UserCollection:
+        def document(self, uid):
+            return UserDocument(uid)
+
+    class Database:
+        def collection(self, name):
+            return JobCollection() if name == artwork_database.JOB_COLLECTION else UserCollection()
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+
+    jobs = artwork_database.list_pending_jobs(limit=1, now=now)
+
+    assert [job["job_id"] for job in jobs] == ["terminal-new"]
+
+
+def test_legacy_job_migration_commits_firestore_writes_in_safe_chunks(monkeypatch):
+    now = datetime.now(timezone.utc)
+    generation_key = "a" * 64
+
+    class Reference:
+        pass
+
+    class Snapshot:
+        def __init__(self, index):
+            self.id = f"job-{index}"
+            self.reference = Reference()
+            self._payload = {
+                "uid": "owner-a",
+                "memory_id": f"memory-{index}",
+                "generation_key": generation_key,
+                "status": "pending",
+                "available_at": now,
+            }
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    snapshots = [Snapshot(index) for index in range(401)]
+
+    class Query:
+        def where(self, *args):
+            return self
+
+        def stream(self):
+            return iter(snapshots)
+
+    class Batch:
+        def __init__(self, database):
+            self.database = database
+            self.count = 0
+
+        def set(self, reference, payload, merge=False):
+            assert merge is True
+            self.count += 1
+
+        def commit(self):
+            self.database.commits.append(self.count)
+
+    class Database:
+        def __init__(self):
+            self.commits = []
+
+        def collection(self, name):
+            assert name == artwork_database.JOB_COLLECTION
+            return Query()
+
+        def batch(self):
+            return Batch(self)
+
+    class ConversationReference:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.ARTWORK_FIELD: {
+                        "generation_key": generation_key,
+                        "authority_digest": "digest-a",
+                        "style_version": artwork.DEFAULT_STYLE_VERSION,
+                    }
+                },
+            )
+
+    database = Database()
+    monkeypatch.setattr(artwork_database, "db", database)
+    monkeypatch.setattr(artwork_database, "_conversation_ref", lambda uid, memory_id: ConversationReference())
+
+    jobs = artwork_database.list_jobs_for_uid("owner-a")
+
+    assert len(jobs) == 401
+    assert database.commits == [artwork_database.FIRESTORE_MIGRATION_BATCH_SIZE, 1]
 
 
 def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeypatch):

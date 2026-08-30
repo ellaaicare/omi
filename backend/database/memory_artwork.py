@@ -20,6 +20,7 @@ DELETION_PENDING_FIELD = "memory_artwork_deletion_pending"
 JOB_COLLECTION = "ella_memory_artwork_jobs"
 RECONCILIATION_COLLECTION = "ella_memory_artwork_reconciliation_jobs"
 DEFAULT_BACKFILL_BATCH_SIZE = 10
+FIRESTORE_MIGRATION_BATCH_SIZE = 400
 TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
 HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
 
@@ -396,6 +397,10 @@ def list_jobs_for_uid(uid: str) -> list[dict[str, Any]]:
                     payload = {**payload, **migration}
                     migration_batch.set(snapshot.reference, migration, merge=True)
                     migration_count += 1
+                    if migration_count >= FIRESTORE_MIGRATION_BATCH_SIZE:
+                        migration_batch.commit()
+                        migration_batch = db.batch()
+                        migration_count = 0
         jobs.append({**payload, "job_id": snapshot.id})
     if migration_count:
         migration_batch.commit()
@@ -482,7 +487,20 @@ def _reserve_generation_transaction(
     if isinstance(current, dict) and current.get("generation_key") == generation_key:
         if current.get("status") in {"generating", "ready"}:
             if current.get("status") == "generating" and job_ref is not None and job_state is not None:
-                if current_job.get("status") not in {"pending", "processing"}:
+                should_promote_terminal = bool(
+                    current_job.get("status") == "pending"
+                    and current_job.get("origin") != TERMINAL_ENRICHMENT_ORIGIN
+                    and job_state.get("origin") == TERMINAL_ENRICHMENT_ORIGIN
+                )
+                if should_promote_terminal:
+                    transaction.update(
+                        job_ref,
+                        {
+                            "origin": TERMINAL_ENRICHMENT_ORIGIN,
+                            "updated_at": job_state.get("updated_at") or datetime.now(timezone.utc),
+                        },
+                    )
+                elif current_job.get("status") not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
     published = conversation.get(PUBLISHED_ARTWORK_FIELD) or {}
@@ -539,19 +557,16 @@ def reserve_generation(
 def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
     collection = db.collection(JOB_COLLECTION)
-    query_limit = max(1, limit)
     snapshots = list(
         collection.where("status", "==", "pending")
         .where("available_at", "<=", current_time)
         .order_by("available_at", direction=firestore.Query.ASCENDING)
-        .limit(query_limit)
         .stream()
     )
     snapshots.extend(
         collection.where("status", "==", "processing")
         .where("lease_expires_at", "<=", current_time)
         .order_by("lease_expires_at", direction=firestore.Query.ASCENDING)
-        .limit(query_limit)
         .stream()
     )
     pending: list[dict[str, Any]] = []
@@ -573,7 +588,20 @@ def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> lis
             str(job.get("job_id") or ""),
         )
     )
-    return pending[: max(1, limit)]
+    eligible: list[dict[str, Any]] = []
+    users: dict[str, dict[str, Any]] = {}
+    for job in pending:
+        uid = str(job.get("uid") or "")
+        if not uid:
+            continue
+        if uid not in users:
+            user_snapshot = _user_ref(uid).get()
+            users[uid] = user_snapshot.to_dict() if user_snapshot.exists else {}
+        if _backfill_control_allows_job(users[uid], job):
+            eligible.append(job)
+            if len(eligible) >= max(1, limit):
+                break
+    return eligible
 
 
 def _backfill_control_allows_job(user: dict[str, Any], job: dict[str, Any]) -> bool:
