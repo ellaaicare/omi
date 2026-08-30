@@ -166,6 +166,7 @@ class MemoryArtworkQueueStatus extends MemoryArtworkStyleProgress {
 }
 
 class MemoryArtworkApi {
+  static const int _maxHistoricalBatchSize = 10;
   MemoryArtworkApi({
     MemoryArtworkHttpCall request = makeApiCall,
     MemoryArtworkAuthorityProvider authorityProvider = WalOwnerAuthority.active,
@@ -468,6 +469,7 @@ class MemoryArtworkApi {
         autoContinue is! bool ||
         batchSize == null ||
         batchSize < 1 ||
+        batchSize > _maxHistoricalBatchSize ||
         batchRemaining == null ||
         (!autoContinue && batchRemaining > batchSize) ||
         total != ready + active + queued + retrying + failed ||

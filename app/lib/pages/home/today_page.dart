@@ -213,6 +213,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _homeArtworkQueueControlBusy = false;
   int _homeArtworkStyleOperationGeneration = 0;
   int _homeArtworkQueueOperationGeneration = 0;
+  int _homeArtworkQueueRefreshSequence = 0;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
@@ -503,6 +504,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final authority = _captureHomeArtworkAuthority();
     if (authority == null || _homeArtworkPreferences?.releaseEnabled != true) return;
     final operationGeneration = _homeArtworkQueueOperationGeneration;
+    final refreshSequence = ++_homeArtworkQueueRefreshSequence;
     MemoryArtworkQueueStatus? status;
     try {
       status = await _memoryArtworkApi.queueStatus();
@@ -514,7 +516,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     if (!mounted ||
         !_isHomeArtworkAuthorityCurrent(authority) ||
-        operationGeneration != _homeArtworkQueueOperationGeneration) {
+        operationGeneration != _homeArtworkQueueOperationGeneration ||
+        refreshSequence != _homeArtworkQueueRefreshSequence) {
       return;
     }
     if (status == null) {
@@ -541,6 +544,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkQueuePollTimer = Timer(const Duration(seconds: 4), () {
       if (mounted) unawaited(_refreshHomeArtworkQueueStatus());
     });
+  }
+
+  void _restoreHomeArtworkQueuePollIfNeeded() {
+    final retained = _homeArtworkQueueStatus;
+    if (retained?.controlState == MemoryArtworkQueueState.running && retained!.remaining > 0) {
+      _scheduleHomeArtworkQueuePoll();
+    }
   }
 
   Future<void> _controlHomeArtworkQueue(
@@ -580,6 +590,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     if (updated == null) {
       _showHomeMessage(context.l10n.memoryArtworkQueueControlFailed);
+      _restoreHomeArtworkQueuePollIfNeeded();
       return;
     }
     setState(() {
@@ -789,6 +800,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     } on ExactAccountAuthorityChangedException {
       _scheduleHomeArtworkReload();
       return;
+    } catch (_) {
+      result = const MemoryArtworkPreferenceUpdate(saved: false);
     } finally {
       if (mounted && operationGeneration == _homeArtworkStyleOperationGeneration) {
         setState(() => _homeArtworkStyleSaving = false);
@@ -798,6 +811,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     if (!result.saved) {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
+      _restoreHomeArtworkQueuePollIfNeeded();
       return;
     }
     setState(() {

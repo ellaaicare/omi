@@ -713,4 +713,61 @@ void main() {
 
     expect(await api.queueStatus(), isNull);
   });
+
+  test('queue status rejects a server batch larger than the client safety limit', () async {
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': 'ella.memory_artwork.queue.v1',
+          'generation_id': 'd' * 64,
+          'style_version': memoryArtworkDefaultStyle,
+          'state': 'paused',
+          'control_state': 'paused',
+          'scan_status': 'completed',
+          'scanned': 20,
+          'pages_processed': 1,
+          'auto_continue': false,
+          'batch_size': 11,
+          'batch_remaining': 0,
+          'pause_reason': 'batch_complete',
+          'ready': 10,
+          'active': 0,
+          'queued': 10,
+          'retrying': 0,
+          'failed': 0,
+          'total': 20,
+          'remaining': 10,
+          'styles': [
+            {
+              'style_version': memoryArtworkDefaultStyle,
+              'state': 'paused',
+              'ready': 10,
+              'active': 0,
+              'queued': 10,
+              'retrying': 0,
+              'failed': 0,
+              'total': 20,
+              'remaining': 10,
+            },
+          ],
+        }),
+        200,
+      ),
+    );
+
+    expect(await api.queueStatus(), isNull);
+  });
 }
