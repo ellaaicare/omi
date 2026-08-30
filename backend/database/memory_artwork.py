@@ -140,19 +140,16 @@ def get_reconciliation_job(uid: str, job_id: str) -> Optional[dict[str, Any]]:
 def list_pending_reconciliation_jobs(*, limit: int = 5, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
     collection = db.collection(RECONCILIATION_COLLECTION)
-    query_limit = max(1, limit)
     snapshots = list(
         collection.where("status", "==", "pending")
         .where("available_at", "<=", current_time)
         .order_by("available_at", direction=firestore.Query.ASCENDING)
-        .limit(query_limit)
         .stream()
     )
     snapshots.extend(
         collection.where("status", "==", "processing")
         .where("lease_expires_at", "<=", current_time)
         .order_by("lease_expires_at", direction=firestore.Query.ASCENDING)
-        .limit(query_limit)
         .stream()
     )
     pending: list[dict[str, Any]] = []
@@ -173,7 +170,20 @@ def list_pending_reconciliation_jobs(*, limit: int = 5, now: Optional[datetime] 
             str(job.get("job_id") or ""),
         )
     )
-    return pending[: max(1, limit)]
+    eligible: list[dict[str, Any]] = []
+    users: dict[str, dict[str, Any]] = {}
+    for job in pending:
+        uid = str(job.get("uid") or "")
+        if not uid:
+            continue
+        if uid not in users:
+            user_snapshot = _user_ref(uid).get()
+            users[uid] = user_snapshot.to_dict() if user_snapshot.exists else {}
+        if _backfill_control_allows_job(users[uid], job):
+            eligible.append(job)
+            if len(eligible) >= max(1, limit):
+                break
+    return eligible
 
 
 def _claim_reconciliation_job_transaction(

@@ -3790,6 +3790,8 @@ def test_legacy_job_migration_commits_firestore_writes_in_safe_chunks(monkeypatc
 
 def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeypatch):
     now = datetime.now(timezone.utc)
+    authority_digest = "digest-a"
+    style_version = artwork.DEFAULT_STYLE_VERSION
 
     class Snapshot:
         def __init__(self, identifier, payload):
@@ -3819,9 +3821,33 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
         def stream(self):
             return iter(self.payloads)
 
-    pending_query = Query([Snapshot("job-pending", {"status": "pending", "available_at": now - timedelta(minutes=2)})])
+    pending_query = Query(
+        [
+            Snapshot(
+                "job-pending",
+                {
+                    "uid": "owner-a",
+                    "authority_digest": authority_digest,
+                    "style_version": style_version,
+                    "status": "pending",
+                    "available_at": now - timedelta(minutes=2),
+                },
+            )
+        ]
+    )
     processing_query = Query(
-        [Snapshot("job-processing", {"status": "processing", "lease_expires_at": now - timedelta(minutes=1)})]
+        [
+            Snapshot(
+                "job-processing",
+                {
+                    "uid": "owner-b",
+                    "authority_digest": authority_digest,
+                    "style_version": style_version,
+                    "status": "processing",
+                    "lease_expires_at": now - timedelta(minutes=1),
+                },
+            )
+        ]
     )
 
     class Collection:
@@ -3834,7 +3860,20 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
             assert name == artwork_database.RECONCILIATION_COLLECTION
             return Collection()
 
+    class UserReference:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.PREFERENCES_FIELD: {
+                        "authority_digest": authority_digest,
+                        "style_version": style_version,
+                    }
+                },
+            )
+
     monkeypatch.setattr(artwork_database, "db", Database())
+    monkeypatch.setattr(artwork_database, "_user_ref", lambda uid: UserReference())
 
     jobs = artwork_database.list_pending_reconciliation_jobs(limit=2, now=now)
 
@@ -3843,13 +3882,11 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
         ("where", "status", "==", "pending"),
         ("where", "available_at", "<=", now),
         ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
     ]
     assert processing_query.operations == [
         ("where", "status", "==", "processing"),
         ("where", "lease_expires_at", "<=", now),
         ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
     ]
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     reconciliation_indexes = {
@@ -3859,6 +3896,78 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
     }
     assert (("status", "ASCENDING"), ("available_at", "ASCENDING")) in reconciliation_indexes
     assert (("status", "ASCENDING"), ("lease_expires_at", "ASCENDING")) in reconciliation_indexes
+
+
+def test_pending_reconciliation_filters_paused_users_before_worker_limit(monkeypatch):
+    now = datetime.now(timezone.utc)
+    authority_digest = "digest-a"
+    style_version = artwork.DEFAULT_STYLE_VERSION
+
+    class Snapshot:
+        def __init__(self, identifier, uid, available_at):
+            self.id = identifier
+            self.uid = uid
+            self.available_at = available_at
+
+        def to_dict(self):
+            return {
+                "uid": self.uid,
+                "authority_digest": authority_digest,
+                "style_version": style_version,
+                "status": "pending",
+                "available_at": self.available_at,
+            }
+
+    snapshots = [Snapshot(f"paused-{index}", "owner-paused", now - timedelta(minutes=20 - index)) for index in range(5)]
+    snapshots.append(Snapshot("eligible", "owner-running", now - timedelta(minutes=1)))
+
+    class Query:
+        def where(self, field, operator, value):
+            self.status = value if field == "status" else getattr(self, "status", None)
+            return self
+
+        def order_by(self, field, direction):
+            return self
+
+        def stream(self):
+            if getattr(self, "status", None) == "pending":
+                return iter(snapshots)
+            return iter([])
+
+    class Database:
+        def collection(self, name):
+            assert name == artwork_database.RECONCILIATION_COLLECTION
+            return Query()
+
+    class UserReference:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get(self):
+            generation_id = artwork_database.reconciliation_job_id(self.uid, authority_digest, style_version)
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.PREFERENCES_FIELD: {
+                        "authority_digest": authority_digest,
+                        "style_version": style_version,
+                    },
+                    artwork_database.BACKFILL_CONTROL_FIELD: {
+                        "schema_version": "ella.memory_artwork.queue_control.v1",
+                        "generation_id": generation_id,
+                        "authority_digest": authority_digest,
+                        "style_version": style_version,
+                        "state": "running" if self.uid == "owner-running" else "paused",
+                    },
+                },
+            )
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+    monkeypatch.setattr(artwork_database, "_user_ref", UserReference)
+
+    jobs = artwork_database.list_pending_reconciliation_jobs(limit=1, now=now)
+
+    assert [job["job_id"] for job in jobs] == ["eligible"]
 
 
 def test_reconciliation_claim_deletes_job_when_owner_is_missing():
