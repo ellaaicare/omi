@@ -13,7 +13,7 @@ import os
 import secrets
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol
 from urllib.parse import urlparse
@@ -46,6 +46,7 @@ ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
 ARTWORK_PROVIDER_CONTRACT_VERSION = "ella.artwork.service.v1"
+ARTWORK_RECONCILIATION_SCHEMA_VERSION = "ella.memory_artwork.reconciliation.v1"
 DEFAULT_STYLE_VERSION = "ella.memory_artwork.style.soft-gouache.v1"
 SUPPORTED_STYLE_VERSIONS = {
     DEFAULT_STYLE_VERSION,
@@ -89,6 +90,18 @@ DESIGNER_STYLE_NAMES = {
     "ella.memory_artwork.style.anime-storybook.v1": "anime-storybook",
     "ella.memory_artwork.style.cinematic-still.v1": "cinematic",
 }
+
+MemoryArtworkEnrichmentRecovery = Callable[[str, str], Awaitable[dict[str, Any]]]
+_memory_artwork_enrichment_recovery: Optional[MemoryArtworkEnrichmentRecovery] = None
+
+
+def register_memory_artwork_enrichment_recovery(handler: MemoryArtworkEnrichmentRecovery) -> None:
+    """Register canonical enrichment recovery without introducing a service import cycle."""
+
+    global _memory_artwork_enrichment_recovery
+    _memory_artwork_enrichment_recovery = handler
+
+
 COMPOSITION_DIRECTIONS = (
     "Use layered depth led by a concrete subject already named in the memory, adding no new foreground object.",
     "Use an intimate eye-level view, placing the most specific named subject near one third of the frame.",
@@ -130,6 +143,8 @@ INTERNAL_OWNER_UIDS_ENV = "ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS"
 WORKER_INTERVAL_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS"
 WORKER_BATCH_SIZE = 10
 WORKER_MAX_ATTEMPTS = 5
+ENRICHMENT_RECOVERY_PENDING_OUTCOMES = frozenset({"claimed", "processing", "busy", "superseded"})
+ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES = frozenset({"not_found", "invalid_state", "not_retryable", "failed"})
 PROVIDER_KIND_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER"
 XAI_API_KEY_ENV = "XAI_API_KEY"
 XAI_IMAGE_MODEL_ENV = "ELLA_MEMORY_ARTWORK_XAI_MODEL"
@@ -161,6 +176,12 @@ class MemoryArtworkError(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+class MemoryArtworkBackfillError(MemoryArtworkError):
+    def __init__(self, code: str, *, retryable: bool, partial_result: dict[str, Any]):
+        super().__init__(code, retryable=retryable)
+        self.partial_result = partial_result
 
 
 @dataclass(frozen=True)
@@ -240,6 +261,8 @@ class MemoryArtworkRepository(Protocol):
 
     def finalize_generation(self, uid: str, memory_id: str, **kwargs) -> bool: ...
 
+    def clear_published_artwork(self, uid: str, memory_id: str, **kwargs) -> bool: ...
+
     def mark_generation_unavailable(self, uid: str, memory_id: str, **kwargs) -> bool: ...
 
     def list_pending_jobs(self, **kwargs) -> list[dict[str, Any]]: ...
@@ -258,6 +281,16 @@ class MemoryArtworkRepository(Protocol):
 
     def renew_publication_claim(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
+    def create_reconciliation_job(self, uid: str, **kwargs) -> dict[str, Any]: ...
+
+    def get_reconciliation_job(self, uid: str, job_id: str) -> Optional[dict[str, Any]]: ...
+
+    def list_pending_reconciliation_jobs(self, **kwargs) -> list[dict[str, Any]]: ...
+
+    def claim_reconciliation_job(self, uid: str, job_id: str, **kwargs) -> Optional[dict[str, Any]]: ...
+
+    def finish_reconciliation_job(self, job_id: str, **kwargs) -> bool: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
@@ -267,6 +300,7 @@ class FirestoreMemoryArtworkRepository:
     reserve_generation = staticmethod(artwork_db.reserve_generation)
     claim_generation = staticmethod(artwork_db.claim_generation)
     finalize_generation = staticmethod(artwork_db.finalize_generation)
+    clear_published_artwork = staticmethod(artwork_db.clear_published_artwork)
     mark_generation_unavailable = staticmethod(artwork_db.mark_generation_unavailable)
     list_pending_jobs = staticmethod(artwork_db.list_pending_jobs)
     claim_job = staticmethod(artwork_db.claim_job)
@@ -276,6 +310,11 @@ class FirestoreMemoryArtworkRepository:
     fail_job = staticmethod(artwork_db.fail_job)
     mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
     renew_publication_claim = staticmethod(artwork_db.renew_publication_claim)
+    create_reconciliation_job = staticmethod(artwork_db.create_reconciliation_job)
+    get_reconciliation_job = staticmethod(artwork_db.get_reconciliation_job)
+    list_pending_reconciliation_jobs = staticmethod(artwork_db.list_pending_reconciliation_jobs)
+    claim_reconciliation_job = staticmethod(artwork_db.claim_reconciliation_job)
+    finish_reconciliation_job = staticmethod(artwork_db.finish_reconciliation_job)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -683,6 +722,18 @@ def _preferences_match_authority(
     )
 
 
+def _release_artwork(conversation: dict[str, Any]) -> tuple[dict[str, Any], bool, Optional[str]]:
+    current = conversation.get("artwork") or {}
+    if isinstance(current, dict) and current.get("status") == "ready":
+        return current, False, None
+    published = conversation.get(artwork_db.PUBLISHED_ARTWORK_FIELD) or {}
+    if isinstance(published, dict) and published.get("status") == "ready":
+        current_status = str(current.get("status") or "") if isinstance(current, dict) else ""
+        failure_code = str(current.get("failure_code") or "") if isinstance(current, dict) else ""
+        return published, current_status == "generating", failure_code or None
+    return current if isinstance(current, dict) else {}, False, None
+
+
 def _generation_claim_is_current(
     conversation: dict[str, Any],
     *,
@@ -729,6 +780,38 @@ class MemoryArtworkService:
         self.store_factory = store_factory
         self.global_consent_checker = global_consent_checker or has_current_global_ai_consent
         self.config = config or MemoryArtworkConfig.from_env()
+
+    async def _cleanup_published_artwork(self, uid: str, memory_id: str, *, required: bool) -> bool:
+        try:
+            async with acquire_memory_artwork_publication_lock(uid):
+                conversation = self.repository.get_conversation(uid, memory_id) or {}
+                current = conversation.get(artwork_db.ARTWORK_FIELD) or {}
+                published = conversation.get(artwork_db.PUBLISHED_ARTWORK_FIELD) or {}
+                if not isinstance(published, dict) or not published:
+                    return True
+                if not isinstance(current, dict) or current.get("status") != "ready":
+                    return True
+                object_key = str(published.get("object_key") or "")
+                object_generation = str(published.get("object_generation") or "")
+                if not object_key:
+                    raise MemoryArtworkStorageError("memory_artwork_published_object_missing")
+                if object_key != str(current.get("object_key") or ""):
+                    self.store_factory().delete(uid=uid, memory_id=memory_id, object_key=object_key)
+                if not self.repository.clear_published_artwork(
+                    uid,
+                    memory_id,
+                    object_key=object_key,
+                    object_generation=object_generation,
+                ):
+                    raise MemoryArtworkStorageError("memory_artwork_published_cleanup_conflict")
+                return True
+        except Exception as exc:
+            if required:
+                if isinstance(exc, MemoryArtworkError):
+                    raise
+                raise MemoryArtworkError("memory_artwork_published_cleanup_failed", retryable=True) from exc
+            logger.warning("Memory artwork published-object cleanup remains pending: %s", type(exc).__name__)
+            return False
 
     async def preferences(self, uid: str) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
@@ -777,6 +860,79 @@ class MemoryArtworkService:
         )
         return await self.preferences(uid)
 
+    @staticmethod
+    def _public_reconciliation(job: Optional[dict[str, Any]]) -> dict[str, Any]:
+        if not job:
+            return {
+                "schema_version": ARTWORK_RECONCILIATION_SCHEMA_VERSION,
+                "status": "idle",
+                "pages_processed": 0,
+                "scanned": 0,
+                "queued": 0,
+                "existing": 0,
+                "skipped": 0,
+            }
+        return {
+            "schema_version": ARTWORK_RECONCILIATION_SCHEMA_VERSION,
+            "job_id": str(job.get("job_id") or ""),
+            "status": str(job.get("status") or "idle"),
+            "style_version": str(job.get("style_version") or ""),
+            "pages_processed": int(job.get("pages_processed") or 0),
+            "scanned": int(job.get("scanned") or 0),
+            "queued": int(job.get("queued") or 0),
+            "existing": int(job.get("existing") or 0),
+            "skipped": int(job.get("skipped") or 0),
+            "failure_code": str(job.get("failure_code") or "") or None,
+            "created_at": job.get("created_at"),
+            "updated_at": job.get("updated_at"),
+            "completed_at": job.get("completed_at"),
+        }
+
+    async def start_reconciliation(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        if not (
+            self.config.enabled
+            and self.config.release_enabled
+            and self.config.provider_enabled
+            and self.config.backfill_enabled
+        ):
+            raise MemoryArtworkError("memory_artwork_backfill_disabled")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        if style_version not in SUPPORTED_STYLE_VERSIONS:
+            raise MemoryArtworkError("memory_artwork_style_version_invalid")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        reservation = self.repository.create_reconciliation_job(
+            uid,
+            authority_digest=authority.authority_digest,
+            style_version=style_version,
+        )
+        if reservation.get("outcome") == "deletion_pending":
+            raise MemoryArtworkError("memory_artwork_deletion_pending")
+        return self._public_reconciliation(reservation.get("job"))
+
+    async def reconciliation_status(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        job_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
+        return self._public_reconciliation(self.repository.get_reconciliation_job(uid, job_id))
+
     async def enqueue(
         self,
         uid: str,
@@ -789,6 +945,18 @@ class MemoryArtworkService:
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
+        current_artwork = conversation.get(artwork_db.ARTWORK_FIELD) or {}
+        published_artwork = conversation.get(artwork_db.PUBLISHED_ARTWORK_FIELD) or {}
+        if (
+            isinstance(current_artwork, dict)
+            and current_artwork.get("status") == "ready"
+            and isinstance(published_artwork, dict)
+            and published_artwork
+        ):
+            await self._cleanup_published_artwork(uid, memory_id, required=True)
+            conversation = self.repository.get_conversation(uid, memory_id)
+            if conversation is None:
+                raise MemoryArtworkError("memory_artwork_memory_not_found")
         enrichment_revision = _terminal_enrichment(conversation)
         if enrichment_revision is None:
             raise MemoryArtworkError("memory_artwork_enrichment_not_terminal", retryable=True)
@@ -1328,6 +1496,7 @@ class MemoryArtworkService:
         )
         if not finalized:
             raise MemoryArtworkError("memory_artwork_finalize_conflict", retryable=True)
+        await self._cleanup_published_artwork(uid, memory_id, required=False)
         return {"outcome": "ready", "status": "ready"}
 
     async def signed_url(self, uid: str, memory_id: str) -> dict[str, Any]:
@@ -1352,7 +1521,7 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        artwork = conversation.get("artwork") or {}
+        artwork, refresh_pending, refresh_failure_code = _release_artwork(conversation)
         status = str(artwork.get("status") or "unavailable") if isinstance(artwork, dict) else "unavailable"
         if status != "ready":
             return {
@@ -1379,7 +1548,8 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        current_artwork = conversation.get("artwork") or {}
+        current_artwork, current_refresh_pending, current_refresh_failure_code = _release_artwork(conversation)
+        generation_request = conversation.get("artwork") or {}
         if preferences.get(artwork_db.DELETION_PENDING_FIELD):
             raise MemoryArtworkError("memory_artwork_deletion_pending")
         if preferences.get("consent") == "declined":
@@ -1411,7 +1581,11 @@ class MemoryArtworkService:
             or not _preferences_match_authority(
                 preferences,
                 authority,
-                style_version=str(current_artwork.get("style_version") or ""),
+                style_version=(
+                    None
+                    if current_refresh_pending or current_refresh_failure_code
+                    else str(current_artwork.get("style_version") or "")
+                ),
             )
         ):
             return {
@@ -1419,6 +1593,17 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_preference_authority_stale",
             }
+        if current_refresh_pending or current_refresh_failure_code:
+            if (
+                not isinstance(generation_request, dict)
+                or generation_request.get("style_version") != preferences.get("style_version")
+                or generation_request.get("enrichment_revision") != current_artwork.get("enrichment_revision")
+            ):
+                return {
+                    "schema_version": ARTWORK_SCHEMA_VERSION,
+                    "status": "unavailable",
+                    "failure_code": "memory_artwork_preference_authority_stale",
+                }
         current_enrichment_revision = _terminal_enrichment(conversation)
         _, current_prompt_sha256 = _prompt_for(
             conversation,
@@ -1446,12 +1631,24 @@ class MemoryArtworkService:
             "pixel_height": current_artwork.get("pixel_height"),
             "url": url,
             "expires_in_seconds": 300,
+            "refresh_pending": current_refresh_pending,
+            "refresh_failure_code": current_refresh_failure_code,
+            "requested_style_version": (
+                generation_request.get("style_version")
+                if current_refresh_pending or current_refresh_failure_code
+                else current_artwork.get("style_version")
+            ),
         }
 
     async def backfill(self, uid: str, *, cursor_memory_id: Optional[str] = None) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
-        if not (self.config.enabled and self.config.release_enabled and self.config.backfill_enabled):
+        if not (
+            self.config.enabled
+            and self.config.release_enabled
+            and self.config.provider_enabled
+            and self.config.backfill_enabled
+        ):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
         try:
             recent = self.repository.list_conversations_page(
@@ -1464,10 +1661,28 @@ class MemoryArtworkService:
         has_more = len(recent) > BACKFILL_SCAN_LIMIT
         page = recent[:BACKFILL_SCAN_LIMIT]
         queued = existing = skipped = 0
+        scanned = 0
         memory_ids: list[str] = []
         recovery_memory_ids: list[str] = []
         next_cursor: Optional[str] = None
+
+        def page_result() -> dict[str, Any]:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "limit": MAX_BACKFILL_MEMORIES,
+                "scan_limit": BACKFILL_SCAN_LIMIT,
+                "scanned": scanned,
+                "queued": queued,
+                "existing": existing,
+                "skipped": skipped,
+                "memory_ids": list(memory_ids),
+                "next_cursor": next_cursor if has_more else None,
+                "has_more": has_more,
+                "_recovery_memory_ids": list(recovery_memory_ids),
+            }
+
         for index, conversation in enumerate(page):
+            scanned += 1
             memory_id = str(conversation.get("id") or "")
             if not memory_id:
                 skipped += 1
@@ -1484,7 +1699,26 @@ class MemoryArtworkService:
                         has_more = has_more or index < len(page) - 1
                         break
                 continue
-            result = await self.enqueue(uid, memory_id)
+            try:
+                result = await self.enqueue(uid, memory_id)
+            except MemoryArtworkError as exc:
+                skipped += 1
+                recovery_memory_ids.append(memory_id)
+                has_more = has_more or index < len(page) - 1
+                raise MemoryArtworkBackfillError(
+                    exc.code,
+                    retryable=exc.retryable,
+                    partial_result=page_result(),
+                ) from exc
+            except Exception as exc:
+                skipped += 1
+                recovery_memory_ids.append(memory_id)
+                has_more = has_more or index < len(page) - 1
+                raise MemoryArtworkBackfillError(
+                    "memory_artwork_backfill_failed",
+                    retryable=True,
+                    partial_result=page_result(),
+                ) from exc
             if result.get("outcome") == "reserved":
                 queued += 1
                 memory_ids.append(memory_id)
@@ -1495,20 +1729,7 @@ class MemoryArtworkService:
             if queued >= MAX_BACKFILL_MEMORIES:
                 has_more = has_more or index < len(page) - 1
                 break
-        if not has_more:
-            next_cursor = None
-        return {
-            "schema_version": ARTWORK_SCHEMA_VERSION,
-            "limit": MAX_BACKFILL_MEMORIES,
-            "scan_limit": BACKFILL_SCAN_LIMIT,
-            "queued": queued,
-            "existing": existing,
-            "skipped": skipped,
-            "memory_ids": memory_ids,
-            "next_cursor": next_cursor,
-            "has_more": has_more,
-            "_recovery_memory_ids": recovery_memory_ids,
-        }
+        return page_result()
 
 
 class MemoryArtworkWorker:
@@ -1520,10 +1741,12 @@ class MemoryArtworkWorker:
         repository: Optional[MemoryArtworkRepository] = None,
         service_factory: Callable[[], MemoryArtworkService] = MemoryArtworkService,
         config: Optional[MemoryArtworkConfig] = None,
+        enrichment_recovery: Optional[MemoryArtworkEnrichmentRecovery] = None,
     ):
         self.repository = repository or FirestoreMemoryArtworkRepository()
         self.service_factory = service_factory
         self.config = config or MemoryArtworkConfig.from_env()
+        self.enrichment_recovery = enrichment_recovery
 
     async def run_job(
         self,
@@ -1632,10 +1855,240 @@ class MemoryArtworkWorker:
                 "failure_code": "memory_artwork_worker_failed",
             }
 
+    async def run_reconciliation_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        uid = str(job.get("uid") or "")
+        job_id = str(job.get("job_id") or "")
+        if not uid or len(job_id) != 64 or not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_reconciliation_invalid")
+        lease_token = secrets.token_hex(24)
+        claimed = self.repository.claim_reconciliation_job(
+            uid,
+            job_id,
+            lease_token=lease_token,
+            now=datetime.now(timezone.utc),
+            lease_seconds=_artwork_lease_seconds(),
+        )
+        if claimed is None:
+            return {"outcome": "not_claimed", "status": "unavailable"}
+        service = self.service_factory()
+        result: dict[str, Any] | None = None
+        recovery_memory_ids: list[str] = []
+        remaining_recovery_memory_ids: list[str] = []
+        recovery_index = 0
+        recovery_queued = 0
+        recovery_existing = 0
+        recovery_accounting_applied = False
+        try:
+            authority = await service.authority_resolver(uid)
+            preferences = service.repository.get_preferences(uid)
+            if (
+                claimed.get("authority_digest") != authority.authority_digest
+                or claimed.get("style_version") != preferences.get("style_version")
+                or not service.global_consent_checker(uid)
+                or not _preferences_match_authority(
+                    preferences,
+                    authority,
+                    style_version=str(claimed.get("style_version") or ""),
+                )
+            ):
+                self.repository.finish_reconciliation_job(
+                    job_id,
+                    lease_token=lease_token,
+                    update={
+                        "status": "failed",
+                        "failure_code": "memory_artwork_preference_authority_stale",
+                        "completed_at": datetime.now(timezone.utc),
+                    },
+                )
+                return {
+                    "outcome": "failed",
+                    "status": "failed",
+                    "failure_code": "memory_artwork_preference_authority_stale",
+                }
+            recovery_page = claimed.get("recovery_page")
+            if isinstance(recovery_page, dict):
+                stored_result = recovery_page.get("result")
+                stored_memory_ids = recovery_page.get("memory_ids")
+                if not isinstance(stored_result, dict) or not isinstance(stored_memory_ids, list):
+                    raise MemoryArtworkError("memory_artwork_reconciliation_recovery_page_invalid")
+                result = dict(stored_result)
+                recovery_memory_ids = [
+                    str(memory_id) for memory_id in stored_memory_ids if isinstance(memory_id, str) and memory_id
+                ]
+                if len(recovery_memory_ids) != len(stored_memory_ids):
+                    raise MemoryArtworkError("memory_artwork_reconciliation_recovery_page_invalid")
+            else:
+                try:
+                    result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
+                    recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+                except MemoryArtworkBackfillError as exc:
+                    result = dict(exc.partial_result)
+                    recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+                    raise
+            recovery_pending = False
+            recovery_handler = self.enrichment_recovery or _memory_artwork_enrichment_recovery
+            for index, memory_id in enumerate(recovery_memory_ids):
+                recovery_index = index
+                enqueue_result = None
+                try:
+                    enqueue_result = await service.enqueue(uid, memory_id)
+                except MemoryArtworkError as exc:
+                    if exc.code != "memory_artwork_enrichment_not_terminal":
+                        raise
+                if enqueue_result is None:
+                    if recovery_handler is None:
+                        raise MemoryArtworkError("memory_artwork_enrichment_recovery_unavailable", retryable=True)
+                    recovery = await recovery_handler(uid, memory_id)
+                    recovery_outcome = str(recovery.get("outcome") or "")
+                    if recovery_outcome == "completed":
+                        try:
+                            enqueue_result = await service.enqueue(uid, memory_id)
+                        except MemoryArtworkError as exc:
+                            if exc.code != "memory_artwork_enrichment_not_terminal":
+                                raise
+                            recovery_pending = True
+                            remaining_recovery_memory_ids.append(memory_id)
+                    elif recovery_outcome in ENRICHMENT_RECOVERY_PENDING_OUTCOMES:
+                        recovery_pending = True
+                        remaining_recovery_memory_ids.append(memory_id)
+                    elif recovery_outcome not in ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES:
+                        raise MemoryArtworkError("memory_artwork_enrichment_recovery_outcome_invalid")
+                if enqueue_result is not None:
+                    enqueue_outcome = str(enqueue_result.get("outcome") or "")
+                    if enqueue_outcome == "reserved":
+                        recovery_queued += 1
+                    elif enqueue_outcome == "existing":
+                        recovery_existing += 1
+                    elif enqueue_outcome not in {
+                        "consent_required",
+                        "declined",
+                        "disabled",
+                        "sensitive_source_excluded",
+                    }:
+                        raise MemoryArtworkError("memory_artwork_enqueue_outcome_invalid")
+                recovery_index = index + 1
+            result["queued"] = int(result.get("queued") or 0) + recovery_queued
+            result["existing"] = int(result.get("existing") or 0) + recovery_existing
+            result["skipped"] = max(
+                0,
+                int(result.get("skipped") or 0) - recovery_queued - recovery_existing,
+            )
+            recovery_accounting_applied = True
+            has_more = result.get("has_more") is True
+            now = datetime.now(timezone.utc)
+            if recovery_pending:
+                self.repository.finish_reconciliation_job(
+                    job_id,
+                    lease_token=lease_token,
+                    update={
+                        "status": "pending",
+                        "cursor": claimed.get("cursor"),
+                        "available_at": now + timedelta(seconds=5),
+                        "attempt_count": 0,
+                        "failure_code": None,
+                        "recovery_page": {
+                            "result": result,
+                            "memory_ids": remaining_recovery_memory_ids,
+                        },
+                    },
+                )
+                return {
+                    "outcome": "enrichment_recovery_pending",
+                    "status": "pending",
+                }
+            update = {
+                "status": "pending" if has_more else "completed",
+                "cursor": result.get("next_cursor") if has_more else None,
+                "pages_processed": int(claimed.get("pages_processed") or 0) + 1,
+                "scanned": int(claimed.get("scanned") or 0) + int(result.get("scanned") or 0),
+                "queued": int(claimed.get("queued") or 0) + int(result.get("queued") or 0),
+                "existing": int(claimed.get("existing") or 0) + int(result.get("existing") or 0),
+                "skipped": int(claimed.get("skipped") or 0) + int(result.get("skipped") or 0),
+                "available_at": now,
+                "attempt_count": 0,
+                "failure_code": None,
+                "recovery_page": None,
+            }
+            if not has_more:
+                update["completed_at"] = now
+            self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
+            return {"outcome": "continued" if has_more else "completed", "status": update["status"]}
+        except MemoryArtworkError as exc:
+            attempts = int(claimed.get("attempt_count") or 0) + 1
+            retryable = exc.retryable and attempts < WORKER_MAX_ATTEMPTS
+            now = datetime.now(timezone.utc)
+            update = {
+                "status": "pending" if retryable else "failed",
+                "attempt_count": attempts,
+                "available_at": now + timedelta(seconds=min(300, 2**attempts)),
+                "failure_code": exc.code,
+            }
+            if isinstance(result, dict):
+                checkpoint_result = dict(result)
+                if not recovery_accounting_applied:
+                    checkpoint_result["queued"] = int(checkpoint_result.get("queued") or 0) + recovery_queued
+                    checkpoint_result["existing"] = int(checkpoint_result.get("existing") or 0) + recovery_existing
+                    checkpoint_result["skipped"] = max(
+                        0,
+                        int(checkpoint_result.get("skipped") or 0) - recovery_queued - recovery_existing,
+                    )
+                outstanding_memory_ids = list(
+                    dict.fromkeys(remaining_recovery_memory_ids + recovery_memory_ids[recovery_index:])
+                )
+                update["cursor"] = claimed.get("cursor")
+                update["recovery_page"] = {
+                    "result": checkpoint_result,
+                    "memory_ids": outstanding_memory_ids,
+                }
+            if not retryable:
+                update["completed_at"] = now
+            self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
+            return {"outcome": "retry" if retryable else "failed", "status": update["status"], "failure_code": exc.code}
+        except Exception:
+            attempts = int(claimed.get("attempt_count") or 0) + 1
+            retryable = attempts < WORKER_MAX_ATTEMPTS
+            now = datetime.now(timezone.utc)
+            failure_code = "memory_artwork_reconciliation_worker_failed"
+            update = {
+                "status": "pending" if retryable else "failed",
+                "attempt_count": attempts,
+                "available_at": now + timedelta(seconds=min(300, 2**attempts)),
+                "failure_code": failure_code,
+            }
+            if isinstance(result, dict):
+                checkpoint_result = dict(result)
+                if not recovery_accounting_applied:
+                    checkpoint_result["queued"] = int(checkpoint_result.get("queued") or 0) + recovery_queued
+                    checkpoint_result["existing"] = int(checkpoint_result.get("existing") or 0) + recovery_existing
+                    checkpoint_result["skipped"] = max(
+                        0,
+                        int(checkpoint_result.get("skipped") or 0) - recovery_queued - recovery_existing,
+                    )
+                outstanding_memory_ids = list(
+                    dict.fromkeys(remaining_recovery_memory_ids + recovery_memory_ids[recovery_index:])
+                )
+                update["cursor"] = claimed.get("cursor")
+                update["recovery_page"] = {
+                    "result": checkpoint_result,
+                    "memory_ids": outstanding_memory_ids,
+                }
+            if not retryable:
+                update["completed_at"] = now
+            self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
+            return {
+                "outcome": "retry" if retryable else "failed",
+                "status": update["status"],
+                "failure_code": failure_code,
+            }
+
     async def run_once(self) -> int:
         if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
             return 0
         processed = 0
+        for job in self.repository.list_pending_reconciliation_jobs(limit=5, now=datetime.now(timezone.utc)):
+            result = await self.run_reconciliation_job(job)
+            if result.get("outcome") != "not_claimed":
+                processed += 1
         for job in self.repository.list_pending_jobs(limit=WORKER_BATCH_SIZE, now=datetime.now(timezone.utc)):
             uid = str(job.get("uid") or "")
             memory_id = str(job.get("memory_id") or "")
