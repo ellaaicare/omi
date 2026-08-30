@@ -207,6 +207,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Timer? _homeArtworkBackfillPollTimer;
   _ArtworkBackfillUiState _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
   bool _homeArtworkStyleSaving = false;
+  int _homeArtworkStyleOperationGeneration = 0;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
@@ -316,6 +317,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     _homeArtworkBackfillPollTimer?.cancel();
+    _homeArtworkStyleOperationGeneration++;
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -627,6 +629,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     if (_homeArtworkStyleSaving) return;
+    final operationGeneration = ++_homeArtworkStyleOperationGeneration;
     setState(() => _homeArtworkStyleSaving = true);
     _publishHomeArtworkStudioState();
     MemoryArtworkPreferenceUpdate result;
@@ -636,7 +639,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _scheduleHomeArtworkReload();
       return;
     } finally {
-      if (mounted) {
+      if (mounted && operationGeneration == _homeArtworkStyleOperationGeneration) {
         setState(() => _homeArtworkStyleSaving = false);
         _publishHomeArtworkStudioState();
       }
@@ -675,12 +678,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       builder: (sheetContext) => ValueListenableBuilder<_ArtworkStudioSnapshot?>(
         valueListenable: _homeArtworkStudioState,
         builder: (context, snapshot, _) {
-          final current = snapshot ??
-              (
-                preferences: preferences,
-                backfillState: _homeArtworkBackfillState,
-                styleSaving: _homeArtworkStyleSaving,
-              );
+          if (snapshot == null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (sheetContext.mounted && Navigator.of(sheetContext).canPop()) Navigator.pop(sheetContext);
+            });
+            return const SizedBox.shrink();
+          }
+          final current = snapshot;
           return _ArtworkStudioSheet(
             preferences: current.preferences,
             backfillState: current.backfillState,

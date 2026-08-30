@@ -1150,6 +1150,74 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('stale style completion cannot clear the replacement account operation latch', (tester) async {
+    final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    var activeAuthority = authorityA;
+    final firstStyleGate = Completer<void>();
+    final secondStyleGate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(firstStyleGate: firstStyleGate, secondStyleGate: secondStyleGate);
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => activeAuthority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+
+    authorityA.current = false;
+    activeAuthority = await _installArtworkAuthority(uid: 'account-b', profileBindingId: 'profile-b');
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pump();
+
+    firstStyleGate.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    final pendingTile = tester.widget<ListTile>(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')));
+    expect(pendingTile.onTap, isNull);
+
+    secondStyleGate.complete();
+    await tester.pumpAndSettle();
+    final completedTile =
+        tester.widget<ListTile>(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')));
+    expect(completedTile.onTap, isNotNull);
+  });
+
+  testWidgets('open Artwork Studio dismisses instead of retaining a stale account snapshot', (tester) async {
+    final authority = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    final artwork = _FakeMemoryArtworkApi();
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')), findsOneWidget);
+
+    authority.current = false;
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')), findsNothing);
+  });
+
   testWidgets('open day dismisses and clears its snapshot when the profile authority changes', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi();
@@ -1371,6 +1439,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     ],
     this.firstBackfillGate,
     this.firstStyleGate,
+    this.secondStyleGate,
     Set<int> authorityThrowRequests = const {},
     Set<int> failedBackfillRequests = const {},
   })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
@@ -1385,6 +1454,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final Set<int> _failedBackfillRequests;
   final Completer<void>? firstBackfillGate;
   final Completer<void>? firstStyleGate;
+  final Completer<void>? secondStyleGate;
   int _backfillRequests = 0;
   int _styleRequests = 0;
 
@@ -1419,6 +1489,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     selectedStyles.add(styleVersion);
     final request = _styleRequests++;
     if (request == 0 && firstStyleGate != null) await firstStyleGate!.future;
+    if (request == 1 && secondStyleGate != null) await secondStyleGate!.future;
     return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 }
