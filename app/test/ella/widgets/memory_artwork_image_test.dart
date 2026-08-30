@@ -104,6 +104,38 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _PublishedRefreshArtworkApi extends MemoryArtworkApi {
+  _PublishedRefreshArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/published-$loadCalls.png'),
+      cacheKey: 'published-refresh-$loadCalls',
+      styleVersion: loadCalls == 1 ? memoryArtworkDefaultStyle : memoryArtworkAnimeStorybookStyle,
+      requestedStyleVersion: memoryArtworkAnimeStorybookStyle,
+      refreshPending: loadCalls == 1,
+    );
+  }
+}
+
 void main() {
   testWidgets('renders owner-scoped disk artwork before signed URL refresh completes', (tester) async {
     final api = _DelayedArtworkApi();
@@ -301,6 +333,43 @@ void main() {
 
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-eventually-ready')), findsOneWidget);
+  });
+
+  testWidgets('keeps published artwork visible while polling for a replacement style', (tester) async {
+    final api = _PublishedRefreshArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-style-refresh',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.generating,
+        styleVersion: memoryArtworkAnimeStorybookStyle,
+        enrichmentRevision: 'summary-revision-1',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(api.loadCalls, 1);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-style-refresh')), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-style-refresh')), findsOneWidget);
   });
 
   testWidgets('failed signed image load evicts cache and refreshes the signed URL', (tester) async {

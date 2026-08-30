@@ -156,7 +156,7 @@ abstract class AppLocalizations {
     Locale('tr'),
     Locale('uk'),
     Locale('vi'),
-    Locale('zh'),
+    Locale('zh')
   ];
 
   /// The app title displayed in various places
@@ -9019,10 +9019,7 @@ abstract class AppLocalizations {
   ///
   /// In en, this message translates to:
   /// **'{accessDescription} and is {triggerDescription}.'**
-  String accessesAndTriggeredBy(
-    String accessDescription,
-    String triggerDescription,
-  );
+  String accessesAndTriggeredBy(String accessDescription, String triggerDescription);
 
   /// Sentence starting with 'Is' for trigger description
   ///
@@ -17715,7 +17712,7 @@ abstract class AppLocalizations {
   /// No description provided for @memoryArtworkStyleUpdated.
   ///
   /// In en, this message translates to:
-  /// **'New memories will use this illustration style. Recent memories are being refreshed.'**
+  /// **'Illustration style saved. Ella will prepare the artwork in the background.'**
   String get memoryArtworkStyleUpdated;
 
   /// No description provided for @memoryArtworkStyleUnavailable.
@@ -17838,6 +17835,18 @@ abstract class AppLocalizations {
   /// **'Record a moment and Ella will gather the memories you choose.'**
   String get todayMemoryCanvasEmptyBody;
 
+  /// No description provided for @todayMemoryCanvasLoadingHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Loading your memories'**
+  String get todayMemoryCanvasLoadingHeadline;
+
+  /// No description provided for @todayMemoryCanvasLoadingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is bringing back your recent memories and illustrations.'**
+  String get todayMemoryCanvasLoadingBody;
+
   /// No description provided for @memoryArtworkUnavailableLabel.
   ///
   /// In en, this message translates to:
@@ -17849,6 +17858,66 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Preparing illustration…'**
   String get memoryArtworkPreparingShort;
+
+  /// No description provided for @memoryArtworkStudio.
+  ///
+  /// In en, this message translates to:
+  /// **'Artwork studio'**
+  String get memoryArtworkStudio;
+
+  /// No description provided for @memoryArtworkStudioDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose how your memories look. You can leave while Ella prepares them.'**
+  String get memoryArtworkStudioDetail;
+
+  /// No description provided for @memoryArtworkBackfillInProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is preparing artwork. You can leave this screen.'**
+  String get memoryArtworkBackfillInProgress;
+
+  /// No description provided for @memoryArtworkBackfillMoreAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'More older memories are ready for artwork.'**
+  String get memoryArtworkBackfillMoreAvailable;
+
+  /// No description provided for @memoryArtworkBackfillComplete.
+  ///
+  /// In en, this message translates to:
+  /// **'Artwork is up to date.'**
+  String get memoryArtworkBackfillComplete;
+
+  /// No description provided for @memoryArtworkBackfillNeedsAttention.
+  ///
+  /// In en, this message translates to:
+  /// **'Some artwork still needs attention. Nothing was deleted.'**
+  String get memoryArtworkBackfillNeedsAttention;
+
+  /// No description provided for @memoryArtworkBackfillReady.
+  ///
+  /// In en, this message translates to:
+  /// **'Artwork is ready to continue in the background.'**
+  String get memoryArtworkBackfillReady;
+
+  /// No description provided for @memoryArtworkContinueOlder.
+  ///
+  /// In en, this message translates to:
+  /// **'Continue older artwork'**
+  String get memoryArtworkContinueOlder;
+
+  /// No description provided for @memoryArtworkCheckMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'Check for missing artwork'**
+  String get memoryArtworkCheckMissing;
+
+  /// No description provided for @memoryArtworkRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Try artwork again'**
+  String get memoryArtworkRetry;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
@@ -17894,7 +17963,7 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
         'tr',
         'uk',
         'vi',
-        'zh',
+        'zh'
       ].contains(locale.languageCode);
 
   @override
@@ -17974,10 +18043,8 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsZh();
   }
 
-  throw FlutterError(
-    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-    'an issue with the localizations generation tool. Please file an issue '
-    'on GitHub with a reproducible sample app and the gen-l10n configuration '
-    'that was used.',
-  );
+  throw FlutterError('AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+      'an issue with the localizations generation tool. Please file an issue '
+      'on GitHub with a reproducible sample app and the gen-l10n configuration '
+      'that was used.');
 }

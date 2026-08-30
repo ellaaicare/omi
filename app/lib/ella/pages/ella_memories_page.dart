@@ -42,6 +42,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   MemoryGallerySort _sort = MemoryGallerySort.recent;
   bool _showBackToRecent = false;
   bool _artworkBackfillInFlight = false;
+  bool _artworkBackfillRestartPending = false;
 
   static const _backfillComplete = '__complete__';
 
@@ -111,10 +112,13 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   Future<MemoryArtworkBackfillPage?> _advanceArtworkBackfill({bool restart = false}) async {
+    if (restart) _artworkBackfillRestartPending = true;
     final preferences = _artworkPreferences;
     if (preferences == null || !preferences.releaseEnabled || _artworkBackfillInFlight) return null;
+    final shouldRestart = _artworkBackfillRestartPending;
+    _artworkBackfillRestartPending = false;
     final storage = SharedPreferencesUtil();
-    if (restart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
+    if (shouldRestart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
     final savedCursor = storage.memoryArtworkBackfillCursor(preferences.styleVersion);
     if (savedCursor == _backfillComplete) return null;
     _artworkBackfillInFlight = true;
@@ -131,6 +135,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       return page;
     } finally {
       _artworkBackfillInFlight = false;
+      if (_artworkBackfillRestartPending && mounted) {
+        unawaited(_advanceArtworkBackfill(restart: true));
+      }
     }
   }
 
@@ -140,9 +147,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    final saved = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
+    final result = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
     if (!mounted) return;
-    if (!saved) {
+    if (!result.saved) {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
@@ -154,9 +161,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         releaseEnabled: preferences.releaseEnabled,
       ),
     );
-    final queued = await _advanceArtworkBackfill(restart: true);
-    if (!mounted) return;
-    _showMessage(queued != null ? context.l10n.memoryArtworkStyleUpdated : context.l10n.memoryArtworkStyleUnavailable);
+    _showMessage(context.l10n.memoryArtworkStyleUpdated);
+    unawaited(_advanceArtworkBackfill(restart: true));
   }
 
   void _loadGalleryLayout() {

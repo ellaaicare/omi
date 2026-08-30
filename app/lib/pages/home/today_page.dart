@@ -51,12 +51,19 @@ typedef _HomeArtworkAuthoritySnapshot = ({
   String profileBindingId,
   int generation,
 });
+typedef _ArtworkStudioSnapshot = ({
+  MemoryArtworkPreferences preferences,
+  _ArtworkBackfillUiState backfillState,
+  bool styleSaving,
+});
 
 enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
 
 enum _ExternalCaptureSource { phone, necklace }
 
 enum TodayCaptureDockMode { ready, starting, recording, finishing, unavailable }
+
+enum _ArtworkBackfillUiState { idle, running, moreAvailable, complete, needsAttention }
 
 class TodayCaptureDockPresentation {
   const TodayCaptureDockPresentation({
@@ -197,6 +204,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _homeArtworkReloadScheduled = false;
   Future<MemoryArtworkBackfillPage?>? _homeArtworkBackfillInFlight;
   _HomeArtworkAuthoritySnapshot? _homeArtworkBackfillAuthority;
+  Timer? _homeArtworkBackfillPollTimer;
+  _ArtworkBackfillUiState _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
+  bool _homeArtworkStyleSaving = false;
+  int _homeArtworkStyleOperationGeneration = 0;
+  final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
   MemoryArtworkPreferences? _homeArtworkPreferences;
@@ -304,6 +316,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _resumeNecklaceAfterPhoneCapture = null;
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
+    _homeArtworkBackfillPollTimer?.cancel();
+    _homeArtworkStyleOperationGeneration++;
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -322,7 +336,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeMemoryLayout = MemoryGalleryLayout.journal;
         _homeMemorySort = MemoryGallerySort.recent;
         _homeArtworkPreferences = null;
+        _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
+        _homeArtworkStyleSaving = false;
       });
+      _publishHomeArtworkStudioState();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return;
@@ -343,6 +360,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       unawaited(_syncTodayCardAuthority(forceReload: true));
       if (_guardianAvailable) unawaited(_loadWhisperState());
+      if (_homeArtworkPreferences?.releaseEnabled == true) unawaited(_advanceHomeArtworkBackfill());
     }
   }
 
@@ -358,6 +376,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _scrollController
       ..removeListener(_handleHomeScroll)
       ..dispose();
+    _homeArtworkBackfillPollTimer?.cancel();
+    _homeArtworkStudioState.dispose();
     super.dispose();
   }
 
@@ -408,10 +428,28 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         storage.aiConsentAuthorityGeneration == snapshot.generation;
   }
 
+  void _publishHomeArtworkStudioState() {
+    final preferences = _homeArtworkPreferences;
+    _homeArtworkStudioState.value = preferences == null
+        ? null
+        : (
+            preferences: preferences,
+            backfillState: _homeArtworkBackfillState,
+            styleSaving: _homeArtworkStyleSaving,
+          );
+  }
+
   Future<void> _loadHomeArtworkPreferences() async {
     final authority = _captureHomeArtworkAuthority();
     if (authority == null) {
-      if (mounted && _homeArtworkPreferences != null) setState(() => _homeArtworkPreferences = null);
+      if (mounted && (_homeArtworkPreferences != null || _homeArtworkStyleSaving)) {
+        setState(() {
+          _homeArtworkPreferences = null;
+          _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
+          _homeArtworkStyleSaving = false;
+        });
+        _publishHomeArtworkStudioState();
+      }
       return;
     }
     MemoryArtworkPreferences? preferences;
@@ -422,8 +460,26 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
-    setState(() => _homeArtworkPreferences = preferences);
+    setState(() {
+      _homeArtworkPreferences = preferences;
+      _homeArtworkBackfillState =
+          preferences == null ? _ArtworkBackfillUiState.idle : _storedHomeArtworkBackfillState(preferences, authority);
+    });
+    _publishHomeArtworkStudioState();
     if (preferences?.releaseEnabled == true) unawaited(_advanceHomeArtworkBackfill());
+  }
+
+  _ArtworkBackfillUiState _storedHomeArtworkBackfillState(
+    MemoryArtworkPreferences preferences,
+    _HomeArtworkAuthoritySnapshot authority,
+  ) {
+    final cursor = SharedPreferencesUtil().memoryArtworkBackfillCursor(
+      preferences.styleVersion,
+      expectedUid: authority.uid,
+      expectedProfileBindingId: authority.profileBindingId,
+      expectedAuthorityGeneration: authority.generation,
+    );
+    return cursor == _artworkBackfillComplete ? _ArtworkBackfillUiState.complete : _ArtworkBackfillUiState.idle;
   }
 
   void _scheduleHomeArtworkReload() {
@@ -455,13 +511,36 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     required _HomeArtworkAuthoritySnapshot authority,
     required bool restart,
   }) {
-    final rawOperation = _runHomeArtworkBackfill(
-      preferences: preferences,
-      authority: authority,
-      restart: restart,
-    );
+    if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+      setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.running);
+      _publishHomeArtworkStudioState();
+    }
+    final rawOperation = _runHomeArtworkBackfill(preferences: preferences, authority: authority, restart: restart);
     late final Future<MemoryArtworkBackfillPage?> operation;
-    operation = rawOperation.whenComplete(() {
+    operation = rawOperation.then((page) {
+      if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+        final storedState = _storedHomeArtworkBackfillState(preferences, authority);
+        setState(() {
+          _homeArtworkBackfillState = storedState == _ArtworkBackfillUiState.complete
+              ? storedState
+              : page?.hasMore == true
+                  ? _ArtworkBackfillUiState.running
+                  : page == null
+                      ? _ArtworkBackfillUiState.needsAttention
+                      : _ArtworkBackfillUiState.idle;
+        });
+        _publishHomeArtworkStudioState();
+        if (page?.hasMore == true) {
+          _scheduleHomeArtworkBackfillPoll();
+        } else {
+          _homeArtworkBackfillPollTimer?.cancel();
+        }
+      } else if (mounted && identical(_homeArtworkBackfillInFlight, operation)) {
+        setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.idle);
+        _publishHomeArtworkStudioState();
+      }
+      return page;
+    }).whenComplete(() {
       if (identical(_homeArtworkBackfillInFlight, operation)) {
         _homeArtworkBackfillInFlight = null;
         _homeArtworkBackfillAuthority = null;
@@ -470,6 +549,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkBackfillAuthority = authority;
     _homeArtworkBackfillInFlight = operation;
     return operation;
+  }
+
+  void _scheduleHomeArtworkBackfillPoll() {
+    _homeArtworkBackfillPollTimer?.cancel();
+    _homeArtworkBackfillPollTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      unawaited(_advanceHomeArtworkBackfill());
+    });
   }
 
   Future<MemoryArtworkBackfillPage?> _runHomeArtworkBackfill({
@@ -529,6 +616,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     } on ExactAccountAuthorityChangedException {
       _scheduleHomeArtworkReload();
       return null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -539,18 +628,24 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    bool saved;
+    if (_homeArtworkStyleSaving) return;
+    final operationGeneration = ++_homeArtworkStyleOperationGeneration;
+    setState(() => _homeArtworkStyleSaving = true);
+    _publishHomeArtworkStudioState();
+    MemoryArtworkPreferenceUpdate result;
     try {
-      saved = await _memoryArtworkApi.setStyle(
-        consentVersion: preferences.consentVersion,
-        styleVersion: styleVersion,
-      );
+      result = await _memoryArtworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
     } on ExactAccountAuthorityChangedException {
       _scheduleHomeArtworkReload();
       return;
+    } finally {
+      if (mounted && operationGeneration == _homeArtworkStyleOperationGeneration) {
+        setState(() => _homeArtworkStyleSaving = false);
+        _publishHomeArtworkStudioState();
+      }
     }
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
-    if (!saved) {
+    if (!result.saved) {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
@@ -562,12 +657,50 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         releaseEnabled: true,
       ),
     );
-    final queued = await _advanceHomeArtworkBackfill(restart: true);
-    if (mounted) {
-      _showHomeMessage(
-        queued != null ? context.l10n.memoryArtworkStyleUpdated : context.l10n.memoryArtworkStyleUnavailable,
-      );
+    _publishHomeArtworkStudioState();
+    _showHomeMessage(context.l10n.memoryArtworkStyleUpdated);
+    unawaited(_advanceHomeArtworkBackfill(restart: true));
+  }
+
+  void _openHomeArtworkStudio() {
+    final preferences = _homeArtworkPreferences;
+    if (preferences == null || !preferences.releaseEnabled) {
+      _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
+      return;
     }
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: EllaColors.paper,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
+      ),
+      builder: (sheetContext) => ValueListenableBuilder<_ArtworkStudioSnapshot?>(
+        valueListenable: _homeArtworkStudioState,
+        builder: (context, snapshot, _) {
+          if (snapshot == null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (sheetContext.mounted && Navigator.of(sheetContext).canPop()) Navigator.pop(sheetContext);
+            });
+            return const SizedBox.shrink();
+          }
+          final current = snapshot;
+          return _ArtworkStudioSheet(
+            preferences: current.preferences,
+            backfillState: current.backfillState,
+            styleSaving: current.styleSaving,
+            onStyleSelected: (styleVersion) {
+              Navigator.pop(sheetContext);
+              unawaited(_selectHomeArtworkStyle(styleVersion));
+            },
+            onContinue: () {
+              final restart = current.backfillState == _ArtworkBackfillUiState.complete;
+              unawaited(_advanceHomeArtworkBackfill(restart: restart));
+            },
+          );
+        },
+      ),
+    );
   }
 
   void _showHomeMessage(String message) {
@@ -1203,6 +1336,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return _homeMemorySort == MemoryGallerySort.recent ? result : -result;
       });
     final showDayGallery = _homeMemoryLayout == MemoryGalleryLayout.days;
+    final memoriesHydrating = orderedMemories.isEmpty && !conversations.hasLoadedConversations;
     final heroMemory = orderedMemories.isEmpty || showDayGallery ? null : orderedMemories.first;
     final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);
@@ -1261,9 +1395,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                         sort: _homeMemorySort,
                         canSortOldest: !conversations.hasMoreConversations,
                         artworkPreferences: _homeArtworkPreferences,
+                        artworkBackfillState: _homeArtworkBackfillState,
+                        artworkStyleSaving: _homeArtworkStyleSaving,
                         onLayoutSelected: _selectHomeMemoryLayout,
                         onSortSelected: (sort) => setState(() => _homeMemorySort = sort),
-                        onArtworkStyleSelected: _selectHomeArtworkStyle,
+                        onArtworkStudio: _openHomeArtworkStudio,
                       ),
                     ),
                   ),
@@ -1272,7 +1408,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 12, EllaSizes.screenPadding, 0),
                     sliver: SliverToBoxAdapter(
                       child: heroMemory == null
-                          ? const _MemoryJournalEmptyState()
+                          ? memoriesHydrating
+                              ? const _MemoryJournalLoadingState()
+                              : const _MemoryJournalEmptyState()
                           : MemoryGalleryCard(
                               conversation: heroMemory,
                               layout: MemoryGalleryLayout.journal,
@@ -1608,18 +1746,22 @@ class _HomeMemoryToolbar extends StatelessWidget {
     required this.sort,
     required this.canSortOldest,
     required this.artworkPreferences,
+    required this.artworkBackfillState,
+    required this.artworkStyleSaving,
     required this.onLayoutSelected,
     required this.onSortSelected,
-    required this.onArtworkStyleSelected,
+    required this.onArtworkStudio,
   });
 
   final MemoryGalleryLayout layout;
   final MemoryGallerySort sort;
   final bool canSortOldest;
   final MemoryArtworkPreferences? artworkPreferences;
+  final _ArtworkBackfillUiState artworkBackfillState;
+  final bool artworkStyleSaving;
   final ValueChanged<MemoryGalleryLayout> onLayoutSelected;
   final ValueChanged<MemoryGallerySort> onSortSelected;
-  final ValueChanged<String> onArtworkStyleSelected;
+  final VoidCallback onArtworkStudio;
 
   @override
   Widget build(BuildContext context) {
@@ -1656,40 +1798,165 @@ class _HomeMemoryToolbar extends StatelessWidget {
             ),
           ],
         ),
-        PopupMenuButton<String>(
+        IconButton(
           key: const Key('home-memory-artwork-style-menu'),
           tooltip: artworkPreferences?.releaseEnabled == true
-              ? context.l10n.memoryArtworkStyle
+              ? context.l10n.memoryArtworkStudio
               : context.l10n.memoryArtworkStyleUnavailable,
-          initialValue: artworkPreferences?.styleVersion,
-          icon: Icon(
-            Icons.palette_outlined,
-            color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+          onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Icon(
+                Icons.palette_outlined,
+                color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+              ),
+              if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
+                const Positioned(
+                  right: -4,
+                  bottom: -4,
+                  child: SizedBox(
+                    key: Key('home-artwork-progress-indicator'),
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                  ),
+                )
+              else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
+                const Positioned(
+                  right: -3,
+                  bottom: -3,
+                  child: DecoratedBox(
+                    key: Key('home-artwork-attention-indicator'),
+                    decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
+                    child: SizedBox(width: 9, height: 9),
+                  ),
+                ),
+            ],
           ),
-          enabled: artworkPreferences?.releaseEnabled == true,
-          onSelected: artworkPreferences?.releaseEnabled == true ? onArtworkStyleSelected : null,
-          itemBuilder: (context) => [
-            PopupMenuItem(value: memoryArtworkDefaultStyle, child: Text(context.l10n.memoryArtworkSoftGouache)),
-            PopupMenuItem(value: memoryArtworkPaperCollageStyle, child: Text(context.l10n.memoryArtworkPaperCollage)),
-            PopupMenuItem(
-              value: memoryArtworkGraphicLandscapeStyle,
-              child: Text(context.l10n.memoryArtworkGraphicLandscape),
+        ),
+      ],
+    );
+  }
+}
+
+class _ArtworkStudioSheet extends StatelessWidget {
+  const _ArtworkStudioSheet({
+    required this.preferences,
+    required this.backfillState,
+    required this.styleSaving,
+    required this.onStyleSelected,
+    required this.onContinue,
+  });
+
+  final MemoryArtworkPreferences preferences;
+  final _ArtworkBackfillUiState backfillState;
+  final bool styleSaving;
+  final ValueChanged<String> onStyleSelected;
+  final VoidCallback onContinue;
+
+  @override
+  Widget build(BuildContext context) {
+    final styles = <(String, String)>[
+      (memoryArtworkDefaultStyle, context.l10n.memoryArtworkSoftGouache),
+      (memoryArtworkPaperCollageStyle, context.l10n.memoryArtworkPaperCollage),
+      (memoryArtworkGraphicLandscapeStyle, context.l10n.memoryArtworkGraphicLandscape),
+      (memoryArtworkWatercolorJournalStyle, context.l10n.memoryArtworkWatercolorJournal),
+      (memoryArtworkAnimeStorybookStyle, context.l10n.memoryArtworkAnimeStorybook),
+      (memoryArtworkCinematicStillStyle, context.l10n.memoryArtworkCinematicStill),
+    ];
+    final status = switch (backfillState) {
+      _ArtworkBackfillUiState.running => context.l10n.memoryArtworkBackfillInProgress,
+      _ArtworkBackfillUiState.moreAvailable => context.l10n.memoryArtworkBackfillMoreAvailable,
+      _ArtworkBackfillUiState.complete => context.l10n.memoryArtworkBackfillComplete,
+      _ArtworkBackfillUiState.needsAttention => context.l10n.memoryArtworkBackfillNeedsAttention,
+      _ArtworkBackfillUiState.idle => context.l10n.memoryArtworkBackfillReady,
+    };
+    final action = switch (backfillState) {
+      _ArtworkBackfillUiState.complete => context.l10n.memoryArtworkCheckMissing,
+      _ArtworkBackfillUiState.needsAttention => context.l10n.memoryArtworkRetry,
+      _ => context.l10n.memoryArtworkContinueOlder,
+    };
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(20, 12, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(color: EllaColors.cardEdge, borderRadius: BorderRadius.circular(2)),
+              ),
             ),
-            PopupMenuItem(
-              value: memoryArtworkWatercolorJournalStyle,
-              child: Text(context.l10n.memoryArtworkWatercolorJournal),
+            const SizedBox(height: 18),
+            Text(context.l10n.memoryArtworkStudio, style: EllaTextStyles.display),
+            const SizedBox(height: 6),
+            Text(context.l10n.memoryArtworkStudioDetail, style: EllaTextStyles.secondary),
+            const SizedBox(height: 16),
+            EllaCardSurface(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    if (styleSaving || backfillState == _ArtworkBackfillUiState.running)
+                      const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                      )
+                    else
+                      Icon(
+                        backfillState == _ArtworkBackfillUiState.needsAttention
+                            ? Icons.info_outline_rounded
+                            : Icons.auto_awesome_rounded,
+                        color: backfillState == _ArtworkBackfillUiState.needsAttention
+                            ? EllaColors.warning
+                            : EllaColors.tealDeep,
+                      ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(status, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
+                    ),
+                  ],
+                ),
+              ),
             ),
-            PopupMenuItem(
-              value: memoryArtworkAnimeStorybookStyle,
-              child: Text(context.l10n.memoryArtworkAnimeStorybook),
+            const SizedBox(height: 18),
+            Text(context.l10n.memoryArtworkStyle, style: EllaTextStyles.eyebrow),
+            const SizedBox(height: 6),
+            ...styles.map(
+              (style) => ListTile(
+                key: Key('home-artwork-style-${style.$1}'),
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  preferences.styleVersion == style.$1
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.radio_button_unchecked_rounded,
+                  color: preferences.styleVersion == style.$1 ? EllaColors.tealDeep : EllaColors.inkSoft,
+                ),
+                title: Text(style.$2, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
+                selected: preferences.styleVersion == style.$1,
+                selectedColor: EllaColors.tealDeep,
+                onTap: styleSaving ? null : () => onStyleSelected(style.$1),
+              ),
             ),
-            PopupMenuItem(
-              value: memoryArtworkCinematicStillStyle,
-              child: Text(context.l10n.memoryArtworkCinematicStill),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                key: const Key('home-artwork-continue'),
+                onPressed: styleSaving || backfillState == _ArtworkBackfillUiState.running ? null : onContinue,
+                icon: const Icon(Icons.history_rounded),
+                label: Text(action),
+              ),
             ),
           ],
         ),
-      ],
+      ),
     );
   }
 }
@@ -2542,6 +2809,48 @@ class _MemoryJournalEmptyState extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _MemoryJournalLoadingState extends StatelessWidget {
+  const _MemoryJournalLoadingState();
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    return EllaCardSurface(
+      key: const Key('memory-journal-loading'),
+      borderRadius: 20,
+      color: EllaColors.elevatedCard,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 24, 20, 26),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: reduceMotion
+                  ? const Icon(Icons.auto_awesome_rounded, color: EllaColors.tealDeep)
+                  : const EllaBreathingDot(active: true, live: true),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    context.l10n.todayMemoryCanvasLoadingHeadline,
+                    style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.15),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(context.l10n.todayMemoryCanvasLoadingBody, style: EllaTextStyles.secondary),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

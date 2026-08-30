@@ -38,6 +38,9 @@ class MemoryArtworkResult {
     this.styleVersion = '',
     this.enrichmentRevision = '',
     this.failureCode = '',
+    this.refreshPending = false,
+    this.refreshFailureCode = '',
+    this.requestedStyleVersion = '',
   });
 
   final MemoryArtworkResultStatus status;
@@ -46,6 +49,9 @@ class MemoryArtworkResult {
   final String styleVersion;
   final String enrichmentRevision;
   final String failureCode;
+  final bool refreshPending;
+  final String refreshFailureCode;
+  final String requestedStyleVersion;
 
   bool get isReady => status == MemoryArtworkResultStatus.ready && url != null;
 }
@@ -62,6 +68,13 @@ class MemoryArtworkPreferences {
   final String consentVersion;
   final String styleVersion;
   final bool releaseEnabled;
+}
+
+class MemoryArtworkPreferenceUpdate {
+  const MemoryArtworkPreferenceUpdate({required this.saved, this.failureCode = ''});
+
+  final bool saved;
+  final String failureCode;
 }
 
 class MemoryArtworkBackfillPage {
@@ -178,6 +191,9 @@ class MemoryArtworkApi {
       styleVersion: payload['style_version']?.toString().trim() ?? '',
       enrichmentRevision: payload['enrichment_revision']?.toString().trim() ?? '',
       failureCode: payload['failure_code']?.toString().trim() ?? '',
+      refreshPending: payload['refresh_pending'] == true,
+      refreshFailureCode: payload['refresh_failure_code']?.toString().trim() ?? '',
+      requestedStyleVersion: payload['requested_style_version']?.toString().trim() ?? '',
     );
   }
 
@@ -218,16 +234,27 @@ class MemoryArtworkApi {
     );
   }
 
-  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+  Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) async {
     final authority = _authorityProvider();
-    if (authority == null || consentVersion.isEmpty || !_supportedStyles.contains(styleVersion)) return false;
+    if (authority == null) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_authority_unavailable');
+    }
+    if (consentVersion.isEmpty || !_supportedStyles.contains(styleVersion)) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_preference_invalid');
+    }
     final response = await _call(
       authority,
       method: 'PUT',
       path: 'v1/ella/memory-artwork/preferences',
       body: jsonEncode({'consent': 'accepted', 'consent_version': consentVersion, 'style_version': styleVersion}),
     );
-    return response?.statusCode == 200;
+    if (!authority.isExactCurrent()) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_authority_changed');
+    }
+    if (response?.statusCode != 200) {
+      return MemoryArtworkPreferenceUpdate(saved: false, failureCode: _safeFailureCode(response?.body));
+    }
+    return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 
   Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {

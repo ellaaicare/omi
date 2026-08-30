@@ -787,6 +787,27 @@ void main() {
     expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
   });
 
+  testWidgets('Home shows a truthful loading canvas until the first memory response is authoritative', (tester) async {
+    final initialLoadGate = Completer<void>();
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      conversationsLoaded: false,
+      initialConversationLoadGate: initialLoadGate,
+    );
+    addTearDown(harness.dispose);
+
+    expect(find.byKey(const Key('memory-journal-loading')), findsOneWidget);
+    expect(find.text('Loading your memories'), findsOneWidget);
+    expect(find.byKey(const Key('memory-journal-empty')), findsNothing);
+
+    initialLoadGate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-journal-loading')), findsNothing);
+    expect(find.byKey(const Key('memory-journal-empty')), findsOneWidget);
+  });
+
   testWidgets('Home shows the full lazy memory feed with layout and sort controls', (tester) async {
     final harness = await _pumpHome(tester, conversations: _ConversationFixtures.manyMemories());
     addTearDown(harness.dispose);
@@ -834,23 +855,14 @@ void main() {
 
     expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
     expect(artwork.backfillCursors.where((cursor) => cursor == null).length, greaterThanOrEqualTo(2));
-    expect(
-      find.text('New memories will use this illustration style. Recent memories are being refreshed.'),
-      findsOneWidget,
-    );
+    expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
   });
 
   testWidgets('Home continues artwork backfill when the memory feed nears its end', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
-        MemoryArtworkBackfillPage(
-          queued: 10,
-          existing: 0,
-          skipped: 0,
-          hasMore: true,
-          nextCursor: 'older-artwork-page',
-        ),
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: true, nextCursor: 'older-artwork-page'),
         MemoryArtworkBackfillPage(queued: 8, existing: 2, skipped: 0, hasMore: false),
       ],
     );
@@ -863,12 +875,64 @@ void main() {
     addTearDown(harness.dispose);
     await tester.pumpAndSettle();
 
-    expect(artwork.backfillCursors, [null]);
+    expect(artwork.backfillCursors, [null, 'older-artwork-page']);
 
     await tester.drag(find.byKey(const Key('today-scroll')), const Offset(0, -900));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     expect(artwork.backfillCursors, [null, 'older-artwork-page']);
+  });
+
+  testWidgets('Home replaces a legacy completion marker with the durable reconciliation checkpoint', (tester) async {
+    final authority = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    final preferences = SharedPreferencesUtil();
+    await preferences.saveString(
+      'ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a',
+      '__complete__',
+    );
+    final artwork = _FakeMemoryArtworkApi(
+      backfillPages: const [MemoryArtworkBackfillPage(queued: 4, existing: 6, skipped: 0, hasMore: false)],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null]);
+    expect(
+      preferences.getString('ellaMemoryArtworkBackfillCursorV2:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      '__complete__',
+    );
+  });
+
+  testWidgets('Home keeps polling a durable artwork job without requiring another scroll', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: true, nextCursor: 'job-a'),
+        MemoryArtworkBackfillPage(queued: 16, existing: 3, skipped: 1, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    expect(artwork.backfillCursors, [null]);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+
+    expect(artwork.backfillCursors, [null, 'job-a']);
+    expect(find.byKey(const Key('home-artwork-progress-indicator')), findsNothing);
   });
 
   testWidgets('Home discards a delayed artwork cursor after account authority changes', (tester) async {
@@ -877,13 +941,7 @@ void main() {
     final artwork = _FakeMemoryArtworkApi(
       firstBackfillGate: gate,
       backfillPages: const [
-        MemoryArtworkBackfillPage(
-          queued: 10,
-          existing: 0,
-          skipped: 0,
-          hasMore: true,
-          nextCursor: 'account-a-older',
-        ),
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: true, nextCursor: 'account-a-older'),
       ],
     );
     final harness = await _pumpHome(
@@ -901,26 +959,26 @@ void main() {
     preferences.uid = 'account-b';
     await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
     gate.complete();
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     expect(
-      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      preferences.getString('ellaMemoryArtworkBackfillCursorV2:$memoryArtworkDefaultStyle:account-a:profile-a'),
       isEmpty,
     );
     expect(preferences.memoryArtworkBackfillCursor(memoryArtworkDefaultStyle), isEmpty);
   });
 
-  testWidgets('Home restarts artwork backfill after the HTTP authority boundary rejects a stale account',
-      (tester) async {
+  testWidgets('Home restarts artwork backfill after the HTTP authority boundary rejects a stale account', (
+    tester,
+  ) async {
     final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
     var activeAuthority = authorityA;
     final gate = Completer<void>();
     final artwork = _FakeMemoryArtworkApi(
       firstBackfillGate: gate,
       authorityThrowRequests: const {0},
-      backfillPages: const [
-        MemoryArtworkBackfillPage(queued: 4, existing: 0, skipped: 0, hasMore: false),
-      ],
+      backfillPages: const [MemoryArtworkBackfillPage(queued: 4, existing: 0, skipped: 0, hasMore: false)],
     );
     final harness = await _pumpHome(
       tester,
@@ -944,11 +1002,11 @@ void main() {
     expect(artwork.backfillCursors, [null, null]);
     final preferences = SharedPreferencesUtil();
     expect(
-      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-a:profile-a'),
+      preferences.getString('ellaMemoryArtworkBackfillCursorV2:$memoryArtworkDefaultStyle:account-a:profile-a'),
       isEmpty,
     );
     expect(
-      preferences.getString('ellaMemoryArtworkBackfillCursor:$memoryArtworkDefaultStyle:account-b:profile-b'),
+      preferences.getString('ellaMemoryArtworkBackfillCursorV2:$memoryArtworkDefaultStyle:account-b:profile-b'),
       '__complete__',
     );
   });
@@ -973,19 +1031,191 @@ void main() {
     await tester.pump();
 
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.tap(find.text('Anime storybook'));
     await tester.pump();
     expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
+    expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
 
     gate.complete();
     await tester.pumpAndSettle();
 
     expect(artwork.backfillCursors, [null, null]);
-    expect(
-      find.text('New memories will use this illustration style. Recent memories are being refreshed.'),
-      findsOneWidget,
+    expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
+  });
+
+  testWidgets('saved style survives a backfill timeout and exposes a manual retry', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      failedBackfillRequests: const {1},
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
+        MemoryArtworkBackfillPage(queued: 4, existing: 2, skipped: 0, hasMore: false),
+      ],
     );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+
+    expect(artwork.selectedStyles, [memoryArtworkPaperCollageStyle]);
+    expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-attention-indicator')), findsOneWidget);
+    expect(find.text("Ella couldn't update the illustration style right now."), findsNothing);
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    expect(find.text('Some artwork still needs attention. Nothing was deleted.'), findsOneWidget);
+    expect(find.text('Try artwork again'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('home-artwork-continue')));
+    await tester.pumpAndSettle();
+
+    expect(artwork.backfillCursors, [null, null, null]);
+    expect(find.byKey(const Key('home-artwork-attention-indicator')), findsNothing);
+  });
+
+  testWidgets('open Artwork Studio follows backfill completion without being reopened', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final gate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstBackfillGate: gate,
+      backfillPages: const [
+        MemoryArtworkBackfillPage(queued: 3, existing: 1, skipped: 0, hasMore: false),
+      ],
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Ella is preparing artwork. You can leave this screen.'), findsOneWidget);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Artwork is up to date.'), findsOneWidget);
+    final button = tester.widget<OutlinedButton>(find.byKey(const Key('home-artwork-continue')));
+    expect(button.onPressed, isNotNull);
+  });
+
+  testWidgets('account turnover clears a pending style latch for the replacement account', (tester) async {
+    final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    var activeAuthority = authorityA;
+    final styleGate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(firstStyleGate: styleGate);
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => activeAuthority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+    expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle]);
+
+    authorityA.current = false;
+    activeAuthority = await _installArtworkAuthority(uid: 'account-b', profileBindingId: 'profile-b');
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+
+    expect(artwork.selectedStyles, [memoryArtworkAnimeStorybookStyle, memoryArtworkPaperCollageStyle]);
+    styleGate.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('stale style completion cannot clear the replacement account operation latch', (tester) async {
+    final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    var activeAuthority = authorityA;
+    final firstStyleGate = Completer<void>();
+    final secondStyleGate = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(firstStyleGate: firstStyleGate, secondStyleGate: secondStyleGate);
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => activeAuthority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+
+    authorityA.current = false;
+    activeAuthority = await _installArtworkAuthority(uid: 'account-b', profileBindingId: 'profile-b');
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pump();
+
+    firstStyleGate.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    final pendingTile = tester.widget<ListTile>(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')));
+    expect(pendingTile.onTap, isNull);
+
+    secondStyleGate.complete();
+    await tester.pumpAndSettle();
+    final completedTile =
+        tester.widget<ListTile>(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')));
+    expect(completedTile.onTap, isNotNull);
+  });
+
+  testWidgets('open Artwork Studio dismisses instead of retaining a stale account snapshot', (tester) async {
+    final authority = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+    final artwork = _FakeMemoryArtworkApi();
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')), findsOneWidget);
+
+    authority.current = false;
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')), findsNothing);
   });
 
   testWidgets('open day dismisses and clears its snapshot when the profile authority changes', (tester) async {
@@ -1208,17 +1438,25 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
       MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
     ],
     this.firstBackfillGate,
+    this.firstStyleGate,
+    this.secondStyleGate,
     Set<int> authorityThrowRequests = const {},
+    Set<int> failedBackfillRequests = const {},
   })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
-        _authorityThrowRequests = Set<int>.of(authorityThrowRequests);
+        _authorityThrowRequests = Set<int>.of(authorityThrowRequests),
+        _failedBackfillRequests = Set<int>.of(failedBackfillRequests);
 
   int preferenceRequests = 0;
   final List<String?> backfillCursors = [];
   final List<String> selectedStyles = [];
   final List<MemoryArtworkBackfillPage> _backfillPages;
   final Set<int> _authorityThrowRequests;
+  final Set<int> _failedBackfillRequests;
   final Completer<void>? firstBackfillGate;
+  final Completer<void>? firstStyleGate;
+  final Completer<void>? secondStyleGate;
   int _backfillRequests = 0;
+  int _styleRequests = 0;
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async {
@@ -1239,6 +1477,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     if (_authorityThrowRequests.contains(request)) {
       throw ExactAccountAuthorityChangedException('test artwork authority changed during transport');
     }
+    if (_failedBackfillRequests.contains(request)) return null;
     if (_backfillPages.isEmpty) {
       return const MemoryArtworkBackfillPage(queued: 0, existing: 0, skipped: 0, hasMore: false);
     }
@@ -1246,9 +1485,12 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   }
 
   @override
-  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+  Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) async {
     selectedStyles.add(styleVersion);
-    return true;
+    final request = _styleRequests++;
+    if (request == 0 && firstStyleGate != null) await firstStyleGate!.future;
+    if (request == 1 && secondStyleGate != null) await secondStyleGate!.future;
+    return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 }
 
@@ -1271,6 +1513,8 @@ Future<_HomeHarness> _pumpHome(
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
   List<ActionItemWithMetadata> actionItems = const [],
   List<List<ServerConversation>> olderConversationPages = const [],
+  bool conversationsLoaded = true,
+  Completer<void>? initialConversationLoadGate,
   MemoryArtworkApi? memoryArtworkApi,
   MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
 }) async {
@@ -1292,6 +1536,8 @@ Future<_HomeHarness> _pumpHome(
   final conversationProvider = _FixtureConversationProvider(
     conversations,
     olderConversationPages: olderConversationPages,
+    conversationsLoaded: conversationsLoaded,
+    initialLoadGate: initialConversationLoadGate,
   );
   final deviceProvider = device ?? DeviceProvider();
   final home = HomeProvider();
@@ -1389,14 +1635,17 @@ class _FixtureConversationProvider extends ConversationProvider {
   _FixtureConversationProvider(
     List<ServerConversation> values, {
     List<List<ServerConversation>> olderConversationPages = const [],
+    bool conversationsLoaded = true,
+    this.initialLoadGate,
   }) : _olderConversationPages = olderConversationPages.map(List<ServerConversation>.of).toList() {
     conversations = values;
-    hasLoadedConversations = true;
-    hasFreshConversations = true;
+    hasLoadedConversations = conversationsLoaded;
+    hasFreshConversations = conversationsLoaded;
     hasMoreConversations = _olderConversationPages.isNotEmpty;
   }
 
   final List<List<ServerConversation>> _olderConversationPages;
+  final Completer<void>? initialLoadGate;
   int pageRequests = 0;
 
   void restoreIncompletePage(List<ServerConversation> values) {
@@ -1406,7 +1655,14 @@ class _FixtureConversationProvider extends ConversationProvider {
   }
 
   @override
-  Future<void> ensureFreshConversations() async {}
+  Future<void> ensureFreshConversations() async {
+    final gate = initialLoadGate;
+    if (gate == null) return;
+    await gate.future;
+    hasLoadedConversations = true;
+    hasFreshConversations = true;
+    notifyListeners();
+  }
 
   @override
   Future<void> getMoreConversationsFromServer() async {
