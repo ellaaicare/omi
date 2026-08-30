@@ -42,6 +42,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   MemoryGallerySort _sort = MemoryGallerySort.recent;
   bool _showBackToRecent = false;
   bool _artworkBackfillInFlight = false;
+  bool _artworkBackfillRestartPending = false;
 
   static const _backfillComplete = '__complete__';
 
@@ -111,10 +112,13 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   Future<MemoryArtworkBackfillPage?> _advanceArtworkBackfill({bool restart = false}) async {
+    if (restart) _artworkBackfillRestartPending = true;
     final preferences = _artworkPreferences;
     if (preferences == null || !preferences.releaseEnabled || _artworkBackfillInFlight) return null;
+    final shouldRestart = _artworkBackfillRestartPending;
+    _artworkBackfillRestartPending = false;
     final storage = SharedPreferencesUtil();
-    if (restart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
+    if (shouldRestart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
     final savedCursor = storage.memoryArtworkBackfillCursor(preferences.styleVersion);
     if (savedCursor == _backfillComplete) return null;
     _artworkBackfillInFlight = true;
@@ -131,6 +135,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       return page;
     } finally {
       _artworkBackfillInFlight = false;
+      if (_artworkBackfillRestartPending && mounted) {
+        unawaited(_advanceArtworkBackfill(restart: true));
+      }
     }
   }
 

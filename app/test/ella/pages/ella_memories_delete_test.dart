@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -57,6 +59,17 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
     backfillCalls += 1;
     return const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false);
+  }
+}
+
+class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
+  final firstBackfill = Completer<MemoryArtworkBackfillPage?>();
+
+  @override
+  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) {
+    backfillCalls += 1;
+    if (backfillCalls == 1) return firstBackfill.future;
+    return Future.value(const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false));
   }
 }
 
@@ -351,6 +364,50 @@ void main() {
     expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
     expect(artworkApi.backfillCalls, backfillCallsBeforeStyleChange + 1);
     expect(find.textContaining('Illustration style saved'), findsOneWidget);
+  });
+
+  testWidgets('style change restarts reconciliation after an active archive backfill finishes', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-style-restart')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _DelayedBackfillArtworkApi();
+    addTearDown(provider.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<ConversationProvider>.value(value: provider),
+          ChangeNotifierProvider<CaptureProvider>(create: (_) => CaptureProvider()),
+        ],
+        child: MaterialApp(
+          theme: ellaThemeData(),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaMemoriesPage(artworkApi: artworkApi),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(artworkApi.backfillCalls, 1);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
+    expect(artworkApi.backfillCalls, 1, reason: 'the first archive request is still active');
+
+    artworkApi.firstBackfill.complete(
+      const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
+    );
+    await tester.pumpAndSettle();
+
+    expect(artworkApi.backfillCalls, 2, reason: 'the selected style must start after the active request completes');
   });
 
   testWidgets('days layout groups a local day into one comic-style tile', (tester) async {
