@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from ella.services.memory_artwork import (
     ARTWORK_CONSENT_VERSION,
     DEFAULT_STYLE_VERSION,
+    HISTORICAL_BACKFILL_ORIGIN,
     MemoryArtworkError,
     MemoryArtworkService,
     MemoryArtworkWorker,
@@ -44,6 +45,7 @@ class MemoryArtworkBackfillRequest(BaseModel):
 class MemoryArtworkQueueControlRequest(BaseModel):
     action: Literal["pause", "resume", "cancel"]
     generation_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    auto_continue: bool = False
 
 
 def require_memory_artwork_service(
@@ -184,7 +186,7 @@ async def backfill_memory_artwork(
             claim = await claim_memory_artwork_enrichment_recovery(uid, memory_id)
             outcome = str(claim.get("outcome") or "")
             if outcome == "completed":
-                await service.enqueue(uid, memory_id)
+                await service.enqueue(uid, memory_id, origin=HISTORICAL_BACKFILL_ORIGIN)
             elif outcome == "claimed":
                 background_tasks.add_task(
                     recover_failed_conversation_summary,
@@ -234,6 +236,7 @@ async def control_memory_artwork_queue(
             uid,
             action=payload.action,
             generation_id=payload.generation_id,
+            auto_continue=payload.auto_continue,
         )
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc

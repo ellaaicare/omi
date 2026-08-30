@@ -144,6 +144,10 @@ INTERNAL_OWNER_UIDS_ENV = "ELLA_MEMORY_ARTWORK_INTERNAL_OWNER_UIDS"
 WORKER_INTERVAL_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_WORKER_INTERVAL_SECONDS"
 WORKER_BATCH_SIZE = 10
 WORKER_MAX_ATTEMPTS = 5
+WORKER_RETRY_DELAYS_SECONDS = (30, 120, 300, 900)
+DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE = artwork_db.DEFAULT_BACKFILL_BATCH_SIZE
+TERMINAL_ENRICHMENT_ORIGIN = artwork_db.TERMINAL_ENRICHMENT_ORIGIN
+HISTORICAL_BACKFILL_ORIGIN = artwork_db.HISTORICAL_BACKFILL_ORIGIN
 ENRICHMENT_RECOVERY_PENDING_OUTCOMES = frozenset({"claimed", "processing", "busy", "superseded"})
 ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES = frozenset({"not_found", "invalid_state", "not_retryable", "failed"})
 PROVIDER_KIND_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER"
@@ -166,6 +170,11 @@ def _provider_timeout_seconds() -> float:
     if not math.isfinite(timeout_seconds):
         timeout_seconds = DEFAULT_PROVIDER_TIMEOUT_SECONDS
     return min(MAX_PROVIDER_TIMEOUT_SECONDS, max(MIN_PROVIDER_TIMEOUT_SECONDS, timeout_seconds))
+
+
+def _worker_retry_delay_seconds(attempts: int) -> int:
+    index = min(max(attempts, 1), len(WORKER_RETRY_DELAYS_SECONDS)) - 1
+    return WORKER_RETRY_DELAYS_SECONDS[index]
 
 
 def _artwork_lease_seconds() -> int:
@@ -990,6 +999,10 @@ class MemoryArtworkService:
             and control.get("state") in {"running", "paused", "cancelled"}
         )
         state = str(control.get("state")) if control_is_current else "running"
+        auto_continue = bool(control.get("auto_continue")) if control_is_current else False
+        batch_size = int(control.get("batch_size") or DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE)
+        batch_remaining = int(control.get("batch_remaining", batch_size) or 0) if control_is_current else batch_size
+        pause_reason = str(control.get("pause_reason") or "") if control_is_current else ""
         jobs = self.repository.list_jobs_for_uid(uid)
         current_counts = self._queue_counts(
             jobs,
@@ -1024,6 +1037,10 @@ class MemoryArtworkService:
             "style_version": style_version,
             "state": effective_state,
             "control_state": state,
+            "auto_continue": auto_continue,
+            "batch_size": batch_size,
+            "batch_remaining": batch_remaining,
+            "pause_reason": pause_reason,
             "scan_status": scan_status,
             "scanned": int((reconciliation or {}).get("scanned") or 0),
             "pages_processed": int((reconciliation or {}).get("pages_processed") or 0),
@@ -1043,7 +1060,14 @@ class MemoryArtworkService:
             ),
         }
 
-    async def set_queue_control(self, uid: str, *, action: str, generation_id: str) -> dict[str, Any]:
+    async def set_queue_control(
+        self,
+        uid: str,
+        *,
+        action: str,
+        generation_id: str,
+        auto_continue: bool = False,
+    ) -> dict[str, Any]:
         states = {"pause": "paused", "resume": "running", "cancel": "cancelled"}
         state = states.get(action)
         if not self.config.allows_uid(uid):
@@ -1066,6 +1090,7 @@ class MemoryArtworkService:
             uid,
             expected_generation_id=generation_id,
             state=state,
+            auto_continue=auto_continue if action == "resume" else False,
         )
         outcome = str(update.get("outcome") or "")
         if outcome == "deletion_pending":
@@ -1085,10 +1110,13 @@ class MemoryArtworkService:
         uid: str,
         memory_id: str,
         *,
+        origin: str = TERMINAL_ENRICHMENT_ORIGIN,
         preserve_job_attempts: bool = False,
     ) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             return {"outcome": "disabled", "status": "unavailable"}
+        if origin not in {TERMINAL_ENRICHMENT_ORIGIN, HISTORICAL_BACKFILL_ORIGIN}:
+            raise MemoryArtworkError("memory_artwork_job_origin_invalid")
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
@@ -1172,6 +1200,9 @@ class MemoryArtworkService:
             "uid": uid,
             "memory_id": memory_id,
             "generation_key": generation_key,
+            "authority_digest": authority.authority_digest,
+            "style_version": style_version,
+            "origin": origin,
             "status": "pending",
             "attempt_count": 0,
             "available_at": now,
@@ -1848,7 +1879,7 @@ class MemoryArtworkService:
                         break
                 continue
             try:
-                result = await self.enqueue(uid, memory_id)
+                result = await self.enqueue(uid, memory_id, origin=HISTORICAL_BACKFILL_ORIGIN)
             except MemoryArtworkError as exc:
                 skipped += 1
                 recovery_memory_ids.append(memory_id)
@@ -1923,7 +1954,12 @@ class MemoryArtworkWorker:
             return {"outcome": "not_claimed", "status": "unavailable"}
         service = self.service_factory()
         try:
-            reservation = await service.enqueue(uid, memory_id, preserve_job_attempts=True)
+            reservation = await service.enqueue(
+                uid,
+                memory_id,
+                origin=str(claimed_job.get("origin") or HISTORICAL_BACKFILL_ORIGIN),
+                preserve_job_attempts=True,
+            )
             if reservation.get("status") == "ready":
                 self.repository.complete_job(uid, memory_id, generation_key, lease_token=job_lease_token)
                 return {"outcome": "ready", "status": "ready"}
@@ -1961,7 +1997,7 @@ class MemoryArtworkWorker:
                     generation_key,
                     lease_token=job_lease_token,
                     attempt_count=attempts,
-                    delay_seconds=min(300, 2**attempts),
+                    delay_seconds=_worker_retry_delay_seconds(attempts),
                     failure_code=exc.code,
                 )
             else:
@@ -1984,7 +2020,7 @@ class MemoryArtworkWorker:
                     generation_key,
                     lease_token=job_lease_token,
                     attempt_count=attempts,
-                    delay_seconds=min(300, 2**attempts),
+                    delay_seconds=_worker_retry_delay_seconds(attempts),
                     failure_code="memory_artwork_worker_failed",
                 )
             else:
@@ -2079,7 +2115,7 @@ class MemoryArtworkWorker:
                 recovery_index = index
                 enqueue_result = None
                 try:
-                    enqueue_result = await service.enqueue(uid, memory_id)
+                    enqueue_result = await service.enqueue(uid, memory_id, origin=HISTORICAL_BACKFILL_ORIGIN)
                 except MemoryArtworkError as exc:
                     if exc.code != "memory_artwork_enrichment_not_terminal":
                         raise
@@ -2090,7 +2126,7 @@ class MemoryArtworkWorker:
                     recovery_outcome = str(recovery.get("outcome") or "")
                     if recovery_outcome == "completed":
                         try:
-                            enqueue_result = await service.enqueue(uid, memory_id)
+                            enqueue_result = await service.enqueue(uid, memory_id, origin=HISTORICAL_BACKFILL_ORIGIN)
                         except MemoryArtworkError as exc:
                             if exc.code != "memory_artwork_enrichment_not_terminal":
                                 raise

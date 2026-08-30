@@ -19,6 +19,9 @@ STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
 DELETION_PENDING_FIELD = "memory_artwork_deletion_pending"
 JOB_COLLECTION = "ella_memory_artwork_jobs"
 RECONCILIATION_COLLECTION = "ella_memory_artwork_reconciliation_jobs"
+DEFAULT_BACKFILL_BATCH_SIZE = 10
+TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
+HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
 
 
 def _user_ref(uid: str):
@@ -41,7 +44,15 @@ def reconciliation_job_id(uid: str, authority_digest: str, style_version: str) -
     return hashlib.sha256(f"{uid}\0{authority_digest}\0{style_version}".encode("utf-8")).hexdigest()
 
 
-def _backfill_control_state(uid: str, preferences: dict[str, Any], state: str) -> dict[str, Any]:
+def _backfill_control_state(
+    uid: str,
+    preferences: dict[str, Any],
+    state: str,
+    *,
+    auto_continue: bool = False,
+    batch_size: int = DEFAULT_BACKFILL_BATCH_SIZE,
+    pause_reason: str = "",
+) -> dict[str, Any]:
     authority_digest = str(preferences.get("authority_digest") or "")
     style_version = str(preferences.get("style_version") or "")
     now = datetime.now(timezone.utc)
@@ -51,6 +62,10 @@ def _backfill_control_state(uid: str, preferences: dict[str, Any], state: str) -
         "authority_digest": authority_digest,
         "style_version": style_version,
         "state": state,
+        "auto_continue": auto_continue,
+        "batch_size": batch_size,
+        "batch_remaining": 0 if state != "running" or auto_continue else batch_size,
+        "pause_reason": pause_reason,
         "updated_at": now,
     }
 
@@ -295,6 +310,7 @@ def _set_backfill_control_transaction(
     *,
     expected_generation_id: str,
     state: str,
+    auto_continue: bool,
 ) -> dict[str, Any]:
     snapshot = user_ref.get(transaction=transaction)
     if not snapshot.exists:
@@ -312,7 +328,18 @@ def _set_backfill_control_transaction(
     )
     if generation_id != expected_generation_id:
         return {"outcome": "generation_stale"}
-    control = _backfill_control_state(str(snapshot.id), preferences, state)
+    pause_reason = ""
+    if state == "paused":
+        pause_reason = "user_paused"
+    elif state == "cancelled":
+        pause_reason = "user_cancelled"
+    control = _backfill_control_state(
+        str(snapshot.id),
+        preferences,
+        state,
+        auto_continue=auto_continue if state == "running" else False,
+        pause_reason=pause_reason,
+    )
     transaction.set(user_ref, {BACKFILL_CONTROL_FIELD: control}, merge=True)
     return {"outcome": "updated", "control": control}
 
@@ -322,20 +349,57 @@ def _set_backfill_control(transaction, user_ref, **kwargs):
     return _set_backfill_control_transaction(transaction, user_ref, **kwargs)
 
 
-def set_backfill_control(uid: str, *, expected_generation_id: str, state: str) -> dict[str, Any]:
+def set_backfill_control(
+    uid: str,
+    *,
+    expected_generation_id: str,
+    state: str,
+    auto_continue: bool = False,
+) -> dict[str, Any]:
     return _set_backfill_control(
         db.transaction(),
         _user_ref(uid),
         expected_generation_id=expected_generation_id,
         state=state,
+        auto_continue=auto_continue,
     )
 
 
+def _legacy_job_metadata(job: dict[str, Any], conversation: dict[str, Any]) -> dict[str, str]:
+    artwork = conversation.get(ARTWORK_FIELD)
+    if not isinstance(artwork, dict) or artwork.get("generation_key") != job.get("generation_key"):
+        return {}
+    authority_digest = str(artwork.get("authority_digest") or "")
+    style_version = str(artwork.get("style_version") or "")
+    if not authority_digest or not style_version:
+        return {}
+    return {
+        "authority_digest": authority_digest,
+        "style_version": style_version,
+        "origin": HISTORICAL_BACKFILL_ORIGIN,
+    }
+
+
 def list_jobs_for_uid(uid: str) -> list[dict[str, Any]]:
-    return [
-        {**(snapshot.to_dict() or {}), "job_id": snapshot.id}
-        for snapshot in db.collection(JOB_COLLECTION).where("uid", "==", uid).stream()
-    ]
+    jobs: list[dict[str, Any]] = []
+    migration_batch = db.batch()
+    migration_count = 0
+    for snapshot in db.collection(JOB_COLLECTION).where("uid", "==", uid).stream():
+        payload = snapshot.to_dict() or {}
+        if not payload.get("authority_digest") or not payload.get("style_version") or not payload.get("origin"):
+            memory_id = str(payload.get("memory_id") or "")
+            if memory_id:
+                conversation_snapshot = _conversation_ref(uid, memory_id).get()
+                conversation = conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
+                migration = _legacy_job_metadata(payload, conversation)
+                if migration:
+                    payload = {**payload, **migration}
+                    migration_batch.set(snapshot.reference, migration, merge=True)
+                    migration_count += 1
+        jobs.append({**payload, "job_id": snapshot.id})
+    if migration_count:
+        migration_batch.commit()
+    return jobs
 
 
 def get_conversation(uid: str, memory_id: str) -> Optional[dict[str, Any]]:
@@ -513,23 +577,34 @@ def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> lis
 
 
 def _backfill_control_allows_job(user: dict[str, Any], job: dict[str, Any]) -> bool:
+    preferences = user.get(PREFERENCES_FIELD)
+    if not isinstance(preferences, dict):
+        return False
+    authority_digest = str(job.get("authority_digest") or preferences.get("authority_digest") or "")
+    style_version = str(job.get("style_version") or preferences.get("style_version") or "")
+    if not authority_digest or not style_version:
+        return False
+    if authority_digest != preferences.get("authority_digest") or style_version != preferences.get("style_version"):
+        return False
+    if str(job.get("origin") or HISTORICAL_BACKFILL_ORIGIN) == TERMINAL_ENRICHMENT_ORIGIN:
+        return True
     control = user.get(BACKFILL_CONTROL_FIELD)
     if control is None:
-        # Existing queues predate controllable backfill. They remain runnable
-        # until the owner changes style or explicitly pauses/cancels.
+        # The first claim for a legacy queue initializes the bounded batch
+        # control transactionally below.
         return True
     if not isinstance(control, dict):
         return False
     expected_generation_id = reconciliation_job_id(
         str(job.get("uid") or ""),
-        str(job.get("authority_digest") or ""),
-        str(job.get("style_version") or ""),
+        authority_digest,
+        style_version,
     )
     return bool(
         control.get("schema_version") == "ella.memory_artwork.queue_control.v1"
         and control.get("generation_id") == expected_generation_id
-        and control.get("authority_digest") == job.get("authority_digest")
-        and control.get("style_version") == job.get("style_version")
+        and control.get("authority_digest") == authority_digest
+        and control.get("style_version") == style_version
         and control.get("state") == "running"
     )
 
@@ -551,6 +626,15 @@ def _claim_job_transaction(
     if not job_snapshot.exists:
         return None
     job = job_snapshot.to_dict() or {}
+    preferences = user.get(PREFERENCES_FIELD)
+    if not isinstance(preferences, dict):
+        return None
+    job = {
+        **job,
+        "authority_digest": str(job.get("authority_digest") or preferences.get("authority_digest") or ""),
+        "style_version": str(job.get("style_version") or preferences.get("style_version") or ""),
+        "origin": str(job.get("origin") or HISTORICAL_BACKFILL_ORIGIN),
+    }
     if not _backfill_control_allows_job(user, job):
         return None
     status = job.get("status")
@@ -564,6 +648,29 @@ def _claim_job_transaction(
             return None
     else:
         return None
+    origin = str(job.get("origin") or HISTORICAL_BACKFILL_ORIGIN)
+    if origin == HISTORICAL_BACKFILL_ORIGIN:
+        control = user.get(BACKFILL_CONTROL_FIELD)
+        if control is None:
+            control = _backfill_control_state(str(user_ref.id), preferences, "running")
+        if not isinstance(control, dict):
+            return None
+        auto_continue = bool(control.get("auto_continue"))
+        batch_size = int(control.get("batch_size") or DEFAULT_BACKFILL_BATCH_SIZE)
+        batch_remaining = int(control.get("batch_remaining", batch_size) or 0)
+        if batch_size < 1 or (batch_remaining < 1 and not auto_continue):
+            return None
+        if not auto_continue:
+            batch_remaining -= 1
+            control = {
+                **control,
+                "batch_size": batch_size,
+                "batch_remaining": batch_remaining,
+                "state": "paused" if batch_remaining == 0 else "running",
+                "pause_reason": "batch_complete" if batch_remaining == 0 else "",
+                "updated_at": now,
+            }
+        transaction.set(user_ref, {BACKFILL_CONTROL_FIELD: control}, merge=True)
     claimed = {
         **job,
         "status": "processing",
