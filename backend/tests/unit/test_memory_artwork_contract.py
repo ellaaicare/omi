@@ -592,11 +592,11 @@ def _authority(uid="owner-a", digest="digest-a"):
     )
 
 
-def _enabled_config(*, backfill=True):
+def _enabled_config(*, backfill=True, provider=True):
     return artwork.MemoryArtworkConfig(
         enabled=True,
         release_enabled=True,
-        provider_enabled=True,
+        provider_enabled=provider,
         backfill_enabled=backfill,
     )
 
@@ -1324,6 +1324,78 @@ def test_reconciliation_resets_retry_budget_after_successful_page_progress():
     assert continued["attempt_count"] == 0
     assert continued["pages_processed"] == 1
     assert continued["queued"] == 10
+
+
+def test_reconciliation_checkpoints_reservations_when_backfill_enqueue_raises():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    for index, memory_id in enumerate(("memory-first", "memory-second")):
+        repository.conversations[("owner-a", memory_id)] = _terminal_memory(
+            memory_id,
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=index),
+        )
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    enqueue = service.enqueue
+    attempts = []
+
+    async def flaky_enqueue(uid, memory_id, **kwargs):
+        attempts.append((uid, memory_id))
+        if memory_id == "memory-second" and attempts.count((uid, memory_id)) == 1:
+            raise artwork.MemoryArtworkError("authority_unavailable", retryable=True)
+        return await enqueue(uid, memory_id, **kwargs)
+
+    service.enqueue = flaky_enqueue
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+
+    first = asyncio.run(worker.run_reconciliation_job(repository.get_reconciliation_job("owner-a", started["job_id"])))
+    held = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert first == {"outcome": "retry", "status": "pending", "failure_code": "authority_unavailable"}
+    assert held["recovery_page"]["result"]["queued"] == 1
+    assert held["recovery_page"]["result"]["existing"] == 0
+    assert held["recovery_page"]["result"]["skipped"] == 1
+    assert held["recovery_page"]["memory_ids"] == ["memory-second"]
+
+    held["available_at"] = datetime.now(timezone.utc)
+    repository.reconciliation_jobs[started["job_id"]] = held
+    second = asyncio.run(worker.run_reconciliation_job(held))
+    completed = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert second == {"outcome": "completed", "status": "completed"}
+    assert completed["attempt_count"] == 0
+    assert completed["pages_processed"] == 1
+    assert completed["scanned"] == 2
+    assert completed["queued"] == 2
+    assert completed["existing"] == 0
+    assert completed["skipped"] == 0
+
+
+def test_reconciliation_rejects_creation_when_provider_worker_is_disabled():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(provider=False),
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError, match="memory_artwork_backfill_disabled"):
+        asyncio.run(service.start_reconciliation("owner-a"))
+
+    assert repository.reconciliation_jobs == {}
 
 
 @pytest.mark.parametrize(

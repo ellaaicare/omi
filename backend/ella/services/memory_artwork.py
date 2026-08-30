@@ -178,6 +178,12 @@ class MemoryArtworkError(RuntimeError):
         self.retryable = retryable
 
 
+class MemoryArtworkBackfillError(MemoryArtworkError):
+    def __init__(self, code: str, *, retryable: bool, partial_result: dict[str, Any]):
+        super().__init__(code, retryable=retryable)
+        self.partial_result = partial_result
+
+
 @dataclass(frozen=True)
 class ArtworkRuntimeAuthority:
     uid: str
@@ -885,7 +891,12 @@ class MemoryArtworkService:
     async def start_reconciliation(self, uid: str) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
-        if not (self.config.enabled and self.config.release_enabled and self.config.backfill_enabled):
+        if not (
+            self.config.enabled
+            and self.config.release_enabled
+            and self.config.provider_enabled
+            and self.config.backfill_enabled
+        ):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
         authority = await self.authority_resolver(uid)
         preferences = self.repository.get_preferences(uid)
@@ -1632,7 +1643,12 @@ class MemoryArtworkService:
     async def backfill(self, uid: str, *, cursor_memory_id: Optional[str] = None) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
-        if not (self.config.enabled and self.config.release_enabled and self.config.backfill_enabled):
+        if not (
+            self.config.enabled
+            and self.config.release_enabled
+            and self.config.provider_enabled
+            and self.config.backfill_enabled
+        ):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
         try:
             recent = self.repository.list_conversations_page(
@@ -1649,6 +1665,22 @@ class MemoryArtworkService:
         memory_ids: list[str] = []
         recovery_memory_ids: list[str] = []
         next_cursor: Optional[str] = None
+
+        def page_result() -> dict[str, Any]:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "limit": MAX_BACKFILL_MEMORIES,
+                "scan_limit": BACKFILL_SCAN_LIMIT,
+                "scanned": scanned,
+                "queued": queued,
+                "existing": existing,
+                "skipped": skipped,
+                "memory_ids": list(memory_ids),
+                "next_cursor": next_cursor if has_more else None,
+                "has_more": has_more,
+                "_recovery_memory_ids": list(recovery_memory_ids),
+            }
+
         for index, conversation in enumerate(page):
             scanned += 1
             memory_id = str(conversation.get("id") or "")
@@ -1667,7 +1699,26 @@ class MemoryArtworkService:
                         has_more = has_more or index < len(page) - 1
                         break
                 continue
-            result = await self.enqueue(uid, memory_id)
+            try:
+                result = await self.enqueue(uid, memory_id)
+            except MemoryArtworkError as exc:
+                skipped += 1
+                recovery_memory_ids.append(memory_id)
+                has_more = has_more or index < len(page) - 1
+                raise MemoryArtworkBackfillError(
+                    exc.code,
+                    retryable=exc.retryable,
+                    partial_result=page_result(),
+                ) from exc
+            except Exception as exc:
+                skipped += 1
+                recovery_memory_ids.append(memory_id)
+                has_more = has_more or index < len(page) - 1
+                raise MemoryArtworkBackfillError(
+                    "memory_artwork_backfill_failed",
+                    retryable=True,
+                    partial_result=page_result(),
+                ) from exc
             if result.get("outcome") == "reserved":
                 queued += 1
                 memory_ids.append(memory_id)
@@ -1678,21 +1729,7 @@ class MemoryArtworkService:
             if queued >= MAX_BACKFILL_MEMORIES:
                 has_more = has_more or index < len(page) - 1
                 break
-        if not has_more:
-            next_cursor = None
-        return {
-            "schema_version": ARTWORK_SCHEMA_VERSION,
-            "limit": MAX_BACKFILL_MEMORIES,
-            "scan_limit": BACKFILL_SCAN_LIMIT,
-            "scanned": scanned,
-            "queued": queued,
-            "existing": existing,
-            "skipped": skipped,
-            "memory_ids": memory_ids,
-            "next_cursor": next_cursor,
-            "has_more": has_more,
-            "_recovery_memory_ids": recovery_memory_ids,
-        }
+        return page_result()
 
 
 class MemoryArtworkWorker:
@@ -1881,8 +1918,13 @@ class MemoryArtworkWorker:
                 if len(recovery_memory_ids) != len(stored_memory_ids):
                     raise MemoryArtworkError("memory_artwork_reconciliation_recovery_page_invalid")
             else:
-                result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
-                recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+                try:
+                    result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
+                    recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+                except MemoryArtworkBackfillError as exc:
+                    result = dict(exc.partial_result)
+                    recovery_memory_ids = result.pop("_recovery_memory_ids", [])
+                    raise
             recovery_pending = False
             recovery_handler = self.enrichment_recovery or _memory_artwork_enrichment_recovery
             for index, memory_id in enumerate(recovery_memory_ids):
