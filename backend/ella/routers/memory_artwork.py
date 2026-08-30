@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
@@ -26,6 +27,7 @@ from utils.ella.exact_firebase_auth import (
 
 router = APIRouter(prefix="/v1/ella", tags=["Ella Memory Artwork"])
 MEMORY_ARTWORK_SERVICE_HEADER = "X-Ella-Memory-Artwork-Service-Key"
+RECONCILIATION_JOB_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class MemoryArtworkPreferencesUpdate(BaseModel):
@@ -139,7 +141,34 @@ async def backfill_memory_artwork(
 ):
     try:
         service = MemoryArtworkService()
-        result = await service.backfill(uid, cursor_memory_id=payload.cursor if payload else None)
+        cursor = payload.cursor if payload else None
+        if cursor is None or RECONCILIATION_JOB_ID_RE.fullmatch(cursor):
+            reconciliation = (
+                await service.start_reconciliation(uid) if cursor is None else await service.reconciliation_status(uid)
+            )
+            if cursor is not None and reconciliation.get("job_id") != cursor:
+                raise MemoryArtworkError("memory_artwork_backfill_cursor_invalid")
+            if reconciliation.get("status") == "failed":
+                raise MemoryArtworkError(
+                    str(reconciliation.get("failure_code") or "memory_artwork_reconciliation_failed"),
+                    retryable=True,
+                )
+            active = reconciliation.get("status") in {"pending", "processing"}
+            return {
+                "schema_version": "ella.memory_artwork.v1",
+                "limit": 10,
+                "scan_limit": 50,
+                "queued": int(reconciliation.get("queued") or 0),
+                "existing": int(reconciliation.get("existing") or 0),
+                "skipped": int(reconciliation.get("skipped") or 0),
+                "memory_ids": [],
+                "next_cursor": reconciliation.get("job_id") if active else None,
+                "has_more": active,
+                "reconciliation_status": reconciliation.get("status"),
+                "pages_processed": int(reconciliation.get("pages_processed") or 0),
+                "scanned": int(reconciliation.get("scanned") or 0),
+            }
+        result = await service.backfill(uid, cursor_memory_id=cursor)
         recovery_memory_ids = result.pop("_recovery_memory_ids", [])
         recovery_queued = 0
         for memory_id in recovery_memory_ids:
@@ -158,6 +187,22 @@ async def backfill_memory_artwork(
                 recovery_queued += 1
         result["enrichment_recovery_queued"] = recovery_queued
         return result
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/memory-artwork/reconciliation", status_code=202)
+async def start_memory_artwork_reconciliation(uid: str = Depends(get_exact_firebase_uid)):
+    try:
+        return await MemoryArtworkService().start_reconciliation(uid)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/memory-artwork/reconciliation")
+async def get_memory_artwork_reconciliation(uid: str = Depends(get_exact_firebase_uid)):
+    try:
+        return await MemoryArtworkService().reconciliation_status(uid)
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 

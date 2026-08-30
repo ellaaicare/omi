@@ -46,6 +46,7 @@ ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
 ARTWORK_PROVIDER_CONTRACT_VERSION = "ella.artwork.service.v1"
+ARTWORK_RECONCILIATION_SCHEMA_VERSION = "ella.memory_artwork.reconciliation.v1"
 DEFAULT_STYLE_VERSION = "ella.memory_artwork.style.soft-gouache.v1"
 SUPPORTED_STYLE_VERSIONS = {
     DEFAULT_STYLE_VERSION,
@@ -258,6 +259,16 @@ class MemoryArtworkRepository(Protocol):
 
     def renew_publication_claim(self, uid: str, memory_id: str, generation_key: str, **kwargs) -> bool: ...
 
+    def create_reconciliation_job(self, uid: str, **kwargs) -> dict[str, Any]: ...
+
+    def get_reconciliation_job(self, uid: str, job_id: str) -> Optional[dict[str, Any]]: ...
+
+    def list_pending_reconciliation_jobs(self, **kwargs) -> list[dict[str, Any]]: ...
+
+    def claim_reconciliation_job(self, uid: str, job_id: str, **kwargs) -> Optional[dict[str, Any]]: ...
+
+    def finish_reconciliation_job(self, job_id: str, **kwargs) -> bool: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
@@ -276,6 +287,11 @@ class FirestoreMemoryArtworkRepository:
     fail_job = staticmethod(artwork_db.fail_job)
     mark_storage_cleanup_required = staticmethod(artwork_db.mark_storage_cleanup_required)
     renew_publication_claim = staticmethod(artwork_db.renew_publication_claim)
+    create_reconciliation_job = staticmethod(artwork_db.create_reconciliation_job)
+    get_reconciliation_job = staticmethod(artwork_db.get_reconciliation_job)
+    list_pending_reconciliation_jobs = staticmethod(artwork_db.list_pending_reconciliation_jobs)
+    claim_reconciliation_job = staticmethod(artwork_db.claim_reconciliation_job)
+    finish_reconciliation_job = staticmethod(artwork_db.finish_reconciliation_job)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -683,6 +699,18 @@ def _preferences_match_authority(
     )
 
 
+def _release_artwork(conversation: dict[str, Any]) -> tuple[dict[str, Any], bool, Optional[str]]:
+    current = conversation.get("artwork") or {}
+    if isinstance(current, dict) and current.get("status") == "ready":
+        return current, False, None
+    published = conversation.get(artwork_db.PUBLISHED_ARTWORK_FIELD) or {}
+    if isinstance(published, dict) and published.get("status") == "ready":
+        current_status = str(current.get("status") or "") if isinstance(current, dict) else ""
+        failure_code = str(current.get("failure_code") or "") if isinstance(current, dict) else ""
+        return published, current_status == "generating", failure_code or None
+    return current if isinstance(current, dict) else {}, False, None
+
+
 def _generation_claim_is_current(
     conversation: dict[str, Any],
     *,
@@ -776,6 +804,74 @@ class MemoryArtworkService:
             },
         )
         return await self.preferences(uid)
+
+    @staticmethod
+    def _public_reconciliation(job: Optional[dict[str, Any]]) -> dict[str, Any]:
+        if not job:
+            return {
+                "schema_version": ARTWORK_RECONCILIATION_SCHEMA_VERSION,
+                "status": "idle",
+                "pages_processed": 0,
+                "scanned": 0,
+                "queued": 0,
+                "existing": 0,
+                "skipped": 0,
+            }
+        return {
+            "schema_version": ARTWORK_RECONCILIATION_SCHEMA_VERSION,
+            "job_id": str(job.get("job_id") or ""),
+            "status": str(job.get("status") or "idle"),
+            "style_version": str(job.get("style_version") or ""),
+            "pages_processed": int(job.get("pages_processed") or 0),
+            "scanned": int(job.get("scanned") or 0),
+            "queued": int(job.get("queued") or 0),
+            "existing": int(job.get("existing") or 0),
+            "skipped": int(job.get("skipped") or 0),
+            "failure_code": str(job.get("failure_code") or "") or None,
+            "created_at": job.get("created_at"),
+            "updated_at": job.get("updated_at"),
+            "completed_at": job.get("completed_at"),
+        }
+
+    async def start_reconciliation(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        if not (self.config.enabled and self.config.release_enabled and self.config.backfill_enabled):
+            raise MemoryArtworkError("memory_artwork_backfill_disabled")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        if style_version not in SUPPORTED_STYLE_VERSIONS:
+            raise MemoryArtworkError("memory_artwork_style_version_invalid")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        reservation = self.repository.create_reconciliation_job(
+            uid,
+            authority_digest=authority.authority_digest,
+            style_version=style_version,
+        )
+        if reservation.get("outcome") == "deletion_pending":
+            raise MemoryArtworkError("memory_artwork_deletion_pending")
+        return self._public_reconciliation(reservation.get("job"))
+
+    async def reconciliation_status(self, uid: str) -> dict[str, Any]:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        job_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
+        return self._public_reconciliation(self.repository.get_reconciliation_job(uid, job_id))
 
     async def enqueue(
         self,
@@ -1352,7 +1448,7 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        artwork = conversation.get("artwork") or {}
+        artwork, refresh_pending, refresh_failure_code = _release_artwork(conversation)
         status = str(artwork.get("status") or "unavailable") if isinstance(artwork, dict) else "unavailable"
         if status != "ready":
             return {
@@ -1379,7 +1475,8 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        current_artwork = conversation.get("artwork") or {}
+        current_artwork, current_refresh_pending, current_refresh_failure_code = _release_artwork(conversation)
+        generation_request = conversation.get("artwork") or {}
         if preferences.get(artwork_db.DELETION_PENDING_FIELD):
             raise MemoryArtworkError("memory_artwork_deletion_pending")
         if preferences.get("consent") == "declined":
@@ -1411,7 +1508,11 @@ class MemoryArtworkService:
             or not _preferences_match_authority(
                 preferences,
                 authority,
-                style_version=str(current_artwork.get("style_version") or ""),
+                style_version=(
+                    None
+                    if current_refresh_pending or current_refresh_failure_code
+                    else str(current_artwork.get("style_version") or "")
+                ),
             )
         ):
             return {
@@ -1419,6 +1520,17 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_preference_authority_stale",
             }
+        if current_refresh_pending or current_refresh_failure_code:
+            if (
+                not isinstance(generation_request, dict)
+                or generation_request.get("style_version") != preferences.get("style_version")
+                or generation_request.get("enrichment_revision") != current_artwork.get("enrichment_revision")
+            ):
+                return {
+                    "schema_version": ARTWORK_SCHEMA_VERSION,
+                    "status": "unavailable",
+                    "failure_code": "memory_artwork_preference_authority_stale",
+                }
         current_enrichment_revision = _terminal_enrichment(conversation)
         _, current_prompt_sha256 = _prompt_for(
             conversation,
@@ -1446,6 +1558,13 @@ class MemoryArtworkService:
             "pixel_height": current_artwork.get("pixel_height"),
             "url": url,
             "expires_in_seconds": 300,
+            "refresh_pending": current_refresh_pending,
+            "refresh_failure_code": current_refresh_failure_code,
+            "requested_style_version": (
+                generation_request.get("style_version")
+                if current_refresh_pending or current_refresh_failure_code
+                else current_artwork.get("style_version")
+            ),
         }
 
     async def backfill(self, uid: str, *, cursor_memory_id: Optional[str] = None) -> dict[str, Any]:
@@ -1464,10 +1583,12 @@ class MemoryArtworkService:
         has_more = len(recent) > BACKFILL_SCAN_LIMIT
         page = recent[:BACKFILL_SCAN_LIMIT]
         queued = existing = skipped = 0
+        scanned = 0
         memory_ids: list[str] = []
         recovery_memory_ids: list[str] = []
         next_cursor: Optional[str] = None
         for index, conversation in enumerate(page):
+            scanned += 1
             memory_id = str(conversation.get("id") or "")
             if not memory_id:
                 skipped += 1
@@ -1501,6 +1622,7 @@ class MemoryArtworkService:
             "schema_version": ARTWORK_SCHEMA_VERSION,
             "limit": MAX_BACKFILL_MEMORIES,
             "scan_limit": BACKFILL_SCAN_LIMIT,
+            "scanned": scanned,
             "queued": queued,
             "existing": existing,
             "skipped": skipped,
@@ -1632,10 +1754,109 @@ class MemoryArtworkWorker:
                 "failure_code": "memory_artwork_worker_failed",
             }
 
+    async def run_reconciliation_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        uid = str(job.get("uid") or "")
+        job_id = str(job.get("job_id") or "")
+        if not uid or len(job_id) != 64 or not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_reconciliation_invalid")
+        lease_token = secrets.token_hex(24)
+        claimed = self.repository.claim_reconciliation_job(
+            uid,
+            job_id,
+            lease_token=lease_token,
+            now=datetime.now(timezone.utc),
+            lease_seconds=_artwork_lease_seconds(),
+        )
+        if claimed is None:
+            return {"outcome": "not_claimed", "status": "unavailable"}
+        service = self.service_factory()
+        try:
+            authority = await service.authority_resolver(uid)
+            preferences = service.repository.get_preferences(uid)
+            if (
+                claimed.get("authority_digest") != authority.authority_digest
+                or claimed.get("style_version") != preferences.get("style_version")
+                or not service.global_consent_checker(uid)
+                or not _preferences_match_authority(
+                    preferences,
+                    authority,
+                    style_version=str(claimed.get("style_version") or ""),
+                )
+            ):
+                self.repository.finish_reconciliation_job(
+                    job_id,
+                    lease_token=lease_token,
+                    update={
+                        "status": "failed",
+                        "failure_code": "memory_artwork_preference_authority_stale",
+                        "completed_at": datetime.now(timezone.utc),
+                    },
+                )
+                return {
+                    "outcome": "failed",
+                    "status": "failed",
+                    "failure_code": "memory_artwork_preference_authority_stale",
+                }
+            result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
+            has_more = result.get("has_more") is True
+            now = datetime.now(timezone.utc)
+            update = {
+                "status": "pending" if has_more else "completed",
+                "cursor": result.get("next_cursor") if has_more else None,
+                "pages_processed": int(claimed.get("pages_processed") or 0) + 1,
+                "scanned": int(claimed.get("scanned") or 0) + int(result.get("scanned") or 0),
+                "queued": int(claimed.get("queued") or 0) + int(result.get("queued") or 0),
+                "existing": int(claimed.get("existing") or 0) + int(result.get("existing") or 0),
+                "skipped": int(claimed.get("skipped") or 0) + int(result.get("skipped") or 0),
+                "available_at": now,
+                "failure_code": None,
+            }
+            if not has_more:
+                update["completed_at"] = now
+            self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
+            return {"outcome": "continued" if has_more else "completed", "status": update["status"]}
+        except MemoryArtworkError as exc:
+            attempts = int(claimed.get("attempt_count") or 0) + 1
+            retryable = exc.retryable and attempts < WORKER_MAX_ATTEMPTS
+            now = datetime.now(timezone.utc)
+            update = {
+                "status": "pending" if retryable else "failed",
+                "attempt_count": attempts,
+                "available_at": now + timedelta(seconds=min(300, 2**attempts)),
+                "failure_code": exc.code,
+            }
+            if not retryable:
+                update["completed_at"] = now
+            self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
+            return {"outcome": "retry" if retryable else "failed", "status": update["status"], "failure_code": exc.code}
+        except Exception:
+            attempts = int(claimed.get("attempt_count") or 0) + 1
+            retryable = attempts < WORKER_MAX_ATTEMPTS
+            now = datetime.now(timezone.utc)
+            failure_code = "memory_artwork_reconciliation_worker_failed"
+            update = {
+                "status": "pending" if retryable else "failed",
+                "attempt_count": attempts,
+                "available_at": now + timedelta(seconds=min(300, 2**attempts)),
+                "failure_code": failure_code,
+            }
+            if not retryable:
+                update["completed_at"] = now
+            self.repository.finish_reconciliation_job(job_id, lease_token=lease_token, update=update)
+            return {
+                "outcome": "retry" if retryable else "failed",
+                "status": update["status"],
+                "failure_code": failure_code,
+            }
+
     async def run_once(self) -> int:
         if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
             return 0
         processed = 0
+        for job in self.repository.list_pending_reconciliation_jobs(limit=5, now=datetime.now(timezone.utc)):
+            result = await self.run_reconciliation_job(job)
+            if result.get("outcome") != "not_claimed":
+                processed += 1
         for job in self.repository.list_pending_jobs(limit=WORKER_BATCH_SIZE, now=datetime.now(timezone.utc)):
             uid = str(job.get("uid") or "")
             memory_id = str(job.get("memory_id") or "")

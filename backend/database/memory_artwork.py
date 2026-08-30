@@ -12,10 +12,12 @@ from google.cloud.firestore_v1 import transactional
 from ._client import db
 
 ARTWORK_FIELD = "artwork"
+PUBLISHED_ARTWORK_FIELD = "published_artwork"
 PREFERENCES_FIELD = "memory_artwork_preferences"
 STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
 DELETION_PENDING_FIELD = "memory_artwork_deletion_pending"
 JOB_COLLECTION = "ella_memory_artwork_jobs"
+RECONCILIATION_COLLECTION = "ella_memory_artwork_reconciliation_jobs"
 
 
 def _user_ref(uid: str):
@@ -32,6 +34,207 @@ def _job_id(uid: str, memory_id: str, generation_key: str) -> str:
 
 def _job_ref(uid: str, memory_id: str, generation_key: str):
     return db.collection(JOB_COLLECTION).document(_job_id(uid, memory_id, generation_key))
+
+
+def reconciliation_job_id(uid: str, authority_digest: str, style_version: str) -> str:
+    return hashlib.sha256(f"{uid}\0{authority_digest}\0{style_version}".encode("utf-8")).hexdigest()
+
+
+def _reconciliation_ref(job_id: str):
+    return db.collection(RECONCILIATION_COLLECTION).document(job_id)
+
+
+def _create_reconciliation_job_transaction(transaction, user_ref, job_ref, *, job_state: dict[str, Any]):
+    user_snapshot = user_ref.get(transaction=transaction)
+    user = user_snapshot.to_dict() if user_snapshot.exists else {}
+    if not user_snapshot.exists or bool(user.get(DELETION_PENDING_FIELD)):
+        return {"outcome": "deletion_pending"}
+    existing_snapshot = job_ref.get(transaction=transaction)
+    existing = existing_snapshot.to_dict() if existing_snapshot.exists else {}
+    if (
+        existing.get("uid") == job_state.get("uid")
+        and existing.get("authority_digest") == job_state.get("authority_digest")
+        and existing.get("style_version") == job_state.get("style_version")
+        and existing.get("status") in {"pending", "processing"}
+    ):
+        return {"outcome": "existing", "job": dict(existing)}
+    transaction.set(job_ref, job_state)
+    return {"outcome": "reserved", "job": dict(job_state)}
+
+
+@transactional
+def _create_reconciliation_job(transaction, user_ref, job_ref, **kwargs):
+    return _create_reconciliation_job_transaction(transaction, user_ref, job_ref, **kwargs)
+
+
+def create_reconciliation_job(uid: str, *, authority_digest: str, style_version: str) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    job_id = reconciliation_job_id(uid, authority_digest, style_version)
+    state = {
+        "schema_version": "ella.memory_artwork.reconciliation.v1",
+        "job_id": job_id,
+        "uid": uid,
+        "authority_digest": authority_digest,
+        "style_version": style_version,
+        "status": "pending",
+        "cursor": None,
+        "pages_processed": 0,
+        "scanned": 0,
+        "queued": 0,
+        "existing": 0,
+        "skipped": 0,
+        "attempt_count": 0,
+        "available_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    return _create_reconciliation_job(
+        db.transaction(),
+        _user_ref(uid),
+        _reconciliation_ref(job_id),
+        job_state=state,
+    )
+
+
+def get_reconciliation_job(uid: str, job_id: str) -> Optional[dict[str, Any]]:
+    snapshot = _reconciliation_ref(job_id).get()
+    if not snapshot.exists:
+        return None
+    payload = snapshot.to_dict() or {}
+    if payload.get("uid") != uid:
+        return None
+    return {**payload, "job_id": snapshot.id}
+
+
+def list_pending_reconciliation_jobs(*, limit: int = 5, now: Optional[datetime] = None) -> list[dict[str, Any]]:
+    current_time = now or datetime.now(timezone.utc)
+    collection = db.collection(RECONCILIATION_COLLECTION)
+    query_limit = max(1, limit)
+    snapshots = list(
+        collection.where("status", "==", "pending")
+        .where("available_at", "<=", current_time)
+        .order_by("available_at", direction=firestore.Query.ASCENDING)
+        .limit(query_limit)
+        .stream()
+    )
+    snapshots.extend(
+        collection.where("status", "==", "processing")
+        .where("lease_expires_at", "<=", current_time)
+        .order_by("lease_expires_at", direction=firestore.Query.ASCENDING)
+        .limit(query_limit)
+        .stream()
+    )
+    pending: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for snapshot in snapshots:
+        if snapshot.id in seen:
+            continue
+        seen.add(snapshot.id)
+        payload = snapshot.to_dict() or {}
+        status = payload.get("status")
+        due_at = payload.get("lease_expires_at") if status == "processing" else payload.get("available_at")
+        if status not in {"pending", "processing"} or not isinstance(due_at, datetime) or due_at > current_time:
+            continue
+        pending.append({**payload, "job_id": snapshot.id})
+    pending.sort(
+        key=lambda job: (
+            job.get("lease_expires_at") if job.get("status") == "processing" else job.get("available_at"),
+            str(job.get("job_id") or ""),
+        )
+    )
+    return pending[: max(1, limit)]
+
+
+def _claim_reconciliation_job_transaction(
+    transaction,
+    user_ref,
+    job_ref,
+    *,
+    lease_token: str,
+    now: datetime,
+    lease_seconds: int,
+) -> Optional[dict[str, Any]]:
+    user_snapshot = user_ref.get(transaction=transaction)
+    user = user_snapshot.to_dict() if user_snapshot.exists else {}
+    if not user_snapshot.exists or bool(user.get(DELETION_PENDING_FIELD)):
+        return None
+    snapshot = job_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return None
+    job = snapshot.to_dict() or {}
+    status = job.get("status")
+    if status == "processing":
+        expiry = job.get("lease_expires_at")
+        if not isinstance(expiry, datetime) or expiry > now:
+            return None
+    elif status != "pending":
+        return None
+    claimed = {
+        **job,
+        "status": "processing",
+        "lease_token": lease_token,
+        "lease_expires_at": now + timedelta(seconds=max(1, lease_seconds)),
+        "updated_at": now,
+    }
+    transaction.set(job_ref, claimed)
+    return claimed
+
+
+@transactional
+def _claim_reconciliation_job(transaction, user_ref, job_ref, **kwargs):
+    return _claim_reconciliation_job_transaction(transaction, user_ref, job_ref, **kwargs)
+
+
+def claim_reconciliation_job(
+    uid: str,
+    job_id: str,
+    *,
+    lease_token: str,
+    now: datetime,
+    lease_seconds: int,
+) -> Optional[dict[str, Any]]:
+    return _claim_reconciliation_job(
+        db.transaction(),
+        _user_ref(uid),
+        _reconciliation_ref(job_id),
+        lease_token=lease_token,
+        now=now,
+        lease_seconds=lease_seconds,
+    )
+
+
+def _finish_reconciliation_job_transaction(
+    transaction,
+    job_ref,
+    *,
+    lease_token: str,
+    update: dict[str, Any],
+) -> bool:
+    snapshot = job_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    current = snapshot.to_dict() or {}
+    if current.get("status") != "processing" or current.get("lease_token") != lease_token:
+        return False
+    finished = {**update, "updated_at": datetime.now(timezone.utc)}
+    finished["lease_token"] = firestore.DELETE_FIELD
+    finished["lease_expires_at"] = firestore.DELETE_FIELD
+    transaction.update(job_ref, finished)
+    return True
+
+
+@transactional
+def _finish_reconciliation_job(transaction, job_ref, **kwargs):
+    return _finish_reconciliation_job_transaction(transaction, job_ref, **kwargs)
+
+
+def finish_reconciliation_job(job_id: str, *, lease_token: str, update: dict[str, Any]) -> bool:
+    return _finish_reconciliation_job(
+        db.transaction(),
+        _reconciliation_ref(job_id),
+        lease_token=lease_token,
+        update=update,
+    )
 
 
 def get_preferences(uid: str) -> dict[str, Any]:
@@ -135,7 +338,21 @@ def _reserve_generation_transaction(
                 if current_job.get("status") not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
-    transaction.update(conversation_ref, {ARTWORK_FIELD: artwork_state})
+    published = conversation.get(PUBLISHED_ARTWORK_FIELD) or {}
+    update: dict[str, Any] = {ARTWORK_FIELD: artwork_state}
+    if (
+        isinstance(current, dict)
+        and current.get("status") == "ready"
+        and current.get("enrichment_revision") == enrichment_revision
+    ):
+        update[PUBLISHED_ARTWORK_FIELD] = dict(current)
+    elif not (
+        isinstance(published, dict)
+        and published.get("status") == "ready"
+        and published.get("enrichment_revision") == enrichment_revision
+    ):
+        update[PUBLISHED_ARTWORK_FIELD] = firestore.DELETE_FIELD
+    transaction.update(conversation_ref, update)
     if job_ref is not None and job_state is not None:
         # A worker owns a processing record before it refreshes a retry's
         # generation state. Do not replace that durable claim with pending.
@@ -693,7 +910,13 @@ def _finalize_generation_transaction(
     conversation = snapshot.to_dict() or {}
     if not _generation_is_current(conversation, generation_key, authority_digest, lease_token):
         return False
-    transaction.update(conversation_ref, {ARTWORK_FIELD: ready_state})
+    transaction.update(
+        conversation_ref,
+        {
+            ARTWORK_FIELD: ready_state,
+            PUBLISHED_ARTWORK_FIELD: firestore.DELETE_FIELD,
+        },
+    )
     return True
 
 
