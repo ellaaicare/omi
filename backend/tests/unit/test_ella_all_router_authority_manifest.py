@@ -272,6 +272,8 @@ ROUTE_GROUPS = (
         ("POST", "/v1/ella/memory-artwork/backfill", "backfill_memory_artwork"),
         ("POST", "/v1/ella/memory-artwork/reconciliation", "start_memory_artwork_reconciliation"),
         ("GET", "/v1/ella/memory-artwork/reconciliation", "get_memory_artwork_reconciliation"),
+        ("GET", "/v1/ella/memory-artwork/queue", "get_memory_artwork_queue"),
+        ("POST", "/v1/ella/memory-artwork/queue/control", "control_memory_artwork_queue"),
     ),
     _group(
         "memory_artwork",

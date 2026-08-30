@@ -10,6 +10,7 @@ import types
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import httpx
@@ -37,6 +38,9 @@ def _load_service_module():
     for name in (
         "get_preferences",
         "set_preferences",
+        "get_backfill_control",
+        "set_backfill_control",
+        "list_jobs_for_uid",
         "get_conversation",
         "list_conversations_page",
         "list_recent_conversations",
@@ -65,6 +69,10 @@ def _load_service_module():
     database_stub.DELETION_PENDING_FIELD = "memory_artwork_deletion_pending"
     database_stub.ARTWORK_FIELD = "artwork"
     database_stub.PUBLISHED_ARTWORK_FIELD = "published_artwork"
+    database_stub.BACKFILL_CONTROL_FIELD = "memory_artwork_backfill_control"
+    database_stub.DEFAULT_BACKFILL_BATCH_SIZE = 10
+    database_stub.TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
+    database_stub.HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
     database_stub.reconciliation_job_id = lambda uid, authority_digest, style_version: hashlib.sha256(
         f"{uid}\0{authority_digest}\0{style_version}".encode("utf-8")
     ).hexdigest()
@@ -165,14 +173,69 @@ class FakeRepository:
         self.storage_cleanup_required = set()
         self.deletion_pending = set()
         self.reconciliation_jobs = {}
+        self.backfill_controls = {}
 
     def get_preferences(self, uid):
         result = copy.deepcopy(self.preferences_by_uid.get(uid, {}))
         result[artwork.artwork_db.DELETION_PENDING_FIELD] = uid in self.deletion_pending
         return result
 
-    def set_preferences(self, uid, preferences):
+    def set_preferences(self, uid, preferences, *, backfill_control_state=None):
         self.preferences_by_uid[uid] = copy.deepcopy(preferences)
+        if backfill_control_state is not None:
+            generation_id = artwork.artwork_db.reconciliation_job_id(
+                uid,
+                preferences["authority_digest"],
+                preferences["style_version"],
+            )
+            self.backfill_controls[uid] = {
+                "schema_version": "ella.memory_artwork.queue_control.v1",
+                "generation_id": generation_id,
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "state": backfill_control_state,
+                "auto_continue": False,
+                "batch_size": artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE,
+                "batch_remaining": (
+                    artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE if backfill_control_state == "running" else 0
+                ),
+                "pause_reason": "",
+                "updated_at": datetime.now(timezone.utc),
+            }
+
+    def get_backfill_control(self, uid):
+        return copy.deepcopy(self.backfill_controls.get(uid, {}))
+
+    def set_backfill_control(self, uid, *, expected_generation_id, state, auto_continue=False):
+        preferences = self.preferences_by_uid.get(uid) or {}
+        generation_id = artwork.artwork_db.reconciliation_job_id(
+            uid,
+            str(preferences.get("authority_digest") or ""),
+            str(preferences.get("style_version") or ""),
+        )
+        if uid in self.deletion_pending:
+            return {"outcome": "deletion_pending"}
+        if generation_id != expected_generation_id:
+            return {"outcome": "generation_stale"}
+        control = {
+            "schema_version": "ella.memory_artwork.queue_control.v1",
+            "generation_id": generation_id,
+            "authority_digest": preferences["authority_digest"],
+            "style_version": preferences["style_version"],
+            "state": state,
+            "auto_continue": auto_continue if state == "running" else False,
+            "batch_size": artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE,
+            "batch_remaining": (
+                0 if state != "running" or auto_continue else artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE
+            ),
+            "pause_reason": "user_paused" if state == "paused" else "user_cancelled" if state == "cancelled" else "",
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.backfill_controls[uid] = control
+        return {"outcome": "updated", "control": copy.deepcopy(control)}
+
+    def list_jobs_for_uid(self, uid):
+        return [copy.deepcopy(job) for (owner, _, _), job in self.jobs.items() if owner == uid]
 
     def get_conversation(self, uid, memory_id):
         value = self.conversations.get((uid, memory_id))
@@ -223,8 +286,19 @@ class FakeRepository:
         effective_job["created_at"] = existing_job.get("created_at") or effective_job.get("created_at")
         current = conversation.get("artwork") or {}
         if current.get("generation_key") == generation_key and current.get("status") in {"generating", "ready"}:
-            if current.get("status") == "generating" and existing_job.get("status") not in {"pending", "processing"}:
-                self.jobs[job_key] = effective_job
+            if current.get("status") == "generating":
+                if (
+                    existing_job.get("status") == "pending"
+                    and existing_job.get("origin") != artwork.TERMINAL_ENRICHMENT_ORIGIN
+                    and job_state.get("origin") == artwork.TERMINAL_ENRICHMENT_ORIGIN
+                ):
+                    self.jobs[job_key] = {
+                        **existing_job,
+                        "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                        "updated_at": job_state.get("updated_at"),
+                    }
+                elif existing_job.get("status") not in {"pending", "processing"}:
+                    self.jobs[job_key] = effective_job
             return {"outcome": "existing", "artwork": copy.deepcopy(current)}
         published = conversation.get("published_artwork") or {}
         if current.get("status") == "ready" and current.get("enrichment_revision") == enrichment_revision:
@@ -363,6 +437,9 @@ class FakeRepository:
         if uid in self.deletion_pending:
             self.reconciliation_jobs.pop(job_id, None)
             return None
+        control = self.backfill_controls.get(uid)
+        if control and (control.get("generation_id") != job_id or control.get("state") != "running"):
+            return None
         if not job or job.get("uid") != uid or job.get("status") != "pending":
             return None
         job.update(
@@ -389,12 +466,54 @@ class FakeRepository:
         job = self.jobs.get((uid, memory_id, generation_key))
         if job is None:
             return None
+        preferences = self.preferences_by_uid.get(uid) or {}
+        job.setdefault("authority_digest", preferences.get("authority_digest", ""))
+        job.setdefault("style_version", preferences.get("style_version", ""))
+        job.setdefault("origin", artwork.HISTORICAL_BACKFILL_ORIGIN)
+        if (
+            not job.get("authority_digest")
+            or not job.get("style_version")
+            or job.get("authority_digest") != preferences.get("authority_digest")
+            or job.get("style_version") != preferences.get("style_version")
+        ):
+            return None
+        control = self.backfill_controls.get(uid)
+        expected_generation_id = artwork.artwork_db.reconciliation_job_id(
+            uid,
+            str(job.get("authority_digest") or ""),
+            str(job.get("style_version") or ""),
+        )
+        if job.get("origin") != artwork.TERMINAL_ENRICHMENT_ORIGIN:
+            if control is None:
+                control = {
+                    "schema_version": "ella.memory_artwork.queue_control.v1",
+                    "generation_id": expected_generation_id,
+                    "authority_digest": job["authority_digest"],
+                    "style_version": job["style_version"],
+                    "state": "running",
+                    "auto_continue": False,
+                    "batch_size": artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE,
+                    "batch_remaining": artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE,
+                    "pause_reason": "",
+                }
+                self.backfill_controls[uid] = control
+            if control.get("generation_id") != expected_generation_id or control.get("state") != "running":
+                return None
         if job.get("status") == "processing":
             lease_expires_at = job.get("lease_expires_at")
             if not isinstance(lease_expires_at, datetime) or lease_expires_at > now:
                 return None
         elif job.get("status") != "pending":
             return None
+        if job.get("origin") != artwork.TERMINAL_ENRICHMENT_ORIGIN and not control.get("auto_continue"):
+            remaining = int(control.get("batch_remaining") or 0)
+            if remaining < 1:
+                return None
+            remaining -= 1
+            control["batch_remaining"] = remaining
+            if remaining == 0:
+                control["state"] = "paused"
+                control["pause_reason"] = "batch_complete"
         job.update(
             {
                 "status": "processing",
@@ -614,6 +733,321 @@ def _accepted_preferences(authority):
         "profile_id": authority.profile_id,
         "authority_digest": authority.authority_digest,
     }
+
+
+def _queue_job(
+    *,
+    status,
+    style=artwork.DEFAULT_STYLE_VERSION,
+    attempt_count=0,
+    lease_expires_at=None,
+):
+    return {
+        "uid": "owner-a",
+        "memory_id": f"memory-{status}-{attempt_count}-{style}",
+        "generation_key": hashlib.sha256(f"{status}-{attempt_count}-{style}".encode()).hexdigest(),
+        "authority_digest": "digest-a",
+        "style_version": style,
+        "status": status,
+        "attempt_count": attempt_count,
+        "available_at": datetime.now(timezone.utc),
+        "lease_expires_at": lease_expires_at,
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+
+def test_queue_status_separates_active_queued_retrying_failed_and_style_generations():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    jobs = [
+        _queue_job(status="completed"),
+        _queue_job(status="processing", lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1)),
+        _queue_job(status="pending"),
+        _queue_job(status="pending", attempt_count=2),
+        _queue_job(status="failed", attempt_count=5),
+        _queue_job(status="completed", style="ella.memory_artwork.style.paper-collage.v1"),
+    ]
+    for index, job in enumerate(jobs):
+        repository.jobs[("owner-a", f"memory-{index}", job["generation_key"])] = job
+    job_id = artwork.artwork_db.reconciliation_job_id("owner-a", "digest-a", artwork.DEFAULT_STYLE_VERSION)
+    repository.reconciliation_jobs[job_id] = {
+        "job_id": job_id,
+        "uid": "owner-a",
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "status": "completed",
+        "scanned": 5,
+        "pages_processed": 1,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    status = asyncio.run(service.queue_status("owner-a"))
+
+    assert status["schema_version"] == artwork.ARTWORK_QUEUE_SCHEMA_VERSION
+    assert status["generation_id"] == job_id
+    assert status["state"] == "needs_attention"
+    assert status["control_state"] == "running"
+    assert status["ready"] == 1
+    assert status["active"] == 1
+    assert status["queued"] == 1
+    assert status["retrying"] == 1
+    assert status["failed"] == 1
+    assert status["total"] == 5
+    assert status["remaining"] == 4
+    assert status["scanned"] == 5
+    by_style = {item["style_version"]: item for item in status["styles"]}
+    assert by_style["ella.memory_artwork.style.paper-collage.v1"]["ready"] == 1
+    assert by_style["ella.memory_artwork.style.paper-collage.v1"]["state"] == "paused"
+
+
+def test_legacy_job_metadata_is_recovered_only_from_its_exact_generation():
+    legacy = {"generation_key": "a" * 64}
+    conversation = {
+        "artwork": {
+            "generation_key": "a" * 64,
+            "authority_digest": "digest-a",
+            "style_version": artwork.DEFAULT_STYLE_VERSION,
+        }
+    }
+
+    assert artwork_database._legacy_job_metadata(legacy, conversation) == {
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "origin": artwork.HISTORICAL_BACKFILL_ORIGIN,
+    }
+    conversation["artwork"]["generation_key"] = "b" * 64
+    assert artwork_database._legacy_job_metadata(legacy, conversation) == {}
+
+
+def test_pause_blocks_new_reconciliation_and_generation_leases_but_does_not_revoke_active_claim():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    memory = _terminal_memory("memory-1")
+    repository.conversations[("owner-a", "memory-1")] = memory
+    asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.HISTORICAL_BACKFILL_ORIGIN))
+    generation_key = repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"]
+    reconciliation = asyncio.run(service.start_reconciliation("owner-a"))
+    generation_id = reconciliation["job_id"]
+    claimed = repository.claim_job(
+        "owner-a",
+        "memory-1",
+        generation_key,
+        lease_token="active-lease",
+        now=datetime.now(timezone.utc),
+        lease_seconds=120,
+    )
+    assert claimed is not None
+
+    paused = asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=generation_id))
+
+    assert paused["control_state"] == "paused"
+    assert (
+        repository.claim_reconciliation_job(
+            "owner-a",
+            generation_id,
+            lease_token="scan-lease",
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        )
+        is None
+    )
+    assert (
+        repository.claim_job(
+            "owner-a",
+            "memory-1",
+            generation_key,
+            lease_token="replacement-lease",
+            now=datetime.now(timezone.utc) + timedelta(minutes=3),
+            lease_seconds=120,
+        )
+        is None
+    )
+    assert repository.complete_job(
+        "owner-a",
+        "memory-1",
+        generation_key,
+        lease_token="active-lease",
+    )
+
+
+def test_cancel_is_non_destructive_and_resume_restarts_exact_style_generation():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    ready = _queue_job(status="completed")
+    pending = _queue_job(status="pending")
+    repository.jobs[("owner-a", "ready", ready["generation_key"])] = ready
+    repository.jobs[("owner-a", "pending", pending["generation_key"])] = pending
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+    generation_id = started["job_id"]
+    repository.reconciliation_jobs[generation_id]["status"] = "completed"
+
+    cancelled = asyncio.run(service.set_queue_control("owner-a", action="cancel", generation_id=generation_id))
+    assert cancelled["control_state"] == "cancelled"
+    assert cancelled["ready"] == 1
+    assert cancelled["queued"] == 1
+    assert repository.jobs[("owner-a", "ready", ready["generation_key"])]["status"] == "completed"
+
+    resumed = asyncio.run(service.set_queue_control("owner-a", action="resume", generation_id=generation_id))
+    assert resumed["control_state"] == "running"
+    assert repository.reconciliation_jobs[generation_id]["status"] == "pending"
+
+
+def test_queue_control_rejects_stale_generation_after_style_switch():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    stale_generation = artwork.artwork_db.reconciliation_job_id(
+        "owner-a",
+        "digest-a",
+        "ella.memory_artwork.style.paper-collage.v1",
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=stale_generation))
+
+    assert failure.value.code == "memory_artwork_queue_generation_stale"
+
+
+def test_historical_backfill_stops_after_ten_claims_while_new_enrichment_remains_immediate():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    generation_keys = []
+    for index in range(12):
+        memory_id = f"history-{index}"
+        repository.conversations[("owner-a", memory_id)] = _terminal_memory(memory_id)
+        asyncio.run(service.enqueue("owner-a", memory_id, origin=artwork.HISTORICAL_BACKFILL_ORIGIN))
+        job = next(job for (owner, item, _), job in repository.jobs.items() if owner == "owner-a" and item == memory_id)
+        assert job["authority_digest"] == "digest-a"
+        assert job["style_version"] == artwork.DEFAULT_STYLE_VERSION
+        assert job["origin"] == artwork.HISTORICAL_BACKFILL_ORIGIN
+        generation_keys.append((memory_id, job["generation_key"]))
+
+    for index, (memory_id, generation_key) in enumerate(generation_keys[:10]):
+        lease_token = f"batch-{index}"
+        assert repository.claim_job(
+            "owner-a",
+            memory_id,
+            generation_key,
+            lease_token=lease_token,
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        )
+        assert repository.complete_job("owner-a", memory_id, generation_key, lease_token=lease_token)
+
+    control = repository.backfill_controls["owner-a"]
+    assert control["state"] == "paused"
+    assert control["batch_remaining"] == 0
+    assert control["pause_reason"] == "batch_complete"
+    memory_id, generation_key = generation_keys[10]
+    assert (
+        repository.claim_job(
+            "owner-a",
+            memory_id,
+            generation_key,
+            lease_token="blocked-eleventh",
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        )
+        is None
+    )
+
+    repository.conversations[("owner-a", "new-memory")] = _terminal_memory("new-memory")
+    asyncio.run(service.enqueue("owner-a", "new-memory"))
+    new_job = next(
+        job for (owner, item, _), job in repository.jobs.items() if owner == "owner-a" and item == "new-memory"
+    )
+    assert new_job["origin"] == artwork.TERMINAL_ENRICHMENT_ORIGIN
+    assert repository.claim_job(
+        "owner-a",
+        "new-memory",
+        new_job["generation_key"],
+        lease_token="new-memory-lease",
+        now=datetime.now(timezone.utc),
+        lease_seconds=120,
+    )
+
+
+def test_terminal_event_promotes_an_existing_pending_historical_job():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.HISTORICAL_BACKFILL_ORIGIN))
+    first_job = next(iter(repository.jobs.values()))
+    assert first_job["origin"] == artwork.HISTORICAL_BACKFILL_ORIGIN
+
+    result = asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.TERMINAL_ENRICHMENT_ORIGIN))
+
+    assert result["outcome"] == "existing"
+    assert next(iter(repository.jobs.values()))["origin"] == artwork.TERMINAL_ENRICHMENT_ORIGIN
+
+
+def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit_opt_in():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    generation_id = artwork.artwork_db.reconciliation_job_id("owner-a", "digest-a", artwork.DEFAULT_STYLE_VERSION)
+    repository.backfill_controls["owner-a"] = {
+        "schema_version": "ella.memory_artwork.queue_control.v1",
+        "generation_id": generation_id,
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "state": "paused",
+        "auto_continue": False,
+        "batch_size": 10,
+        "batch_remaining": 0,
+        "pause_reason": "batch_complete",
+    }
+
+    manual = asyncio.run(service.set_queue_control("owner-a", action="resume", generation_id=generation_id))
+    assert manual["control_state"] == "running"
+    assert manual["auto_continue"] is False
+    assert manual["batch_remaining"] == 10
+
+    asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=generation_id))
+    automatic = asyncio.run(
+        service.set_queue_control("owner-a", action="resume", generation_id=generation_id, auto_continue=True)
+    )
+    assert automatic["control_state"] == "running"
+    assert automatic["auto_continue"] is True
+    assert automatic["batch_remaining"] == 0
+
+
+def test_provider_retry_backoff_is_bounded_and_not_a_tight_loop():
+    assert [artwork._worker_retry_delay_seconds(attempt) for attempt in range(1, 7)] == [30, 120, 300, 900, 900, 900]
 
 
 def test_prompt_is_semantically_specific_and_varies_composition_by_memory():
@@ -1590,6 +2024,23 @@ def test_stale_source_or_style_fails_before_provider_egress(drift):
         repository.preferences_by_uid["owner-a"]["style_version"] = "ella.memory_artwork.style.paper-collage.v1"
     else:
         repository.preferences_by_uid["owner-a"]["consent"] = "declined"
+
+    if drift == "style":
+        conversation = repository.get_conversation("owner-a", "memory-1") or {}
+        generation_key = str(((conversation.get("artwork") or {}).get("generation_key") or ""))
+        assert (
+            repository.claim_job(
+                "owner-a",
+                "memory-1",
+                generation_key,
+                lease_token="stale-style-lease",
+                now=datetime.now(timezone.utc),
+                lease_seconds=120,
+            )
+            is None
+        )
+        assert provider.calls == 0
+        return
 
     with pytest.raises(artwork.MemoryArtworkError):
         _run_claimed_process(service, repository)
@@ -2791,6 +3242,67 @@ def test_firestore_reservation_writes_generation_and_dispatch_in_one_transaction
     assert job_ref.state == job_state
 
 
+def test_firestore_terminal_reservation_promotes_existing_pending_historical_job():
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def update(self, reference, payload):
+            reference.state.update(copy.deepcopy(payload))
+
+        def set(self, reference, payload):
+            reference.state = copy.deepcopy(payload)
+
+    generation_key = "a" * 64
+    conversation = _terminal_memory("memory-1")
+    conversation[artwork_database.ARTWORK_FIELD] = {
+        "status": "generating",
+        "generation_key": generation_key,
+        "enrichment_revision": "summary-memory-1",
+    }
+    job_ref = Reference(
+        {
+            "status": "pending",
+            "uid": "owner-a",
+            "memory_id": "memory-1",
+            "generation_key": generation_key,
+            "origin": artwork.HISTORICAL_BACKFILL_ORIGIN,
+        }
+    )
+    now = datetime.now(timezone.utc)
+
+    result = artwork_database._reserve_generation_transaction(
+        Transaction(),
+        Reference({"id": "owner-a"}),
+        Reference(conversation),
+        enrichment_revision="summary-memory-1",
+        generation_key=generation_key,
+        artwork_state=conversation[artwork_database.ARTWORK_FIELD],
+        job_ref=job_ref,
+        job_state={
+            **job_ref.state,
+            "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+            "updated_at": now,
+        },
+    )
+
+    assert result["outcome"] == "existing"
+    assert job_ref.state["origin"] == artwork.TERMINAL_ENRICHMENT_ORIGIN
+    assert job_ref.state["updated_at"] == now
+
+
 def test_firestore_style_refresh_keeps_published_art_until_atomic_finalize():
     class Snapshot:
         def __init__(self, state, *, exists=True):
@@ -2973,7 +3485,7 @@ def test_firestore_retry_reservation_preserves_attempt_history():
     assert job_ref.state["attempt_count"] == 0
 
 
-def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
+def test_pending_job_query_filters_control_before_applying_worker_limit(monkeypatch):
     now = datetime.now(timezone.utc)
 
     class Snapshot:
@@ -3008,7 +3520,15 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
         [
             Snapshot(
                 "pending-first",
-                {"status": "pending", "memory_id": "memory-1", "available_at": now - timedelta(minutes=2)},
+                {
+                    "status": "pending",
+                    "uid": "owner-a",
+                    "memory_id": "memory-1",
+                    "authority_digest": "digest-a",
+                    "style_version": artwork.DEFAULT_STYLE_VERSION,
+                    "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                    "available_at": now - timedelta(minutes=2),
+                },
             )
         ]
     )
@@ -3018,7 +3538,11 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
                 "processing-first",
                 {
                     "status": "processing",
+                    "uid": "owner-a",
                     "memory_id": "memory-2",
+                    "authority_digest": "digest-a",
+                    "style_version": artwork.DEFAULT_STYLE_VERSION,
+                    "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
                     "lease_expires_at": now - timedelta(minutes=1),
                 },
             )
@@ -3027,13 +3551,29 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
 
     class Database:
         def collection(self, name):
-            assert name == artwork_database.JOB_COLLECTION
-            return Collection()
+            if name == artwork_database.JOB_COLLECTION:
+                return Collection()
+            assert name == "users"
+            return UserCollection()
 
     class Collection:
         def where(self, field, operator, value):
             query = pending_query if value == "pending" else processing_query
             return query.where(field, operator, value)
+
+    class UserDocument:
+        id = "owner-a"
+
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {artwork_database.PREFERENCES_FIELD: _accepted_preferences(_authority())},
+            )
+
+    class UserCollection:
+        def document(self, uid):
+            assert uid == "owner-a"
+            return UserDocument()
 
     monkeypatch.setattr(artwork_database, "db", Database())
 
@@ -3044,13 +3584,13 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
         ("where", "status", "==", "pending"),
         ("where", "available_at", "<=", now),
         ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
+        ("limit", 8),
     ]
     assert processing_query.operations == [
         ("where", "status", "==", "processing"),
         ("where", "lease_expires_at", "<=", now),
         ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
+        ("limit", 8),
     ]
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     artwork_indexes = {
@@ -3068,8 +3608,196 @@ def test_pending_job_query_is_bounded_to_due_work_and_ordered(monkeypatch):
     ) in artwork_indexes
 
 
+def test_pending_job_selection_skips_paused_history_to_reach_terminal_work(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class Snapshot:
+        def __init__(self, identifier, payload):
+            self.id = identifier
+            self._payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    paused_preferences = _accepted_preferences(_authority())
+    terminal_preferences = {
+        **paused_preferences,
+        "authority_digest": "digest-b",
+        "binding_id": "binding-b",
+        "profile_id": "profile-b",
+    }
+    pending = [
+        Snapshot(
+            f"paused-{index}",
+            {
+                "status": "pending",
+                "uid": "owner-paused",
+                "memory_id": f"history-{index}",
+                "authority_digest": "digest-a",
+                "style_version": artwork.DEFAULT_STYLE_VERSION,
+                "origin": artwork.HISTORICAL_BACKFILL_ORIGIN,
+                "available_at": now - timedelta(minutes=10 - index),
+            },
+        )
+        for index in range(3)
+    ]
+    pending.append(
+        Snapshot(
+            "terminal-new",
+            {
+                "status": "pending",
+                "uid": "owner-terminal",
+                "memory_id": "new-memory",
+                "authority_digest": "digest-b",
+                "style_version": artwork.DEFAULT_STYLE_VERSION,
+                "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                "available_at": now - timedelta(minutes=1),
+            },
+        )
+    )
+
+    class Query:
+        def __init__(self, values):
+            self.values = values
+
+        def where(self, *args):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            self.values = self.values[:value]
+            return self
+
+        def stream(self):
+            return iter(self.values)
+
+    class JobCollection:
+        def where(self, field, operator, value):
+            return Query(pending if value == "pending" else [])
+
+    class UserDocument:
+        def __init__(self, uid):
+            self.id = uid
+
+        def get(self):
+            preferences = paused_preferences if self.id == "owner-paused" else terminal_preferences
+            control = {
+                "schema_version": "ella.memory_artwork.queue_control.v1",
+                "generation_id": artwork_database.reconciliation_job_id(
+                    self.id,
+                    preferences["authority_digest"],
+                    preferences["style_version"],
+                ),
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "state": "paused" if self.id == "owner-paused" else "running",
+            }
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.PREFERENCES_FIELD: preferences,
+                    artwork_database.BACKFILL_CONTROL_FIELD: control,
+                },
+            )
+
+    class UserCollection:
+        def document(self, uid):
+            return UserDocument(uid)
+
+    class Database:
+        def collection(self, name):
+            return JobCollection() if name == artwork_database.JOB_COLLECTION else UserCollection()
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+
+    jobs = artwork_database.list_pending_jobs(limit=1, now=now)
+
+    assert [job["job_id"] for job in jobs] == ["terminal-new"]
+
+
+def test_legacy_job_migration_commits_firestore_writes_in_safe_chunks(monkeypatch):
+    now = datetime.now(timezone.utc)
+    generation_key = "a" * 64
+
+    class Reference:
+        pass
+
+    class Snapshot:
+        def __init__(self, index):
+            self.id = f"job-{index}"
+            self.reference = Reference()
+            self._payload = {
+                "uid": "owner-a",
+                "memory_id": f"memory-{index}",
+                "generation_key": generation_key,
+                "status": "pending",
+                "available_at": now,
+            }
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    snapshots = [Snapshot(index) for index in range(401)]
+
+    class Query:
+        def where(self, *args):
+            return self
+
+        def stream(self):
+            return iter(snapshots)
+
+    class Batch:
+        def __init__(self, database):
+            self.database = database
+            self.count = 0
+
+        def set(self, reference, payload, merge=False):
+            assert merge is True
+            self.count += 1
+
+        def commit(self):
+            self.database.commits.append(self.count)
+
+    class Database:
+        def __init__(self):
+            self.commits = []
+
+        def collection(self, name):
+            assert name == artwork_database.JOB_COLLECTION
+            return Query()
+
+        def batch(self):
+            return Batch(self)
+
+    class ConversationReference:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.ARTWORK_FIELD: {
+                        "generation_key": generation_key,
+                        "authority_digest": "digest-a",
+                        "style_version": artwork.DEFAULT_STYLE_VERSION,
+                    }
+                },
+            )
+
+    database = Database()
+    monkeypatch.setattr(artwork_database, "db", database)
+    monkeypatch.setattr(artwork_database, "_conversation_ref", lambda uid, memory_id: ConversationReference())
+
+    jobs = artwork_database.list_jobs_for_uid("owner-a")
+
+    assert len(jobs) == 401
+    assert database.commits == [artwork_database.FIRESTORE_MIGRATION_BATCH_SIZE, 1]
+
+
 def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeypatch):
     now = datetime.now(timezone.utc)
+    authority_digest = "digest-a"
+    style_version = artwork.DEFAULT_STYLE_VERSION
 
     class Snapshot:
         def __init__(self, identifier, payload):
@@ -3099,9 +3827,33 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
         def stream(self):
             return iter(self.payloads)
 
-    pending_query = Query([Snapshot("job-pending", {"status": "pending", "available_at": now - timedelta(minutes=2)})])
+    pending_query = Query(
+        [
+            Snapshot(
+                "job-pending",
+                {
+                    "uid": "owner-a",
+                    "authority_digest": authority_digest,
+                    "style_version": style_version,
+                    "status": "pending",
+                    "available_at": now - timedelta(minutes=2),
+                },
+            )
+        ]
+    )
     processing_query = Query(
-        [Snapshot("job-processing", {"status": "processing", "lease_expires_at": now - timedelta(minutes=1)})]
+        [
+            Snapshot(
+                "job-processing",
+                {
+                    "uid": "owner-b",
+                    "authority_digest": authority_digest,
+                    "style_version": style_version,
+                    "status": "processing",
+                    "lease_expires_at": now - timedelta(minutes=1),
+                },
+            )
+        ]
     )
 
     class Collection:
@@ -3114,7 +3866,20 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
             assert name == artwork_database.RECONCILIATION_COLLECTION
             return Collection()
 
+    class UserReference:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.PREFERENCES_FIELD: {
+                        "authority_digest": authority_digest,
+                        "style_version": style_version,
+                    }
+                },
+            )
+
     monkeypatch.setattr(artwork_database, "db", Database())
+    monkeypatch.setattr(artwork_database, "_user_ref", lambda uid: UserReference())
 
     jobs = artwork_database.list_pending_reconciliation_jobs(limit=2, now=now)
 
@@ -3123,13 +3888,13 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
         ("where", "status", "==", "pending"),
         ("where", "available_at", "<=", now),
         ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
+        ("limit", 8),
     ]
     assert processing_query.operations == [
         ("where", "status", "==", "processing"),
         ("where", "lease_expires_at", "<=", now),
         ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 2),
+        ("limit", 8),
     ]
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     reconciliation_indexes = {
@@ -3139,6 +3904,96 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
     }
     assert (("status", "ASCENDING"), ("available_at", "ASCENDING")) in reconciliation_indexes
     assert (("status", "ASCENDING"), ("lease_expires_at", "ASCENDING")) in reconciliation_indexes
+
+
+def test_pending_reconciliation_filters_paused_users_before_worker_limit(monkeypatch):
+    now = datetime.now(timezone.utc)
+    authority_digest = "digest-a"
+    style_version = artwork.DEFAULT_STYLE_VERSION
+
+    class Snapshot:
+        def __init__(self, identifier, uid, available_at):
+            self.id = identifier
+            self.uid = uid
+            self.available_at = available_at
+
+        def to_dict(self):
+            return {
+                "uid": self.uid,
+                "authority_digest": authority_digest,
+                "style_version": style_version,
+                "status": "pending",
+                "available_at": self.available_at,
+            }
+
+    snapshots = [Snapshot(f"paused-{index}", "owner-paused", now - timedelta(minutes=20 - index)) for index in range(5)]
+    snapshots.append(Snapshot("eligible", "owner-running", now - timedelta(minutes=1)))
+
+    class Query:
+        def __init__(self):
+            self._status = None
+            self._cursor = None
+            self._limit = None
+
+        def where(self, field, operator, value):
+            self._status = value if field == "status" else self._status
+            return self
+
+        def order_by(self, field, direction):
+            return self
+
+        def start_after(self, cursor):
+            self._cursor = cursor
+            return self
+
+        def limit(self, value):
+            self._limit = value
+            return self
+
+        def stream(self):
+            values = snapshots if self._status == "pending" else []
+            if self._cursor is not None:
+                cursor_index = next(index for index, snapshot in enumerate(values) if snapshot.id == self._cursor.id)
+                values = values[cursor_index + 1 :]
+            return iter(values[: self._limit])
+
+    class Database:
+        def collection(self, name):
+            assert name == artwork_database.RECONCILIATION_COLLECTION
+            return Query()
+
+    class UserReference:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get(self):
+            generation_id = artwork_database.reconciliation_job_id(self.uid, authority_digest, style_version)
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    artwork_database.PREFERENCES_FIELD: {
+                        "authority_digest": authority_digest,
+                        "style_version": style_version,
+                    },
+                    artwork_database.BACKFILL_CONTROL_FIELD: {
+                        "schema_version": "ella.memory_artwork.queue_control.v1",
+                        "generation_id": generation_id,
+                        "authority_digest": authority_digest,
+                        "style_version": style_version,
+                        "state": "running" if self.uid == "owner-running" else "paused",
+                    },
+                },
+            )
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+    monkeypatch.setattr(artwork_database, "_user_ref", UserReference)
+    artwork_database._due_scan_cursors.clear()
+
+    first_page = artwork_database.list_pending_reconciliation_jobs(limit=1, now=now)
+    jobs = artwork_database.list_pending_reconciliation_jobs(limit=1, now=now)
+
+    assert first_page == []
+    assert [job["job_id"] for job in jobs] == ["eligible"]
 
 
 def test_reconciliation_claim_deletes_job_when_owner_is_missing():
@@ -3929,6 +4784,61 @@ def test_backfill_route_preserves_hexadecimal_legacy_memory_cursor(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [("owner-a", legacy_cursor)]
+
+
+def test_queue_routes_bind_status_and_control_to_authenticated_owner(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_queue_router_test_module")
+    calls = []
+
+    class Service:
+        async def queue_status(self, uid):
+            calls.append(("status", uid))
+            return {"schema_version": artwork.ARTWORK_QUEUE_SCHEMA_VERSION, "generation_id": "a" * 64}
+
+        async def set_queue_control(self, uid, *, action, generation_id, auto_continue=False):
+            calls.append(("control", uid, action, generation_id, auto_continue))
+            return {
+                "schema_version": artwork.ARTWORK_QUEUE_SCHEMA_VERSION,
+                "generation_id": generation_id,
+                "control_state": "paused",
+            }
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+    client = TestClient(app)
+
+    status_response = client.get("/v1/ella/memory-artwork/queue")
+    control_response = client.post(
+        "/v1/ella/memory-artwork/queue/control",
+        json={"action": "pause", "generation_id": "a" * 64},
+    )
+
+    assert status_response.status_code == 200
+    assert control_response.status_code == 200
+    assert calls == [("status", "owner-a"), ("control", "owner-a", "pause", "a" * 64, False)]
+
+
+def test_queue_control_route_returns_conflict_for_stale_generation(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_queue_stale_router_test_module")
+
+    class Service:
+        async def set_queue_control(self, uid, *, action, generation_id, auto_continue=False):
+            raise artwork.MemoryArtworkError("memory_artwork_queue_generation_stale")
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).post(
+        "/v1/ella/memory-artwork/queue/control",
+        json={"action": "resume", "generation_id": "a" * 64},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "memory_artwork_queue_generation_stale"
 
 
 def test_mounted_internal_process_route_uses_durable_worker_job_claim(monkeypatch):
