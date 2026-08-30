@@ -3584,11 +3584,13 @@ def test_pending_job_query_filters_control_before_applying_worker_limit(monkeypa
         ("where", "status", "==", "pending"),
         ("where", "available_at", "<=", now),
         ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
+        ("limit", 8),
     ]
     assert processing_query.operations == [
         ("where", "status", "==", "processing"),
         ("where", "lease_expires_at", "<=", now),
         ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
+        ("limit", 8),
     ]
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     artwork_indexes = {
@@ -3662,6 +3664,10 @@ def test_pending_job_selection_skips_paused_history_to_reach_terminal_work(monke
             return self
 
         def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            self.values = self.values[:value]
             return self
 
         def stream(self):
@@ -3882,11 +3888,13 @@ def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeyp
         ("where", "status", "==", "pending"),
         ("where", "available_at", "<=", now),
         ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
+        ("limit", 8),
     ]
     assert processing_query.operations == [
         ("where", "status", "==", "processing"),
         ("where", "lease_expires_at", "<=", now),
         ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
+        ("limit", 8),
     ]
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     reconciliation_indexes = {
@@ -3922,17 +3930,32 @@ def test_pending_reconciliation_filters_paused_users_before_worker_limit(monkeyp
     snapshots.append(Snapshot("eligible", "owner-running", now - timedelta(minutes=1)))
 
     class Query:
+        def __init__(self):
+            self._status = None
+            self._cursor = None
+            self._limit = None
+
         def where(self, field, operator, value):
-            self.status = value if field == "status" else getattr(self, "status", None)
+            self._status = value if field == "status" else self._status
             return self
 
         def order_by(self, field, direction):
             return self
 
+        def start_after(self, cursor):
+            self._cursor = cursor
+            return self
+
+        def limit(self, value):
+            self._limit = value
+            return self
+
         def stream(self):
-            if getattr(self, "status", None) == "pending":
-                return iter(snapshots)
-            return iter([])
+            values = snapshots if self._status == "pending" else []
+            if self._cursor is not None:
+                cursor_index = next(index for index, snapshot in enumerate(values) if snapshot.id == self._cursor.id)
+                values = values[cursor_index + 1 :]
+            return iter(values[: self._limit])
 
     class Database:
         def collection(self, name):
@@ -3964,9 +3987,12 @@ def test_pending_reconciliation_filters_paused_users_before_worker_limit(monkeyp
 
     monkeypatch.setattr(artwork_database, "db", Database())
     monkeypatch.setattr(artwork_database, "_user_ref", UserReference)
+    artwork_database._due_scan_cursors.clear()
 
+    first_page = artwork_database.list_pending_reconciliation_jobs(limit=1, now=now)
     jobs = artwork_database.list_pending_reconciliation_jobs(limit=1, now=now)
 
+    assert first_page == []
     assert [job["job_id"] for job in jobs] == ["eligible"]
 
 

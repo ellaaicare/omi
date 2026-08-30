@@ -21,8 +21,12 @@ JOB_COLLECTION = "ella_memory_artwork_jobs"
 RECONCILIATION_COLLECTION = "ella_memory_artwork_reconciliation_jobs"
 DEFAULT_BACKFILL_BATCH_SIZE = 10
 FIRESTORE_MIGRATION_BATCH_SIZE = 400
+WORKER_SCAN_PAGE_MULTIPLIER = 4
+WORKER_SCAN_PAGE_MAX = 100
 TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
 HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
+
+_due_scan_cursors: dict[tuple[str, str], Any] = {}
 
 
 def _user_ref(uid: str):
@@ -137,20 +141,53 @@ def get_reconciliation_job(uid: str, job_id: str) -> Optional[dict[str, Any]]:
     return {**payload, "job_id": snapshot.id}
 
 
+def _bounded_due_snapshots(
+    collection_name: str,
+    *,
+    status: str,
+    due_field: str,
+    current_time: datetime,
+    worker_limit: int,
+) -> list[Any]:
+    page_size = min(
+        WORKER_SCAN_PAGE_MAX,
+        max(1, worker_limit) * WORKER_SCAN_PAGE_MULTIPLIER,
+    )
+    query = (
+        db.collection(collection_name)
+        .where("status", "==", status)
+        .where(due_field, "<=", current_time)
+        .order_by(due_field, direction=firestore.Query.ASCENDING)
+    )
+    cursor_key = (collection_name, status)
+    cursor = _due_scan_cursors.get(cursor_key)
+    if cursor is not None:
+        query = query.start_after(cursor)
+    snapshots = list(query.limit(page_size).stream())
+    if len(snapshots) == page_size:
+        _due_scan_cursors[cursor_key] = snapshots[-1]
+    else:
+        _due_scan_cursors.pop(cursor_key, None)
+    return snapshots
+
+
 def list_pending_reconciliation_jobs(*, limit: int = 5, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
-    collection = db.collection(RECONCILIATION_COLLECTION)
-    snapshots = list(
-        collection.where("status", "==", "pending")
-        .where("available_at", "<=", current_time)
-        .order_by("available_at", direction=firestore.Query.ASCENDING)
-        .stream()
+    snapshots = _bounded_due_snapshots(
+        RECONCILIATION_COLLECTION,
+        status="pending",
+        due_field="available_at",
+        current_time=current_time,
+        worker_limit=limit,
     )
     snapshots.extend(
-        collection.where("status", "==", "processing")
-        .where("lease_expires_at", "<=", current_time)
-        .order_by("lease_expires_at", direction=firestore.Query.ASCENDING)
-        .stream()
+        _bounded_due_snapshots(
+            RECONCILIATION_COLLECTION,
+            status="processing",
+            due_field="lease_expires_at",
+            current_time=current_time,
+            worker_limit=limit,
+        )
     )
     pending: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -566,18 +603,21 @@ def reserve_generation(
 
 def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
-    collection = db.collection(JOB_COLLECTION)
-    snapshots = list(
-        collection.where("status", "==", "pending")
-        .where("available_at", "<=", current_time)
-        .order_by("available_at", direction=firestore.Query.ASCENDING)
-        .stream()
+    snapshots = _bounded_due_snapshots(
+        JOB_COLLECTION,
+        status="pending",
+        due_field="available_at",
+        current_time=current_time,
+        worker_limit=limit,
     )
     snapshots.extend(
-        collection.where("status", "==", "processing")
-        .where("lease_expires_at", "<=", current_time)
-        .order_by("lease_expires_at", direction=firestore.Query.ASCENDING)
-        .stream()
+        _bounded_due_snapshots(
+            JOB_COLLECTION,
+            status="processing",
+            due_field="lease_expires_at",
+            current_time=current_time,
+            worker_limit=limit,
+        )
     )
     pending: list[dict[str, Any]] = []
     seen: set[str] = set()
