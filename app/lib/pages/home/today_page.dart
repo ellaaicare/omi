@@ -51,6 +51,11 @@ typedef _HomeArtworkAuthoritySnapshot = ({
   String profileBindingId,
   int generation,
 });
+typedef _ArtworkStudioSnapshot = ({
+  MemoryArtworkPreferences preferences,
+  _ArtworkBackfillUiState backfillState,
+  bool styleSaving,
+});
 
 enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
 
@@ -199,8 +204,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _homeArtworkReloadScheduled = false;
   Future<MemoryArtworkBackfillPage?>? _homeArtworkBackfillInFlight;
   _HomeArtworkAuthoritySnapshot? _homeArtworkBackfillAuthority;
+  Timer? _homeArtworkBackfillPollTimer;
   _ArtworkBackfillUiState _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
   bool _homeArtworkStyleSaving = false;
+  final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
   MemoryArtworkPreferences? _homeArtworkPreferences;
@@ -308,6 +315,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _resumeNecklaceAfterPhoneCapture = null;
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
+    _homeArtworkBackfillPollTimer?.cancel();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -326,7 +334,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeMemoryLayout = MemoryGalleryLayout.journal;
         _homeMemorySort = MemoryGallerySort.recent;
         _homeArtworkPreferences = null;
+        _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
+        _homeArtworkStyleSaving = false;
       });
+      _publishHomeArtworkStudioState();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return;
@@ -347,6 +358,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       unawaited(_syncTodayCardAuthority(forceReload: true));
       if (_guardianAvailable) unawaited(_loadWhisperState());
+      if (_homeArtworkPreferences?.releaseEnabled == true) unawaited(_advanceHomeArtworkBackfill());
     }
   }
 
@@ -362,6 +374,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _scrollController
       ..removeListener(_handleHomeScroll)
       ..dispose();
+    _homeArtworkBackfillPollTimer?.cancel();
+    _homeArtworkStudioState.dispose();
     super.dispose();
   }
 
@@ -412,10 +426,28 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         storage.aiConsentAuthorityGeneration == snapshot.generation;
   }
 
+  void _publishHomeArtworkStudioState() {
+    final preferences = _homeArtworkPreferences;
+    _homeArtworkStudioState.value = preferences == null
+        ? null
+        : (
+            preferences: preferences,
+            backfillState: _homeArtworkBackfillState,
+            styleSaving: _homeArtworkStyleSaving,
+          );
+  }
+
   Future<void> _loadHomeArtworkPreferences() async {
     final authority = _captureHomeArtworkAuthority();
     if (authority == null) {
-      if (mounted && _homeArtworkPreferences != null) setState(() => _homeArtworkPreferences = null);
+      if (mounted && (_homeArtworkPreferences != null || _homeArtworkStyleSaving)) {
+        setState(() {
+          _homeArtworkPreferences = null;
+          _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
+          _homeArtworkStyleSaving = false;
+        });
+        _publishHomeArtworkStudioState();
+      }
       return;
     }
     MemoryArtworkPreferences? preferences;
@@ -431,6 +463,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _homeArtworkBackfillState =
           preferences == null ? _ArtworkBackfillUiState.idle : _storedHomeArtworkBackfillState(preferences, authority);
     });
+    _publishHomeArtworkStudioState();
     if (preferences?.releaseEnabled == true) unawaited(_advanceHomeArtworkBackfill());
   }
 
@@ -478,6 +511,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }) {
     if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
       setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.running);
+      _publishHomeArtworkStudioState();
     }
     final rawOperation = _runHomeArtworkBackfill(preferences: preferences, authority: authority, restart: restart);
     late final Future<MemoryArtworkBackfillPage?> operation;
@@ -488,13 +522,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           _homeArtworkBackfillState = storedState == _ArtworkBackfillUiState.complete
               ? storedState
               : page?.hasMore == true
-                  ? _ArtworkBackfillUiState.moreAvailable
+                  ? _ArtworkBackfillUiState.running
                   : page == null
                       ? _ArtworkBackfillUiState.needsAttention
                       : _ArtworkBackfillUiState.idle;
         });
+        _publishHomeArtworkStudioState();
+        if (page?.hasMore == true) {
+          _scheduleHomeArtworkBackfillPoll();
+        } else {
+          _homeArtworkBackfillPollTimer?.cancel();
+        }
       } else if (mounted && identical(_homeArtworkBackfillInFlight, operation)) {
         setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.idle);
+        _publishHomeArtworkStudioState();
       }
       return page;
     }).whenComplete(() {
@@ -506,6 +547,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkBackfillAuthority = authority;
     _homeArtworkBackfillInFlight = operation;
     return operation;
+  }
+
+  void _scheduleHomeArtworkBackfillPoll() {
+    _homeArtworkBackfillPollTimer?.cancel();
+    _homeArtworkBackfillPollTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      unawaited(_advanceHomeArtworkBackfill());
+    });
   }
 
   Future<MemoryArtworkBackfillPage?> _runHomeArtworkBackfill({
@@ -579,6 +628,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     if (_homeArtworkStyleSaving) return;
     setState(() => _homeArtworkStyleSaving = true);
+    _publishHomeArtworkStudioState();
     MemoryArtworkPreferenceUpdate result;
     try {
       result = await _memoryArtworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
@@ -586,8 +636,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _scheduleHomeArtworkReload();
       return;
     } finally {
-      if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+      if (mounted) {
         setState(() => _homeArtworkStyleSaving = false);
+        _publishHomeArtworkStudioState();
       }
     }
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
@@ -603,6 +654,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         releaseEnabled: true,
       ),
     );
+    _publishHomeArtworkStudioState();
     _showHomeMessage(context.l10n.memoryArtworkStyleUpdated);
     unawaited(_advanceHomeArtworkBackfill(restart: true));
   }
@@ -620,18 +672,28 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
       ),
-      builder: (sheetContext) => _ArtworkStudioSheet(
-        preferences: preferences,
-        backfillState: _homeArtworkBackfillState,
-        styleSaving: _homeArtworkStyleSaving,
-        onStyleSelected: (styleVersion) {
-          Navigator.pop(sheetContext);
-          unawaited(_selectHomeArtworkStyle(styleVersion));
-        },
-        onContinue: () {
-          final restart = _homeArtworkBackfillState == _ArtworkBackfillUiState.complete;
-          Navigator.pop(sheetContext);
-          unawaited(_advanceHomeArtworkBackfill(restart: restart));
+      builder: (sheetContext) => ValueListenableBuilder<_ArtworkStudioSnapshot?>(
+        valueListenable: _homeArtworkStudioState,
+        builder: (context, snapshot, _) {
+          final current = snapshot ??
+              (
+                preferences: preferences,
+                backfillState: _homeArtworkBackfillState,
+                styleSaving: _homeArtworkStyleSaving,
+              );
+          return _ArtworkStudioSheet(
+            preferences: current.preferences,
+            backfillState: current.backfillState,
+            styleSaving: current.styleSaving,
+            onStyleSelected: (styleVersion) {
+              Navigator.pop(sheetContext);
+              unawaited(_selectHomeArtworkStyle(styleVersion));
+            },
+            onContinue: () {
+              final restart = current.backfillState == _ArtworkBackfillUiState.complete;
+              unawaited(_advanceHomeArtworkBackfill(restart: restart));
+            },
+          );
         },
       ),
     );
@@ -1270,6 +1332,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return _homeMemorySort == MemoryGallerySort.recent ? result : -result;
       });
     final showDayGallery = _homeMemoryLayout == MemoryGalleryLayout.days;
+    final memoriesHydrating = orderedMemories.isEmpty && !conversations.hasLoadedConversations;
     final heroMemory = orderedMemories.isEmpty || showDayGallery ? null : orderedMemories.first;
     final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);
@@ -1341,7 +1404,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 12, EllaSizes.screenPadding, 0),
                     sliver: SliverToBoxAdapter(
                       child: heroMemory == null
-                          ? const _MemoryJournalEmptyState()
+                          ? memoriesHydrating
+                              ? const _MemoryJournalLoadingState()
+                              : const _MemoryJournalEmptyState()
                           : MemoryGalleryCard(
                               conversation: heroMemory,
                               layout: MemoryGalleryLayout.journal,
@@ -2740,6 +2805,48 @@ class _MemoryJournalEmptyState extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _MemoryJournalLoadingState extends StatelessWidget {
+  const _MemoryJournalLoadingState();
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    return EllaCardSurface(
+      key: const Key('memory-journal-loading'),
+      borderRadius: 20,
+      color: EllaColors.elevatedCard,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 24, 20, 26),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: reduceMotion
+                  ? const Icon(Icons.auto_awesome_rounded, color: EllaColors.tealDeep)
+                  : const EllaBreathingDot(active: true, live: true),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    context.l10n.todayMemoryCanvasLoadingHeadline,
+                    style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.15),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(context.l10n.todayMemoryCanvasLoadingBody, style: EllaTextStyles.secondary),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

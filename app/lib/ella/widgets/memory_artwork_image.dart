@@ -165,6 +165,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   bool _shouldRetry(MemoryArtworkResult result) {
+    if (result.refreshPending) return true;
     if (result.status == MemoryArtworkResultStatus.generating) return true;
     if (result.status != MemoryArtworkResultStatus.unavailable) return false;
     return const {

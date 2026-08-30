@@ -38,6 +38,9 @@ class MemoryArtworkResult {
     this.styleVersion = '',
     this.enrichmentRevision = '',
     this.failureCode = '',
+    this.refreshPending = false,
+    this.refreshFailureCode = '',
+    this.requestedStyleVersion = '',
   });
 
   final MemoryArtworkResultStatus status;
@@ -46,6 +49,9 @@ class MemoryArtworkResult {
   final String styleVersion;
   final String enrichmentRevision;
   final String failureCode;
+  final bool refreshPending;
+  final String refreshFailureCode;
+  final String requestedStyleVersion;
 
   bool get isReady => status == MemoryArtworkResultStatus.ready && url != null;
 }
@@ -185,6 +191,9 @@ class MemoryArtworkApi {
       styleVersion: payload['style_version']?.toString().trim() ?? '',
       enrichmentRevision: payload['enrichment_revision']?.toString().trim() ?? '',
       failureCode: payload['failure_code']?.toString().trim() ?? '',
+      refreshPending: payload['refresh_pending'] == true,
+      refreshFailureCode: payload['refresh_failure_code']?.toString().trim() ?? '',
+      requestedStyleVersion: payload['requested_style_version']?.toString().trim() ?? '',
     );
   }
 

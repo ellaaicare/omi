@@ -800,7 +800,7 @@ class SharedPreferencesUtil {
     if (expectedUid != null && expectedUid != currentUid) return null;
     if (expectedProfileBindingId != null && expectedProfileBindingId != currentProfileBindingId) return null;
     if (expectedAuthorityGeneration != null && expectedAuthorityGeneration != aiConsentAuthorityGeneration) return null;
-    return 'ellaMemoryArtworkBackfillCursor:$styleVersion:$currentUid:$currentProfileBindingId';
+    return 'ellaMemoryArtworkBackfillCursorV2:$styleVersion:$currentUid:$currentProfileBindingId';
   }
 
   String memoryArtworkBackfillCursor(

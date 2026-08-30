@@ -10810,6 +10810,8 @@
   "memorySortOldest": "Oldest first",
   "todayMemoryCanvasEmptyHeadline": "Your memories will appear here",
   "todayMemoryCanvasEmptyBody": "Record a moment and Ella will gather the memories you choose.",
+  "todayMemoryCanvasLoadingHeadline": "Loading your memories",
+  "todayMemoryCanvasLoadingBody": "Ella is bringing back your recent memories and illustrations.",
   "memoryArtworkUnavailableLabel": "Illustration unavailable",
   "memoryArtworkPreparingShort": "Preparing illustration…",
   "memoryArtworkStudio": "Artwork studio",

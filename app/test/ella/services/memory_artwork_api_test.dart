@@ -253,6 +253,44 @@ void main() {
     expect(methods, ['GET', 'GET']);
   });
 
+  test('published artwork remains ready while a selected style refresh is pending', () async {
+    final authority = _Authority('owner-a');
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': memoryArtworkSchemaVersion,
+          'status': 'ready',
+          'url': 'https://private-storage.example/published',
+          'style_version': memoryArtworkDefaultStyle,
+          'requested_style_version': memoryArtworkAnimeStorybookStyle,
+          'enrichment_revision': 'summary-published',
+          'refresh_pending': true,
+        }),
+        200,
+      ),
+    );
+
+    final result = await api.fetch('memory-refreshing');
+
+    expect(result.isReady, isTrue);
+    expect(result.styleVersion, memoryArtworkDefaultStyle);
+    expect(result.requestedStyleVersion, memoryArtworkAnimeStorybookStyle);
+    expect(result.refreshPending, isTrue);
+  });
+
   test('terminal policy response returns immediately without retaining the polling window', () async {
     var calls = 0;
     final api = MemoryArtworkApi(

@@ -9551,6 +9551,12 @@ class AppLocalizationsTh extends AppLocalizations {
   String get todayMemoryCanvasEmptyBody => 'Record a moment and Ella will gather the memories you choose.';
 
   @override
+  String get todayMemoryCanvasLoadingHeadline => 'Loading your memories';
+
+  @override
+  String get todayMemoryCanvasLoadingBody => 'Ella is bringing back your recent memories and illustrations.';
+
+  @override
   String get memoryArtworkUnavailableLabel => 'Illustration unavailable';
 
   @override

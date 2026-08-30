@@ -17835,6 +17835,18 @@ abstract class AppLocalizations {
   /// **'Record a moment and Ella will gather the memories you choose.'**
   String get todayMemoryCanvasEmptyBody;
 
+  /// No description provided for @todayMemoryCanvasLoadingHeadline.
+  ///
+  /// In en, this message translates to:
+  /// **'Loading your memories'**
+  String get todayMemoryCanvasLoadingHeadline;
+
+  /// No description provided for @todayMemoryCanvasLoadingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is bringing back your recent memories and illustrations.'**
+  String get todayMemoryCanvasLoadingBody;
+
   /// No description provided for @memoryArtworkUnavailableLabel.
   ///
   /// In en, this message translates to:
