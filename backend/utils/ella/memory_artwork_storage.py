@@ -242,18 +242,26 @@ class GCSMemoryArtworkStore:
 
 
 def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversation: dict) -> None:
-    artwork = conversation.get("artwork") if isinstance(conversation, dict) else None
-    object_key = str((artwork or {}).get("object_key") or "") if isinstance(artwork, dict) else ""
-    if not isinstance(artwork, dict) or not artwork:
+    if not isinstance(conversation, dict):
+        return
+    artwork_states = [
+        state
+        for state in (conversation.get("artwork"), conversation.get("published_artwork"))
+        if isinstance(state, dict) and state
+    ]
+    if not artwork_states:
         return
     store = GCSMemoryArtworkStore()
-    if object_key:
+    object_keys = {str(state.get("object_key") or "") for state in artwork_states}
+    for object_key in sorted(object_keys - {""}):
         store.delete(uid=uid, memory_id=memory_id, object_key=object_key)
-    store.delete_memory_prefix(
-        uid=uid,
-        memory_id=memory_id,
-        profile_binding_id=str(artwork.get("binding_id") or "") or None,
-    )
+    binding_ids = {str(state.get("binding_id") or "") for state in artwork_states}
+    for binding_id in sorted(binding_ids - {""}):
+        store.delete_memory_prefix(
+            uid=uid,
+            memory_id=memory_id,
+            profile_binding_id=binding_id,
+        )
 
 
 def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:

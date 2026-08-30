@@ -917,7 +917,6 @@ def _finalize_generation_transaction(
         conversation_ref,
         {
             ARTWORK_FIELD: ready_state,
-            PUBLISHED_ARTWORK_FIELD: firestore.DELETE_FIELD,
         },
     )
     return True
@@ -944,6 +943,48 @@ def finalize_generation(
         authority_digest=authority_digest,
         lease_token=lease_token,
         ready_state=ready_state,
+    )
+
+
+def _clear_published_artwork_transaction(
+    transaction,
+    conversation_ref,
+    *,
+    object_key: str,
+    object_generation: str,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    published = conversation.get(PUBLISHED_ARTWORK_FIELD) or {}
+    if (
+        not isinstance(published, dict)
+        or published.get("object_key") != object_key
+        or str(published.get("object_generation") or "") != object_generation
+    ):
+        return False
+    transaction.update(conversation_ref, {PUBLISHED_ARTWORK_FIELD: firestore.DELETE_FIELD})
+    return True
+
+
+@transactional
+def _clear_published_artwork(transaction, conversation_ref, **kwargs) -> bool:
+    return _clear_published_artwork_transaction(transaction, conversation_ref, **kwargs)
+
+
+def clear_published_artwork(
+    uid: str,
+    memory_id: str,
+    *,
+    object_key: str,
+    object_generation: str,
+) -> bool:
+    return _clear_published_artwork(
+        db.transaction(),
+        _conversation_ref(uid, memory_id),
+        object_key=object_key,
+        object_generation=object_generation,
     )
 
 
