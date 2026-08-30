@@ -1816,6 +1816,8 @@ class MemoryArtworkWorker:
             result = await service.backfill(uid, cursor_memory_id=claimed.get("cursor"))
             recovery_memory_ids = result.pop("_recovery_memory_ids", [])
             recovery_pending = False
+            recovery_queued = 0
+            recovery_existing = 0
             recovery_handler = self.enrichment_recovery or _memory_artwork_enrichment_recovery
             if recovery_memory_ids and recovery_handler is None:
                 raise MemoryArtworkError("memory_artwork_enrichment_recovery_unavailable", retryable=True)
@@ -1824,15 +1826,34 @@ class MemoryArtworkWorker:
                 recovery_outcome = str(recovery.get("outcome") or "")
                 if recovery_outcome == "completed":
                     try:
-                        await service.enqueue(uid, memory_id)
+                        enqueue_result = await service.enqueue(uid, memory_id)
                     except MemoryArtworkError as exc:
                         if exc.code != "memory_artwork_enrichment_not_terminal":
                             raise
                         recovery_pending = True
+                    else:
+                        enqueue_outcome = str(enqueue_result.get("outcome") or "")
+                        if enqueue_outcome == "reserved":
+                            recovery_queued += 1
+                        elif enqueue_outcome == "existing":
+                            recovery_existing += 1
+                        elif enqueue_outcome not in {
+                            "consent_required",
+                            "declined",
+                            "disabled",
+                            "sensitive_source_excluded",
+                        }:
+                            raise MemoryArtworkError("memory_artwork_enqueue_outcome_invalid")
                 elif recovery_outcome in ENRICHMENT_RECOVERY_PENDING_OUTCOMES:
                     recovery_pending = True
                 elif recovery_outcome not in ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES:
                     raise MemoryArtworkError("memory_artwork_enrichment_recovery_outcome_invalid")
+            result["queued"] = int(result.get("queued") or 0) + recovery_queued
+            result["existing"] = int(result.get("existing") or 0) + recovery_existing
+            result["skipped"] = max(
+                0,
+                int(result.get("skipped") or 0) - recovery_queued - recovery_existing,
+            )
             has_more = result.get("has_more") is True
             now = datetime.now(timezone.utc)
             if recovery_pending:

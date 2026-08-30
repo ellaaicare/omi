@@ -27,7 +27,8 @@ from utils.ella.exact_firebase_auth import (
 
 router = APIRouter(prefix="/v1/ella", tags=["Ella Memory Artwork"])
 MEMORY_ARTWORK_SERVICE_HEADER = "X-Ella-Memory-Artwork-Service-Key"
-RECONCILIATION_JOB_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+RECONCILIATION_CURSOR_PREFIX = "reconciliation:"
+RECONCILIATION_CURSOR_RE = re.compile(r"^reconciliation:([0-9a-f]{64})$")
 
 
 class MemoryArtworkPreferencesUpdate(BaseModel):
@@ -142,11 +143,13 @@ async def backfill_memory_artwork(
     try:
         service = MemoryArtworkService()
         cursor = payload.cursor if payload else None
-        if cursor is None or RECONCILIATION_JOB_ID_RE.fullmatch(cursor):
+        reconciliation_match = RECONCILIATION_CURSOR_RE.fullmatch(cursor or "")
+        if cursor is None or reconciliation_match:
+            requested_job_id = reconciliation_match.group(1) if reconciliation_match else None
             reconciliation = (
                 await service.start_reconciliation(uid) if cursor is None else await service.reconciliation_status(uid)
             )
-            if cursor is not None and reconciliation.get("job_id") != cursor:
+            if requested_job_id is not None and reconciliation.get("job_id") != requested_job_id:
                 raise MemoryArtworkError("memory_artwork_backfill_cursor_invalid")
             if reconciliation.get("status") == "failed":
                 raise MemoryArtworkError(
@@ -162,7 +165,7 @@ async def backfill_memory_artwork(
                 "existing": int(reconciliation.get("existing") or 0),
                 "skipped": int(reconciliation.get("skipped") or 0),
                 "memory_ids": [],
-                "next_cursor": reconciliation.get("job_id") if active else None,
+                "next_cursor": (f"{RECONCILIATION_CURSOR_PREFIX}{reconciliation.get('job_id')}" if active else None),
                 "has_more": active,
                 "reconciliation_status": reconciliation.get("status"),
                 "pages_processed": int(reconciliation.get("pages_processed") or 0),

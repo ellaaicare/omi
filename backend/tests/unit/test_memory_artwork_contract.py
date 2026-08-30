@@ -1044,6 +1044,52 @@ def test_reconciliation_retains_page_until_nonterminal_enrichment_recovers():
     assert len(repository.jobs) == 1
 
 
+@pytest.mark.parametrize(
+    ("queue_before_return", "expected_queued", "expected_existing"),
+    [(False, 1, 0), (True, 0, 1)],
+)
+def test_reconciliation_reclassifies_recovered_memory_after_enqueue(
+    queue_before_return, expected_queued, expected_existing
+):
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    memory = _terminal_memory("memory-1")
+    memory["enrichment_state"] = {"status": "pending"}
+    repository.conversations[("owner-a", "memory-1")] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    async def recover_enrichment(uid, memory_id):
+        recovered = repository.conversations[(uid, memory_id)]
+        recovered["enrichment_state"] = {"status": "writeback_applied", "kind": "hermes_enriched"}
+        if queue_before_return:
+            assert (await service.enqueue(uid, memory_id))["outcome"] == "reserved"
+        return {"outcome": "completed"}
+
+    worker = artwork.MemoryArtworkWorker(
+        repository=repository,
+        service_factory=lambda: service,
+        config=_enabled_config(),
+        enrichment_recovery=recover_enrichment,
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+
+    result = asyncio.run(worker.run_reconciliation_job(repository.get_reconciliation_job("owner-a", started["job_id"])))
+    completed = repository.get_reconciliation_job("owner-a", started["job_id"])
+
+    assert result == {"outcome": "completed", "status": "completed"}
+    assert completed["scanned"] == 1
+    assert completed["queued"] == expected_queued
+    assert completed["existing"] == expected_existing
+    assert completed["skipped"] == 0
+    assert len(repository.jobs) == 1
+
+
 @pytest.mark.parametrize("terminal_outcome", ["not_found", "invalid_state", "not_retryable", "failed"])
 def test_reconciliation_advances_past_terminal_enrichment_recovery_outcomes(terminal_outcome):
     repository = FakeRepository()
@@ -3454,8 +3500,40 @@ def test_backfill_route_preserves_legacy_empty_body_clients(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["has_more"] is True
-    assert response.json()["next_cursor"] == "a" * 64
+    assert response.json()["next_cursor"] == f"reconciliation:{'a' * 64}"
     assert response.json()["reconciliation_status"] == "pending"
+
+
+def test_backfill_route_preserves_hexadecimal_legacy_memory_cursor(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_hex_legacy_cursor_router_test_module")
+    legacy_cursor = "b" * 64
+    calls = []
+
+    class Service:
+        async def reconciliation_status(self, uid):
+            raise AssertionError("an unprefixed memory cursor must not select reconciliation status")
+
+        async def backfill(self, uid, *, cursor_memory_id):
+            calls.append((uid, cursor_memory_id))
+            return {
+                "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+                "queued": 0,
+                "existing": 0,
+                "skipped": 0,
+                "next_cursor": None,
+                "has_more": False,
+                "_recovery_memory_ids": [],
+            }
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).post("/v1/ella/memory-artwork/backfill", json={"cursor": legacy_cursor})
+
+    assert response.status_code == 200
+    assert calls == [("owner-a", legacy_cursor)]
 
 
 def test_mounted_internal_process_route_uses_durable_worker_job_claim(monkeypatch):
