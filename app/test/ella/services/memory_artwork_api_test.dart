@@ -390,7 +390,11 @@ void main() {
     );
 
     expect(
-      await api.setStyle(consentVersion: 'ai-data-processors-v10', styleVersion: memoryArtworkPaperCollageStyle),
+      (await api.setStyle(
+        consentVersion: 'ai-data-processors-v10',
+        styleVersion: memoryArtworkPaperCollageStyle,
+      ))
+          .saved,
       isTrue,
     );
     expect(await api.backfillRecent(), isTrue);
@@ -401,6 +405,38 @@ void main() {
     ]);
     expect(jsonDecode(bodies.first)['style_version'], memoryArtworkPaperCollageStyle);
     expect(jsonDecode(bodies.last), isEmpty);
+  });
+
+  test('style update exposes a safe typed backend failure', () async {
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'detail': {'code': 'memory_artwork_consent_required'},
+        }),
+        409,
+      ),
+    );
+
+    final result = await api.setStyle(
+      consentVersion: 'ai-data-processors-v10',
+      styleVersion: memoryArtworkPaperCollageStyle,
+    );
+
+    expect(result.saved, isFalse);
+    expect(result.failureCode, 'memory_artwork_consent_required');
   });
 
   test('progressive backfill validates and forwards the opaque cursor', () async {

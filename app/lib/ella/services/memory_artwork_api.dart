@@ -64,6 +64,13 @@ class MemoryArtworkPreferences {
   final bool releaseEnabled;
 }
 
+class MemoryArtworkPreferenceUpdate {
+  const MemoryArtworkPreferenceUpdate({required this.saved, this.failureCode = ''});
+
+  final bool saved;
+  final String failureCode;
+}
+
 class MemoryArtworkBackfillPage {
   const MemoryArtworkBackfillPage({
     required this.queued,
@@ -218,16 +225,27 @@ class MemoryArtworkApi {
     );
   }
 
-  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+  Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) async {
     final authority = _authorityProvider();
-    if (authority == null || consentVersion.isEmpty || !_supportedStyles.contains(styleVersion)) return false;
+    if (authority == null) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_authority_unavailable');
+    }
+    if (consentVersion.isEmpty || !_supportedStyles.contains(styleVersion)) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_preference_invalid');
+    }
     final response = await _call(
       authority,
       method: 'PUT',
       path: 'v1/ella/memory-artwork/preferences',
       body: jsonEncode({'consent': 'accepted', 'consent_version': consentVersion, 'style_version': styleVersion}),
     );
-    return response?.statusCode == 200;
+    if (!authority.isExactCurrent()) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_authority_changed');
+    }
+    if (response?.statusCode != 200) {
+      return MemoryArtworkPreferenceUpdate(saved: false, failureCode: _safeFailureCode(response?.body));
+    }
+    return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 
   Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {

@@ -140,9 +140,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    final saved = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
+    final result = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
     if (!mounted) return;
-    if (!saved) {
+    if (!result.saved) {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
@@ -154,9 +154,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         releaseEnabled: preferences.releaseEnabled,
       ),
     );
-    final queued = await _advanceArtworkBackfill(restart: true);
-    if (!mounted) return;
-    _showMessage(queued != null ? context.l10n.memoryArtworkStyleUpdated : context.l10n.memoryArtworkStyleUnavailable);
+    _showMessage(context.l10n.memoryArtworkStyleUpdated);
+    unawaited(_advanceArtworkBackfill(restart: true));
   }
 
   void _loadGalleryLayout() {

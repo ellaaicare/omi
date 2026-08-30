@@ -47,10 +47,10 @@ class _FakeArtworkApi extends MemoryArtworkApi {
       );
 
   @override
-  Future<bool> setStyle({required String consentVersion, required String styleVersion}) async {
+  Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) async {
     expect(consentVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
     selectedStyle = styleVersion;
-    return true;
+    return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 
   @override
@@ -350,7 +350,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
     expect(artworkApi.backfillCalls, backfillCallsBeforeStyleChange + 1);
-    expect(find.textContaining('Recent memories are being refreshed'), findsOneWidget);
+    expect(find.textContaining('Illustration style saved'), findsOneWidget);
   });
 
   testWidgets('days layout groups a local day into one comic-style tile', (tester) async {

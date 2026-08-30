@@ -10766,14 +10766,20 @@
   "memoryDayCount": "{count, plural, =1{1 memory} other{{count} memories}}",
   "@memoryDayCount": {
     "placeholders": {
-      "count": {"type": "int"}
+      "count": {
+        "type": "int"
+      }
     }
   },
   "memoryDayOpen": "Open {day}, {count, plural, =1{1 memory} other{{count} memories}}",
   "@memoryDayOpen": {
     "placeholders": {
-      "day": {"type": "String"},
-      "count": {"type": "int"}
+      "day": {
+        "type": "String"
+      },
+      "count": {
+        "type": "int"
+      }
     }
   },
   "memoryArtworkStyle": "Illustration style",
@@ -10783,7 +10789,7 @@
   "memoryArtworkWatercolorJournal": "Watercolor journal",
   "memoryArtworkAnimeStorybook": "Anime storybook",
   "memoryArtworkCinematicStill": "Cinematic still",
-  "memoryArtworkStyleUpdated": "New memories will use this illustration style. Recent memories are being refreshed.",
+  "memoryArtworkStyleUpdated": "Illustration style saved. Ella will prepare the artwork in the background.",
   "memoryArtworkStyleUnavailable": "Ella couldn't update the illustration style right now.",
   "memoryGeneratedArtworkLabel": "Illustration created for this memory",
   "memoryArtworkPreparingLabel": "Ella is preparing an illustration for this memory",
@@ -10805,5 +10811,15 @@
   "todayMemoryCanvasEmptyHeadline": "Your memories will appear here",
   "todayMemoryCanvasEmptyBody": "Record a moment and Ella will gather the memories you choose.",
   "memoryArtworkUnavailableLabel": "Illustration unavailable",
-  "memoryArtworkPreparingShort": "Preparing illustration…"
+  "memoryArtworkPreparingShort": "Preparing illustration…",
+  "memoryArtworkStudio": "Artwork studio",
+  "memoryArtworkStudioDetail": "Choose how your memories look. You can leave while Ella prepares them.",
+  "memoryArtworkBackfillInProgress": "Ella is preparing artwork. You can leave this screen.",
+  "memoryArtworkBackfillMoreAvailable": "More older memories are ready for artwork.",
+  "memoryArtworkBackfillComplete": "Artwork is up to date.",
+  "memoryArtworkBackfillNeedsAttention": "Some artwork still needs attention. Nothing was deleted.",
+  "memoryArtworkBackfillReady": "Artwork is ready to continue in the background.",
+  "memoryArtworkContinueOlder": "Continue older artwork",
+  "memoryArtworkCheckMissing": "Check for missing artwork",
+  "memoryArtworkRetry": "Try artwork again"
 }

@@ -4779,10 +4779,7 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
-  String accessesAndTriggeredBy(
-    String accessDescription,
-    String triggerDescription,
-  ) {
+  String accessesAndTriggeredBy(String accessDescription, String triggerDescription) {
     return '$accessDescription és $triggerDescription.';
   }
 
@@ -9566,8 +9563,7 @@ class AppLocalizationsHu extends AppLocalizations {
   String get memoryArtworkCinematicStill => 'Cinematic still';
 
   @override
-  String get memoryArtworkStyleUpdated =>
-      'New memories will use this illustration style. Recent memories are being refreshed.';
+  String get memoryArtworkStyleUpdated => 'Illustration style saved. Ella will prepare the artwork in the background.';
 
   @override
   String get memoryArtworkStyleUnavailable => 'Ella couldn\'t update the illustration style right now.';
@@ -9634,4 +9630,34 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get memoryArtworkPreparingShort => 'Preparing illustration…';
+
+  @override
+  String get memoryArtworkStudio => 'Artwork studio';
+
+  @override
+  String get memoryArtworkStudioDetail => 'Choose how your memories look. You can leave while Ella prepares them.';
+
+  @override
+  String get memoryArtworkBackfillInProgress => 'Ella is preparing artwork. You can leave this screen.';
+
+  @override
+  String get memoryArtworkBackfillMoreAvailable => 'More older memories are ready for artwork.';
+
+  @override
+  String get memoryArtworkBackfillComplete => 'Artwork is up to date.';
+
+  @override
+  String get memoryArtworkBackfillNeedsAttention => 'Some artwork still needs attention. Nothing was deleted.';
+
+  @override
+  String get memoryArtworkBackfillReady => 'Artwork is ready to continue in the background.';
+
+  @override
+  String get memoryArtworkContinueOlder => 'Continue older artwork';
+
+  @override
+  String get memoryArtworkCheckMissing => 'Check for missing artwork';
+
+  @override
+  String get memoryArtworkRetry => 'Try artwork again';
 }
