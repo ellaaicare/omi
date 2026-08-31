@@ -10819,11 +10819,14 @@
   "memoryArtworkBackfillInProgress": "Ella is preparing artwork. You can leave this screen.",
   "memoryArtworkBackfillMoreAvailable": "More older memories are ready for artwork.",
   "memoryArtworkBackfillComplete": "Artwork is up to date.",
-  "memoryArtworkBackfillNeedsAttention": "Some artwork still needs attention. Nothing was deleted.",
+  "memoryArtworkBackfillNeedsAttention": "Artwork paused because a few illustrations need another try.",
   "memoryArtworkBackfillReady": "Artwork is ready to continue in the background.",
   "memoryArtworkContinueOlder": "Continue older artwork",
   "memoryArtworkCheckMissing": "Check for missing artwork",
   "memoryArtworkRetry": "Try artwork again",
+  "memoryArtworkQueueChecking": "Checking artwork progress…",
+  "memoryArtworkQueueUnavailable": "Artwork progress could not be loaded. Your finished illustrations are still available.",
+  "memoryArtworkQueueRetryStatus": "Try loading progress again",
   "memoryArtworkQueueProgress": "{ready} of {total} illustrations ready",
   "@memoryArtworkQueueProgress": {
     "placeholders": {

@@ -1045,15 +1045,9 @@ void main() {
     expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
   });
 
-  testWidgets('saved style survives a backfill timeout and exposes a manual retry', (tester) async {
+  testWidgets('Artwork Studio shows a clear retry when queue progress cannot be loaded', (tester) async {
     final authority = await _installArtworkAuthority();
-    final artwork = _FakeMemoryArtworkApi(
-      failedBackfillRequests: const {1},
-      backfillPages: const [
-        MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
-        MemoryArtworkBackfillPage(queued: 4, existing: 2, skipped: 0, hasMore: false),
-      ],
-    );
+    final artwork = _FakeMemoryArtworkApi(failedQueueStatusRequests: const {0});
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.manyMemories(),
@@ -1065,35 +1059,31 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
+      findsOneWidget,
+    );
+    expect(find.text('Try loading progress again'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-continue')), findsNothing);
+
+    artwork.queue = _artworkQueueStatus(ready: 4, queued: 2);
+    await tester.tap(find.byKey(const Key('home-artwork-retry-status')));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.text('Paper collage'));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 100));
 
-    expect(artwork.selectedStyles, [memoryArtworkPaperCollageStyle]);
-    expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
-    expect(find.byKey(const Key('home-artwork-attention-indicator')), findsOneWidget);
-    expect(find.text("Ella couldn't update the illustration style right now."), findsNothing);
-
-    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
-    await tester.pumpAndSettle();
-    expect(find.text('Some artwork still needs attention. Nothing was deleted.'), findsOneWidget);
-    expect(find.text('Try artwork again'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('home-artwork-continue')));
-    await tester.pumpAndSettle();
-
-    expect(artwork.backfillCursors, [null, null, null]);
-    expect(find.byKey(const Key('home-artwork-attention-indicator')), findsNothing);
+    expect(find.text('4 of 6 illustrations ready'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
   });
 
-  testWidgets('open Artwork Studio follows backfill completion without being reopened', (tester) async {
+  testWidgets('open Artwork Studio follows queue loading without being reopened', (tester) async {
     final authority = await _installArtworkAuthority();
-    final gate = Completer<void>();
+    final queueGate = Completer<void>();
+    final backfillGate = Completer<void>();
     final artwork = _FakeMemoryArtworkApi(
-      firstBackfillGate: gate,
-      backfillPages: const [
-        MemoryArtworkBackfillPage(queued: 3, existing: 1, skipped: 0, hasMore: false),
-      ],
+      queue: _artworkQueueStatus(ready: 4),
+      firstBackfillGate: backfillGate,
+      queueStatusGates: {0: queueGate},
     );
     final harness = await _pumpHome(
       tester,
@@ -1107,14 +1097,15 @@ void main() {
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Ella is preparing artwork. You can leave this screen.'), findsOneWidget);
+    expect(find.text('Checking artwork progress…'), findsOneWidget);
 
-    gate.complete();
+    queueGate.complete();
+    backfillGate.complete();
     await tester.pumpAndSettle();
 
-    expect(find.text('Artwork is up to date.'), findsOneWidget);
-    final button = tester.widget<OutlinedButton>(find.byKey(const Key('home-artwork-continue')));
-    expect(button.onPressed, isNotNull);
+    expect(find.text('4 of 4 illustrations ready'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-continue')), findsNothing);
   });
 
   testWidgets('Artwork Studio shows exact queue progress and progress by style', (tester) async {
@@ -1890,7 +1881,7 @@ MemoryArtworkQueueStatus _artworkQueueStatus({
     styleVersion: memoryArtworkDefaultStyle,
     state: remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running,
     controlState: controlState,
-    scanStatus: 'complete',
+    scanStatus: 'completed',
     scanned: ready + remaining,
     pagesProcessed: 4,
     autoContinue: autoContinue,

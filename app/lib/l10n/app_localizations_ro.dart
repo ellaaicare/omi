@@ -9654,7 +9654,7 @@ class AppLocalizationsRo extends AppLocalizations {
   String get memoryArtworkBackfillComplete => 'Artwork is up to date.';
 
   @override
-  String get memoryArtworkBackfillNeedsAttention => 'Some artwork still needs attention. Nothing was deleted.';
+  String get memoryArtworkBackfillNeedsAttention => 'Artwork paused because a few illustrations need another try.';
 
   @override
   String get memoryArtworkBackfillReady => 'Artwork is ready to continue in the background.';
@@ -9667,6 +9667,16 @@ class AppLocalizationsRo extends AppLocalizations {
 
   @override
   String get memoryArtworkRetry => 'Try artwork again';
+
+  @override
+  String get memoryArtworkQueueChecking => 'Checking artwork progress…';
+
+  @override
+  String get memoryArtworkQueueUnavailable =>
+      'Artwork progress could not be loaded. Your finished illustrations are still available.';
+
+  @override
+  String get memoryArtworkQueueRetryStatus => 'Try loading progress again';
 
   @override
   String memoryArtworkQueueProgress(int ready, int total) {
