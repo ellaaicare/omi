@@ -33,22 +33,32 @@ class _MutableAuthority implements AccountCommitAuthority {
 }
 
 class _FakeArtworkApi extends MemoryArtworkApi {
-  _FakeArtworkApi({this.releaseEnabled = true})
-      : super(baseUrl: 'https://api.example.test', authorityProvider: () => null);
+  _FakeArtworkApi({
+    this.releaseEnabled = true,
+    List<MemoryArtworkResult>? displayResults,
+    List<MemoryArtworkQueueStatus?>? queueStatuses,
+  }) : _displayResults = List<MemoryArtworkResult>.of(displayResults ?? const []),
+       _queueStatuses = List<MemoryArtworkQueueStatus?>.of(queueStatuses ?? const []),
+       super(baseUrl: 'https://api.example.test', authorityProvider: () => null);
 
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
   int backfillCalls = 0;
   final List<String?> backfillCursors = [];
   final List<MemoryArtworkBackfillMode> backfillModes = [];
+  final List<MemoryArtworkResult> _displayResults;
+  final List<MemoryArtworkQueueStatus?> _queueStatuses;
+  final List<bool> displayEnqueueRequests = [];
+  int displayRequests = 0;
+  int queueStatusRequests = 0;
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async => MemoryArtworkPreferences(
-        consent: 'accepted',
-        consentVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
-        styleVersion: selectedStyle,
-        releaseEnabled: releaseEnabled,
-      );
+    consent: 'accepted',
+    consentVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    styleVersion: selectedStyle,
+    releaseEnabled: releaseEnabled,
+  );
 
   @override
   Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) async {
@@ -67,6 +77,66 @@ class _FakeArtworkApi extends MemoryArtworkApi {
     backfillModes.add(mode);
     return const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false);
   }
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    displayEnqueueRequests.add(enqueueIfMissing);
+    final request = displayRequests++;
+    if (_displayResults.isEmpty) {
+      return const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable);
+    }
+    return _displayResults[request < _displayResults.length ? request : _displayResults.length - 1];
+  }
+
+  @override
+  Future<MemoryArtworkQueueStatus?> queueStatus() async {
+    final request = queueStatusRequests++;
+    if (_queueStatuses.isEmpty) return null;
+    return _queueStatuses[request < _queueStatuses.length ? request : _queueStatuses.length - 1];
+  }
+}
+
+MemoryArtworkQueueStatus _queueStatus({required int ready, required int active, required int queued}) {
+  final remaining = active + queued;
+  final state = remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running;
+  return MemoryArtworkQueueStatus(
+    generationId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    styleVersion: memoryArtworkDefaultStyle,
+    state: state,
+    controlState: state,
+    scanStatus: 'completed',
+    scanned: ready + remaining,
+    pagesProcessed: 1,
+    autoContinue: false,
+    batchSize: 10,
+    batchRemaining: remaining,
+    pauseReason: '',
+    ready: ready,
+    active: active,
+    queued: queued,
+    retrying: 0,
+    failed: 0,
+    total: ready + remaining,
+    remaining: remaining,
+    styles: [
+      MemoryArtworkStyleProgress(
+        styleVersion: memoryArtworkDefaultStyle,
+        state: state,
+        ready: ready,
+        active: active,
+        queued: queued,
+        retrying: 0,
+        failed: 0,
+        total: ready + remaining,
+        remaining: remaining,
+      ),
+    ],
+  );
 }
 
 class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
@@ -136,17 +206,18 @@ void main() {
   testWidgets('gallery swipe-left confirms and permanently deletes the selected memory', (tester) async {
     final requestedIds = <String>[];
     final authority = _MutableAuthority('test-user');
-    final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationDeleteCall: (id, _) async {
-        requestedIds.add(id);
-        return true;
-      },
-    )
-      ..conversations = [memory('memory-1')]
-      ..hasLoadedConversations = true
-      ..hasFreshConversations = true
-      ..hasMoreConversations = false;
+    final provider =
+        ConversationProvider(
+            activeAuthority: () => authority,
+            conversationDeleteCall: (id, _) async {
+              requestedIds.add(id);
+              return true;
+            },
+          )
+          ..conversations = [memory('memory-1')]
+          ..hasLoadedConversations = true
+          ..hasFreshConversations = true
+          ..hasMoreConversations = false;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -321,13 +392,15 @@ void main() {
   });
 
   testWidgets('oldest-first sorting stays disabled until the full archive is loaded', (tester) async {
-    final provider = ConversationProvider(
-      conversationsPageFetchCall: ({required limit, required offset}) async => const ConversationsFetchResult.failure(),
-    )
-      ..conversations = [memory('recent-page')]
-      ..hasLoadedConversations = true
-      ..hasFreshConversations = true
-      ..hasMoreConversations = true;
+    final provider =
+        ConversationProvider(
+            conversationsPageFetchCall: ({required limit, required offset}) async =>
+                const ConversationsFetchResult.failure(),
+          )
+          ..conversations = [memory('recent-page')]
+          ..hasLoadedConversations = true
+          ..hasFreshConversations = true
+          ..hasMoreConversations = true;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);
@@ -378,8 +451,44 @@ void main() {
     expect(find.textContaining('Illustration style saved'), findsOneWidget);
   });
 
-  testWidgets('a second explicit style change restarts one cursorless preview after the active preview finishes',
-      (tester) async {
+  testWidgets('completed artwork queue refreshes visible gallery cards without scheduling artwork from rendering', (
+    tester,
+  ) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-visible-artwork')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi(
+      displayResults: [
+        const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable),
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://cdn.example.test/memory-visible-artwork.png'),
+          cacheKey: 'visible-artwork-v1',
+        ),
+      ],
+      queueStatuses: [_queueStatus(ready: 0, active: 1, queued: 0), _queueStatus(ready: 1, active: 0, queued: 0)],
+    );
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(artworkApi.displayRequests, 1);
+    expect(artworkApi.displayEnqueueRequests, [false]);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+
+    expect(artworkApi.queueStatusRequests, greaterThanOrEqualTo(2));
+    expect(artworkApi.displayRequests, 2, reason: 'completed queue progress refreshes the visible gallery card');
+    expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
+  });
+
+  testWidgets('a second explicit style change restarts one cursorless preview after the active preview finishes', (
+    tester,
+  ) async {
     final provider = ConversationProvider()
       ..conversations = [memory('memory-style-restart')]
       ..hasLoadedConversations = true
@@ -431,10 +540,7 @@ void main() {
 
     expect(artworkApi.backfillCalls, 2, reason: 'the second explicit style starts after the active request completes');
     expect(artworkApi.backfillCursors, [null, null]);
-    expect(
-      artworkApi.backfillModes,
-      [MemoryArtworkBackfillMode.preview, MemoryArtworkBackfillMode.preview],
-    );
+    expect(artworkApi.backfillModes, [MemoryArtworkBackfillMode.preview, MemoryArtworkBackfillMode.preview]);
   });
 
   testWidgets('days layout groups a local day into one comic-style tile', (tester) async {
@@ -486,18 +592,19 @@ void main() {
   testWidgets('a short first page loads older memories without starting artwork work', (tester) async {
     final authority = _MutableAuthority('test-user');
     var pageRequests = 0;
-    final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationsPageFetchCall: ({required limit, required offset}) async {
-        pageRequests += 1;
-        expect(offset, 1);
-        return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
-      },
-    )
-      ..conversations = [memory('memory-current')]
-      ..hasLoadedConversations = true
-      ..hasFreshConversations = true
-      ..hasMoreConversations = true;
+    final provider =
+        ConversationProvider(
+            activeAuthority: () => authority,
+            conversationsPageFetchCall: ({required limit, required offset}) async {
+              pageRequests += 1;
+              expect(offset, 1);
+              return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
+            },
+          )
+          ..conversations = [memory('memory-current')]
+          ..hasLoadedConversations = true
+          ..hasFreshConversations = true
+          ..hasMoreConversations = true;
     final artworkApi = _FakeArtworkApi();
     addTearDown(provider.dispose);
 
@@ -512,19 +619,20 @@ void main() {
   testWidgets('a failed automatic page waits for the visible retry action', (tester) async {
     final authority = _MutableAuthority('test-user');
     var pageRequests = 0;
-    final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationsPageFetchCall: ({required limit, required offset}) async {
-        pageRequests += 1;
-        return pageRequests == 1
-            ? const ConversationsFetchResult.failure(statusCode: 503)
-            : ConversationsFetchResult.success([memory('memory-older')]);
-      },
-    )
-      ..conversations = [memory('memory-current')]
-      ..hasLoadedConversations = true
-      ..hasFreshConversations = true
-      ..hasMoreConversations = true;
+    final provider =
+        ConversationProvider(
+            activeAuthority: () => authority,
+            conversationsPageFetchCall: ({required limit, required offset}) async {
+              pageRequests += 1;
+              return pageRequests == 1
+                  ? const ConversationsFetchResult.failure(statusCode: 503)
+                  : ConversationsFetchResult.success([memory('memory-older')]);
+            },
+          )
+          ..conversations = [memory('memory-current')]
+          ..hasLoadedConversations = true
+          ..hasFreshConversations = true
+          ..hasMoreConversations = true;
     addTearDown(provider.dispose);
 
     await pumpPage(tester, provider);

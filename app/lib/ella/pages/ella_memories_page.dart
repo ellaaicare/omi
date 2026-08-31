@@ -43,6 +43,10 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   bool _showBackToRecent = false;
   bool _artworkBackfillInFlight = false;
   bool _artworkBackfillRestartPending = false;
+  MemoryArtworkQueueStatus? _artworkQueueStatus;
+  Timer? _artworkQueuePollTimer;
+  int _artworkQueueRefreshSequence = 0;
+  int _artworkDisplayEpoch = 0;
 
   @override
   void initState() {
@@ -58,6 +62,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   @override
   void dispose() {
+    _artworkQueuePollTimer?.cancel();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
@@ -100,11 +105,47 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     }
     await context.read<ConversationProvider>().getInitialConversations();
     await _loadArtworkPreferences();
+    await _refreshArtworkQueueStatus();
   }
 
   Future<void> _loadArtworkPreferences() async {
     final preferences = await _artworkApi.preferences();
     if (mounted) setState(() => _artworkPreferences = preferences);
+    if (preferences?.releaseEnabled == true) unawaited(_refreshArtworkQueueStatus());
+  }
+
+  bool _shouldPollArtworkQueue(MemoryArtworkQueueStatus status) {
+    return status.controlState == MemoryArtworkQueueState.running &&
+        (status.remaining > 0 || status.scanStatus != 'completed');
+  }
+
+  Future<void> _refreshArtworkQueueStatus() async {
+    if (!mounted || _artworkPreferences?.releaseEnabled != true) return;
+    final refreshSequence = ++_artworkQueueRefreshSequence;
+    MemoryArtworkQueueStatus? status;
+    try {
+      status = await _artworkApi.queueStatus();
+    } on ExactAccountAuthorityChangedException {
+      return;
+    } catch (_) {
+      return;
+    }
+    if (!mounted || refreshSequence != _artworkQueueRefreshSequence || status == null) return;
+    final previous = _artworkQueueStatus;
+    final refreshVisibleArtwork =
+        previous == null ||
+        status.ready > previous.ready ||
+        (status.state == MemoryArtworkQueueState.completed && previous.state != MemoryArtworkQueueState.completed);
+    setState(() {
+      _artworkQueueStatus = status;
+      if (refreshVisibleArtwork) _artworkDisplayEpoch++;
+    });
+    _artworkQueuePollTimer?.cancel();
+    if (_shouldPollArtworkQueue(status)) {
+      _artworkQueuePollTimer = Timer(const Duration(seconds: 4), () {
+        if (mounted) unawaited(_refreshArtworkQueueStatus());
+      });
+    }
   }
 
   /// Gallery browsing must never spend image allowance. A deliberate style
@@ -116,7 +157,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     _artworkBackfillRestartPending = false;
     _artworkBackfillInFlight = true;
     try {
-      return await _artworkApi.backfillNext();
+      final page = await _artworkApi.backfillNext();
+      if (page != null && mounted) unawaited(_refreshArtworkQueueStatus());
+      return page;
     } finally {
       _artworkBackfillInFlight = false;
       if (_artworkBackfillRestartPending && mounted) {
@@ -399,12 +442,14 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               dayLabel: entry.key,
               memories: entry.value,
               artworkApi: _artworkApi,
+              artworkRefreshEpoch: _artworkDisplayEpoch,
               onOpen: () => Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => EllaMemoryDayPage(
                     dayLabel: entry.key,
                     memories: entry.value,
                     artworkApi: _artworkApi,
+                    artworkRefreshEpoch: _artworkDisplayEpoch,
                     exactAuthority: WalOwnerAuthority.active(),
                     authorityChanges: SharedPreferencesUtil.aiConsentAuthorityChanges,
                     onDelete: _deleteMemory,
@@ -456,11 +501,13 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   Widget _memoryCard(ServerConversation conversation) => MemoryGalleryCard(
-        conversation: conversation,
-        layout: _layout,
-        onOpen: () => _openMemory(conversation),
-        onDelete: () => _deleteMemory(conversation),
-      );
+    conversation: conversation,
+    layout: _layout,
+    artworkApi: _artworkApi,
+    artworkRefreshEpoch: _artworkDisplayEpoch,
+    onOpen: () => _openMemory(conversation),
+    onDelete: () => _deleteMemory(conversation),
+  );
 
   void _openMemory(ServerConversation conversation) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
@@ -469,7 +516,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Future<bool> _deleteMemory(ServerConversation conversation) async {
     final l10n = context.l10n;
     final provider = context.read<ConversationProvider>();
-    final confirmed = await showDialog<bool>(
+    final confirmed =
+        await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             title: Text(l10n.deleteConversationTitle),
@@ -627,6 +675,7 @@ class EllaMemoryDayPage extends StatefulWidget {
     this.artworkApi,
     this.exactAuthority,
     this.authorityChanges,
+    this.artworkRefreshEpoch = 0,
   });
 
   final String dayLabel;
@@ -635,6 +684,7 @@ class EllaMemoryDayPage extends StatefulWidget {
   final MemoryArtworkApi? artworkApi;
   final ExactAccountAuthorityVerifier? exactAuthority;
   final Listenable? authorityChanges;
+  final int artworkRefreshEpoch;
 
   @override
   State<EllaMemoryDayPage> createState() => _EllaMemoryDayPageState();
@@ -694,6 +744,8 @@ class _EllaMemoryDayPageState extends State<EllaMemoryDayPage> {
           return MemoryGalleryCard(
             conversation: memory,
             layout: MemoryGalleryLayout.journal,
+            artworkApi: widget.artworkApi,
+            artworkRefreshEpoch: widget.artworkRefreshEpoch,
             onOpen: () => Navigator.of(
               context,
             ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: memory))),
@@ -952,8 +1004,8 @@ Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
     final label = day == today
         ? context.l10n.memoriesToday
         : day == today.subtract(const Duration(days: 1))
-            ? context.l10n.memoriesYesterday
-            : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
+        ? context.l10n.memoriesYesterday
+        : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
     result.putIfAbsent(label, () => []).add(conversation);
   }
   return result;

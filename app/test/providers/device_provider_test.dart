@@ -704,6 +704,92 @@ void main() {
     expect(provider.presentationPairedDevice?.id, necklace.id);
   });
 
+  test('a delayed remembered-necklace write cannot restore account A after account B takes authority', () async {
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil()..uid = 'account-a';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    await preferences.btDeviceSet(BtDevice.empty());
+    addTearDown(() => preferences.btDeviceSet(BtDevice.empty()));
+    final writeStarted = Completer<void>();
+    final allowWrite = Completer<void>();
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'account-a-necklace',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      rememberedDeviceWriter: (device) async {
+        if (device.id == necklace.id && !writeStarted.isCompleted) {
+          writeStarted.complete();
+          await allowWrite.future;
+        }
+        await preferences.btDeviceSet(device);
+      },
+    );
+    addTearDown(provider.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await writeStarted.future.timeout(const Duration(seconds: 1));
+
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    await preferences.btDeviceSet(BtDevice.empty());
+    allowWrite.complete();
+    await pumpEventQueue();
+
+    expect(
+      preferences.btDevice.id,
+      isEmpty,
+      reason: 'a stale account callback must not repopulate the replacement account',
+    );
+  });
+
+  test('a persisted necklace reconnects after an app-provider restart without revisiting Settings', () async {
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'restart-necklace',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    final firstProvider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+    );
+    await firstProvider.setConnectedDevice(necklace);
+    expect(SharedPreferencesUtil().btDevice.id, necklace.id);
+    firstProvider.dispose();
+
+    var reconnectScans = 0;
+    final restartedProvider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async {
+        reconnectScans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 2),
+    );
+    addTearDown(restartedProvider.dispose);
+    for (var attempt = 0; attempt < 100 && !restartedProvider.presentationIsConnected; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(reconnectScans, greaterThanOrEqualTo(1));
+    expect(restartedProvider.presentationConnectedDevice?.id, necklace.id);
+  });
+
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
@@ -712,17 +798,18 @@ void main() {
     final disconnectGate = Completer<void>();
     final capture = _RecordingCaptureProvider(disconnectGate: disconnectGate);
     var reconnectScans = 0;
-    final provider = DeviceProvider(
-      deviceService: service,
-      scanConnector: () async {
-        reconnectScans++;
-        return null;
-      },
-    )
-      ..setProviders(capture)
-      ..pairedDevice = necklace
-      ..connectedDevice = necklace
-      ..isConnected = true;
+    final provider =
+        DeviceProvider(
+            deviceService: service,
+            scanConnector: () async {
+              reconnectScans++;
+              return null;
+            },
+          )
+          ..setProviders(capture)
+          ..pairedDevice = necklace
+          ..connectedDevice = necklace
+          ..isConnected = true;
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 

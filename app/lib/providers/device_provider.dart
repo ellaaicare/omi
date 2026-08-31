@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/http/api/device.dart';
@@ -24,6 +25,7 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 typedef DeviceConnectionResolver = Future<BtDevice?> Function(String deviceId);
 typedef DeviceScanConnector = Future<BtDevice?> Function();
 typedef DeviceStorageListResolver = Future<List<int>> Function(String deviceId);
+typedef DevicePreferenceWriter = Future<void> Function(BtDevice device);
 
 class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implements IDeviceServiceSubsciption {
   DeviceProvider({
@@ -36,17 +38,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     @visibleForTesting Duration automaticReconnectCooldown = const Duration(minutes: 1),
     @visibleForTesting Duration deviceCaptureRetryDelay = const Duration(milliseconds: 500),
     @visibleForTesting int maxDeviceCaptureStartAttempts = 3,
-  })  : _deviceService = deviceService ?? ServiceManager.instance().device,
-        _connectionResolver = connectionResolver,
-        _scanConnector = scanConnector,
-        _storageListResolver = storageListResolver,
-        _reconnectionInterval = reconnectionInterval,
-        _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts,
-        _automaticReconnectCooldown = automaticReconnectCooldown,
-        _deviceCaptureRetryDelay = deviceCaptureRetryDelay,
-        _maxDeviceCaptureStartAttempts = maxDeviceCaptureStartAttempts {
+    @visibleForTesting DevicePreferenceWriter? rememberedDeviceWriter,
+  }) : _deviceService = deviceService ?? ServiceManager.instance().device,
+       _connectionResolver = connectionResolver,
+       _scanConnector = scanConnector,
+       _storageListResolver = storageListResolver,
+       _reconnectionInterval = reconnectionInterval,
+       _maxAutomaticReconnectAttempts = maxAutomaticReconnectAttempts,
+       _automaticReconnectCooldown = automaticReconnectCooldown,
+       _deviceCaptureRetryDelay = deviceCaptureRetryDelay,
+       _maxDeviceCaptureStartAttempts = maxDeviceCaptureStartAttempts,
+       _rememberedDeviceWriter = rememberedDeviceWriter ?? SharedPreferencesUtil().btDeviceSet {
     WidgetsBinding.instance.addObserver(this);
     _deviceService.subscribe(this, this);
+    _accountAuthorityChanges.addListener(_handleAccountAuthorityChanged);
   }
 
   final IDeviceService _deviceService;
@@ -72,6 +77,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   final Duration _automaticReconnectCooldown;
   final Duration _deviceCaptureRetryDelay;
   final int _maxDeviceCaptureStartAttempts;
+  final DevicePreferenceWriter _rememberedDeviceWriter;
+  final ValueListenable<int> _accountAuthorityChanges = SharedPreferencesUtil.aiConsentAuthorityChanges;
   int _automaticReconnectAttempts = 0;
   bool _automaticReconnectExhausted = false;
   DateTime? _automaticReconnectCooldownUntil;
@@ -117,6 +124,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   final Debouncer _disconnectDebouncer = Debouncer(delay: const Duration(milliseconds: 500));
   final Debouncer _connectDebouncer = Debouncer(delay: const Duration(milliseconds: 100));
   int _deviceOperationGeneration = 0;
+  int _rememberedDeviceAuthorityGeneration = 0;
+  Future<void> _rememberedDeviceWriteTail = Future<void>.value();
   bool _deviceServiceReady = false;
   Future<void>? _captureTeardown;
   int? _deferredDeviceCaptureGeneration;
@@ -128,18 +137,29 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   bool _isDeviceOperationCurrent(int generation) =>
       _deviceServiceReady && _captureTeardown == null && generation == _deviceOperationGeneration;
 
+  String _rememberedDeviceOwnerBinding() {
+    final preferences = SharedPreferencesUtil();
+    return '${preferences.uid}\u001f${preferences.aiConsentProfileBindingId}';
+  }
+
+  void _handleAccountAuthorityChanged() {
+    // A delayed BLE callback must never restore a device convenience binding
+    // after account/profile authority has moved to somebody else.
+    _rememberedDeviceAuthorityGeneration++;
+  }
+
   Future<void> _teardownCaptureForDevice(String? deviceId) {
     final priorTeardown = _captureTeardown;
     final capture = captureProvider;
     late final Future<void> teardown;
-    teardown = (() async {
-      await priorTeardown;
-      if (deviceId == null || deviceId.isEmpty || capture == null) return;
-      await capture.handleRecordingDeviceDisconnected(deviceId);
-    })()
-        .whenComplete(() {
-      if (identical(_captureTeardown, teardown)) _captureTeardown = null;
-    });
+    teardown =
+        (() async {
+          await priorTeardown;
+          if (deviceId == null || deviceId.isEmpty || capture == null) return;
+          await capture.handleRecordingDeviceDisconnected(deviceId);
+        })().whenComplete(() {
+          if (identical(_captureTeardown, teardown)) _captureTeardown = null;
+        });
     _captureTeardown = teardown;
     return teardown;
   }
@@ -218,8 +238,53 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future<void> _persistRememberedDevice(BtDevice device, {int? operationGeneration}) async {
     if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
-    await SharedPreferencesUtil().btDeviceSet(device);
-    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+    final authorityGeneration = _rememberedDeviceAuthorityGeneration;
+    final ownerBinding = _rememberedDeviceOwnerBinding();
+    final expectedDeviceId = device.id;
+    if (expectedDeviceId.isEmpty) return;
+    final previousWrite = _rememberedDeviceWriteTail;
+    late final Future<void> write;
+    write = (() async {
+      await previousWrite.catchError((_) {});
+      if (!_isRememberedDeviceWriteCurrent(
+        authorityGeneration: authorityGeneration,
+        ownerBinding: ownerBinding,
+        operationGeneration: operationGeneration,
+        deviceId: expectedDeviceId,
+      )) {
+        return;
+      }
+      await _rememberedDeviceWriter(device);
+      if (_isRememberedDeviceWriteCurrent(
+        authorityGeneration: authorityGeneration,
+        ownerBinding: ownerBinding,
+        operationGeneration: operationGeneration,
+        deviceId: expectedDeviceId,
+      )) {
+        return;
+      }
+      // The serialized tail guarantees a newer account/device write runs only
+      // after this stale binding is removed.
+      if (SharedPreferencesUtil().btDevice.id == expectedDeviceId) {
+        await _rememberedDeviceWriter(BtDevice.empty());
+      }
+    })();
+    _rememberedDeviceWriteTail = write;
+    await write;
+  }
+
+  bool _isRememberedDeviceWriteCurrent({
+    required int authorityGeneration,
+    required String ownerBinding,
+    required int? operationGeneration,
+    required String deviceId,
+  }) {
+    if (authorityGeneration != _rememberedDeviceAuthorityGeneration ||
+        ownerBinding != _rememberedDeviceOwnerBinding()) {
+      return false;
+    }
+    if (operationGeneration == null || operationGeneration == _deviceOperationGeneration) return true;
+    return pairedDevice?.id == deviceId || connectedDevice?.id == deviceId;
   }
 
   Future getDeviceInfo({int? operationGeneration}) async {
@@ -233,7 +298,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       final info = await connectedDevice?.getDeviceInfo(connection);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
       pairedDevice = info;
-      await SharedPreferencesUtil().btDeviceSet(pairedDevice!);
+      await _persistRememberedDevice(pairedDevice!, operationGeneration: operationGeneration);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     } else {
       if (SharedPreferencesUtil().btDevice.id.isEmpty) {
@@ -351,8 +416,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     // Throttle notifyListeners to reduce battery drain from excessive UI rebuilds
     // Only notify when: first reading, >=5% change, 15min elapsed, or crosses 20% threshold
     final delta = (_lastNotifiedBatteryLevel - value).abs();
-    final elapsed =
-        _lastBatteryNotifyTime == null ? const Duration(minutes: 999) : currentTime.difference(_lastBatteryNotifyTime!);
+    final elapsed = _lastBatteryNotifyTime == null
+        ? const Duration(minutes: 999)
+        : currentTime.difference(_lastBatteryNotifyTime!);
     final crossedLowBatteryThreshold =
         (value < 20 && _lastNotifiedBatteryLevel >= 20) || (value >= 20 && _lastNotifiedBatteryLevel < 20);
     final shouldNotify =
@@ -549,6 +615,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _accountAuthorityChanges.removeListener(_handleAccountAuthorityChanged);
     captureProvider?.removeListener(_onCaptureProviderChanged);
     _clearDeferredDeviceCapture();
     _bleBatteryLevelListener?.cancel();
