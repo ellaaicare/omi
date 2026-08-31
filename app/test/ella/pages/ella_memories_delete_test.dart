@@ -56,7 +56,10 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   }
 
   @override
-  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
+  Future<MemoryArtworkBackfillPage?> backfillNext({
+    String? cursor,
+    MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
+  }) async {
     backfillCalls += 1;
     return const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false);
   }
@@ -66,7 +69,10 @@ class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
   final firstBackfill = Completer<MemoryArtworkBackfillPage?>();
 
   @override
-  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) {
+  Future<MemoryArtworkBackfillPage?> backfillNext({
+    String? cursor,
+    MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
+  }) {
     backfillCalls += 1;
     if (backfillCalls == 1) return firstBackfill.future;
     return Future.value(const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false));

@@ -419,6 +419,7 @@ void main() {
               'skipped': 1,
               'has_more': true,
               'next_cursor': 'memory-cursor',
+              'mode': 'preview',
             }),
             200,
           );
@@ -442,7 +443,7 @@ void main() {
       'https://api.example/v1/ella/memory-artwork/backfill',
     ]);
     expect(jsonDecode(bodies.first)['style_version'], memoryArtworkPaperCollageStyle);
-    expect(jsonDecode(bodies.last), isEmpty);
+    expect(jsonDecode(bodies.last), {'mode': 'preview'});
   });
 
   test('style update exposes a safe typed backend failure', () async {
@@ -477,7 +478,7 @@ void main() {
     expect(result.failureCode, 'memory_artwork_consent_required');
   });
 
-  test('progressive backfill validates and forwards the opaque cursor', () async {
+  test('preview backfill validates and forwards the opaque cursor', () async {
     var requestBody = '';
     final api = MemoryArtworkApi(
       baseUrl: 'https://api.example',
@@ -502,6 +503,7 @@ void main() {
             'skipped': 2,
             'has_more': true,
             'next_cursor': 'memory-older-42',
+            'mode': 'preview',
           }),
           200,
         );
@@ -510,12 +512,43 @@ void main() {
 
     final page = await api.backfillNext(cursor: 'memory-current-42');
 
-    expect(jsonDecode(requestBody), {'cursor': 'memory-current-42'});
+    expect(jsonDecode(requestBody), {'mode': 'preview', 'cursor': 'memory-current-42'});
     expect(page?.queued, 10);
     expect(page?.existing, 12);
     expect(page?.hasMore, isTrue);
     expect(page?.nextCursor, 'memory-older-42');
     expect(await api.backfillNext(cursor: 'bad/cursor'), isNull);
+  });
+
+  test('backfill rejects an older server response that does not confirm the requested mode', () async {
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': memoryArtworkSchemaVersion,
+          'queued': 10,
+          'existing': 0,
+          'skipped': 0,
+          'has_more': true,
+          'next_cursor': 'memory-older-42',
+        }),
+        200,
+      ),
+    );
+
+    expect(await api.backfillNext(), isNull);
   });
 
   test('queue status separates active work from queued, retrying, and failed memories', () async {
