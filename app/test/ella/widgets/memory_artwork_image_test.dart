@@ -202,6 +202,34 @@ class _AuthorityBecomesReadyArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _PersistentlyUnavailableAuthorityArtworkApi extends MemoryArtworkApi {
+  _PersistentlyUnavailableAuthorityArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      'persistently-unavailable-authority-cache-key';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    return const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_authority_unavailable',
+    );
+  }
+}
+
 void main() {
   testWidgets('renders owner-scoped disk artwork before signed URL refresh completes', (tester) async {
     final api = _DelayedArtworkApi();
@@ -507,6 +535,41 @@ void main() {
 
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-settling-authority')), findsOneWidget);
+  });
+
+  testWidgets('bounds replacement-authority retries instead of polling a failing endpoint indefinitely',
+      (tester) async {
+    final api = _PersistentlyUnavailableAuthorityArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-persistently-unavailable-authority',
+      createdAt: DateTime(2026, 8, 31),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+          maxAuthorityUnavailableRetries: 2,
+          authorityEpoch: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(api.loadCalls, 3, reason: 'initial request plus the configured bounded retries');
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('keeps published artwork visible while polling for a replacement style', (tester) async {

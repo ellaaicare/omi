@@ -60,7 +60,11 @@ class OmiFeatures {
 abstract class IDeviceServiceSubsciption {
   void onDevices(List<BtDevice> devices);
   void onStatusChanged(DeviceServiceStatus status);
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state);
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  });
 }
 
 class DeviceService implements IDeviceService {
@@ -76,6 +80,7 @@ class DeviceService implements IDeviceService {
 
   DeviceConnection? _connection;
   int _operationGeneration = 0;
+  int _connectionGeneration = 0;
   List<BtDevice> get devices => _devices;
 
   DeviceServiceStatus get status => _status;
@@ -164,9 +169,18 @@ class DeviceService implements IDeviceService {
       }
     }
 
-    _connection = DeviceConnectionFactory.create(device);
-    if (_connection != null) {
-      await _connection!.connect(onConnectionStateChanged: onDeviceConnectionStateChanged);
+    final connection = DeviceConnectionFactory.create(device);
+    _connection = connection;
+    if (connection != null) {
+      final connectionGeneration = ++_connectionGeneration;
+      await connection.connect(
+        onConnectionStateChanged: (deviceId, state) {
+          // A BLE transport can finish a callback after a later connection to
+          // the same device id exists. Do not let the old session reach clients.
+          if (connectionGeneration != _connectionGeneration || !identical(connection, _connection)) return;
+          onDeviceConnectionStateChanged(deviceId, state, connectionGeneration: connectionGeneration);
+        },
+      );
     } else {
       Logger.debug("Failed to create device connection for ${device.id}");
     }
@@ -216,14 +230,18 @@ class DeviceService implements IDeviceService {
     }
   }
 
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  }) {
     Logger.debug("device connection state changed...$deviceId...$state");
     DebugLogManager.logEvent('device_connection_state', {
       'device_id': deviceId,
       'state': state.name,
     });
     for (var s in _subscriptions.values) {
-      s.onDeviceConnectionStateChanged(deviceId, state);
+      s.onDeviceConnectionStateChanged(deviceId, state, connectionGeneration: connectionGeneration);
     }
   }
 
@@ -314,6 +332,7 @@ class DeviceService implements IDeviceService {
         Logger.debug("DeviceService: Disconnecting device...");
         await _connection?.disconnect();
         _connection = null;
+        _connectionGeneration++;
       }
     } finally {
       _mutex.release();

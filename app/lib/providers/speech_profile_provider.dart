@@ -451,7 +451,11 @@ class SpeechProfileProvider extends ChangeNotifier
   }
 
   @override
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) async {
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  }) async {
     switch (state) {
       case DeviceConnectionState.connected:
         var connection = await ServiceManager.instance().device.ensureConnection(deviceId);

@@ -38,6 +38,16 @@ class _FakeDeviceService implements IDeviceService {
     }
   }
 
+  void publishConnection(String deviceId, DeviceConnectionState state, {required int connectionGeneration}) {
+    for (final subscriber in _subscriptions.values.toList()) {
+      subscriber.onDeviceConnectionStateChanged(
+        deviceId,
+        state,
+        connectionGeneration: connectionGeneration,
+      );
+    }
+  }
+
   @override
   void start() => publish(DeviceServiceStatus.ready);
 
@@ -314,7 +324,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected, connectionGeneration: 1);
     service.publish(DeviceServiceStatus.stop);
     await Future<void>.delayed(const Duration(milliseconds: 150));
 
@@ -341,7 +351,8 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged('legacy-necklace', DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged('legacy-necklace', DeviceConnectionState.connected,
+        connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
 
     expect(resolverCalls, 0);
@@ -364,7 +375,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
     expect(capture.recordingState, RecordingState.deviceRecord);
@@ -376,6 +387,65 @@ void main() {
     expect(provider.connectedDevice?.id, necklace.id);
     expect(provider.presentationIsConnected, isTrue);
     expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('authority reconciliation cannot notify after the device provider is disposed', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'dispose-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    );
+    var notificationsAfterInvalidation = 0;
+    provider.addListener(() => notificationsAfterInvalidation++);
+
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    provider.dispose();
+    await pumpEventQueue();
+
+    expect(notificationsAfterInvalidation, 0);
+  });
+
+  test('a stale disconnect session cannot tear down a later reconnect to the same necklace', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'shared-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace, uid: 'account-a', profileBindingId: 'profile-a');
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    service.publishConnection(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(provider.presentationIsConnected, isTrue);
+
+    final preferences = SharedPreferencesUtil()..uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('account-b\u001fprofile-b');
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    await pumpEventQueue();
+
+    await provider.confirmConnectedDeviceForCurrentAuthority(necklace);
+    service.publishConnection(necklace.id, DeviceConnectionState.connected, connectionGeneration: 2);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    final disconnectsBeforeStaleCallback = capture.disconnectedDeviceIds.length;
+    expect(provider.presentationIsConnected, isTrue);
+
+    service.publishConnection(necklace.id, DeviceConnectionState.disconnected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isTrue);
+    expect(capture.disconnectedDeviceIds, hasLength(disconnectsBeforeStaleCallback));
   });
 
   test('device connection cannot start necklace capture while phone owns audio', () async {
@@ -391,7 +461,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -414,7 +484,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
     expect(capture.deviceStarts, 0);
@@ -447,7 +517,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -480,7 +550,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected, connectionGeneration: 1);
     await resolverEntered.future;
     service.publish(DeviceServiceStatus.stop);
     resolution.complete(necklace);
@@ -727,7 +797,7 @@ void main() {
     await provider.periodicConnect('test callback publication ordering');
     await scanEntered.future;
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await storageEntered.future.timeout(const Duration(seconds: 1));
 
     expect(provider.connectedDevice, same(necklace));
@@ -763,7 +833,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -798,7 +868,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -894,7 +964,7 @@ void main() {
     allowScanResult.complete(necklace);
     await pumpEventQueue();
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -1002,7 +1072,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     expect(scanCalls, 0);
     expect(capture.deviceStarts, 0);
@@ -1012,7 +1082,7 @@ void main() {
     expect(scanCalls, 1);
     expect(provider.pairedDevice?.id, necklace.id);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 2);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     expect(capture.deviceStarts, 1);
 

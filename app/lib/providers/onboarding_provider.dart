@@ -598,7 +598,11 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   @override
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  }) {
     // TODO: implement onDeviceConnectionStateChanged
   }
 

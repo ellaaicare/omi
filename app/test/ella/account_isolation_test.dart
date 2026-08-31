@@ -2210,7 +2210,11 @@ class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
   final List<DeviceConnectionState> connectionStates = [];
 
   @override
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  }) {
     connectionStates.add(state);
   }
 

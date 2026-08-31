@@ -25,6 +25,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.cacheEvictor,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
+    this.maxAuthorityUnavailableRetries = 3,
     this.refreshEpoch = 0,
     this.authorityEpoch = 0,
     this.enqueueIfMissing = false,
@@ -36,6 +37,11 @@ class MemoryArtworkImage extends StatefulWidget {
   final MemoryArtworkCacheEvictor? cacheEvictor;
   final BoxFit fit;
   final Duration retryDelay;
+
+  /// A replacement authority can take a moment to persist after its notifier
+  /// fires. Retry that narrow race a few times, then wait for the next parent
+  /// refresh instead of polling a failing authenticated endpoint forever.
+  final int maxAuthorityUnavailableRetries;
 
   /// A parent-owned queue completion revision. It refreshes visible cards after
   /// the server finishes a batch without letting scrolling create new jobs.
@@ -57,6 +63,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   int _requestGeneration = 0;
   Timer? _retryTimer;
   bool _imageRetryScheduled = false;
+  int _authorityUnavailableRetries = 0;
 
   @override
   void initState() {
@@ -87,6 +94,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _retryTimer?.cancel();
     _retryTimer = null;
     _imageRetryScheduled = false;
+    _authorityUnavailableRetries = 0;
     final generation = ++_requestGeneration;
     final api = widget.api ?? MemoryArtworkApi();
     final artwork = widget.conversation.artwork;
@@ -167,7 +175,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (loadCachedFile && readyCacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(readyCacheKey, generation));
     }
-    if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation);
+    if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
   }
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
@@ -225,8 +233,17 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     }.contains(result.failureCode);
   }
 
-  void _scheduleRetry(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) {
+  void _scheduleRetry(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation, {
+    MemoryArtworkResult? result,
+  }) {
     if (!mounted || generation != _requestGeneration || _retryTimer?.isActive == true) return;
+    if (result?.failureCode == 'memory_artwork_authority_unavailable') {
+      if (_authorityUnavailableRetries >= widget.maxAuthorityUnavailableRetries) return;
+      _authorityUnavailableRetries++;
+    }
     _retryTimer = Timer(widget.retryDelay, () {
       _retryTimer = null;
       if (!mounted || generation != _requestGeneration) return;

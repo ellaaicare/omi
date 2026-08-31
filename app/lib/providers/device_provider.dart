@@ -142,12 +142,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   bool _requiresExplicitDeviceSelectionAfterAuthorityChange = true;
   bool _authorityReconciliationPending = false;
   String? _lastDeviceOwnerBinding;
+  int? _activeDeviceConnectionSession;
   bool _disposed = false;
 
   void Function(BtDevice device)? onDeviceConnected;
 
   bool _isDeviceOperationCurrent(int generation) =>
       !_disposed && _deviceServiceReady && _captureTeardown == null && generation == _deviceOperationGeneration;
+
+  bool _isCurrentDeviceConnectionSession(int connectionGeneration) =>
+      !_disposed && connectionGeneration == _activeDeviceConnectionSession;
 
   String? _rememberedDeviceOwnerBinding() {
     final preferences = SharedPreferencesUtil();
@@ -188,7 +192,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     // microtask lets the profile write share this authority transition without
     // leaving a timer alive after a widget/provider is disposed.
     await Future<void>.microtask(() {});
-    if (reconciliationGeneration != _authorityReconciliationGeneration) return;
+    if (_disposed || reconciliationGeneration != _authorityReconciliationGeneration) return;
 
     final settledOwnerBinding = _rememberedDeviceOwnerBinding();
     final ownerChanged = settledOwnerBinding != _lastDeviceOwnerBinding;
@@ -209,6 +213,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     // A new owner cannot inherit capture from the preceding authority. Only a
     // fresh, owner-bound reconnect started after this point can clear the fence.
     _lastDeviceOwnerBinding = settledOwnerBinding;
+    _activeDeviceConnectionSession = null;
     final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
     _reconnectionTimer?.cancel();
     _disconnectNotificationTimer?.cancel();
@@ -231,7 +236,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
     if (settledOwnerBinding != null && pairedDevice != null) {
       await teardown;
-      if (operationGeneration != _deviceOperationGeneration) return;
+      if (!_isDeviceOperationCurrent(operationGeneration)) return;
       unawaited(_resumeBoundDeviceAfterTeardown(operationGeneration));
     }
   }
@@ -727,6 +732,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   @override
   void dispose() {
     _disposed = true;
+    _authorityReconciliationGeneration++;
+    _authorityReconciliationPending = false;
+    _activeDeviceConnectionSession = null;
     WidgetsBinding.instance.removeObserver(this);
     _accountAuthorityChanges.removeListener(_handleAccountAuthorityChanged);
     captureProvider?.removeListener(_onCaptureProviderChanged);
@@ -758,11 +766,17 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
-  Future<void> onDeviceDisconnected({int? operationGeneration, String? deviceId}) async {
+  Future<void> onDeviceDisconnected({
+    int? operationGeneration,
+    String? deviceId,
+    int? connectionGeneration,
+  }) async {
+    if (connectionGeneration != null && !_isCurrentDeviceConnectionSession(connectionGeneration)) return;
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('onDisconnected inside: $connectedDevice');
     final disconnectedDeviceId = deviceId ?? connectedDevice?.id ?? pairedDevice?.id;
+    _activeDeviceConnectionSession = null;
     _deviceOperationGeneration++;
     _havingNewFirmware = false;
     connectedDevice = null;
@@ -947,8 +961,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return false;
   }
 
-  Future<void> _handleDeviceConnected(String deviceId, int operationGeneration) async {
-    if (!_isDeviceOperationCurrent(operationGeneration)) return;
+  Future<void> _handleDeviceConnected(String deviceId, int operationGeneration, int connectionGeneration) async {
+    if (!_isDeviceOperationCurrent(operationGeneration) || !_isCurrentDeviceConnectionSession(connectionGeneration)) {
+      return;
+    }
     if (_authorityReconciliationPending ||
         _requiresExplicitDeviceSelectionAfterAuthorityChange ||
         !_isCurrentOwnerBoundDevice(deviceId)) {
@@ -957,6 +973,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final device = await _resolveConnectedDevice(deviceId);
     if (device == null ||
         !_isDeviceOperationCurrent(operationGeneration) ||
+        !_isCurrentDeviceConnectionSession(connectionGeneration) ||
         _authorityReconciliationPending ||
         !_isCurrentOwnerBoundDevice(device.id)) {
       return;
@@ -1096,7 +1113,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   @override
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) async {
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  }) async {
     Logger.debug("provider > device connection state changed...$deviceId...$state...${connectedDevice?.id}");
     switch (state) {
       case DeviceConnectionState.connected:
@@ -1104,23 +1125,34 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         // Service callbacks carry no Firebase identity. Only accept a callback
         // after the current account explicitly starts a new scan. This fences
         // an account-A BLE event delivered after account B becomes current.
-        if (_authorityReconciliationPending ||
+        if (connectionGeneration == null ||
+            _authorityReconciliationPending ||
             _requiresExplicitDeviceSelectionAfterAuthorityChange ||
             !_isCurrentOwnerBoundDevice(deviceId)) {
           return;
         }
         final generation = _deviceOperationGeneration;
         if (!_isDeviceOperationCurrent(generation)) return;
-        _connectDebouncer.run(() => _handleDeviceConnected(deviceId, generation));
+        _activeDeviceConnectionSession = connectionGeneration;
+        _connectDebouncer.run(() => _handleDeviceConnected(deviceId, generation, connectionGeneration));
         break;
       case DeviceConnectionState.disconnected:
         _connectDebouncer.cancel();
+        // Native callbacks from an older connection session must not tear down
+        // a current owner's later reconnect to the same physical necklace.
+        if (connectionGeneration == null || !_isCurrentDeviceConnectionSession(connectionGeneration)) return;
         // Check if this is the paired device or currently connected device
         // Coz connectedDevice and pairedDevice are the same but connectedDevice becomes null after disconnect
         if (deviceId == connectedDevice?.id || deviceId == pairedDevice?.id) {
           final generation = _deviceOperationGeneration;
           if (!_isDeviceOperationCurrent(generation)) return;
-          _disconnectDebouncer.run(() => onDeviceDisconnected(operationGeneration: generation, deviceId: deviceId));
+          _disconnectDebouncer.run(
+            () => onDeviceDisconnected(
+              operationGeneration: generation,
+              deviceId: deviceId,
+              connectionGeneration: connectionGeneration,
+            ),
+          );
         }
         break;
     }
@@ -1135,6 +1167,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       case DeviceServiceStatus.stop:
         final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
         _deviceOperationGeneration++;
+        _activeDeviceConnectionSession = null;
         _deviceServiceReady = false;
         _clearDeferredDeviceCapture();
         _reconnectionTimer?.cancel();
