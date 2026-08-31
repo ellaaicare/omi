@@ -44,8 +44,6 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   bool _artworkBackfillInFlight = false;
   bool _artworkBackfillRestartPending = false;
 
-  static const _backfillComplete = '__complete__';
-
   @override
   void initState() {
     super.initState();
@@ -81,7 +79,6 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     if (provider.loadMoreConversationsFailed) return;
     if (_scrollController.position.extentAfter < 720) {
       unawaited(provider.getMoreConversationsFromServer());
-      unawaited(_advanceArtworkBackfill());
     }
   }
 
@@ -108,35 +105,22 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Future<void> _loadArtworkPreferences() async {
     final preferences = await _artworkApi.preferences();
     if (mounted) setState(() => _artworkPreferences = preferences);
-    if (preferences?.releaseEnabled == true) unawaited(_advanceArtworkBackfill());
   }
 
-  Future<MemoryArtworkBackfillPage?> _advanceArtworkBackfill({bool restart = false}) async {
+  /// Gallery browsing must never spend image allowance. A deliberate style
+  /// change can request one cursorless, bounded recent preview instead.
+  Future<MemoryArtworkBackfillPage?> _startArtworkPreview({bool restart = false}) async {
     if (restart) _artworkBackfillRestartPending = true;
     final preferences = _artworkPreferences;
     if (preferences == null || !preferences.releaseEnabled || _artworkBackfillInFlight) return null;
-    final shouldRestart = _artworkBackfillRestartPending;
     _artworkBackfillRestartPending = false;
-    final storage = SharedPreferencesUtil();
-    if (shouldRestart) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
-    final savedCursor = storage.memoryArtworkBackfillCursor(preferences.styleVersion);
-    if (savedCursor == _backfillComplete) return null;
     _artworkBackfillInFlight = true;
     try {
-      final page = await _artworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor);
-      if (page == null) {
-        if (savedCursor.isNotEmpty) await storage.clearMemoryArtworkBackfillCursor(preferences.styleVersion);
-        return null;
-      }
-      await storage.saveMemoryArtworkBackfillCursor(
-        preferences.styleVersion,
-        page.hasMore ? page.nextCursor! : _backfillComplete,
-      );
-      return page;
+      return await _artworkApi.backfillNext();
     } finally {
       _artworkBackfillInFlight = false;
       if (_artworkBackfillRestartPending && mounted) {
-        unawaited(_advanceArtworkBackfill(restart: true));
+        unawaited(_startArtworkPreview(restart: true));
       }
     }
   }
@@ -162,7 +146,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       ),
     );
     _showMessage(context.l10n.memoryArtworkStyleUpdated);
-    unawaited(_advanceArtworkBackfill(restart: true));
+    unawaited(_startArtworkPreview(restart: true));
   }
 
   void _loadGalleryLayout() {

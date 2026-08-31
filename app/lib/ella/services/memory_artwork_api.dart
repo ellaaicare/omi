@@ -34,6 +34,10 @@ enum MemoryArtworkQueueState { running, paused, cancelled, completed, needsAtten
 
 enum MemoryArtworkQueueAction { pause, resume, cancel }
 
+/// Full historical regeneration is opt-in because it can consume a meaningful
+/// image allowance. A preview always targets one bounded recent page.
+enum MemoryArtworkBackfillMode { preview, all }
+
 class MemoryArtworkResult {
   const MemoryArtworkResult({
     required this.status,
@@ -88,6 +92,7 @@ class MemoryArtworkBackfillPage {
     required this.skipped,
     required this.hasMore,
     this.nextCursor,
+    this.mode = MemoryArtworkBackfillMode.preview,
   });
 
   final int queued;
@@ -95,6 +100,7 @@ class MemoryArtworkBackfillPage {
   final int skipped;
   final bool hasMore;
   final String? nextCursor;
+  final MemoryArtworkBackfillMode mode;
 }
 
 class MemoryArtworkStyleProgress {
@@ -331,7 +337,10 @@ class MemoryArtworkApi {
     return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 
-  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
+  Future<MemoryArtworkBackfillPage?> backfillNext({
+    String? cursor,
+    MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
+  }) async {
     final authority = _authorityProvider();
     final normalizedCursor = cursor?.trim() ?? '';
     if (authority == null || normalizedCursor.contains('/')) return null;
@@ -339,11 +348,15 @@ class MemoryArtworkApi {
       authority,
       method: 'POST',
       path: 'v1/ella/memory-artwork/backfill',
-      body: jsonEncode({if (normalizedCursor.isNotEmpty) 'cursor': normalizedCursor}),
+      body: jsonEncode({'mode': mode.name, if (normalizedCursor.isNotEmpty) 'cursor': normalizedCursor}),
     );
     if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
     final payload = _jsonObject(response!.body);
-    if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) return null;
+    if (payload == null ||
+        payload['schema_version'] != memoryArtworkSchemaVersion ||
+        payload['mode']?.toString() != mode.name) {
+      return null;
+    }
     final hasMore = payload['has_more'];
     final nextCursor = payload['next_cursor']?.toString().trim() ?? '';
     if (hasMore is! bool || (hasMore && (nextCursor.isEmpty || nextCursor.contains('/')))) return null;
@@ -353,6 +366,7 @@ class MemoryArtworkApi {
       skipped: _nonNegativeInt(payload['skipped']),
       hasMore: hasMore,
       nextCursor: hasMore ? nextCursor : null,
+      mode: mode,
     );
   }
 

@@ -39,6 +39,8 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
   int backfillCalls = 0;
+  final List<String?> backfillCursors = [];
+  final List<MemoryArtworkBackfillMode> backfillModes = [];
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async => MemoryArtworkPreferences(
@@ -56,8 +58,13 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   }
 
   @override
-  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) async {
+  Future<MemoryArtworkBackfillPage?> backfillNext({
+    String? cursor,
+    MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
+  }) async {
     backfillCalls += 1;
+    backfillCursors.add(cursor);
+    backfillModes.add(mode);
     return const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false);
   }
 }
@@ -66,8 +73,13 @@ class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
   final firstBackfill = Completer<MemoryArtworkBackfillPage?>();
 
   @override
-  Future<MemoryArtworkBackfillPage?> backfillNext({String? cursor}) {
+  Future<MemoryArtworkBackfillPage?> backfillNext({
+    String? cursor,
+    MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
+  }) {
     backfillCalls += 1;
+    backfillCursors.add(cursor);
+    backfillModes.add(mode);
     if (backfillCalls == 1) return firstBackfill.future;
     return Future.value(const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false));
   }
@@ -366,7 +378,8 @@ void main() {
     expect(find.textContaining('Illustration style saved'), findsOneWidget);
   });
 
-  testWidgets('style change restarts reconciliation after an active archive backfill finishes', (tester) async {
+  testWidgets('a second explicit style change restarts one cursorless preview after the active preview finishes',
+      (tester) async {
     final provider = ConversationProvider()
       ..conversations = [memory('memory-style-restart')]
       ..hasLoadedConversations = true
@@ -391,7 +404,7 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(artworkApi.backfillCalls, 1);
+    expect(artworkApi.backfillCalls, 0);
 
     await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
     await tester.pumpAndSettle();
@@ -400,14 +413,28 @@ void main() {
     await tester.pump();
 
     expect(artworkApi.selectedStyle, memoryArtworkPaperCollageStyle);
-    expect(artworkApi.backfillCalls, 1, reason: 'the first archive request is still active');
+    expect(artworkApi.backfillCalls, 1, reason: 'the selected style starts one bounded preview');
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anime storybook'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(artworkApi.selectedStyle, memoryArtworkAnimeStorybookStyle);
+    expect(artworkApi.backfillCalls, 1, reason: 'the first preview remains in flight');
 
     artworkApi.firstBackfill.complete(
       const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false),
     );
     await tester.pumpAndSettle();
 
-    expect(artworkApi.backfillCalls, 2, reason: 'the selected style must start after the active request completes');
+    expect(artworkApi.backfillCalls, 2, reason: 'the second explicit style starts after the active request completes');
+    expect(artworkApi.backfillCursors, [null, null]);
+    expect(
+      artworkApi.backfillModes,
+      [MemoryArtworkBackfillMode.preview, MemoryArtworkBackfillMode.preview],
+    );
   });
 
   testWidgets('days layout groups a local day into one comic-style tile', (tester) async {
@@ -456,38 +483,7 @@ void main() {
     expect(artworkApi.backfillCalls, 0);
   });
 
-  testWidgets('scrolling near the end requests the next memory page', (tester) async {
-    final authority = _MutableAuthority('test-user');
-    var pageRequests = 0;
-    final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationsPageFetchCall: ({required limit, required offset}) async {
-        pageRequests += 1;
-        expect(limit, 50);
-        expect(offset, 50);
-        return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
-      },
-    )
-      ..conversations = List.generate(50, (index) => memory('memory-$index', title: 'Memory $index'))
-      ..hasLoadedConversations = true
-      ..hasFreshConversations = true
-      ..hasMoreConversations = true;
-    addTearDown(provider.dispose);
-
-    await pumpPage(tester, provider);
-    final scrollable = tester.state<ScrollableState>(
-      find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)),
-    );
-    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
-    await tester.pump();
-    await tester.pumpAndSettle();
-
-    expect(pageRequests, 1);
-    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
-    expect(provider.hasMoreConversations, isFalse);
-  });
-
-  testWidgets('a short first page automatically requests older memories without a scroll event', (tester) async {
+  testWidgets('a short first page loads older memories without starting artwork work', (tester) async {
     final authority = _MutableAuthority('test-user');
     var pageRequests = 0;
     final provider = ConversationProvider(
@@ -502,13 +498,15 @@ void main() {
       ..hasLoadedConversations = true
       ..hasFreshConversations = true
       ..hasMoreConversations = true;
+    final artworkApi = _FakeArtworkApi();
     addTearDown(provider.dispose);
 
-    await pumpPage(tester, provider);
+    await pumpPage(tester, provider, artworkApi: artworkApi);
 
     expect(pageRequests, 1);
     expect(provider.conversations.map((item) => item.id), containsAll(['memory-current', 'memory-older']));
     expect(provider.hasMoreConversations, isFalse);
+    expect(artworkApi.backfillCalls, 0);
   });
 
   testWidgets('a failed automatic page waits for the visible retry action', (tester) async {
