@@ -52,6 +52,7 @@ class EllaEntitlementProvider extends ChangeNotifier {
   int? retryAfterSeconds;
   String supportCode = '';
   String correlationId = '';
+  EllaEntitlementFailureKind? accessFailureKind;
   String? _boundUid;
   String? _verifiedUid;
   int _generation = 0;
@@ -88,8 +89,16 @@ class EllaEntitlementProvider extends ChangeNotifier {
       _setDiagnostics(result.supportCode, result.correlationId);
       state = EllaEntitlementLoadState.ready;
       notifyListeners();
+    } on EllaEntitlementRequestException catch (error) {
+      if (generation != _generation || uid != _boundUid) return;
+      accessFailureKind = error.kind;
+      supportCode = error.supportCode;
+      state = EllaEntitlementLoadState.unavailable;
+      notifyListeners();
     } catch (_) {
       if (generation != _generation || uid != _boundUid) return;
+      accessFailureKind = EllaEntitlementFailureKind.unavailable;
+      supportCode = 'ELLA-ACCESS-RETRY';
       state = EllaEntitlementLoadState.unavailable;
       notifyListeners();
     }
@@ -129,8 +138,16 @@ class EllaEntitlementProvider extends ChangeNotifier {
       }
       state = EllaEntitlementLoadState.ready;
       notifyListeners();
+    } on EllaEntitlementRequestException catch (error) {
+      if (generation != _generation || uid != _boundUid) return;
+      accessFailureKind = error.kind;
+      supportCode = error.supportCode;
+      state = EllaEntitlementLoadState.unavailable;
+      notifyListeners();
     } catch (_) {
       if (generation != _generation || uid != _boundUid) return;
+      accessFailureKind = EllaEntitlementFailureKind.unavailable;
+      supportCode = 'ELLA-ACCESS-RETRY';
       state = EllaEntitlementLoadState.unavailable;
       notifyListeners();
     }
@@ -177,6 +194,7 @@ class EllaEntitlementProvider extends ChangeNotifier {
     retryAfterSeconds = null;
     supportCode = '';
     correlationId = '';
+    accessFailureKind = null;
   }
 
   void _clearFailure() {
@@ -184,6 +202,7 @@ class EllaEntitlementProvider extends ChangeNotifier {
     retryAfterSeconds = null;
     supportCode = '';
     correlationId = '';
+    accessFailureKind = null;
   }
 
   void _setDiagnostics(String support, String correlation) {

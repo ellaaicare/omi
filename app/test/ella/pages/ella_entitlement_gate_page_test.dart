@@ -146,6 +146,36 @@ void main() {
     expect(find.byType(TextField), findsNothing);
   });
 
+  testWidgets('temporary service failure is not described as the person\'s connection failing', (tester) async {
+    final provider = EllaEntitlementProvider(
+      transport: const _UnavailableEntitlementTransport(),
+      authenticatedUidChanges: const Stream.empty(),
+      initialAuthenticatedUid: 'uid-a',
+    );
+    addTearDown(provider.dispose);
+    await provider.load();
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaEntitlementGatePage(
+            startOnMount: false,
+            onSignOutOverride: _noop,
+            readyChild: Text('ONBOARDING READY'),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Ella’s service needs a moment'), findsOneWidget);
+    expect(find.textContaining('Your account and memories are safe'), findsOneWidget);
+    expect(find.text('ELLA-ACCESS-RETRY'), findsOneWidget);
+  });
+
   testWidgets('revoked recovery requires a fresh explicit consent grant before retrying entitlement', (tester) async {
     final transport = _RecoveryEntitlementTransport();
     final provider = EllaEntitlementProvider(
@@ -273,8 +303,9 @@ void main() {
     expect(find.text('ONBOARDING READY'), findsNothing);
   });
 
-  testWidgets('non-English internal pilot performs no claim request and exposes no English-only claim UI',
-      (tester) async {
+  testWidgets('non-English internal pilot performs no claim request and exposes no English-only claim UI', (
+    tester,
+  ) async {
     final transport = _CountingEntitlementTransport();
     final provider = EllaEntitlementProvider(
       transport: transport,
@@ -343,6 +374,18 @@ class _RecoveryEntitlementTransport implements EllaEntitlementTransport {
           )
         : EllaAccessDemoFixtures.active;
   }
+
+  @override
+  Future<EllaEntitlement> redeem(String code) => throw UnimplementedError();
+}
+
+class _UnavailableEntitlementTransport implements EllaEntitlementTransport {
+  const _UnavailableEntitlementTransport();
+
+  @override
+  Future<EllaEntitlement> fetch() => Future.error(
+        const EllaEntitlementRequestException(EllaEntitlementFailureKind.unavailable, supportCode: 'ELLA-ACCESS-RETRY'),
+      );
 
   @override
   Future<EllaEntitlement> redeem(String code) => throw UnimplementedError();

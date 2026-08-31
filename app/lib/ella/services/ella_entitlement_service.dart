@@ -2,9 +2,11 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
 
 const bool isEllaEntitlementGateEnabled = SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled;
@@ -14,6 +16,17 @@ const bool isEllaEntitlementStubEnabled = !SharedPreferencesUtil.isPublicBuild &
 enum EllaEntitlementStatus { invited, active, suspended, revoked, expired, none }
 
 enum EllaInviteRedemptionError { invalid, expired, capacity, rateLimited }
+
+/// Safe, user-facing categories for the authenticated entitlement boundary.
+/// Raw transport and backend detail must never be rendered into the access UI.
+enum EllaEntitlementFailureKind { authenticationRequired, accessDenied, updateRequired, unavailable, invalidResponse }
+
+class EllaEntitlementRequestException implements Exception {
+  const EllaEntitlementRequestException(this.kind, {required this.supportCode});
+
+  final EllaEntitlementFailureKind kind;
+  final String supportCode;
+}
 
 enum EllaVoicePolicyReason { quotaDaily, quotaMonthly, concurrent, suspended, sessionMax }
 
@@ -142,10 +155,21 @@ class EllaEntitlementHttpTransport implements EllaEntitlementTransport {
       timeout: const Duration(seconds: 10),
       retries: 0,
     );
-    if (response == null || response.statusCode != 200) {
-      throw const FormatException('Entitlement request failed');
+    if (response == null) {
+      throw classifyEllaEntitlementFailure(isSignedIn: AuthService.instance.isSignedIn());
     }
-    return _decodeEntitlement(response.body);
+    if (response.statusCode != 200) {
+      throw classifyEllaEntitlementFailure(statusCode: response.statusCode, body: response.body);
+    }
+    try {
+      return _decodeEntitlement(response.body);
+    } on FormatException {
+      throw classifyEllaEntitlementFailure(
+        statusCode: response.statusCode,
+        body: response.body,
+        invalidResponse: true,
+      );
+    }
   }
 
   @override
@@ -183,6 +207,37 @@ String buildEllaEntitlementUrl(String baseUrl) => '${baseUrl.endsWith('/') ? bas
 @visibleForTesting
 String buildEllaInviteRedemptionUrl(String baseUrl) =>
     '${baseUrl.endsWith('/') ? baseUrl : '$baseUrl/'}v1/invite/redeem';
+
+@visibleForTesting
+EllaEntitlementRequestException classifyEllaEntitlementFailure({
+  int? statusCode,
+  String body = '',
+  bool isSignedIn = true,
+  bool invalidResponse = false,
+}) {
+  final failure = invalidResponse
+      ? const ClientApiFailure(ClientApiFailureKind.invalidResponse)
+      : statusCode == null
+          ? (isSignedIn
+              ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+              : const ClientApiFailure(ClientApiFailureKind.authenticationRequired))
+          : ClientApiFailure.fromHttp(statusCode: statusCode, body: body);
+  final kind = switch (failure.kind) {
+    ClientApiFailureKind.authenticationRequired => EllaEntitlementFailureKind.authenticationRequired,
+    ClientApiFailureKind.forbidden => EllaEntitlementFailureKind.accessDenied,
+    ClientApiFailureKind.updateRequired => EllaEntitlementFailureKind.updateRequired,
+    ClientApiFailureKind.invalidResponse => EllaEntitlementFailureKind.invalidResponse,
+    _ => EllaEntitlementFailureKind.unavailable,
+  };
+  final supportCode = switch (kind) {
+    EllaEntitlementFailureKind.authenticationRequired => 'ELLA-AUTH-REFRESH',
+    EllaEntitlementFailureKind.accessDenied => 'ELLA-ACCESS-DENIED',
+    EllaEntitlementFailureKind.updateRequired => 'ELLA-UPDATE-REQUIRED',
+    EllaEntitlementFailureKind.invalidResponse => 'ELLA-ACCESS-RESPONSE',
+    EllaEntitlementFailureKind.unavailable => 'ELLA-ACCESS-RETRY',
+  };
+  return EllaEntitlementRequestException(kind, supportCode: supportCode);
+}
 
 EllaEntitlement _decodeEntitlement(String body) {
   final decoded = jsonDecode(body);

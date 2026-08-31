@@ -23,6 +23,28 @@ void main() {
       expect(redemptionUri.toString(), isNot(contains('profile')));
     });
 
+    test('maps entitlement failures to safe, actionable client categories', () {
+      final authentication = classifyEllaEntitlementFailure(statusCode: 401);
+      final denied = classifyEllaEntitlementFailure(statusCode: 403);
+      final update = classifyEllaEntitlementFailure(statusCode: 426);
+      final unavailable = classifyEllaEntitlementFailure(statusCode: 503);
+      final malformed = classifyEllaEntitlementFailure(statusCode: 200, body: '{not-json', invalidResponse: true);
+
+      expect(authentication.kind, EllaEntitlementFailureKind.authenticationRequired);
+      expect(authentication.supportCode, 'ELLA-AUTH-REFRESH');
+      expect(denied.kind, EllaEntitlementFailureKind.accessDenied);
+      expect(update.kind, EllaEntitlementFailureKind.updateRequired);
+      expect(unavailable.kind, EllaEntitlementFailureKind.unavailable);
+      expect(malformed.kind, EllaEntitlementFailureKind.invalidResponse);
+    });
+
+    test('does not describe a missing signed-in identity as a network outage', () {
+      final failure = classifyEllaEntitlementFailure(isSignedIn: false);
+
+      expect(failure.kind, EllaEntitlementFailureKind.authenticationRequired);
+      expect(failure.supportCode, 'ELLA-AUTH-REFRESH');
+    });
+
     test('parses every typed entitlement status and quota field', () {
       for (final status in EllaEntitlementStatus.values) {
         final entitlement = EllaEntitlement.fromJson({

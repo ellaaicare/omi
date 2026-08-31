@@ -16752,13 +16752,13 @@ abstract class AppLocalizations {
   /// No description provided for @ellaAccessUnavailableTitle.
   ///
   /// In en, this message translates to:
-  /// **'Ella could not check access just now'**
+  /// **'Ella’s service needs a moment'**
   String get ellaAccessUnavailableTitle;
 
   /// No description provided for @ellaAccessUnavailableBody.
   ///
   /// In en, this message translates to:
-  /// **'Your connection may need a moment. Try again when you are ready.'**
+  /// **'Your account and memories are safe. Please try again in a moment.'**
   String get ellaAccessUnavailableBody;
 
   /// No description provided for @ellaAccessNeedsCheckTitle.

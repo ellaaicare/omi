@@ -199,6 +199,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
             primaryLabel: context.l10n.retry,
             onPrimary: provider.retry,
             onSignOut: _signOut,
+            supportCode: provider.supportCode,
           );
         }
 
