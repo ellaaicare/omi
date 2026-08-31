@@ -39,9 +39,27 @@ void main() {
 
     await _pumpRecordControl(tester, necklaceConnecting: true);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
-    expect(find.text(l10n.todayDockNecklaceConnecting), findsNothing);
-    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
+    expect(find.text(l10n.todayDockPhoneReady), findsNothing);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
+  });
+
+  testWidgets('remembered necklace exposes a direct reconnect action from Home', (tester) async {
+    var reconnects = 0;
+    await _pumpRecordControl(
+      tester,
+      hasNecklace: true,
+      onReconnectNecklace: () => reconnects += 1,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayDockNecklaceNotConnected), findsOneWidget);
+    expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+
+    expect(reconnects, 1);
   });
 
   testWidgets('non-Home active capture keeps Finish and Transcript as separate actions', (tester) async {
@@ -199,6 +217,7 @@ Future<void> _pumpRecordControl(
   bool homeCaptureOwned = false,
   bool homeCaptureUsesNecklace = false,
   bool starting = false,
+  bool hasNecklace = false,
   bool necklaceConnected = false,
   bool necklaceConnecting = false,
   RecordingState recordingState = RecordingState.stop,
@@ -207,6 +226,7 @@ Future<void> _pumpRecordControl(
   VoidCallback? onViewTranscript,
   VoidCallback? onFinishExternalCapture,
   VoidCallback? onUnavailable,
+  VoidCallback? onReconnectNecklace,
   VoidCallback? onTap,
 }) {
   return tester.pumpWidget(
@@ -218,6 +238,7 @@ Future<void> _pumpRecordControl(
           homeCaptureOwned: homeCaptureOwned,
           homeCaptureUsesNecklace: homeCaptureUsesNecklace,
           starting: starting,
+          hasNecklace: hasNecklace,
           necklaceConnected: necklaceConnected,
           necklaceConnecting: necklaceConnecting,
           recordingState: recordingState,
@@ -226,6 +247,7 @@ Future<void> _pumpRecordControl(
           onViewTranscript: onViewTranscript ?? () {},
           onFinishExternalCapture: onFinishExternalCapture ?? () {},
           onUnavailable: onUnavailable,
+          onReconnectNecklace: onReconnectNecklace,
           onTap: onTap ?? () {},
         ),
       ),

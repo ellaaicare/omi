@@ -70,12 +70,7 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({
-    this.startGate,
-    this.disconnectGate,
-    this.failuresBeforeStart = 0,
-    this.onDeviceStart,
-  });
+  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.failuresBeforeStart = 0, this.onDeviceStart});
 
   final Completer<void>? startGate;
   final Completer<void>? disconnectGate;
@@ -154,10 +149,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Small change (2%) within 15 minutes - should NOT notify
-      final result = provider.updateBatteryLevelForTesting(
-        52,
-        now: now.add(const Duration(minutes: 5)),
-      );
+      final result = provider.updateBatteryLevelForTesting(52, now: now.add(const Duration(minutes: 5)));
 
       expect(result, false);
       expect(notifyCount, 1); // No additional notification
@@ -172,10 +164,7 @@ void main() {
       expect(notifyCount, 1);
 
       // 5% change - should notify
-      final result = provider.updateBatteryLevelForTesting(
-        45,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(45, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -189,10 +178,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Small change but 15 minutes elapsed - should notify
-      final result = provider.updateBatteryLevelForTesting(
-        51,
-        now: now.add(const Duration(minutes: 15)),
-      );
+      final result = provider.updateBatteryLevelForTesting(51, now: now.add(const Duration(minutes: 15)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -206,10 +192,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Cross below 20% (only 6% change, but crosses threshold)
-      final result = provider.updateBatteryLevelForTesting(
-        19,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(19, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -223,10 +206,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Cross above 20% (only 6% change, but crosses threshold)
-      final result = provider.updateBatteryLevelForTesting(
-        21,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(21, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -240,10 +220,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Small change staying above 20% - should NOT notify
-      final result = provider.updateBatteryLevelForTesting(
-        23,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(23, now: now.add(const Duration(minutes: 1)));
 
       expect(result, false);
       expect(notifyCount, 1);
@@ -260,10 +237,7 @@ void main() {
       provider.resetBatteryThrottlingForTesting();
 
       // Now same value should trigger notification again (as if first reading)
-      final result = provider.updateBatteryLevelForTesting(
-        50,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(50, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -330,10 +304,8 @@ void main() {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
-    final provider = DeviceProvider(
-      deviceService: service,
-      connectionResolver: (_) async => necklace,
-    )..setProviders(capture);
+    final provider = DeviceProvider(deviceService: service, connectionResolver: (_) async => necklace)
+      ..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
@@ -700,6 +672,36 @@ void main() {
     expect(provider.isConnecting, isFalse);
     expect(capture.deviceStarts, 2);
     expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('a connected necklace is persisted before optional metadata work so startup can reconnect it', () async {
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'remembered-necklace-1',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(SharedPreferencesUtil().btDevice.id, necklace.id);
+    expect(provider.presentationPairedDevice?.id, necklace.id);
   });
 
   test('device service restart waits for exact necklace capture teardown', () async {

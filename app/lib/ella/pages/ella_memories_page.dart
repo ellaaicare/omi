@@ -499,12 +499,14 @@ class MemoryDayGalleryCard extends StatelessWidget {
     required this.memories,
     required this.onOpen,
     this.artworkApi,
+    this.artworkRefreshEpoch = 0,
   });
 
   final String dayLabel;
   final List<ServerConversation> memories;
   final VoidCallback onOpen;
   final MemoryArtworkApi? artworkApi;
+  final int artworkRefreshEpoch;
 
   @override
   Widget build(BuildContext context) {
@@ -528,7 +530,11 @@ class MemoryDayGalleryCard extends StatelessWidget {
             children: [
               AspectRatio(
                 aspectRatio: 1.75,
-                child: _MemoryDayArtworkCollage(memories: memories, artworkApi: artworkApi),
+                child: _MemoryDayArtworkCollage(
+                  memories: memories,
+                  artworkApi: artworkApi,
+                  artworkRefreshEpoch: artworkRefreshEpoch,
+                ),
               ),
               Padding(
                 padding: const EdgeInsets.all(16),
@@ -562,12 +568,14 @@ class MemoryDayGalleryCard extends StatelessWidget {
 }
 
 class _MemoryDayArtworkCollage extends StatelessWidget {
-  const _MemoryDayArtworkCollage({required this.memories, this.artworkApi});
+  const _MemoryDayArtworkCollage({required this.memories, this.artworkApi, this.artworkRefreshEpoch = 0});
 
   final List<ServerConversation> memories;
   final MemoryArtworkApi? artworkApi;
+  final int artworkRefreshEpoch;
 
-  Widget _art(ServerConversation memory) => MemoryArtworkImage(conversation: memory, api: artworkApi);
+  Widget _art(ServerConversation memory) =>
+      MemoryArtworkImage(conversation: memory, api: artworkApi, refreshEpoch: artworkRefreshEpoch);
 
   @override
   Widget build(BuildContext context) {
@@ -779,6 +787,8 @@ class MemoryGalleryCard extends StatelessWidget {
     required this.onOpen,
     this.displayTitle,
     this.onDelete,
+    this.artworkApi,
+    this.artworkRefreshEpoch = 0,
   });
 
   final ServerConversation conversation;
@@ -786,6 +796,8 @@ class MemoryGalleryCard extends StatelessWidget {
   final VoidCallback onOpen;
   final String? displayTitle;
   final Future<bool> Function()? onDelete;
+  final MemoryArtworkApi? artworkApi;
+  final int artworkRefreshEpoch;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -796,7 +808,15 @@ class MemoryGalleryCard extends StatelessWidget {
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SizedBox(width: 112, height: 112, child: MemoryArtworkImage(conversation: conversation)),
+              SizedBox(
+                width: 112,
+                height: 112,
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: artworkApi,
+                  refreshEpoch: artworkRefreshEpoch,
+                ),
+              ),
               Expanded(
                 child: Padding(padding: const EdgeInsets.all(14), child: details),
               ),
@@ -807,7 +827,11 @@ class MemoryGalleryCard extends StatelessWidget {
             children: [
               AspectRatio(
                 aspectRatio: layout == MemoryGalleryLayout.journal ? 2.1 : 1.45,
-                child: MemoryArtworkImage(conversation: conversation),
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: artworkApi,
+                  refreshEpoch: artworkRefreshEpoch,
+                ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),
             ],

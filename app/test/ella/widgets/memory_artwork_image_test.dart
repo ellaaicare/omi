@@ -43,6 +43,7 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
   _RefreshingArtworkApi() : super(authorityProvider: () => null);
 
   int loadCalls = 0;
+  bool? lastEnqueueIfMissing;
 
   @override
   String cacheKeyForDisplay({
@@ -60,6 +61,7 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) async {
     loadCalls += 1;
+    lastEnqueueIfMissing = enqueueIfMissing;
     if (loadCalls == 1) return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
     return MemoryArtworkResult(
       status: MemoryArtworkResultStatus.ready,
@@ -220,7 +222,7 @@ void main() {
     expect(find.text('Illustration unavailable'), findsNothing);
   });
 
-  testWidgets('visible ready metadata still requests the authenticated artwork ensure', (tester) async {
+  testWidgets('visible artwork never enqueues work just because the card is rendered', (tester) async {
     final api = _DelayedArtworkApi();
     final conversation = ServerConversation(
       id: 'memory-ready-metadata',
@@ -242,7 +244,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(api.lastEnqueueIfMissing, isTrue);
+    expect(api.lastEnqueueIfMissing, isFalse);
   });
 
   testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
@@ -333,6 +335,40 @@ void main() {
 
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-eventually-ready')), findsOneWidget);
+  });
+
+  testWidgets('a completed queue refresh immediately rechecks visible artwork without enqueuing', (tester) async {
+    final api = _RefreshingArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-queue-complete',
+      createdAt: DateTime(2026, 8, 31),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            refreshEpoch: refreshEpoch,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    expect(api.loadCalls, 1);
+    expect(api.lastEnqueueIfMissing, isFalse);
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(api.lastEnqueueIfMissing, isFalse);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-queue-complete')), findsOneWidget);
   });
 
   testWidgets('keeps published artwork visible while polling for a replacement style', (tester) async {

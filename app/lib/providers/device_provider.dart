@@ -147,11 +147,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<void> _resumeBoundDeviceAfterTeardown(int generation) async {
     await _captureTeardown;
     if (!_isDeviceOperationCurrent(generation) || pairedDevice == null) return;
-    await periodicConnect(
-      'device service resumed',
-      boundDeviceOnly: true,
-      operationGeneration: generation,
-    );
+    await periodicConnect('device service resumed', boundDeviceOnly: true, operationGeneration: generation);
   }
 
   Future<BtDevice?> _resolveConnectedDevice(String deviceId) async {
@@ -210,10 +206,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     connectedDevice = device;
     pairedDevice = device;
+    if (device != null) {
+      await _persistRememberedDevice(device, operationGeneration: operationGeneration);
+      if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+    }
     await getDeviceInfo(operationGeneration: operationGeneration);
     if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     Logger.debug('setConnectedDevice: $device');
     notifyListeners();
+  }
+
+  Future<void> _persistRememberedDevice(BtDevice device, {int? operationGeneration}) async {
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+    await SharedPreferencesUtil().btDeviceSet(device);
+    if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
   }
 
   Future getDeviceInfo({int? operationGeneration}) async {
@@ -367,11 +373,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _lastBatteryNotifyTime = null;
   }
 
-  Future periodicConnect(
-    String printer, {
-    bool boundDeviceOnly = false,
-    int? operationGeneration,
-  }) async {
+  Future periodicConnect(String printer, {bool boundDeviceOnly = false, int? operationGeneration}) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
@@ -573,11 +575,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final generation = ++_deviceOperationGeneration;
     pairedDevice = stored;
     _automaticReconnectCooldownUntil = null;
-    await periodicConnect(
-      reason,
-      boundDeviceOnly: true,
-      operationGeneration: generation,
-    );
+    await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
   Future<void> onDeviceDisconnected({int? operationGeneration, String? deviceId}) async {
@@ -639,7 +637,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     );
 
     var (message, hasUpdate, version) = await DeviceUtils.shouldUpdateFirmware(
-        currentFirmware: device.firmwareRevision, latestFirmwareDetails: latestFirmwareDetails);
+      currentFirmware: device.firmwareRevision,
+      latestFirmwareDetails: latestFirmwareDetails,
+    );
     return (message, hasUpdate, version, latestFirmwareDetails);
   }
 
@@ -658,6 +658,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     connectedDevice = device;
     pairedDevice = device;
     setIsConnected(true);
+    await _persistRememberedDevice(device, operationGeneration: operationGeneration);
+    if (!_isDeviceOperationCurrent(operationGeneration)) return;
     final capture = captureProvider;
     capture?.updateRecordingDevice(device);
 
@@ -714,11 +716,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     onDeviceConnected?.call(device);
   }
 
-  Future<void> _runConnectedSetupStep(
-    String name,
-    int operationGeneration,
-    Future<void> Function() step,
-  ) async {
+  Future<void> _runConnectedSetupStep(String name, int operationGeneration, Future<void> Function() step) async {
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
     try {
       await step();
@@ -751,8 +749,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         await Future<void>.delayed(_deviceCaptureRetryDelay);
       }
     }
-    Logger.debug('Necklace transport is connected but capture did not become ready after '
-        '$_maxDeviceCaptureStartAttempts attempts');
+    Logger.debug(
+      'Necklace transport is connected but capture did not become ready after '
+      '$_maxDeviceCaptureStartAttempts attempts',
+    );
     return false;
   }
 
@@ -864,18 +864,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
           if (_isOmiGlassDevice) {
             Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (context) => OmiGlassOtaUpdate(
-                  device: pairedDevice,
-                  latestFirmwareDetails: _latestOmiGlassFirmwareDetails,
-                ),
+                builder: (context) =>
+                    OmiGlassOtaUpdate(device: pairedDevice, latestFirmwareDetails: _latestOmiGlassFirmwareDetails),
               ),
             );
           } else {
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (context) => FirmwareUpdate(device: pairedDevice),
-              ),
-            );
+            Navigator.of(context).push(MaterialPageRoute(builder: (context) => FirmwareUpdate(device: pairedDevice)));
           }
         },
         onCancel: () {
@@ -915,9 +909,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         if (deviceId == connectedDevice?.id || deviceId == pairedDevice?.id) {
           final generation = _deviceOperationGeneration;
           if (!_isDeviceOperationCurrent(generation)) return;
-          _disconnectDebouncer.run(
-            () => onDeviceDisconnected(operationGeneration: generation, deviceId: deviceId),
-          );
+          _disconnectDebouncer.run(() => onDeviceDisconnected(operationGeneration: generation, deviceId: deviceId));
         }
         break;
     }

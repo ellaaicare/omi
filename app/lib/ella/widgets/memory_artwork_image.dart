@@ -25,6 +25,8 @@ class MemoryArtworkImage extends StatefulWidget {
     this.cacheEvictor,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
+    this.refreshEpoch = 0,
+    this.enqueueIfMissing = false,
   });
 
   final ServerConversation conversation;
@@ -33,6 +35,11 @@ class MemoryArtworkImage extends StatefulWidget {
   final MemoryArtworkCacheEvictor? cacheEvictor;
   final BoxFit fit;
   final Duration retryDelay;
+
+  /// A parent-owned queue completion revision. It refreshes visible cards after
+  /// the server finishes a batch without letting scrolling create new jobs.
+  final int refreshEpoch;
+  final bool enqueueIfMissing;
 
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
@@ -58,7 +65,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (oldWidget.conversation.id != widget.conversation.id ||
         oldWidget.conversation.artwork?.enrichmentRevision != widget.conversation.artwork?.enrichmentRevision ||
         oldWidget.conversation.artwork?.status != widget.conversation.artwork?.status ||
-        oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion) {
+        oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion ||
+        oldWidget.refreshEpoch != widget.refreshEpoch) {
       _refreshRequest();
     }
   }
@@ -112,7 +120,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Future<void> _loadRemoteResult(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) async {
     MemoryArtworkResult result;
     try {
-      result = await api.loadForDisplay(widget.conversation.id, enqueueIfMissing: true);
+      result = await api.loadForDisplay(widget.conversation.id, enqueueIfMissing: widget.enqueueIfMissing);
     } catch (_) {
       _scheduleRetry(api, artwork, generation);
       return;
