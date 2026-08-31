@@ -2185,7 +2185,9 @@ class _ArtworkStudioSheet extends StatelessWidget {
                       const SizedBox(height: 12),
                       Semantics(
                         label: _previewHeadline(context, queue),
-                        value: '${(progress * 100).round()}%',
+                        value: progress == null
+                            ? context.l10n.memoryArtworkBackfillInProgress
+                            : '${(progress * 100).round()}%',
                         child: LinearProgressIndicator(
                           key: const Key('home-artwork-queue-progress-bar'),
                           value: progress,
@@ -2391,7 +2393,10 @@ class _ArtworkStudioSheet extends StatelessWidget {
     return _queueDetail(context, queue);
   }
 
-  double _previewProgress(MemoryArtworkQueueStatus queue) {
+  double? _previewProgress(MemoryArtworkQueueStatus queue) {
+    // A full-history run has no truthful bounded denominator. Keep the bar
+    // indeterminate until the server reports a paused or terminal batch.
+    if (queue.autoContinue && queue.controlState == MemoryArtworkQueueState.running) return null;
     if (queue.controlState == MemoryArtworkQueueState.paused && queue.pauseReason == 'batch_complete') return 1;
     if (queue.batchSize <= 0) return 0;
     return ((queue.batchSize - queue.batchRemaining) / queue.batchSize).clamp(0, 1);

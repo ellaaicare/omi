@@ -1157,6 +1157,37 @@ void main() {
     expect(indicator.value, closeTo(3 / 10, 0.0001));
   });
 
+  testWidgets('Artwork Studio keeps an automatic history run indeterminate', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(
+        ready: 527,
+        active: 1,
+        queued: 35,
+        autoContinue: true,
+        batchRemaining: 0,
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final indicator = tester.widget<LinearProgressIndicator>(
+      find.byKey(const Key('home-artwork-queue-progress-bar')),
+    );
+    expect(indicator.value, isNull, reason: 'ongoing history has no truthful fixed denominator');
+  });
+
   testWidgets('Artwork Studio pauses, stops, and resumes the exact artwork generation', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
