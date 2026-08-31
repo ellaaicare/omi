@@ -148,6 +148,7 @@ WORKER_RETRY_DELAYS_SECONDS = (30, 120, 300, 900)
 DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE = artwork_db.DEFAULT_BACKFILL_BATCH_SIZE
 TERMINAL_ENRICHMENT_ORIGIN = artwork_db.TERMINAL_ENRICHMENT_ORIGIN
 HISTORICAL_BACKFILL_ORIGIN = artwork_db.HISTORICAL_BACKFILL_ORIGIN
+PREVIEW_BACKFILL_ORIGIN = artwork_db.PREVIEW_BACKFILL_ORIGIN
 ENRICHMENT_RECOVERY_PENDING_OUTCOMES = frozenset({"claimed", "processing", "busy", "superseded"})
 ENRICHMENT_RECOVERY_TERMINAL_OUTCOMES = frozenset({"not_found", "invalid_state", "not_retryable", "failed"})
 PROVIDER_KIND_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER"
@@ -1101,7 +1102,7 @@ class MemoryArtworkService:
             raise MemoryArtworkError("memory_artwork_deletion_pending")
         if outcome != "updated":
             raise MemoryArtworkError("memory_artwork_queue_generation_stale")
-        if action == "resume":
+        if action == "resume" and auto_continue:
             self.repository.create_reconciliation_job(
                 uid,
                 authority_digest=authority.authority_digest,
@@ -1119,7 +1120,11 @@ class MemoryArtworkService:
     ) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             return {"outcome": "disabled", "status": "unavailable"}
-        if origin not in {TERMINAL_ENRICHMENT_ORIGIN, HISTORICAL_BACKFILL_ORIGIN}:
+        if origin not in {
+            TERMINAL_ENRICHMENT_ORIGIN,
+            HISTORICAL_BACKFILL_ORIGIN,
+            PREVIEW_BACKFILL_ORIGIN,
+        }:
             raise MemoryArtworkError("memory_artwork_job_origin_invalid")
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
@@ -1823,7 +1828,13 @@ class MemoryArtworkService:
             ),
         }
 
-    async def backfill(self, uid: str, *, cursor_memory_id: Optional[str] = None) -> dict[str, Any]:
+    async def backfill(
+        self,
+        uid: str,
+        *,
+        cursor_memory_id: Optional[str] = None,
+        origin: str = HISTORICAL_BACKFILL_ORIGIN,
+    ) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
         if not (
@@ -1833,6 +1844,8 @@ class MemoryArtworkService:
             and self.config.backfill_enabled
         ):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
+        if origin not in {HISTORICAL_BACKFILL_ORIGIN, PREVIEW_BACKFILL_ORIGIN}:
+            raise MemoryArtworkError("memory_artwork_backfill_origin_invalid")
         try:
             recent = self.repository.list_conversations_page(
                 uid,
@@ -1883,7 +1896,7 @@ class MemoryArtworkService:
                         break
                 continue
             try:
-                result = await self.enqueue(uid, memory_id, origin=HISTORICAL_BACKFILL_ORIGIN)
+                result = await self.enqueue(uid, memory_id, origin=origin)
             except MemoryArtworkError as exc:
                 skipped += 1
                 recovery_memory_ids.append(memory_id)

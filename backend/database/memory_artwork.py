@@ -25,6 +25,11 @@ WORKER_SCAN_PAGE_MULTIPLIER = 4
 WORKER_SCAN_PAGE_MAX = 100
 TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
 HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
+PREVIEW_BACKFILL_ORIGIN = "preview_backfill"
+# Preview work is deliberately promoted ahead of historical backfill. The
+# worker's indexed due-time scan sees this without requiring a new Firestore
+# composite index, while a bounded client batch prevents starvation.
+PREVIEW_PRIORITY_AVAILABLE_AT = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 _due_scan_cursors: dict[tuple[str, str], Any] = {}
 
@@ -550,6 +555,19 @@ def _reserve_generation_transaction(
                             "updated_at": job_state.get("updated_at") or datetime.now(timezone.utc),
                         },
                     )
+                elif bool(
+                    current_job.get("status") == "pending"
+                    and current_job.get("origin") == HISTORICAL_BACKFILL_ORIGIN
+                    and job_state.get("origin") == PREVIEW_BACKFILL_ORIGIN
+                ):
+                    transaction.update(
+                        job_ref,
+                        {
+                            "origin": PREVIEW_BACKFILL_ORIGIN,
+                            "available_at": PREVIEW_PRIORITY_AVAILABLE_AT,
+                            "updated_at": job_state.get("updated_at") or datetime.now(timezone.utc),
+                        },
+                    )
                 elif current_job.get("status") not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
@@ -730,7 +748,7 @@ def _claim_job_transaction(
     else:
         return None
     origin = str(job.get("origin") or HISTORICAL_BACKFILL_ORIGIN)
-    if origin == HISTORICAL_BACKFILL_ORIGIN:
+    if origin in {HISTORICAL_BACKFILL_ORIGIN, PREVIEW_BACKFILL_ORIGIN}:
         control = user.get(BACKFILL_CONTROL_FIELD)
         if control is None:
             control = _backfill_control_state(str(user_ref.id), preferences, "running")
