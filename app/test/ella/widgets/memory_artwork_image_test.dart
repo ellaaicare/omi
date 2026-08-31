@@ -23,7 +23,8 @@ class _DelayedArtworkApi extends MemoryArtworkApi {
     required String memoryId,
     required String styleVersion,
     required String enrichmentRevision,
-  }) => 'owner-profile-memory-revision-cache-key';
+  }) =>
+      'owner-profile-memory-revision-cache-key';
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -49,7 +50,8 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
     required String memoryId,
     required String styleVersion,
     required String enrichmentRevision,
-  }) => '';
+  }) =>
+      '';
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -79,7 +81,8 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
     required String memoryId,
     required String styleVersion,
     required String enrichmentRevision,
-  }) => '';
+  }) =>
+      '';
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -113,7 +116,8 @@ class _PublishedRefreshArtworkApi extends MemoryArtworkApi {
     required String memoryId,
     required String styleVersion,
     required String enrichmentRevision,
-  }) => '';
+  }) =>
+      '';
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -144,7 +148,8 @@ class _AuthorityRefreshArtworkApi extends MemoryArtworkApi {
     required String memoryId,
     required String styleVersion,
     required String enrichmentRevision,
-  }) => 'authority-artwork-cache-key';
+  }) =>
+      'authority-artwork-cache-key';
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -158,6 +163,41 @@ class _AuthorityRefreshArtworkApi extends MemoryArtworkApi {
       status: MemoryArtworkResultStatus.ready,
       url: Uri.parse('https://private-storage.example/authority-$loadCalls.png'),
       cacheKey: 'authority-artwork-cache-key',
+    );
+  }
+}
+
+class _AuthorityBecomesReadyArtworkApi extends MemoryArtworkApi {
+  _AuthorityBecomesReadyArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      'settling-authority-artwork-cache-key';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    if (loadCalls == 1) {
+      return const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_authority_unavailable',
+      );
+    }
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/settled-authority.png'),
+      cacheKey: 'settling-authority-artwork-cache-key',
     );
   }
 }
@@ -179,21 +219,21 @@ void main() {
     );
 
     Widget buildArtwork() => MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      home: SizedBox(
-        width: 320,
-        height: 180,
-        child: MemoryArtworkImage(
-          conversation: conversation,
-          api: api,
-          cachedFileLookup: (cacheKey) async {
-            requestedKeys.add(cacheKey);
-            return cachedFile;
-          },
-        ),
-      ),
-    );
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: SizedBox(
+            width: 320,
+            height: 180,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (cacheKey) async {
+                requestedKeys.add(cacheKey);
+                return cachedFile;
+              },
+            ),
+          ),
+        );
 
     await tester.pumpWidget(buildArtwork());
     await tester.pump();
@@ -371,15 +411,15 @@ void main() {
     );
 
     Widget buildArtwork(int refreshEpoch) => MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      home: MemoryArtworkImage(
-        conversation: conversation,
-        api: api,
-        cachedFileLookup: (_) async => null,
-        refreshEpoch: refreshEpoch,
-      ),
-    );
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            refreshEpoch: refreshEpoch,
+          ),
+        );
 
     await tester.pumpWidget(buildArtwork(0));
     await tester.pump();
@@ -413,16 +453,16 @@ void main() {
     );
 
     Widget buildArtwork(int authorityEpoch) => MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      home: MemoryArtworkImage(
-        conversation: conversation,
-        api: api,
-        authorityEpoch: authorityEpoch,
-        cachedFileLookup: (_) async => cachedFile,
-        cacheEvictor: (cacheKey) async => evicted.add(cacheKey),
-      ),
-    );
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            authorityEpoch: authorityEpoch,
+            cachedFileLookup: (_) async => cachedFile,
+            cacheEvictor: (cacheKey) async => evicted.add(cacheKey),
+          ),
+        );
 
     await tester.pumpWidget(buildArtwork(0));
     await tester.pump();
@@ -433,6 +473,40 @@ void main() {
 
     expect(evicted, ['authority-artwork-cache-key']);
     expect(api.loadCalls, 2);
+  });
+
+  testWidgets('retries when replacement account artwork authority settles after the widget refresh', (tester) async {
+    final api = _AuthorityBecomesReadyArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-settling-authority',
+      createdAt: DateTime(2026, 8, 31),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'revision-a',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+          authorityEpoch: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-settling-authority')), findsOneWidget);
   });
 
   testWidgets('keeps published artwork visible while polling for a replacement style', (tester) async {

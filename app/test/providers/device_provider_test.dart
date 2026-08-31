@@ -100,6 +100,18 @@ class _RecordingCaptureProvider extends CaptureProvider {
   }
 }
 
+Future<void> bindRememberedDeviceForCurrentTestAuthority(
+  BtDevice device, {
+  String uid = 'test-user',
+  String profileBindingId = 'test-profile',
+}) async {
+  await SharedPreferencesUtil.init();
+  final preferences = SharedPreferencesUtil()..uid = uid;
+  await preferences.saveString('aiConsentProfileBindingId', profileBindingId);
+  await preferences.btDeviceSet(device);
+  await preferences.btDeviceOwnerBindingSet('$uid\u001f$profileBindingId');
+}
+
 void main() {
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
@@ -123,6 +135,15 @@ void main() {
     );
   });
 
+  setUp(() async {
+    await SharedPreferencesUtil.init();
+    SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+    final preferences = SharedPreferencesUtil()..uid = '';
+    await preferences.saveString('aiConsentProfileBindingId', '');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+  });
+
   group('battery throttling', () {
     late DeviceProvider provider;
     late int notifyCount;
@@ -132,6 +153,8 @@ void main() {
       notifyCount = 0;
       provider.addListener(() => notifyCount++);
     });
+
+    tearDown(() => provider.dispose());
 
     test('notifies on first battery reading', () {
       final result = provider.updateBatteryLevelForTesting(50);
@@ -300,12 +323,71 @@ void main() {
     expect(provider.presentationIsConnected, isFalse);
   });
 
+  test('an unowned necklace callback cannot attach or start capture for the current account', () async {
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil()..uid = '';
+    await preferences.saveString('aiConsentProfileBindingId', '');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+    var resolverCalls = 0;
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async {
+        resolverCalls++;
+        return BtDevice(name: 'Ella', id: 'legacy-necklace', type: DeviceType.omi, rssi: -30);
+      },
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged('legacy-necklace', DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(resolverCalls, 0);
+    expect(capture.deviceStarts, 0);
+    expect(provider.connectedDevice, isNull);
+    expect(SharedPreferencesUtil().btDevice.id, isEmpty);
+  });
+
+  test('a same-owner authority refresh preserves the active necklace capture', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'same-owner-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(capture.recordingState, RecordingState.deviceRecord);
+
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice?.id, necklace.id);
+    expect(provider.presentationIsConnected, isTrue);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
   test('device connection cannot start necklace capture while phone owns audio', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
-    final provider = DeviceProvider(deviceService: service, connectionResolver: (_) async => necklace)
-      ..setProviders(capture);
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
@@ -320,12 +402,14 @@ void main() {
 
   test('necklace capture resumes when phone releases audio without reconnecting', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
     final provider = DeviceProvider(
       deviceService: service,
       connectionResolver: (_) async => necklace,
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -345,6 +429,7 @@ void main() {
 
   test('necklace retry re-defers when phone reacquires audio', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     late final _RecordingCaptureProvider capture;
     capture = _RecordingCaptureProvider(
@@ -357,6 +442,7 @@ void main() {
       deviceService: service,
       connectionResolver: (_) async => necklace,
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -378,6 +464,8 @@ void main() {
 
   test('in-flight connected resolution cannot repopulate after stop', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final resolution = Completer<BtDevice?>();
     final resolverEntered = Completer<void>();
     final capture = _RecordingCaptureProvider();
@@ -387,6 +475,7 @@ void main() {
         resolverEntered.complete();
         return resolution.future;
       },
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -394,7 +483,7 @@ void main() {
     provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
     await resolverEntered.future;
     service.publish(DeviceServiceStatus.stop);
-    resolution.complete(BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30));
+    resolution.complete(necklace);
     await pumpEventQueue();
 
     expect(capture.deviceStarts, 0);
@@ -611,6 +700,7 @@ void main() {
   test('connected callback publishes device and connection atomically before reconnect scan failure', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final scanEntered = Completer<void>();
     final scanResult = Completer<BtDevice?>();
     final storageEntered = Completer<void>();
@@ -629,6 +719,7 @@ void main() {
       },
       reconnectionInterval: const Duration(milliseconds: 2),
       maxAutomaticReconnectAttempts: 3,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -660,12 +751,14 @@ void main() {
   test('connected callback retries necklace capture and ignores optional setup failure', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final capture = _RecordingCaptureProvider(failuresBeforeStart: 1);
     final provider = DeviceProvider(
       deviceService: service,
       connectionResolver: (_) async => necklace,
       storageListResolver: (_) => throw StateError('synthetic optional storage failure'),
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -693,12 +786,14 @@ void main() {
       rssi: -30,
       firmwareRevision: '1.0.0',
     );
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final capture = _RecordingCaptureProvider();
     final provider = DeviceProvider(
       deviceService: service,
       connectionResolver: (_) async => necklace,
       storageListResolver: (_) async => const [],
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -741,7 +836,7 @@ void main() {
     );
     addTearDown(provider.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    unawaited(provider.confirmConnectedDeviceForCurrentAuthority(necklace));
     await writeStarted.future.timeout(const Duration(seconds: 1));
 
     preferences.uid = 'account-b';
@@ -814,8 +909,6 @@ void main() {
 
   test('a persisted necklace reconnects after an app-provider restart without revisiting Settings', () async {
     await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
-    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
     final necklace = BtDevice(
       name: 'Ella necklace',
       id: 'restart-necklace',
@@ -823,12 +916,16 @@ void main() {
       rssi: -30,
       firmwareRevision: '1.0.0',
     );
+    final preferences = SharedPreferencesUtil()..uid = 'restart-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'restart-profile');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
     final firstProvider = DeviceProvider(
       deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
       connectionResolver: (_) async => necklace,
       storageListResolver: (_) async => const [],
     );
-    await firstProvider.setConnectedDevice(necklace);
+    await firstProvider.confirmConnectedDeviceForCurrentAuthority(necklace);
     expect(SharedPreferencesUtil().btDevice.id, necklace.id);
     firstProvider.dispose();
 
@@ -854,24 +951,22 @@ void main() {
 
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(necklace);
-    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
     final disconnectGate = Completer<void>();
     final capture = _RecordingCaptureProvider(disconnectGate: disconnectGate);
     var reconnectScans = 0;
-    final provider =
-        DeviceProvider(
-            deviceService: service,
-            scanConnector: () async {
-              reconnectScans++;
-              return null;
-            },
-          )
-          ..setProviders(capture)
-          ..pairedDevice = necklace
-          ..connectedDevice = necklace
-          ..isConnected = true;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        reconnectScans++;
+        return null;
+      },
+    )
+      ..setProviders(capture)
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
@@ -891,7 +986,7 @@ void main() {
   test('only a later ready generation reconnects the retained bound device', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(necklace);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.init);
     var scanCalls = 0;
     final startGate = Completer<void>();

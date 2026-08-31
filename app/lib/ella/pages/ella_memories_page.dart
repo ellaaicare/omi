@@ -45,7 +45,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   bool _artworkBackfillRestartPending = false;
   MemoryArtworkQueueStatus? _artworkQueueStatus;
   Timer? _artworkQueuePollTimer;
+  Timer? _artworkPreferencesRetryTimer;
   int _artworkQueueRefreshSequence = 0;
+  int _artworkPreferenceLoadSequence = 0;
   int _artworkDisplayEpoch = 0;
   int _artworkAuthorityEpoch = 0;
   late final Listenable _artworkAuthorityChanges;
@@ -68,6 +70,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   void dispose() {
     _artworkAuthorityChanges.removeListener(_handleArtworkAuthorityChanged);
     _artworkQueuePollTimer?.cancel();
+    _artworkPreferencesRetryTimer?.cancel();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
@@ -79,6 +82,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     // Never let a same-UID profile change inherit either while the new page loads.
     _artworkQueueRefreshSequence++;
     _artworkQueuePollTimer?.cancel();
+    _artworkPreferencesRetryTimer?.cancel();
     if (mounted) {
       setState(() {
         _artworkPreferences = null;
@@ -87,7 +91,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         _artworkDisplayEpoch++;
       });
     }
-    unawaited(_loadArtworkPreferences());
+    unawaited(_loadArtworkPreferences(retryOnUnavailable: true));
   }
 
   void _handleScroll() {
@@ -129,10 +133,24 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     await _refreshArtworkQueueStatus();
   }
 
-  Future<void> _loadArtworkPreferences() async {
+  Future<void> _loadArtworkPreferences({bool retryOnUnavailable = false}) async {
+    final loadSequence = ++_artworkPreferenceLoadSequence;
     final preferences = await _artworkApi.preferences();
+    if (!mounted || loadSequence != _artworkPreferenceLoadSequence) return;
+    if (preferences == null) {
+      if (retryOnUnavailable) _scheduleArtworkPreferencesRetry(loadSequence);
+      return;
+    }
     if (mounted) setState(() => _artworkPreferences = preferences);
-    if (preferences?.releaseEnabled == true) unawaited(_refreshArtworkQueueStatus());
+    if (preferences.releaseEnabled) unawaited(_refreshArtworkQueueStatus());
+  }
+
+  void _scheduleArtworkPreferencesRetry(int loadSequence) {
+    _artworkPreferencesRetryTimer?.cancel();
+    _artworkPreferencesRetryTimer = Timer(const Duration(seconds: 1), () {
+      if (!mounted || loadSequence != _artworkPreferenceLoadSequence) return;
+      unawaited(_loadArtworkPreferences(retryOnUnavailable: true));
+    });
   }
 
   bool _shouldPollArtworkQueue(MemoryArtworkQueueStatus status) {
@@ -153,8 +171,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     }
     if (!mounted || refreshSequence != _artworkQueueRefreshSequence || status == null) return;
     final previous = _artworkQueueStatus;
-    final refreshVisibleArtwork =
-        previous == null ||
+    final refreshVisibleArtwork = previous == null ||
         status.styleVersion != previous.styleVersion ||
         status.generationId != previous.generationId ||
         status.ready > previous.ready ||
@@ -530,14 +547,14 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   Widget _memoryCard(ServerConversation conversation) => MemoryGalleryCard(
-    conversation: conversation,
-    layout: _layout,
-    artworkApi: _artworkApi,
-    artworkRefreshEpoch: _artworkDisplayEpoch,
-    artworkAuthorityEpoch: _artworkAuthorityEpoch,
-    onOpen: () => _openMemory(conversation),
-    onDelete: () => _deleteMemory(conversation),
-  );
+        conversation: conversation,
+        layout: _layout,
+        artworkApi: _artworkApi,
+        artworkRefreshEpoch: _artworkDisplayEpoch,
+        artworkAuthorityEpoch: _artworkAuthorityEpoch,
+        onOpen: () => _openMemory(conversation),
+        onDelete: () => _deleteMemory(conversation),
+      );
 
   void _openMemory(ServerConversation conversation) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
@@ -546,8 +563,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Future<bool> _deleteMemory(ServerConversation conversation) async {
     final l10n = context.l10n;
     final provider = context.read<ConversationProvider>();
-    final confirmed =
-        await showDialog<bool>(
+    final confirmed = await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             title: Text(l10n.deleteConversationTitle),
@@ -662,11 +678,11 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   final int artworkAuthorityEpoch;
 
   Widget _art(ServerConversation memory) => MemoryArtworkImage(
-    conversation: memory,
-    api: artworkApi,
-    refreshEpoch: artworkRefreshEpoch,
-    authorityEpoch: artworkAuthorityEpoch,
-  );
+        conversation: memory,
+        api: artworkApi,
+        refreshEpoch: artworkRefreshEpoch,
+        authorityEpoch: artworkAuthorityEpoch,
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -1054,8 +1070,8 @@ Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
     final label = day == today
         ? context.l10n.memoriesToday
         : day == today.subtract(const Duration(days: 1))
-        ? context.l10n.memoriesYesterday
-        : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
+            ? context.l10n.memoriesYesterday
+            : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
     result.putIfAbsent(label, () => []).add(conversation);
   }
   return result;

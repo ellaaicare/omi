@@ -213,6 +213,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       'memory_artwork_enrichment_not_terminal',
       'memory_artwork_provider_unavailable',
       'memory_artwork_provider_failed',
+      // The account/profile notifier can arrive just before the replacement
+      // authority is persisted. Retry rather than leaving the visible card
+      // blank until the user navigates away and back.
+      'memory_artwork_authority_unavailable',
       'memory_artwork_runtime_authority_unavailable',
       'memory_artwork_worker_failed',
       'memory_artwork_finalize_conflict',
@@ -273,8 +277,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         ),
       );
     }
-    final fallbackKind =
-        result == null ||
+    final fallbackKind = result == null ||
             result.status == MemoryArtworkResultStatus.generating ||
             result.status == MemoryArtworkResultStatus.unavailable
         ? _MemoryArtworkFallbackKind.preparing
@@ -336,12 +339,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Widget _placeholder(_MemoryArtworkFallbackKind kind) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
     final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
-    final semanticsLabel = isPreparing
-        ? context.l10n.memoryArtworkPreparingLabel
-        : context.l10n.memoryArtworkUnavailableLabel;
-    final visibleLabel = isPreparing
-        ? context.l10n.memoryArtworkPreparingShort
-        : context.l10n.memoryArtworkUnavailableLabel;
+    final semanticsLabel =
+        isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel;
+    final visibleLabel =
+        isPreparing ? context.l10n.memoryArtworkPreparingShort : context.l10n.memoryArtworkUnavailableLabel;
     return Semantics(
       label: semanticsLabel,
       child: DecoratedBox(
