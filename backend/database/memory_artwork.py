@@ -24,9 +24,18 @@ FIRESTORE_MIGRATION_BATCH_SIZE = 400
 WORKER_SCAN_PAGE_MULTIPLIER = 4
 WORKER_SCAN_PAGE_MAX = 100
 TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
+PREVIEW_BACKFILL_ORIGIN = "preview_backfill"
 HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
+# The worker queries each origin independently to preserve this order without
+# falsifying timestamps. A recent preview must be visible promptly, but never
+# run ahead of terminal enrichment for a newly completed memory.
+JOB_ORIGIN_PRIORITY = (
+    TERMINAL_ENRICHMENT_ORIGIN,
+    PREVIEW_BACKFILL_ORIGIN,
+    HISTORICAL_BACKFILL_ORIGIN,
+)
 
-_due_scan_cursors: dict[tuple[str, str], Any] = {}
+_due_scan_cursors: dict[tuple[str, str, str], Any] = {}
 
 
 def _user_ref(uid: str):
@@ -148,18 +157,17 @@ def _bounded_due_snapshots(
     due_field: str,
     current_time: datetime,
     worker_limit: int,
+    origin: Optional[str] = None,
 ) -> list[Any]:
     page_size = min(
         WORKER_SCAN_PAGE_MAX,
         max(1, worker_limit) * WORKER_SCAN_PAGE_MULTIPLIER,
     )
-    query = (
-        db.collection(collection_name)
-        .where("status", "==", status)
-        .where(due_field, "<=", current_time)
-        .order_by(due_field, direction=firestore.Query.ASCENDING)
-    )
-    cursor_key = (collection_name, status)
+    query = db.collection(collection_name).where("status", "==", status)
+    if origin is not None:
+        query = query.where("origin", "==", origin)
+    query = query.where(due_field, "<=", current_time).order_by(due_field, direction=firestore.Query.ASCENDING)
+    cursor_key = (collection_name, status, origin or "")
     cursor = _due_scan_cursors.get(cursor_key)
     if cursor is not None:
         query = query.start_after(cursor)
@@ -550,6 +558,18 @@ def _reserve_generation_transaction(
                             "updated_at": job_state.get("updated_at") or datetime.now(timezone.utc),
                         },
                     )
+                elif bool(
+                    current_job.get("status") == "pending"
+                    and current_job.get("origin") == HISTORICAL_BACKFILL_ORIGIN
+                    and job_state.get("origin") == PREVIEW_BACKFILL_ORIGIN
+                ):
+                    transaction.update(
+                        job_ref,
+                        {
+                            "origin": PREVIEW_BACKFILL_ORIGIN,
+                            "updated_at": job_state.get("updated_at") or datetime.now(timezone.utc),
+                        },
+                    )
                 elif current_job.get("status") not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
@@ -606,12 +626,39 @@ def reserve_generation(
 
 def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> list[dict[str, Any]]:
     current_time = now or datetime.now(timezone.utc)
-    snapshots = _bounded_due_snapshots(
-        JOB_COLLECTION,
-        status="pending",
-        due_field="available_at",
-        current_time=current_time,
-        worker_limit=limit,
+    snapshots: list[Any] = []
+    for origin in JOB_ORIGIN_PRIORITY:
+        snapshots.extend(
+            _bounded_due_snapshots(
+                JOB_COLLECTION,
+                status="pending",
+                due_field="available_at",
+                current_time=current_time,
+                worker_limit=limit,
+                origin=origin,
+            )
+        )
+        snapshots.extend(
+            _bounded_due_snapshots(
+                JOB_COLLECTION,
+                status="processing",
+                due_field="lease_expires_at",
+                current_time=current_time,
+                worker_limit=limit,
+                origin=origin,
+            )
+        )
+    # Jobs created before origin binding remain eligible only after the three
+    # owner-bound lanes. They are retained for migration, never allowed to
+    # starve a freshly enriched or previewed memory.
+    snapshots.extend(
+        _bounded_due_snapshots(
+            JOB_COLLECTION,
+            status="pending",
+            due_field="available_at",
+            current_time=current_time,
+            worker_limit=limit,
+        )
     )
     snapshots.extend(
         _bounded_due_snapshots(
@@ -635,8 +682,10 @@ def list_pending_jobs(*, limit: int = 25, now: Optional[datetime] = None) -> lis
         if not isinstance(due_at, datetime) or due_at > current_time:
             continue
         pending.append({**payload, "job_id": snapshot.id})
+    priority_by_origin = {origin: index for index, origin in enumerate(JOB_ORIGIN_PRIORITY)}
     pending.sort(
         key=lambda job: (
+            priority_by_origin.get(str(job.get("origin") or ""), len(priority_by_origin)),
             (job.get("lease_expires_at") if job.get("status") == "processing" else job.get("available_at")),
             str(job.get("job_id") or ""),
         )
@@ -730,7 +779,7 @@ def _claim_job_transaction(
     else:
         return None
     origin = str(job.get("origin") or HISTORICAL_BACKFILL_ORIGIN)
-    if origin == HISTORICAL_BACKFILL_ORIGIN:
+    if origin in {HISTORICAL_BACKFILL_ORIGIN, PREVIEW_BACKFILL_ORIGIN}:
         control = user.get(BACKFILL_CONTROL_FIELD)
         if control is None:
             control = _backfill_control_state(str(user_ref.id), preferences, "running")

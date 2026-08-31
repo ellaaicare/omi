@@ -16,6 +16,7 @@ from ella.services.memory_artwork import (
     MemoryArtworkError,
     MemoryArtworkService,
     MemoryArtworkWorker,
+    PREVIEW_BACKFILL_ORIGIN,
 )
 from ella.services.memory_artwork_recovery import claim_memory_artwork_enrichment_recovery
 from ella.services.summary_recovery import recover_failed_conversation_summary
@@ -40,6 +41,9 @@ class MemoryArtworkPreferencesUpdate(BaseModel):
 
 class MemoryArtworkBackfillRequest(BaseModel):
     cursor: Optional[str] = Field(default=None, min_length=1, max_length=256, pattern=r"^[^/]+$")
+    # A preview only queues the newest page. Full historical reconciliation is
+    # intentionally opt-in because it can consume a substantial image allowance.
+    mode: Literal["preview", "all"] = "preview"
 
 
 class MemoryArtworkQueueControlRequest(BaseModel):
@@ -151,8 +155,10 @@ async def backfill_memory_artwork(
     try:
         service = MemoryArtworkService()
         cursor = payload.cursor if payload else None
+        mode = payload.mode if payload else "preview"
+        origin = PREVIEW_BACKFILL_ORIGIN if mode == "preview" else HISTORICAL_BACKFILL_ORIGIN
         reconciliation_match = RECONCILIATION_CURSOR_RE.fullmatch(cursor or "")
-        if cursor is None or reconciliation_match:
+        if mode == "all" and (cursor is None or reconciliation_match):
             requested_job_id = reconciliation_match.group(1) if reconciliation_match else None
             reconciliation = (
                 await service.start_reconciliation(uid) if cursor is None else await service.reconciliation_status(uid)
@@ -178,15 +184,22 @@ async def backfill_memory_artwork(
                 "reconciliation_status": reconciliation.get("status"),
                 "pages_processed": int(reconciliation.get("pages_processed") or 0),
                 "scanned": int(reconciliation.get("scanned") or 0),
+                "mode": "all",
             }
-        result = await service.backfill(uid, cursor_memory_id=cursor)
+        if reconciliation_match:
+            raise MemoryArtworkError("memory_artwork_backfill_cursor_invalid")
+        result = await service.backfill(
+            uid,
+            cursor_memory_id=cursor,
+            origin=origin,
+        )
         recovery_memory_ids = result.pop("_recovery_memory_ids", [])
         recovery_queued = 0
         for memory_id in recovery_memory_ids:
             claim = await claim_memory_artwork_enrichment_recovery(uid, memory_id)
             outcome = str(claim.get("outcome") or "")
             if outcome == "completed":
-                await service.enqueue(uid, memory_id, origin=HISTORICAL_BACKFILL_ORIGIN)
+                await service.enqueue(uid, memory_id, origin=origin)
             elif outcome == "claimed":
                 background_tasks.add_task(
                     recover_failed_conversation_summary,
@@ -197,6 +210,7 @@ async def backfill_memory_artwork(
                 )
                 recovery_queued += 1
         result["enrichment_recovery_queued"] = recovery_queued
+        result["mode"] = mode
         return result
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc

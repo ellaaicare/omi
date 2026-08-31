@@ -73,6 +73,7 @@ def _load_service_module():
     database_stub.DEFAULT_BACKFILL_BATCH_SIZE = 10
     database_stub.TERMINAL_ENRICHMENT_ORIGIN = "terminal_enrichment"
     database_stub.HISTORICAL_BACKFILL_ORIGIN = "historical_backfill"
+    database_stub.PREVIEW_BACKFILL_ORIGIN = "preview_backfill"
     database_stub.reconciliation_job_id = lambda uid, authority_digest, style_version: hashlib.sha256(
         f"{uid}\0{authority_digest}\0{style_version}".encode("utf-8")
     ).hexdigest()
@@ -297,6 +298,16 @@ class FakeRepository:
                     self.jobs[job_key] = {
                         **existing_job,
                         "origin": artwork.TERMINAL_ENRICHMENT_ORIGIN,
+                        "updated_at": job_state.get("updated_at"),
+                    }
+                elif (
+                    existing_job.get("status") == "pending"
+                    and existing_job.get("origin") == artwork.HISTORICAL_BACKFILL_ORIGIN
+                    and job_state.get("origin") == artwork.PREVIEW_BACKFILL_ORIGIN
+                ):
+                    self.jobs[job_key] = {
+                        **existing_job,
+                        "origin": artwork.PREVIEW_BACKFILL_ORIGIN,
                         "updated_at": job_state.get("updated_at"),
                     }
                 elif existing_job.get("status") not in {"pending", "processing"}:
@@ -907,7 +918,7 @@ def test_cancel_is_non_destructive_and_resume_restarts_exact_style_generation():
 
     resumed = asyncio.run(service.set_queue_control("owner-a", action="resume", generation_id=generation_id))
     assert resumed["control_state"] == "running"
-    assert repository.reconciliation_jobs[generation_id]["status"] == "pending"
+    assert repository.reconciliation_jobs[generation_id]["status"] == "completed"
 
 
 def test_queue_control_rejects_stale_generation_after_style_switch():
@@ -1014,6 +1025,25 @@ def test_terminal_event_promotes_an_existing_pending_historical_job():
     assert next(iter(repository.jobs.values()))["origin"] == artwork.TERMINAL_ENRICHMENT_ORIGIN
 
 
+def test_preview_promotes_recent_existing_historical_work_without_a_duplicate_generation():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.HISTORICAL_BACKFILL_ORIGIN))
+    result = asyncio.run(service.enqueue("owner-a", "memory-1", origin=artwork.PREVIEW_BACKFILL_ORIGIN))
+
+    assert result["outcome"] == "existing"
+    job = next(iter(repository.jobs.values()))
+    assert job["origin"] == artwork.PREVIEW_BACKFILL_ORIGIN
+    assert repository.reserve_writes == 1
+
+
 def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit_opt_in():
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
@@ -1039,6 +1069,7 @@ def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit
     assert manual["control_state"] == "running"
     assert manual["auto_continue"] is False
     assert manual["batch_remaining"] == 10
+    assert repository.reconciliation_jobs == {}
 
     asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=generation_id))
     automatic = asyncio.run(
@@ -1047,6 +1078,30 @@ def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit
     assert automatic["control_state"] == "running"
     assert automatic["auto_continue"] is True
     assert automatic["batch_remaining"] == 0
+    assert repository.reconciliation_jobs
+
+
+def test_manual_resume_restarts_only_a_failed_reconciliation_job():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    started = asyncio.run(service.start_reconciliation("owner-a"))
+    generation_id = started["job_id"]
+    repository.reconciliation_jobs[generation_id]["status"] = "failed"
+
+    resumed = asyncio.run(service.set_queue_control("owner-a", action="resume", generation_id=generation_id))
+
+    assert resumed["control_state"] == "running"
+    assert repository.reconciliation_jobs[generation_id]["status"] == "pending"
+
+    repository.reconciliation_jobs[generation_id]["status"] = "completed"
+    asyncio.run(service.set_queue_control("owner-a", action="pause", generation_id=generation_id))
+    asyncio.run(service.set_queue_control("owner-a", action="resume", generation_id=generation_id))
+    assert repository.reconciliation_jobs[generation_id]["status"] == "completed"
 
 
 def test_provider_retry_backoff_is_bounded_and_not_a_tight_loop():
@@ -3306,6 +3361,68 @@ def test_firestore_terminal_reservation_promotes_existing_pending_historical_job
     assert job_ref.state["updated_at"] == now
 
 
+def test_firestore_preview_reservation_promotes_existing_pending_historical_job():
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def update(self, reference, payload):
+            reference.state.update(copy.deepcopy(payload))
+
+        def set(self, reference, payload):
+            reference.state = copy.deepcopy(payload)
+
+    generation_key = "b" * 64
+    conversation = _terminal_memory("memory-1")
+    conversation[artwork_database.ARTWORK_FIELD] = {
+        "status": "generating",
+        "generation_key": generation_key,
+        "enrichment_revision": "summary-memory-1",
+    }
+    job_ref = Reference(
+        {
+            "status": "pending",
+            "uid": "owner-a",
+            "memory_id": "memory-1",
+            "generation_key": generation_key,
+            "origin": artwork.HISTORICAL_BACKFILL_ORIGIN,
+        }
+    )
+    now = datetime.now(timezone.utc)
+
+    result = artwork_database._reserve_generation_transaction(
+        Transaction(),
+        Reference({"id": "owner-a"}),
+        Reference(conversation),
+        enrichment_revision="summary-memory-1",
+        generation_key=generation_key,
+        artwork_state=conversation[artwork_database.ARTWORK_FIELD],
+        job_ref=job_ref,
+        job_state={
+            **job_ref.state,
+            "origin": artwork.PREVIEW_BACKFILL_ORIGIN,
+            "updated_at": now,
+        },
+    )
+
+    assert result["outcome"] == "existing"
+    assert job_ref.state["origin"] == artwork.PREVIEW_BACKFILL_ORIGIN
+    assert "available_at" not in job_ref.state
+    assert job_ref.state["updated_at"] == now
+
+
 def test_firestore_style_refresh_keeps_published_art_until_atomic_finalize():
     class Snapshot:
         def __init__(self, state, *, exists=True):
@@ -3583,24 +3700,29 @@ def test_pending_job_query_filters_control_before_applying_worker_limit(monkeypa
     jobs = artwork_database.list_pending_jobs(limit=2, now=now)
 
     assert [job["job_id"] for job in jobs] == ["pending-first", "processing-first"]
-    assert pending_query.operations == [
-        ("where", "status", "==", "pending"),
-        ("where", "available_at", "<=", now),
-        ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 8),
-    ]
-    assert processing_query.operations == [
-        ("where", "status", "==", "processing"),
-        ("where", "lease_expires_at", "<=", now),
-        ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING),
-        ("limit", 8),
-    ]
+    assert ("where", "origin", "==", artwork_database.TERMINAL_ENRICHMENT_ORIGIN) in pending_query.operations
+    assert ("where", "origin", "==", artwork_database.PREVIEW_BACKFILL_ORIGIN) in pending_query.operations
+    assert ("where", "origin", "==", artwork_database.HISTORICAL_BACKFILL_ORIGIN) in pending_query.operations
+    assert ("where", "available_at", "<=", now) in pending_query.operations
+    assert ("order_by", "available_at", artwork_database.firestore.Query.ASCENDING) in pending_query.operations
+    assert ("where", "lease_expires_at", "<=", now) in processing_query.operations
+    assert ("order_by", "lease_expires_at", artwork_database.firestore.Query.ASCENDING) in processing_query.operations
     indexes = json.loads((BACKEND_ROOT.parent / "firestore.indexes.json").read_text())["indexes"]
     artwork_indexes = {
         tuple((field["fieldPath"], field["order"]) for field in index["fields"])
         for index in indexes
         if index.get("collectionGroup") == artwork_database.JOB_COLLECTION
     }
+    assert (
+        ("status", "ASCENDING"),
+        ("origin", "ASCENDING"),
+        ("available_at", "ASCENDING"),
+    ) in artwork_indexes
+    assert (
+        ("status", "ASCENDING"),
+        ("origin", "ASCENDING"),
+        ("lease_expires_at", "ASCENDING"),
+    ) in artwork_indexes
     assert (
         ("status", "ASCENDING"),
         ("available_at", "ASCENDING"),
@@ -3718,6 +3840,74 @@ def test_pending_job_selection_skips_paused_history_to_reach_terminal_work(monke
     jobs = artwork_database.list_pending_jobs(limit=1, now=now)
 
     assert [job["job_id"] for job in jobs] == ["terminal-new"]
+
+
+def test_pending_job_selection_prioritizes_terminal_then_preview_then_history(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class Snapshot:
+        def __init__(self, identifier, payload):
+            self.id = identifier
+            self._payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    def job(identifier, origin, available_at):
+        return Snapshot(
+            identifier,
+            {
+                "status": "pending",
+                "uid": f"owner-{identifier}",
+                "memory_id": f"memory-{identifier}",
+                "authority_digest": "digest-a",
+                "style_version": artwork.DEFAULT_STYLE_VERSION,
+                "origin": origin,
+                "available_at": available_at,
+            },
+        )
+
+    due_by_origin = {
+        artwork_database.TERMINAL_ENRICHMENT_ORIGIN: [
+            job("terminal", artwork_database.TERMINAL_ENRICHMENT_ORIGIN, now - timedelta(minutes=1))
+        ],
+        artwork_database.PREVIEW_BACKFILL_ORIGIN: [
+            job("preview", artwork_database.PREVIEW_BACKFILL_ORIGIN, now - timedelta(minutes=5))
+        ],
+        artwork_database.HISTORICAL_BACKFILL_ORIGIN: [
+            job("history", artwork_database.HISTORICAL_BACKFILL_ORIGIN, now - timedelta(minutes=20))
+        ],
+    }
+
+    def bounded(_collection, *, status, origin=None, **_kwargs):
+        return due_by_origin.get(origin, []) if status == "pending" else []
+
+    class UserDocument:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {artwork_database.PREFERENCES_FIELD: _accepted_preferences(_authority())},
+            )
+
+    class Users:
+        def document(self, _uid):
+            return UserDocument()
+
+    class Database:
+        def collection(self, name):
+            assert name == "users"
+            return Users()
+
+    monkeypatch.setattr(artwork_database, "_bounded_due_snapshots", bounded)
+    monkeypatch.setattr(artwork_database, "db", Database())
+
+    jobs = artwork_database.list_pending_jobs(limit=3, now=now)
+
+    assert [job["origin"] for job in jobs] == [
+        artwork_database.TERMINAL_ENRICHMENT_ORIGIN,
+        artwork_database.PREVIEW_BACKFILL_ORIGIN,
+        artwork_database.HISTORICAL_BACKFILL_ORIGIN,
+    ]
 
 
 def test_legacy_job_migration_commits_firestore_writes_in_safe_chunks(monkeypatch):
@@ -4724,14 +4914,15 @@ def test_retry_route_observes_existing_enrichment_without_duplicate_work(monkeyp
     assert response.json()["outcome"] == "enrichment_in_progress"
 
 
-def test_backfill_route_advances_cursor_and_schedules_bounded_recovery(monkeypatch):
+def test_backfill_route_defaults_to_preview_and_schedules_bounded_recovery(monkeypatch):
     router_module = _load_memory_artwork_router_module("ella_memory_artwork_backfill_router_test_module")
     recoveries = []
 
     class Service:
-        async def backfill(self, uid, *, cursor_memory_id=None):
+        async def backfill(self, uid, *, cursor_memory_id=None, origin):
             assert uid == "owner-a"
             assert cursor_memory_id == "memory-cursor"
+            assert origin == "preview_backfill"
             return {
                 "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
                 "queued": 2,
@@ -4763,6 +4954,7 @@ def test_backfill_route_advances_cursor_and_schedules_bounded_recovery(monkeypat
 
     assert response.status_code == 200
     assert "_recovery_memory_ids" not in response.json()
+    assert response.json()["mode"] == "preview"
     assert response.json()["enrichment_recovery_queued"] == 1
     assert recoveries == [
         {
@@ -4774,8 +4966,39 @@ def test_backfill_route_advances_cursor_and_schedules_bounded_recovery(monkeypat
     ]
 
 
-def test_backfill_route_preserves_legacy_empty_body_clients(monkeypatch):
-    router_module = _load_memory_artwork_router_module("ella_memory_artwork_legacy_backfill_router_test_module")
+def test_backfill_route_empty_body_starts_only_a_bounded_preview(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_preview_backfill_router_test_module")
+
+    class Service:
+        async def backfill(self, uid, *, cursor_memory_id=None, origin):
+            assert uid == "owner-a"
+            assert cursor_memory_id is None
+            assert origin == "preview_backfill"
+            return {
+                "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+                "queued": 10,
+                "existing": 0,
+                "skipped": 0,
+                "next_cursor": "memory-older-10",
+                "has_more": True,
+                "_recovery_memory_ids": [],
+            }
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).post("/v1/ella/memory-artwork/backfill")
+
+    assert response.status_code == 200
+    assert response.json()["has_more"] is True
+    assert response.json()["next_cursor"] == "memory-older-10"
+    assert response.json()["mode"] == "preview"
+
+
+def test_backfill_route_only_starts_full_reconciliation_after_explicit_all_request(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_full_backfill_router_test_module")
 
     class Service:
         async def start_reconciliation(self, uid):
@@ -4796,12 +5019,13 @@ def test_backfill_route_preserves_legacy_empty_body_clients(monkeypatch):
     app.include_router(router_module.router)
     app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
 
-    response = TestClient(app).post("/v1/ella/memory-artwork/backfill")
+    response = TestClient(app).post("/v1/ella/memory-artwork/backfill", json={"mode": "all"})
 
     assert response.status_code == 200
     assert response.json()["has_more"] is True
     assert response.json()["next_cursor"] == f"reconciliation:{'a' * 64}"
     assert response.json()["reconciliation_status"] == "pending"
+    assert response.json()["mode"] == "all"
 
 
 def test_backfill_route_preserves_hexadecimal_legacy_memory_cursor(monkeypatch):
@@ -4813,8 +5037,9 @@ def test_backfill_route_preserves_hexadecimal_legacy_memory_cursor(monkeypatch):
         async def reconciliation_status(self, uid):
             raise AssertionError("an unprefixed memory cursor must not select reconciliation status")
 
-        async def backfill(self, uid, *, cursor_memory_id):
+        async def backfill(self, uid, *, cursor_memory_id, origin):
             calls.append((uid, cursor_memory_id))
+            assert origin == "preview_backfill"
             return {
                 "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
                 "queued": 0,
