@@ -159,10 +159,11 @@ class MemoryArtworkQueueStatus extends MemoryArtworkStyleProgress {
   final List<MemoryArtworkStyleProgress> styles;
   final DateTime? updatedAt;
 
-  bool get canPause => controlState == MemoryArtworkQueueState.running && remaining > 0;
+  bool get canPause => controlState == MemoryArtworkQueueState.running && (remaining > 0 || scanStatus != 'completed');
   bool get canResume =>
       controlState == MemoryArtworkQueueState.paused || controlState == MemoryArtworkQueueState.cancelled;
-  bool get canCancel => controlState != MemoryArtworkQueueState.cancelled && remaining > 0;
+  bool get canCancel =>
+      controlState != MemoryArtworkQueueState.cancelled && (remaining > 0 || scanStatus != 'completed');
 }
 
 class MemoryArtworkApi {
@@ -360,7 +361,12 @@ class MemoryArtworkApi {
   Future<MemoryArtworkQueueStatus?> queueStatus() async {
     final authority = _authorityProvider();
     if (authority == null) return null;
-    final response = await _call(authority, method: 'GET', path: 'v1/ella/memory-artwork/queue');
+    final response = await _call(
+      authority,
+      method: 'GET',
+      path: 'v1/ella/memory-artwork/queue',
+      timeout: const Duration(seconds: 30),
+    );
     if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
     return _queueStatusFromPayload(_jsonObject(response!.body));
   }
@@ -376,6 +382,7 @@ class MemoryArtworkApi {
       authority,
       method: 'POST',
       path: 'v1/ella/memory-artwork/queue/control',
+      timeout: const Duration(seconds: 30),
       body: jsonEncode({
         'action': action.name,
         'generation_id': generationId,
@@ -391,6 +398,7 @@ class MemoryArtworkApi {
     required String method,
     required String path,
     String body = '',
+    Duration timeout = const Duration(seconds: 15),
   }) {
     final normalizedBase = _resolvedBaseUrl();
     if (normalizedBase.isEmpty) return Future<http.Response?>.value(null);
@@ -400,7 +408,7 @@ class MemoryArtworkApi {
       headers: const {'Accept': 'application/json'},
       body: body,
       method: method,
-      timeout: const Duration(seconds: 15),
+      timeout: timeout,
       retries: 0,
       requireAuthCheck: true,
       expectedAuthenticatedUid: authority.uid,

@@ -17892,7 +17892,7 @@ abstract class AppLocalizations {
   /// No description provided for @memoryArtworkBackfillNeedsAttention.
   ///
   /// In en, this message translates to:
-  /// **'Some artwork still needs attention. Nothing was deleted.'**
+  /// **'Artwork paused because a few illustrations need another try.'**
   String get memoryArtworkBackfillNeedsAttention;
 
   /// No description provided for @memoryArtworkBackfillReady.
@@ -17918,6 +17918,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Try artwork again'**
   String get memoryArtworkRetry;
+
+  /// No description provided for @memoryArtworkQueueChecking.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking artwork progress…'**
+  String get memoryArtworkQueueChecking;
+
+  /// No description provided for @memoryArtworkQueueUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Artwork progress could not be loaded. Your finished illustrations are still available.'**
+  String get memoryArtworkQueueUnavailable;
+
+  /// No description provided for @memoryArtworkQueueRetryStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Try loading progress again'**
+  String get memoryArtworkQueueRetryStatus;
 
   /// No description provided for @memoryArtworkQueueProgress.
   ///
