@@ -77,4 +77,33 @@ void main() {
     expect(provider.isIdentityVerified, isFalse);
     expect(provider.canProvision, isFalse);
   });
+
+  test('preserves a typed access failure rather than reducing it to a generic unavailable state', () async {
+    final provider = EllaEntitlementProvider(
+      transport: const _FailingEntitlementTransport(
+        EllaEntitlementRequestException(EllaEntitlementFailureKind.unavailable, supportCode: 'ELLA-ACCESS-RETRY'),
+      ),
+      authenticatedUidChanges: const Stream.empty(),
+      initialAuthenticatedUid: 'user-a',
+    );
+    addTearDown(provider.dispose);
+
+    await provider.load();
+
+    expect(provider.state, EllaEntitlementLoadState.unavailable);
+    expect(provider.accessFailureKind, EllaEntitlementFailureKind.unavailable);
+    expect(provider.supportCode, 'ELLA-ACCESS-RETRY');
+  });
+}
+
+class _FailingEntitlementTransport implements EllaEntitlementTransport {
+  const _FailingEntitlementTransport(this.failure);
+
+  final EllaEntitlementRequestException failure;
+
+  @override
+  Future<EllaEntitlement> fetch() => Future.error(failure);
+
+  @override
+  Future<EllaEntitlement> redeem(String code) => Future.error(failure);
 }
