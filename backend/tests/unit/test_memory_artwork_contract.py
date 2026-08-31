@@ -174,6 +174,7 @@ class FakeRepository:
         self.deletion_pending = set()
         self.reconciliation_jobs = {}
         self.backfill_controls = {}
+        self.job_list_migration_requests = []
 
     def get_preferences(self, uid):
         result = copy.deepcopy(self.preferences_by_uid.get(uid, {}))
@@ -234,7 +235,8 @@ class FakeRepository:
         self.backfill_controls[uid] = control
         return {"outcome": "updated", "control": copy.deepcopy(control)}
 
-    def list_jobs_for_uid(self, uid):
+    def list_jobs_for_uid(self, uid, *, migrate_legacy_jobs=True):
+        self.job_list_migration_requests.append(migrate_legacy_jobs)
         return [copy.deepcopy(job) for (owner, _, _), job in self.jobs.items() if owner == uid]
 
     def get_conversation(self, uid, memory_id):
@@ -800,6 +802,7 @@ def test_queue_status_separates_active_queued_retrying_failed_and_style_generati
     assert status["total"] == 5
     assert status["remaining"] == 4
     assert status["scanned"] == 5
+    assert repository.job_list_migration_requests == [False]
     by_style = {item["style_version"]: item for item in status["styles"]}
     assert by_style["ella.memory_artwork.style.paper-collage.v1"]["ready"] == 1
     assert by_style["ella.memory_artwork.style.paper-collage.v1"]["state"] == "paused"
@@ -3792,6 +3795,53 @@ def test_legacy_job_migration_commits_firestore_writes_in_safe_chunks(monkeypatc
 
     assert len(jobs) == 401
     assert database.commits == [artwork_database.FIRESTORE_MIGRATION_BATCH_SIZE, 1]
+
+
+def test_queue_job_read_does_not_fan_out_into_legacy_migration(monkeypatch):
+    class Reference:
+        pass
+
+    class Snapshot:
+        id = "legacy-job"
+        reference = Reference()
+
+        @staticmethod
+        def to_dict():
+            return {
+                "uid": "owner-a",
+                "memory_id": "memory-a",
+                "generation_key": "a" * 64,
+                "status": "pending",
+            }
+
+    class Query:
+        def where(self, *args):
+            return self
+
+        @staticmethod
+        def stream():
+            return iter([Snapshot()])
+
+    class Database:
+        def collection(self, name):
+            assert name == artwork_database.JOB_COLLECTION
+            return Query()
+
+        @staticmethod
+        def batch():
+            raise AssertionError("read-only queue status must not allocate a migration batch")
+
+    monkeypatch.setattr(artwork_database, "db", Database())
+    monkeypatch.setattr(
+        artwork_database,
+        "_conversation_ref",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("queue status must not read legacy conversations")),
+    )
+
+    jobs = artwork_database.list_jobs_for_uid("owner-a", migrate_legacy_jobs=False)
+
+    assert len(jobs) == 1
+    assert jobs[0]["job_id"] == "legacy-job"
 
 
 def test_pending_reconciliation_query_is_bounded_to_due_work_and_indexed(monkeypatch):
