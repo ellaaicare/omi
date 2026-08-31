@@ -2198,11 +2198,12 @@ class _ArtworkStudioSheet extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 10),
-                      Text(
-                        _queueDetail(context, queue),
-                        key: const Key('home-artwork-queue-detail'),
-                        style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
-                      ),
+                      if (queue.state != MemoryArtworkQueueState.completed)
+                        Text(
+                          _queueDetail(context, queue),
+                          key: const Key('home-artwork-queue-detail'),
+                          style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                        ),
                       if (queue.active > 0 && queue.controlState != MemoryArtworkQueueState.running) ...[
                         const SizedBox(height: 6),
                         Text(
