@@ -1216,6 +1216,8 @@ void main() {
     );
     expect(indicator.value, 1);
     expect(find.text('This illustration style is ready.'), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-queue-detail')), findsNothing);
+    expect(find.text('Automatic generation is on.'), findsNothing);
   });
 
   testWidgets('Artwork Studio pauses, stops, and resumes the exact artwork generation', (tester) async {
