@@ -428,28 +428,31 @@ def _legacy_job_metadata(job: dict[str, Any], conversation: dict[str, Any]) -> d
     }
 
 
-def list_jobs_for_uid(uid: str) -> list[dict[str, Any]]:
+def list_jobs_for_uid(uid: str, *, migrate_legacy_jobs: bool = True) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
-    migration_batch = db.batch()
+    migration_batch = None
     migration_count = 0
     for snapshot in db.collection(JOB_COLLECTION).where("uid", "==", uid).stream():
         payload = snapshot.to_dict() or {}
-        if not payload.get("authority_digest") or not payload.get("style_version") or not payload.get("origin"):
+        if migrate_legacy_jobs and (
+            not payload.get("authority_digest") or not payload.get("style_version") or not payload.get("origin")
+        ):
             memory_id = str(payload.get("memory_id") or "")
             if memory_id:
                 conversation_snapshot = _conversation_ref(uid, memory_id).get()
                 conversation = conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
                 migration = _legacy_job_metadata(payload, conversation)
                 if migration:
+                    migration_batch = migration_batch or db.batch()
                     payload = {**payload, **migration}
                     migration_batch.set(snapshot.reference, migration, merge=True)
                     migration_count += 1
                     if migration_count >= FIRESTORE_MIGRATION_BATCH_SIZE:
                         migration_batch.commit()
-                        migration_batch = db.batch()
+                        migration_batch = None
                         migration_count = 0
         jobs.append({**payload, "job_id": snapshot.id})
-    if migration_count:
+    if migration_count and migration_batch is not None:
         migration_batch.commit()
     return jobs
 

@@ -259,7 +259,7 @@ class MemoryArtworkRepository(Protocol):
 
     def set_backfill_control(self, uid: str, **kwargs) -> dict[str, Any]: ...
 
-    def list_jobs_for_uid(self, uid: str) -> list[dict[str, Any]]: ...
+    def list_jobs_for_uid(self, uid: str, *, migrate_legacy_jobs: bool = True) -> list[dict[str, Any]]: ...
 
     def get_conversation(self, uid: str, memory_id: str) -> Optional[dict[str, Any]]: ...
 
@@ -1003,7 +1003,11 @@ class MemoryArtworkService:
         batch_size = int(control.get("batch_size") or DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE)
         batch_remaining = int(control.get("batch_remaining", batch_size) or 0) if control_is_current else batch_size
         pause_reason = str(control.get("pause_reason") or "") if control_is_current else ""
-        jobs = self.repository.list_jobs_for_uid(uid)
+        # Queue status is a read path. Legacy migration can fan out into one
+        # conversation read per unattributable job and push this endpoint past
+        # the mobile client's timeout. Migration remains available to explicit
+        # maintenance callers; status excludes owner/style-less legacy rows.
+        jobs = self.repository.list_jobs_for_uid(uid, migrate_legacy_jobs=False)
         current_counts = self._queue_counts(
             jobs,
             authority_digest=authority.authority_digest,
