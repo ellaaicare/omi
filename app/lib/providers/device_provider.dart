@@ -131,6 +131,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   int? _deferredDeviceCaptureGeneration;
   String? _deferredDeviceCaptureId;
   Future<void>? _deferredDeviceCaptureStart;
+  bool _requiresExplicitDeviceSelectionAfterAuthorityChange = false;
 
   void Function(BtDevice device)? onDeviceConnected;
 
@@ -142,10 +143,38 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return '${preferences.uid}\u001f${preferences.aiConsentProfileBindingId}';
   }
 
+  BtDevice? _rememberedDeviceForCurrentAuthority() {
+    final preferences = SharedPreferencesUtil();
+    final device = preferences.btDevice;
+    if (device.id.isEmpty || preferences.btDeviceOwnerBinding != _rememberedDeviceOwnerBinding()) return null;
+    return device;
+  }
+
   void _handleAccountAuthorityChanged() {
     // A delayed BLE callback must never restore a device convenience binding
-    // after account/profile authority has moved to somebody else.
+    // or continue capture after account/profile authority has moved.
     _rememberedDeviceAuthorityGeneration++;
+    _deviceOperationGeneration++;
+    _requiresExplicitDeviceSelectionAfterAuthorityChange = true;
+    final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
+    _reconnectionTimer?.cancel();
+    _disconnectNotificationTimer?.cancel();
+    _disconnectDebouncer.cancel();
+    _connectDebouncer.cancel();
+    _bleBatteryLevelListener?.cancel();
+    _bleBatteryLevelListener = null;
+    _clearDeferredDeviceCapture();
+    connectedDevice = null;
+    pairedDevice = null;
+    isConnected = false;
+    isConnecting = false;
+    isDeviceStorageSupport = false;
+    batteryLevel = -1;
+    _automaticReconnectAttempts = 0;
+    _automaticReconnectExhausted = false;
+    _automaticReconnectCooldownUntil = null;
+    unawaited(_teardownCaptureForDevice(disconnectedDeviceId));
+    notifyListeners();
   }
 
   Future<void> _teardownCaptureForDevice(String? deviceId) {
@@ -236,6 +265,18 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     notifyListeners();
   }
 
+  /// Commits a device selected by the current user after the scanner has
+  /// resolved it. This is the only post-authority-change path allowed to
+  /// restart necklace capture; unsolicited BLE callbacks remain fenced.
+  Future<void> confirmConnectedDeviceForCurrentAuthority(BtDevice device) async {
+    if (!_deviceServiceReady) {
+      await setConnectedDevice(device);
+      return;
+    }
+    final generation = ++_deviceOperationGeneration;
+    await _onDeviceConnected(device, generation);
+  }
+
   Future<void> _persistRememberedDevice(BtDevice device, {int? operationGeneration}) async {
     if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     final authorityGeneration = _rememberedDeviceAuthorityGeneration;
@@ -261,12 +302,14 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         operationGeneration: operationGeneration,
         deviceId: expectedDeviceId,
       )) {
+        await SharedPreferencesUtil().btDeviceOwnerBindingSet(ownerBinding);
         return;
       }
       // The serialized tail guarantees a newer account/device write runs only
       // after this stale binding is removed.
       if (SharedPreferencesUtil().btDevice.id == expectedDeviceId) {
         await _rememberedDeviceWriter(BtDevice.empty());
+        await SharedPreferencesUtil().btDeviceOwnerBindingSet('');
       }
     })();
     _rememberedDeviceWriteTail = write;
@@ -301,10 +344,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       await _persistRememberedDevice(pairedDevice!, operationGeneration: operationGeneration);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     } else {
-      if (SharedPreferencesUtil().btDevice.id.isEmpty) {
+      final rememberedDevice = _rememberedDeviceForCurrentAuthority();
+      if (rememberedDevice == null) {
         pairedDevice = BtDevice.empty();
       } else {
-        pairedDevice = SharedPreferencesUtil().btDevice;
+        pairedDevice = rememberedDevice;
       }
     }
     if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
@@ -352,7 +396,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   Future<BtDevice?> _getConnectedDevice() async {
-    var deviceId = SharedPreferencesUtil().btDevice.id;
+    var deviceId = _rememberedDeviceForCurrentAuthority()?.id ?? '';
     if (deviceId.isEmpty) {
       return null;
     }
@@ -461,7 +505,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       if (_reconnectAt != null && _reconnectAt!.isAfter(DateTime.now())) {
         return;
       }
-      if (boundDeviceOnly && SharedPreferencesUtil().btDevice.id.isEmpty) {
+      if (boundDeviceOnly && _rememberedDeviceForCurrentAuthority() == null) {
         t.cancel();
         return;
       }
@@ -515,7 +559,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       return device;
     }
 
-    final pairedDeviceId = SharedPreferencesUtil().btDevice.id;
+    final pairedDeviceId = _rememberedDeviceForCurrentAuthority()?.id ?? '';
     if (pairedDeviceId.isNotEmpty) {
       try {
         Logger.debug('Attempting direct reconnection to paired device: $pairedDeviceId');
@@ -635,8 +679,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future<void> resumeKnownDeviceConnection({required String reason}) async {
     if (!_deviceServiceReady || isConnected) return;
-    final stored = SharedPreferencesUtil().btDevice;
-    if (stored.id.isEmpty) return;
+    final stored = _rememberedDeviceForCurrentAuthority();
+    if (stored == null) return;
     await _captureTeardown;
     if (!_deviceServiceReady || isConnected) return;
     final generation = ++_deviceOperationGeneration;
@@ -654,8 +698,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _havingNewFirmware = false;
     connectedDevice = null;
     _clearDeferredDeviceCapture();
-    final storedDevice = SharedPreferencesUtil().btDevice;
-    pairedDevice = storedDevice.id.isEmpty ? null : storedDevice;
+    pairedDevice = _rememberedDeviceForCurrentAuthority();
     isConnected = false;
     isConnecting = false;
     isDeviceStorageSupport = false;
@@ -712,6 +755,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future<void> _onDeviceConnected(BtDevice device, int operationGeneration) async {
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
+    _requiresExplicitDeviceSelectionAfterAuthorityChange = false;
     Logger.debug('_onConnected inside: $connectedDevice');
     _disconnectNotificationTimer?.cancel();
     try {
@@ -965,6 +1009,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     switch (state) {
       case DeviceConnectionState.connected:
         _disconnectDebouncer.cancel();
+        // Service callbacks carry no Firebase identity. Only accept a callback
+        // after the current account explicitly starts a new scan. This fences
+        // an account-A BLE event delivered after account B becomes current.
+        if (_requiresExplicitDeviceSelectionAfterAuthorityChange) return;
         final generation = _deviceOperationGeneration;
         if (!_isDeviceOperationCurrent(generation)) return;
         _connectDebouncer.run(() => _handleDeviceConnected(deviceId, generation));
@@ -1010,8 +1058,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       case DeviceServiceStatus.ready:
         final generation = ++_deviceOperationGeneration;
         _deviceServiceReady = true;
-        final stored = SharedPreferencesUtil().btDevice;
-        pairedDevice = stored.id.isEmpty ? null : stored;
+        pairedDevice = _rememberedDeviceForCurrentAuthority();
         notifyListeners();
         if (pairedDevice != null) {
           unawaited(_resumeBoundDeviceAfterTeardown(generation));

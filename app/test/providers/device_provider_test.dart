@@ -509,8 +509,14 @@ void main() {
   test('foreground resume immediately retries an exhausted saved necklace', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
-    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
+    final preferences = SharedPreferencesUtil()..uid = 'resume-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'resume-profile');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+    addTearDown(() async {
+      await preferences.btDeviceSet(BtDevice.empty());
+      await preferences.btDeviceOwnerBindingSet('');
+    });
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     var scanCalls = 0;
     final provider = DeviceProvider(
@@ -530,7 +536,8 @@ void main() {
     }
     expect(provider.automaticReconnectExhausted, isTrue);
 
-    await SharedPreferencesUtil().btDeviceSet(necklace);
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('resume-user\u001fresume-profile');
     provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
     for (var attempt = 0; attempt < 100 && !provider.presentationIsConnected; attempt++) {
       await Future<void>.delayed(const Duration(milliseconds: 2));
@@ -747,6 +754,61 @@ void main() {
       preferences.btDevice.id,
       isEmpty,
       reason: 'a stale account callback must not repopulate the replacement account',
+    );
+  });
+
+  test('an account transition quiesces an in-flight remembered reconnect before it can start capture for B', () async {
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil()..uid = 'account-a';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'account-a-necklace',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('account-a\u001fprofile-a');
+    addTearDown(() async {
+      await preferences.btDeviceSet(BtDevice.empty());
+      await preferences.btDeviceOwnerBindingSet('');
+    });
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
+    final scanStarted = Completer<void>();
+    final allowScanResult = Completer<BtDevice?>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        if (!scanStarted.isCompleted) scanStarted.complete();
+        return allowScanResult.future;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 1),
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    service.publish(DeviceServiceStatus.ready);
+    await scanStarted.future.timeout(const Duration(seconds: 1));
+
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    allowScanResult.complete(necklace);
+    await pumpEventQueue();
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.connectedDevice, isNull);
+    expect(
+      capture.deviceStarts,
+      0,
+      reason: 'audio captured under account A must not begin after account B takes authority',
     );
   });
 

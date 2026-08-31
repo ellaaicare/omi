@@ -47,10 +47,14 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Timer? _artworkQueuePollTimer;
   int _artworkQueueRefreshSequence = 0;
   int _artworkDisplayEpoch = 0;
+  int _artworkAuthorityEpoch = 0;
+  late final Listenable _artworkAuthorityChanges;
 
   @override
   void initState() {
     super.initState();
+    _artworkAuthorityChanges = SharedPreferencesUtil.aiConsentAuthorityChanges;
+    _artworkAuthorityChanges.addListener(_handleArtworkAuthorityChanged);
     _scrollController.addListener(_handleScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -62,11 +66,28 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   @override
   void dispose() {
+    _artworkAuthorityChanges.removeListener(_handleArtworkAuthorityChanged);
     _artworkQueuePollTimer?.cancel();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
     super.dispose();
+  }
+
+  void _handleArtworkAuthorityChanged() {
+    // Queue totals and signed artwork bytes belong to the exact account/profile.
+    // Never let a same-UID profile change inherit either while the new page loads.
+    _artworkQueueRefreshSequence++;
+    _artworkQueuePollTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _artworkPreferences = null;
+        _artworkQueueStatus = null;
+        _artworkAuthorityEpoch++;
+        _artworkDisplayEpoch++;
+      });
+    }
+    unawaited(_loadArtworkPreferences());
   }
 
   void _handleScroll() {
@@ -134,6 +155,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final previous = _artworkQueueStatus;
     final refreshVisibleArtwork =
         previous == null ||
+        status.styleVersion != previous.styleVersion ||
+        status.generationId != previous.generationId ||
         status.ready > previous.ready ||
         (status.state == MemoryArtworkQueueState.completed && previous.state != MemoryArtworkQueueState.completed);
     setState(() {
@@ -180,14 +203,18 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    setState(
-      () => _artworkPreferences = MemoryArtworkPreferences(
+    setState(() {
+      _artworkPreferences = MemoryArtworkPreferences(
         consent: 'accepted',
         consentVersion: preferences.consentVersion,
         styleVersion: styleVersion,
         releaseEnabled: preferences.releaseEnabled,
-      ),
-    );
+      );
+      // A prior style can have a larger ready count. Resetting its queue
+      // snapshot makes the new style's first status authoritative.
+      _artworkQueueStatus = null;
+      _artworkDisplayEpoch++;
+    });
     _showMessage(context.l10n.memoryArtworkStyleUpdated);
     unawaited(_startArtworkPreview(restart: true));
   }
@@ -443,6 +470,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               memories: entry.value,
               artworkApi: _artworkApi,
               artworkRefreshEpoch: _artworkDisplayEpoch,
+              artworkAuthorityEpoch: _artworkAuthorityEpoch,
               onOpen: () => Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => EllaMemoryDayPage(
@@ -450,6 +478,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                     memories: entry.value,
                     artworkApi: _artworkApi,
                     artworkRefreshEpoch: _artworkDisplayEpoch,
+                    artworkAuthorityEpoch: _artworkAuthorityEpoch,
                     exactAuthority: WalOwnerAuthority.active(),
                     authorityChanges: SharedPreferencesUtil.aiConsentAuthorityChanges,
                     onDelete: _deleteMemory,
@@ -505,6 +534,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     layout: _layout,
     artworkApi: _artworkApi,
     artworkRefreshEpoch: _artworkDisplayEpoch,
+    artworkAuthorityEpoch: _artworkAuthorityEpoch,
     onOpen: () => _openMemory(conversation),
     onDelete: () => _deleteMemory(conversation),
   );
@@ -548,6 +578,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
     required this.onOpen,
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
   });
 
   final String dayLabel;
@@ -555,6 +586,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
   final VoidCallback onOpen;
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
   @override
   Widget build(BuildContext context) {
@@ -582,6 +614,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
                   memories: memories,
                   artworkApi: artworkApi,
                   artworkRefreshEpoch: artworkRefreshEpoch,
+                  artworkAuthorityEpoch: artworkAuthorityEpoch,
                 ),
               ),
               Padding(
@@ -616,14 +649,24 @@ class MemoryDayGalleryCard extends StatelessWidget {
 }
 
 class _MemoryDayArtworkCollage extends StatelessWidget {
-  const _MemoryDayArtworkCollage({required this.memories, this.artworkApi, this.artworkRefreshEpoch = 0});
+  const _MemoryDayArtworkCollage({
+    required this.memories,
+    this.artworkApi,
+    this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
+  });
 
   final List<ServerConversation> memories;
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
-  Widget _art(ServerConversation memory) =>
-      MemoryArtworkImage(conversation: memory, api: artworkApi, refreshEpoch: artworkRefreshEpoch);
+  Widget _art(ServerConversation memory) => MemoryArtworkImage(
+    conversation: memory,
+    api: artworkApi,
+    refreshEpoch: artworkRefreshEpoch,
+    authorityEpoch: artworkAuthorityEpoch,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -676,6 +719,7 @@ class EllaMemoryDayPage extends StatefulWidget {
     this.exactAuthority,
     this.authorityChanges,
     this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
   });
 
   final String dayLabel;
@@ -685,6 +729,7 @@ class EllaMemoryDayPage extends StatefulWidget {
   final ExactAccountAuthorityVerifier? exactAuthority;
   final Listenable? authorityChanges;
   final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
   @override
   State<EllaMemoryDayPage> createState() => _EllaMemoryDayPageState();
@@ -746,6 +791,7 @@ class _EllaMemoryDayPageState extends State<EllaMemoryDayPage> {
             layout: MemoryGalleryLayout.journal,
             artworkApi: widget.artworkApi,
             artworkRefreshEpoch: widget.artworkRefreshEpoch,
+            artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
             onOpen: () => Navigator.of(
               context,
             ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: memory))),
@@ -841,6 +887,7 @@ class MemoryGalleryCard extends StatelessWidget {
     this.onDelete,
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
   });
 
   final ServerConversation conversation;
@@ -850,6 +897,7 @@ class MemoryGalleryCard extends StatelessWidget {
   final Future<bool> Function()? onDelete;
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -867,6 +915,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   conversation: conversation,
                   api: artworkApi,
                   refreshEpoch: artworkRefreshEpoch,
+                  authorityEpoch: artworkAuthorityEpoch,
                 ),
               ),
               Expanded(
@@ -883,6 +932,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   conversation: conversation,
                   api: artworkApi,
                   refreshEpoch: artworkRefreshEpoch,
+                  authorityEpoch: artworkAuthorityEpoch,
                 ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),

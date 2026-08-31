@@ -26,6 +26,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
     this.refreshEpoch = 0,
+    this.authorityEpoch = 0,
     this.enqueueIfMissing = false,
   });
 
@@ -39,6 +40,10 @@ class MemoryArtworkImage extends StatefulWidget {
   /// A parent-owned queue completion revision. It refreshes visible cards after
   /// the server finishes a batch without letting scrolling create new jobs.
   final int refreshEpoch;
+
+  /// An account/profile change invalidates signed URLs and disk bytes even if
+  /// a memory id happens to collide across authorities.
+  final int authorityEpoch;
   final bool enqueueIfMissing;
 
   @override
@@ -66,8 +71,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         oldWidget.conversation.artwork?.enrichmentRevision != widget.conversation.artwork?.enrichmentRevision ||
         oldWidget.conversation.artwork?.status != widget.conversation.artwork?.status ||
         oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion ||
-        oldWidget.refreshEpoch != widget.refreshEpoch) {
-      _refreshRequest();
+        oldWidget.refreshEpoch != widget.refreshEpoch ||
+        oldWidget.authorityEpoch != widget.authorityEpoch) {
+      _refreshRequest(invalidateCachedArtwork: oldWidget.authorityEpoch != widget.authorityEpoch);
     }
   }
 
@@ -77,7 +83,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     super.dispose();
   }
 
-  void _refreshRequest() {
+  void _refreshRequest({bool invalidateCachedArtwork = false}) {
     _retryTimer?.cancel();
     _retryTimer = null;
     _imageRetryScheduled = false;
@@ -90,9 +96,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       enrichmentRevision: artwork?.enrichmentRevision ?? '',
     );
     _remoteResult = null;
-    if (_cacheKey != cacheKey) {
+    if (_cacheKey != cacheKey || invalidateCachedArtwork) {
       _cacheKey = cacheKey;
       _cachedFile = null;
+    }
+    if (invalidateCachedArtwork && cacheKey.isNotEmpty) {
+      unawaited(_evictThenLoadRemote(api, artwork, generation, cacheKey));
+      return;
     }
     if (cacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(cacheKey, generation));
@@ -117,7 +127,27 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return info?.file;
   }
 
-  Future<void> _loadRemoteResult(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) async {
+  Future<void> _evictThenLoadRemote(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation,
+    String cacheKey,
+  ) async {
+    try {
+      await (widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile)(cacheKey);
+    } catch (_) {
+      // A stale local file is never authority for a replacement account.
+    }
+    if (!mounted || generation != _requestGeneration) return;
+    await _loadRemoteResult(api, artwork, generation, loadCachedFile: false);
+  }
+
+  Future<void> _loadRemoteResult(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation, {
+    bool loadCachedFile = true,
+  }) async {
     MemoryArtworkResult result;
     try {
       result = await api.loadForDisplay(widget.conversation.id, enqueueIfMissing: widget.enqueueIfMissing);
@@ -134,7 +164,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         _cachedFile = null;
       }
     });
-    if (readyCacheKey.isNotEmpty) {
+    if (loadCachedFile && readyCacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(readyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation);
@@ -222,25 +252,29 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return Semantics(
         image: true,
         label: context.l10n.memoryGeneratedArtworkLabel,
-        child: CachedNetworkImage(
-          imageUrl: result!.url.toString(),
+        child: KeyedSubtree(
           key: Key('memory-generated-artwork-${widget.conversation.id}'),
-          cacheKey: result.cacheKey,
-          cacheManager: MemoryArtworkCache.manager,
-          fit: widget.fit,
-          useOldImageOnUrlChange: true,
-          placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
-          errorListener: (_) => _handleImageLoadFailure(
-            widget.api ?? MemoryArtworkApi(),
-            widget.conversation.artwork,
-            _requestGeneration,
-            result.cacheKey,
+          child: CachedNetworkImage(
+            imageUrl: result!.url.toString(),
+            key: Key('memory-generated-artwork-network-${widget.conversation.id}-${widget.authorityEpoch}'),
+            cacheKey: result.cacheKey,
+            cacheManager: MemoryArtworkCache.manager,
+            fit: widget.fit,
+            useOldImageOnUrlChange: true,
+            placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+            errorListener: (_) => _handleImageLoadFailure(
+              widget.api ?? MemoryArtworkApi(),
+              widget.conversation.artwork,
+              _requestGeneration,
+              result.cacheKey,
+            ),
+            errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
           ),
-          errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
         ),
       );
     }
-    final fallbackKind = result == null ||
+    final fallbackKind =
+        result == null ||
             result.status == MemoryArtworkResultStatus.generating ||
             result.status == MemoryArtworkResultStatus.unavailable
         ? _MemoryArtworkFallbackKind.preparing
@@ -302,10 +336,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Widget _placeholder(_MemoryArtworkFallbackKind kind) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
     final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
-    final semanticsLabel =
-        isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel;
-    final visibleLabel =
-        isPreparing ? context.l10n.memoryArtworkPreparingShort : context.l10n.memoryArtworkUnavailableLabel;
+    final semanticsLabel = isPreparing
+        ? context.l10n.memoryArtworkPreparingLabel
+        : context.l10n.memoryArtworkUnavailableLabel;
+    final visibleLabel = isPreparing
+        ? context.l10n.memoryArtworkPreparingShort
+        : context.l10n.memoryArtworkUnavailableLabel;
     return Semantics(
       label: semanticsLabel,
       child: DecoratedBox(

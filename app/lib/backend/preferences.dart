@@ -114,6 +114,15 @@ class SharedPreferencesUtil {
     await saveString('btDevice', jsonEncode(value.toJson()));
   }
 
+  /// BLE hardware is a convenience preference, never account authority. Keep
+  /// its owner binding beside the device so a remembered necklace cannot be
+  /// resumed for a different Firebase account or profile.
+  String get btDeviceOwnerBinding => getString('btDeviceOwnerBinding');
+
+  Future<void> btDeviceOwnerBindingSet(String value) async {
+    await saveString('btDeviceOwnerBinding', value);
+  }
+
   BtDevice get btDevice {
     final String device = getString('btDevice');
     if (device.isEmpty) return BtDevice(id: '', name: '', type: DeviceType.omi, rssi: 0);
@@ -249,7 +258,8 @@ class SharedPreferencesUtil {
       return '';
     }
     final receiptId = aiConsentReceiptId;
-    final persistedGrant = getBool('aiConsentAccepted', defaultValue: false) &&
+    final persistedGrant =
+        getBool('aiConsentAccepted', defaultValue: false) &&
         aiConsentContractVersion == currentAiConsentContractVersion &&
         aiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
         uid.isNotEmpty &&
@@ -266,7 +276,8 @@ class SharedPreferencesUtil {
     if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return false;
     }
-    final accepted = getBool('aiConsentAccepted', defaultValue: false) &&
+    final accepted =
+        getBool('aiConsentAccepted', defaultValue: false) &&
         aiConsentContractVersion == currentAiConsentContractVersion &&
         aiConsentProcessorSetHash == currentAiConsentProcessorSetHash;
     if (!accepted ||
@@ -987,7 +998,7 @@ class SharedPreferencesUtil {
       // BLE pairing is a convenience binding, not cross-account authority.
       // Never carry the prior account's remembered necklace into a replacement
       // account; the replacement user must pair or select their own device.
-      for (final key in const ['btDevice', 'deviceName', 'hasOmiDevice', 'deviceIsV2']) {
+      for (final key in const ['btDevice', 'btDeviceOwnerBinding', 'deviceName', 'hasOmiDevice', 'deviceIsV2']) {
         await remove(key);
       }
     }

@@ -101,12 +101,18 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   }
 }
 
-MemoryArtworkQueueStatus _queueStatus({required int ready, required int active, required int queued}) {
+MemoryArtworkQueueStatus _queueStatus({
+  required int ready,
+  required int active,
+  required int queued,
+  String styleVersion = memoryArtworkDefaultStyle,
+  String generationId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+}) {
   final remaining = active + queued;
   final state = remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running;
   return MemoryArtworkQueueStatus(
-    generationId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    styleVersion: memoryArtworkDefaultStyle,
+    generationId: generationId,
+    styleVersion: styleVersion,
     state: state,
     controlState: state,
     scanStatus: 'completed',
@@ -125,7 +131,7 @@ MemoryArtworkQueueStatus _queueStatus({required int ready, required int active, 
     remaining: remaining,
     styles: [
       MemoryArtworkStyleProgress(
-        styleVersion: memoryArtworkDefaultStyle,
+        styleVersion: styleVersion,
         state: state,
         ready: ready,
         active: active,
@@ -490,6 +496,53 @@ void main() {
       artworkApi.displayRequests,
       greaterThan(initialDisplayRequests),
       reason: 'completed queue progress refreshes the visible gallery card',
+    );
+    expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
+  });
+
+  testWidgets('a new style queue invalidates visible cards even when its ready count resets below the prior style', (
+    tester,
+  ) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-style-reset')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi(
+      displayResults: [
+        const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating),
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://cdn.example.test/memory-style-reset.png'),
+          cacheKey: 'memory-style-reset-paper',
+        ),
+      ],
+      queueStatuses: [
+        _queueStatus(ready: 527, active: 0, queued: 0),
+        _queueStatus(
+          ready: 0,
+          active: 1,
+          queued: 0,
+          styleVersion: memoryArtworkPaperCollageStyle,
+          generationId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        ),
+      ],
+    );
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    final requestsBeforeStyleChange = artworkApi.displayRequests;
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+
+    expect(artworkApi.queueStatusRequests, greaterThanOrEqualTo(2));
+    expect(
+      artworkApi.displayRequests,
+      greaterThan(requestsBeforeStyleChange),
+      reason: 'the new style must not inherit the previous style\'s ready total',
     );
     expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
   });
