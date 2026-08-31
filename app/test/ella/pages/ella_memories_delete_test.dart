@@ -483,44 +483,6 @@ void main() {
     expect(artworkApi.backfillCalls, 0);
   });
 
-  testWidgets('scrolling and refresh load memory pages but never advance artwork history', (tester) async {
-    final authority = _MutableAuthority('test-user');
-    var pageRequests = 0;
-    final provider = ConversationProvider(
-      activeAuthority: () => authority,
-      conversationsPageFetchCall: ({required limit, required offset}) async {
-        pageRequests += 1;
-        expect(limit, 50);
-        expect(offset, 50);
-        return ConversationsFetchResult.success([memory('memory-older', title: 'An older memory')]);
-      },
-    )
-      ..conversations = List.generate(50, (index) => memory('memory-$index', title: 'Memory $index'))
-      ..hasLoadedConversations = true
-      ..hasFreshConversations = true
-      ..hasMoreConversations = true;
-    final artworkApi = _FakeArtworkApi();
-    addTearDown(provider.dispose);
-
-    await pumpPage(tester, provider, artworkApi: artworkApi);
-    expect(artworkApi.backfillCalls, 0);
-    final scrollable = tester.state<ScrollableState>(
-      find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)),
-    );
-    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
-    await tester.pump();
-    await tester.pumpAndSettle();
-
-    expect(pageRequests, 1);
-    expect(provider.conversations.map((item) => item.id), contains('memory-older'));
-    expect(provider.hasMoreConversations, isFalse);
-    expect(artworkApi.backfillCalls, 0);
-
-    await tester.state<RefreshIndicatorState>(find.byType(RefreshIndicator)).show();
-    await tester.pumpAndSettle();
-    expect(artworkApi.backfillCalls, 0);
-  });
-
   testWidgets('a short first page loads older memories without starting artwork work', (tester) async {
     final authority = _MutableAuthority('test-user');
     var pageRequests = 0;

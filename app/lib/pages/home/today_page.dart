@@ -2384,6 +2384,9 @@ class _ArtworkStudioSheet extends StatelessWidget {
   }
 
   String _previewHeadline(BuildContext context, MemoryArtworkQueueStatus queue) {
+    if (queue.state == MemoryArtworkQueueState.completed) {
+      return context.l10n.memoryArtworkQueueComplete;
+    }
     if (queue.controlState == MemoryArtworkQueueState.paused && queue.pauseReason == 'batch_complete') {
       return context.l10n.memoryArtworkQueueBatchComplete(queue.batchSize);
     }
@@ -2394,6 +2397,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
   }
 
   double? _previewProgress(MemoryArtworkQueueStatus queue) {
+    if (queue.state == MemoryArtworkQueueState.completed) return 1;
     // A full-history run has no truthful bounded denominator. Keep the bar
     // indeterminate until the server reports a paused or terminal batch.
     if (queue.autoContinue && queue.controlState == MemoryArtworkQueueState.running) return null;
