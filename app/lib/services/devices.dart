@@ -67,14 +67,18 @@ abstract class IDeviceServiceSubsciption {
   });
 }
 
+typedef DeviceConnectionCreator = DeviceConnection? Function(BtDevice device);
+
 class DeviceService implements IDeviceService {
-  DeviceService({List<DeviceDiscoverer>? discoverers})
-      : _discoverers = discoverers ?? [BluetoothDeviceDiscoverer(), AppleWatchDiscoverer()];
+  DeviceService({List<DeviceDiscoverer>? discoverers, DeviceConnectionCreator? connectionCreator})
+      : _discoverers = discoverers ?? [BluetoothDeviceDiscoverer(), AppleWatchDiscoverer()],
+        _connectionCreator = connectionCreator ?? DeviceConnectionFactory.create;
 
   DeviceServiceStatus _status = DeviceServiceStatus.init;
   List<BtDevice> _devices = [];
 
   final List<DeviceDiscoverer> _discoverers;
+  final DeviceConnectionCreator _connectionCreator;
 
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
@@ -169,7 +173,7 @@ class DeviceService implements IDeviceService {
       }
     }
 
-    final connection = DeviceConnectionFactory.create(device);
+    final connection = _connectionCreator(device);
     _connection = connection;
     if (connection != null) {
       final connectionGeneration = ++_connectionGeneration;

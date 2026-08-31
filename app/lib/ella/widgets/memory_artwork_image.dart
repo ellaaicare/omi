@@ -64,6 +64,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Timer? _retryTimer;
   bool _imageRetryScheduled = false;
   int _authorityUnavailableRetries = 0;
+  int? _authorityRetryBudgetEpoch;
+  String? _authorityRetryBudgetMemoryId;
+  bool _authorityRetryBudgetExhausted = false;
 
   @override
   void initState() {
@@ -91,10 +94,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   void _refreshRequest({bool invalidateCachedArtwork = false}) {
+    _resetAuthorityRetryBudgetIfNeeded();
+    // Queue and presentation revisions are not a new authority. Once the
+    // authenticated authority endpoint has exhausted its small retry budget,
+    // leave the current card alone until the authority or memory changes.
+    if (_authorityRetryBudgetExhausted) return;
     _retryTimer?.cancel();
     _retryTimer = null;
     _imageRetryScheduled = false;
-    _authorityUnavailableRetries = 0;
     final generation = ++_requestGeneration;
     final api = widget.api ?? MemoryArtworkApi();
     final artwork = widget.conversation.artwork;
@@ -116,6 +123,15 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(cacheKey, generation));
     }
     unawaited(_loadRemoteResult(api, artwork, generation));
+  }
+
+  void _resetAuthorityRetryBudgetIfNeeded() {
+    final memoryId = widget.conversation.id;
+    if (_authorityRetryBudgetEpoch == widget.authorityEpoch && _authorityRetryBudgetMemoryId == memoryId) return;
+    _authorityRetryBudgetEpoch = widget.authorityEpoch;
+    _authorityRetryBudgetMemoryId = memoryId;
+    _authorityUnavailableRetries = 0;
+    _authorityRetryBudgetExhausted = false;
   }
 
   Future<void> _loadCachedFile(String cacheKey, int generation) async {
@@ -240,9 +256,15 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     MemoryArtworkResult? result,
   }) {
     if (!mounted || generation != _requestGeneration || _retryTimer?.isActive == true) return;
-    if (result?.failureCode == 'memory_artwork_authority_unavailable') {
+    if (const {
+      'memory_artwork_authority_unavailable',
+      'memory_artwork_runtime_authority_unavailable',
+    }.contains(result?.failureCode)) {
       if (_authorityUnavailableRetries >= widget.maxAuthorityUnavailableRetries) return;
       _authorityUnavailableRetries++;
+      if (_authorityUnavailableRetries >= widget.maxAuthorityUnavailableRetries) {
+        _authorityRetryBudgetExhausted = true;
+      }
     }
     _retryTimer = Timer(widget.retryDelay, () {
       _retryTimer = null;
