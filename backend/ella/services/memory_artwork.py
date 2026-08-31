@@ -1102,7 +1102,8 @@ class MemoryArtworkService:
             raise MemoryArtworkError("memory_artwork_deletion_pending")
         if outcome != "updated":
             raise MemoryArtworkError("memory_artwork_queue_generation_stale")
-        if action == "resume" and auto_continue:
+        reconciliation = self.repository.get_reconciliation_job(uid, generation_id)
+        if action == "resume" and (auto_continue or str((reconciliation or {}).get("status") or "") == "failed"):
             self.repository.create_reconciliation_job(
                 uid,
                 authority_digest=authority.authority_digest,
