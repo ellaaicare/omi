@@ -154,6 +154,21 @@ void main() {
     await preferences.btDeviceOwnerBindingSet('');
   });
 
+  test('empty remembered-device sentinels never present as a paired necklace', () async {
+    final provider = DeviceProvider(deviceService: _FakeDeviceService(DeviceServiceStatus.ready));
+    addTearDown(provider.dispose);
+
+    provider.pairedDevice = BtDevice.empty();
+    provider.connectedDevice = BtDevice.empty();
+
+    expect(provider.presentationPairedDevice, isNull);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
+
+    await provider.getDeviceInfo();
+    expect(provider.pairedDevice, isNull, reason: 'storage sentinels are not Home presentation state');
+  });
+
   group('battery throttling', () {
     late DeviceProvider provider;
     late int notifyCount;

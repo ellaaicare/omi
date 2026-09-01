@@ -35,6 +35,7 @@ class EllaMemoriesPage extends StatefulWidget {
 }
 
 class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
+  static const _maxArtworkPreferenceUnavailableRetries = 3;
   final ScrollController _scrollController = ScrollController();
   late final MemoryArtworkApi _artworkApi = widget.artworkApi ?? MemoryArtworkApi();
   MemoryArtworkPreferences? _artworkPreferences;
@@ -50,6 +51,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   int _artworkPreferenceLoadSequence = 0;
   int _artworkDisplayEpoch = 0;
   int _artworkAuthorityEpoch = 0;
+  int _artworkPreferenceUnavailableRetries = 0;
   late final Listenable _artworkAuthorityChanges;
 
   @override
@@ -83,6 +85,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     _artworkQueueRefreshSequence++;
     _artworkQueuePollTimer?.cancel();
     _artworkPreferencesRetryTimer?.cancel();
+    _artworkPreferenceUnavailableRetries = 0;
     if (mounted) {
       setState(() {
         _artworkPreferences = null;
@@ -141,11 +144,14 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       if (retryOnUnavailable) _scheduleArtworkPreferencesRetry(loadSequence);
       return;
     }
+    _artworkPreferenceUnavailableRetries = 0;
     if (mounted) setState(() => _artworkPreferences = preferences);
     if (preferences.releaseEnabled) unawaited(_refreshArtworkQueueStatus());
   }
 
   void _scheduleArtworkPreferencesRetry(int loadSequence) {
+    if (_artworkPreferenceUnavailableRetries >= _maxArtworkPreferenceUnavailableRetries) return;
+    _artworkPreferenceUnavailableRetries++;
     _artworkPreferencesRetryTimer?.cancel();
     _artworkPreferencesRetryTimer = Timer(const Duration(seconds: 1), () {
       if (!mounted || loadSequence != _artworkPreferenceLoadSequence) return;

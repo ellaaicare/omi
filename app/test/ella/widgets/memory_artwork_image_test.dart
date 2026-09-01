@@ -44,6 +44,7 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
 
   int loadCalls = 0;
   bool? lastEnqueueIfMissing;
+  int? lastPollAttempts;
 
   @override
   String cacheKeyForDisplay({
@@ -62,11 +63,49 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
   }) async {
     loadCalls += 1;
     lastEnqueueIfMissing = enqueueIfMissing;
+    lastPollAttempts = pollAttempts;
     if (loadCalls == 1) return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
     return MemoryArtworkResult(
       status: MemoryArtworkResultStatus.ready,
       url: Uri.parse('https://private-storage.example/art.png'),
       cacheKey: 'ready-artwork-cache-key',
+    );
+  }
+}
+
+class _TerminalThenReadyArtworkApi extends MemoryArtworkApi {
+  _TerminalThenReadyArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+  bool? lastEnqueueIfMissing;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    lastEnqueueIfMissing = enqueueIfMissing;
+    if (loadCalls == 1) {
+      return const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_not_found',
+      );
+    }
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/terminal-refresh.png'),
+      cacheKey: 'terminal-refresh-cache-key',
     );
   }
 }
@@ -227,6 +266,41 @@ class _PersistentlyUnavailableAuthorityArtworkApi extends MemoryArtworkApi {
     return MemoryArtworkResult(
       status: MemoryArtworkResultStatus.unavailable,
       failureCode: failureCode,
+    );
+  }
+}
+
+class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
+  _AuthoritySettlesAfterFinalRetryArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    if (loadCalls <= 2) {
+      return const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_authority_unavailable',
+      );
+    }
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/settled-after-final-retry.png'),
+      cacheKey: 'settled-after-final-retry-cache-key',
     );
   }
 }
@@ -422,6 +496,7 @@ void main() {
 
     expect(find.text('Preparing illustration…'), findsOneWidget);
     expect(api.loadCalls, 1);
+    expect(api.lastPollAttempts, 0, reason: 'each visible card performs one display read per queue revision');
 
     await tester.pump(const Duration(milliseconds: 10));
     await tester.pump();
@@ -462,6 +537,42 @@ void main() {
     expect(api.loadCalls, 2);
     expect(api.lastEnqueueIfMissing, isFalse);
     expect(find.byKey(const Key('memory-generated-artwork-memory-queue-complete')), findsOneWidget);
+  });
+
+  testWidgets('waits for a parent refresh after a terminal unavailable result without creating artwork',
+      (tester) async {
+    final api = _TerminalThenReadyArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-terminal-unavailable',
+      createdAt: DateTime(2026, 8, 31),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            retryDelay: const Duration(milliseconds: 10),
+            refreshEpoch: refreshEpoch,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(api.loadCalls, 1, reason: 'terminal missing artwork must not poll forever');
+    expect(api.lastEnqueueIfMissing, isFalse, reason: 'displaying a card must not spend image allowance');
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(api.loadCalls, 2, reason: 'a later queue revision gets one fresh display read');
+    expect(find.byKey(const Key('memory-generated-artwork-memory-terminal-unavailable')), findsOneWidget);
   });
 
   testWidgets('an authority change evicts cached artwork before fetching the replacement account result', (
@@ -611,6 +722,44 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('a successful final authority retry permits later queue refreshes', (tester) async {
+    final api = _AuthoritySettlesAfterFinalRetryArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-authority-final-retry',
+      createdAt: DateTime(2026, 8, 31),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            retryDelay: const Duration(milliseconds: 10),
+            maxAuthorityUnavailableRetries: 2,
+            authorityEpoch: 1,
+            refreshEpoch: refreshEpoch,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 3, reason: 'the second retry is allowed to observe recovered authority');
+    expect(find.byKey(const Key('memory-generated-artwork-memory-authority-final-retry')), findsOneWidget);
+
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+    expect(api.loadCalls, 4, reason: 'a successful final retry must not permanently freeze later refreshes');
+  });
+
   testWidgets('bounds runtime-authority retries instead of polling a failing endpoint indefinitely', (tester) async {
     final api = _PersistentlyUnavailableAuthorityArtworkApi('memory_artwork_runtime_authority_unavailable');
     final conversation = ServerConversation(
@@ -724,7 +873,7 @@ void main() {
     expect(api.loadCalls, 3, reason: 'a failed image download must obtain a fresh signed URL');
   });
 
-  testWidgets('continues refreshing while Hermes enrichment is being recovered', (tester) async {
+  testWidgets('does not poll a terminal enrichment result until the parent publishes a new revision', (tester) async {
     final api = _RecoveringEnrichmentArtworkApi();
     final conversation = ServerConversation(
       id: 'memory-awaiting-enrichment',
@@ -732,26 +881,30 @@ void main() {
       structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
     );
 
-    await tester.pumpWidget(
-      MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(
-          conversation: conversation,
-          api: api,
-          cachedFileLookup: (_) async => null,
-          retryDelay: const Duration(milliseconds: 10),
-        ),
-      ),
-    );
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            retryDelay: const Duration(milliseconds: 10),
+            refreshEpoch: refreshEpoch,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
     await tester.pump();
 
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsOneWidget);
     expect(api.loadCalls, 1);
 
-    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump(const Duration(milliseconds: 100));
     await tester.pump();
+    expect(api.loadCalls, 1);
 
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-awaiting-enrichment')), findsOneWidget);
   });

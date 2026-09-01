@@ -94,9 +94,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   bool _havingNewFirmware = false;
   bool get havingNewFirmware => _havingNewFirmware && pairedDevice != null && isConnected;
 
-  BtDevice? get presentationConnectedDevice => SharedPreferencesUtil().demoMode ? _demoDevice : connectedDevice;
+  BtDevice? get presentationConnectedDevice =>
+      SharedPreferencesUtil().demoMode ? _demoDevice : _nonEmptyPresentationDevice(connectedDevice);
 
-  BtDevice? get presentationPairedDevice => SharedPreferencesUtil().demoMode ? _demoDevice : pairedDevice;
+  BtDevice? get presentationPairedDevice =>
+      SharedPreferencesUtil().demoMode ? _demoDevice : _nonEmptyPresentationDevice(pairedDevice);
+
+  BtDevice? _nonEmptyPresentationDevice(BtDevice? device) => device?.id.isNotEmpty == true ? device : null;
 
   bool get presentationIsConnected =>
       SharedPreferencesUtil().demoMode || (isConnected && connectedDevice?.id.isNotEmpty == true);
@@ -396,7 +400,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future getDeviceInfo({int? operationGeneration}) async {
     if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
-    if (connectedDevice != null) {
+    if (connectedDevice?.id.isNotEmpty == true) {
       if (pairedDevice?.firmwareRevision != null && pairedDevice?.firmwareRevision != 'Unknown') {
         return;
       }
@@ -410,7 +414,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     } else {
       final rememberedDevice = _rememberedDeviceForCurrentAuthority();
       if (rememberedDevice == null) {
-        pairedDevice = BtDevice.empty();
+        // An empty sentinel is storage hygiene, not a paired necklace. Keep
+        // the presentation state null so Home never offers a fictitious
+        // reconnect path after logout or an authority change.
+        pairedDevice = null;
       } else {
         pairedDevice = rememberedDevice;
       }
