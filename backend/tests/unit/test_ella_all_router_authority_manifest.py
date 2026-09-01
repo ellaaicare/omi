@@ -265,6 +265,7 @@ ROUTE_GROUPS = (
         "memory_artwork",
         "firebase_exact_owner",
         "staged_public",
+        ("GET", "/v1/ella/memory-artwork/libraries", "get_memory_artwork_libraries"),
         ("GET", "/v1/ella/memory-artwork/preferences", "get_memory_artwork_preferences"),
         ("PUT", "/v1/ella/memory-artwork/preferences", "put_memory_artwork_preferences"),
         ("GET", "/v1/ella/memories/{memory_id}/artwork", "get_memory_artwork"),
