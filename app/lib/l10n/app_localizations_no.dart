@@ -8986,10 +8986,10 @@ class AppLocalizationsNo extends AppLocalizations {
       'Your other Ella features are still here. Try again later or contact the person who arranged your access.';
 
   @override
-  String get ellaAccessUnavailableTitle => 'Ella could not check access just now';
+  String get ellaAccessUnavailableTitle => 'Ella’s service needs a moment';
 
   @override
-  String get ellaAccessUnavailableBody => 'Your connection may need a moment. Try again when you are ready.';
+  String get ellaAccessUnavailableBody => 'Your account and memories are safe. Please try again in a moment.';
 
   @override
   String get ellaAccessNeedsCheckTitle => 'Your invitation needs a quick check';
