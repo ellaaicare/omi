@@ -174,6 +174,32 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return device;
   }
 
+  /// A non-empty record written before owner binding existed. It is intentionally
+  /// not treated as paired: Home may offer one explicit confirmation, but no
+  /// reconnect or capture can begin until that confirmation binds it to the
+  /// current Firebase UID/profile.
+  BtDevice? get legacyUntrustedDeviceCandidate {
+    final preferences = SharedPreferencesUtil();
+    if (_rememberedDeviceOwnerBinding() == null) return null;
+    final device = preferences.btDevice;
+    if (device.id.isEmpty || preferences.btDeviceOwnerBinding.trim().isNotEmpty) return null;
+    return device;
+  }
+
+  bool _isLegacyCandidateCurrent({
+    required BtDevice candidate,
+    required String ownerBinding,
+    required int authorityGeneration,
+  }) {
+    final preferences = SharedPreferencesUtil();
+    return !_disposed &&
+        _deviceServiceReady &&
+        authorityGeneration == _rememberedDeviceAuthorityGeneration &&
+        ownerBinding == _rememberedDeviceOwnerBinding() &&
+        preferences.btDevice.id == candidate.id &&
+        preferences.btDeviceOwnerBinding.trim().isEmpty;
+  }
+
   bool _isCurrentOwnerBoundDevice(String deviceId) {
     final boundDevice = _rememberedDeviceForCurrentAuthority();
     return boundDevice != null && boundDevice.id == deviceId;
@@ -773,11 +799,39 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
-  Future<void> onDeviceDisconnected({
-    int? operationGeneration,
-    String? deviceId,
-    int? connectionGeneration,
-  }) async {
+  /// Commits the one explicit Home confirmation for a device saved by builds
+  /// that predate owner binding. This is deliberately separate from normal
+  /// resume so a new account can never inherit or capture through a legacy
+  /// device record without the current person's action.
+  Future<bool> confirmLegacyNecklaceForCurrentAuthority({required String reason}) async {
+    if (!_deviceServiceReady || isConnected) return false;
+    final ownerBinding = _rememberedDeviceOwnerBinding();
+    final candidate = legacyUntrustedDeviceCandidate;
+    final authorityGeneration = _rememberedDeviceAuthorityGeneration;
+    if (ownerBinding == null || candidate == null) return false;
+    if (!_isLegacyCandidateCurrent(
+      candidate: candidate,
+      ownerBinding: ownerBinding,
+      authorityGeneration: authorityGeneration,
+    )) {
+      return false;
+    }
+
+    final generation = ++_deviceOperationGeneration;
+    await _persistRememberedDevice(candidate, operationGeneration: generation);
+    if (!_isDeviceOperationCurrent(generation) || !_isCurrentOwnerBoundDevice(candidate.id)) return false;
+
+    // Only after a durable exact-owner binding may this device enter normal
+    // reconnect/capture handling.
+    pairedDevice = candidate;
+    _requiresExplicitDeviceSelectionAfterAuthorityChange = false;
+    _automaticReconnectCooldownUntil = null;
+    notifyListeners();
+    await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
+    return true;
+  }
+
+  Future<void> onDeviceDisconnected({int? operationGeneration, String? deviceId, int? connectionGeneration}) async {
     if (connectionGeneration != null && !_isCurrentDeviceConnectionSession(connectionGeneration)) return;
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
@@ -843,11 +897,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return (message, hasUpdate, version, latestFirmwareDetails);
   }
 
-  Future<void> _onDeviceConnected(
-    BtDevice device,
-    int operationGeneration, {
-    bool explicitlyAuthorized = false,
-  }) async {
+  Future<void> _onDeviceConnected(BtDevice device, int operationGeneration, {bool explicitlyAuthorized = false}) async {
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
     if (_rememberedDeviceOwnerBinding() == null) return;
     if (!explicitlyAuthorized &&
@@ -1120,11 +1170,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   @override
-  void onDeviceConnectionStateChanged(
-    String deviceId,
-    DeviceConnectionState state, {
-    int? connectionGeneration,
-  }) async {
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration}) async {
     Logger.debug("provider > device connection state changed...$deviceId...$state...${connectedDevice?.id}");
     switch (state) {
       case DeviceConnectionState.connected:

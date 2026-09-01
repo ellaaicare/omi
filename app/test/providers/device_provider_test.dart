@@ -40,11 +40,7 @@ class _FakeDeviceService implements IDeviceService {
 
   void publishConnection(String deviceId, DeviceConnectionState state, {required int connectionGeneration}) {
     for (final subscriber in _subscriptions.values.toList()) {
-      subscriber.onDeviceConnectionStateChanged(
-        deviceId,
-        state,
-        connectionGeneration: connectionGeneration,
-      );
+      subscriber.onDeviceConnectionStateChanged(deviceId, state, connectionGeneration: connectionGeneration);
     }
   }
 
@@ -167,6 +163,152 @@ void main() {
 
     await provider.getDeviceInfo();
     expect(provider.pairedDevice, isNull, reason: 'storage sentinels are not Home presentation state');
+  });
+
+  test('a legacy saved necklace stays a Home confirmation candidate without reconnecting or capture', () async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'legacy-necklace', type: DeviceType.omi, rssi: -30);
+    final preferences = SharedPreferencesUtil()..uid = 'legacy-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'legacy-profile');
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('');
+    var scans = 0;
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 1),
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(provider.presentationPairedDevice, isNull);
+    expect(provider.legacyUntrustedDeviceCandidate?.id, necklace.id);
+    expect(scans, 0, reason: 'legacy storage is never an implicit reconnect authority');
+    expect(capture.deviceStarts, 0, reason: 'capture cannot begin before Home confirmation');
+  });
+
+  test('Home confirmation binds a legacy necklace before reconnect and capture', () async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'legacy-necklace', type: DeviceType.omi, rssi: -30);
+    final preferences = SharedPreferencesUtil()..uid = 'legacy-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'legacy-profile');
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('');
+    final capture = _RecordingCaptureProvider();
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 1),
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    expect(await provider.confirmLegacyNecklaceForCurrentAuthority(reason: 'test Home confirmation'), isTrue);
+    for (var attempt = 0; attempt < 100 && !provider.presentationIsConnected; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(preferences.btDeviceOwnerBinding, 'legacy-user\u001flegacy-profile');
+    expect(scans, greaterThanOrEqualTo(1));
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(capture.deviceStarts, 1);
+  });
+
+  test('a legacy confirmation cannot bind or capture after account authority drift', () async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'legacy-necklace', type: DeviceType.omi, rssi: -30);
+    final preferences = SharedPreferencesUtil()..uid = 'account-a';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('');
+    final writeStarted = Completer<void>();
+    final allowWrite = Completer<void>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      rememberedDeviceWriter: (device) async {
+        if (device.id == necklace.id && !writeStarted.isCompleted) {
+          writeStarted.complete();
+          await allowWrite.future;
+        }
+        await preferences.btDeviceSet(device);
+      },
+      scanConnector: () async => necklace,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    final confirmation = provider.confirmLegacyNecklaceForCurrentAuthority(reason: 'test drift');
+    await writeStarted.future.timeout(const Duration(seconds: 1));
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    allowWrite.complete();
+
+    expect(await confirmation, isFalse);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(preferences.btDeviceOwnerBinding, isEmpty);
+    expect(capture.deviceStarts, 0, reason: 'account B cannot inherit account A confirmation');
+  });
+
+  test('a legacy confirmation cannot bind or capture after profile authority drift', () async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'legacy-necklace', type: DeviceType.omi, rssi: -30);
+    final preferences = SharedPreferencesUtil()..uid = 'same-account';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('');
+    final writeStarted = Completer<void>();
+    final allowWrite = Completer<void>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      rememberedDeviceWriter: (device) async {
+        if (device.id == necklace.id && !writeStarted.isCompleted) {
+          writeStarted.complete();
+          await allowWrite.future;
+        }
+        await preferences.btDeviceSet(device);
+      },
+      scanConnector: () async => necklace,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    final confirmation = provider.confirmLegacyNecklaceForCurrentAuthority(reason: 'test profile drift');
+    await writeStarted.future.timeout(const Duration(seconds: 1));
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    allowWrite.complete();
+
+    expect(await confirmation, isFalse);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(preferences.btDeviceOwnerBinding, isEmpty);
+    expect(capture.deviceStarts, 0, reason: 'a replacement profile cannot inherit a prior confirmation');
+  });
+
+  test('clearing an active device restores only the exact bound necklace for Home', () async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'bound-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final provider = DeviceProvider(deviceService: _FakeDeviceService(DeviceServiceStatus.ready));
+    addTearDown(provider.dispose);
+
+    await provider.setConnectedDevice(null);
+
+    expect(provider.presentationPairedDevice?.id, necklace.id);
+    expect(provider.presentationConnectedDevice, isNull);
   });
 
   group('battery throttling', () {
@@ -366,8 +508,11 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged('legacy-necklace', DeviceConnectionState.connected,
-        connectionGeneration: 1);
+    provider.onDeviceConnectionStateChanged(
+      'legacy-necklace',
+      DeviceConnectionState.connected,
+      connectionGeneration: 1,
+    );
     await Future<void>.delayed(const Duration(milliseconds: 150));
 
     expect(resolverCalls, 0);

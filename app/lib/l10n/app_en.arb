@@ -10916,5 +10916,10 @@
   "memoryArtworkQueueStopTitle": "Stop this illustration update?",
   "memoryArtworkQueueStopDetail": "Finished illustrations will stay. The illustration already being created may finish, and you can resume later.",
   "memoryArtworkQueueActiveMayFinish": "The illustration already being created may finish.",
-  "memoryArtworkQueueControlFailed": "Ella couldn't update illustration work right now."
+  "memoryArtworkQueueControlFailed": "Ella couldn't update illustration work right now.",
+  "todayLegacyNecklaceDockStatus": "Reconnect your necklace",
+  "todayLegacyNecklaceConfirmTitle": "Reconnect your necklace?",
+  "todayLegacyNecklaceConfirmBody": "This necklace was paired with this iPhone before. Confirm it is yours, then Ella will reconnect it for this account.",
+  "todayLegacyNecklaceConfirmAction": "Reconnect necklace",
+  "todayLegacyNecklaceConfirmUnavailable": "Ella could not start reconnecting the necklace right now. Please try again."
 }

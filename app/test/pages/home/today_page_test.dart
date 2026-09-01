@@ -46,11 +46,7 @@ void main() {
 
   testWidgets('remembered necklace exposes a direct reconnect action from Home', (tester) async {
     var reconnects = 0;
-    await _pumpRecordControl(
-      tester,
-      hasNecklace: true,
-      onReconnectNecklace: () => reconnects += 1,
-    );
+    await _pumpRecordControl(tester, hasNecklace: true, onReconnectNecklace: () => reconnects += 1);
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.todayDockNecklaceNotConnected), findsOneWidget);
@@ -60,6 +56,27 @@ void main() {
     await tester.pump();
 
     expect(reconnects, 1);
+  });
+
+  testWidgets('legacy necklace requires Home confirmation instead of reconnecting implicitly', (tester) async {
+    var confirmations = 0;
+    var reconnects = 0;
+    await _pumpRecordControl(
+      tester,
+      legacyNecklaceNeedsConfirmation: true,
+      onConfirmLegacyNecklace: () => confirmations += 1,
+      onReconnectNecklace: () => reconnects += 1,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayLegacyNecklaceDockStatus), findsOneWidget);
+    expect(find.byIcon(Icons.link_rounded), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+
+    expect(confirmations, 1);
+    expect(reconnects, 0);
   });
 
   testWidgets('non-Home active capture keeps Finish and Transcript as separate actions', (tester) async {
@@ -119,12 +136,7 @@ void main() {
     expect(processTaps, 1);
     expect(transcriptTaps, 1);
 
-    await _pumpRecordControl(
-      tester,
-      homeCaptureOwned: true,
-      homeCaptureUsesNecklace: true,
-      necklaceConnecting: true,
-    );
+    await _pumpRecordControl(tester, homeCaptureOwned: true, homeCaptureUsesNecklace: true, necklaceConnecting: true);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.todayDockFinish), findsOneWidget);
@@ -218,6 +230,7 @@ Future<void> _pumpRecordControl(
   bool homeCaptureUsesNecklace = false,
   bool starting = false,
   bool hasNecklace = false,
+  bool legacyNecklaceNeedsConfirmation = false,
   bool necklaceConnected = false,
   bool necklaceConnecting = false,
   RecordingState recordingState = RecordingState.stop,
@@ -227,6 +240,7 @@ Future<void> _pumpRecordControl(
   VoidCallback? onFinishExternalCapture,
   VoidCallback? onUnavailable,
   VoidCallback? onReconnectNecklace,
+  VoidCallback? onConfirmLegacyNecklace,
   VoidCallback? onTap,
 }) {
   return tester.pumpWidget(
@@ -239,6 +253,7 @@ Future<void> _pumpRecordControl(
           homeCaptureUsesNecklace: homeCaptureUsesNecklace,
           starting: starting,
           hasNecklace: hasNecklace,
+          legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
           necklaceConnected: necklaceConnected,
           necklaceConnecting: necklaceConnecting,
           recordingState: recordingState,
@@ -248,6 +263,7 @@ Future<void> _pumpRecordControl(
           onFinishExternalCapture: onFinishExternalCapture ?? () {},
           onUnavailable: onUnavailable,
           onReconnectNecklace: onReconnectNecklace,
+          onConfirmLegacyNecklace: onConfirmLegacyNecklace,
           onTap: onTap ?? () {},
         ),
       ),
