@@ -85,6 +85,26 @@ void main() {
     expect(capture.phoneStarts, 0);
   });
 
+  testWidgets('phone diagnostics outrank a retained necklace reference during Retry', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final capture = _FakeCaptureProvider(
+      RecordingState.error,
+      transcriptReady: false,
+      diagnostics: const CaptureDiagnostics(source: CaptureDiagnosticSource.phone),
+    )..updateRecordingDevice(necklace);
+    final device = _FakeDeviceProvider();
+    await _pumpCapturePage(tester, capture, device: device);
+
+    expect(_captureStatus(tester), 'iPhone · Error');
+    expect(find.byKey(const Key('conversation-capture-retry-phone')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('conversation-capture-retry-phone')));
+    await tester.pump();
+
+    expect(capture.phoneStarts, 1);
+    expect(device.reconnects, 0);
+  });
+
   testWidgets('empty active capture keeps Stop Recording visible before transcript segments', (tester) async {
     final capture = _FakeCaptureProvider(RecordingState.stop, transcriptReady: false);
     await _pumpCapturePage(tester, capture);
@@ -317,13 +337,16 @@ class _FakeCaptureProvider extends CaptureProvider {
     RecordingState initialState, {
     required bool transcriptReady,
     bool phoneOwnsMobileAudio = false,
+    CaptureDiagnostics diagnostics = const CaptureDiagnostics(),
   })  : _transcriptReady = transcriptReady,
-        _phoneOwnsMobileAudio = phoneOwnsMobileAudio {
+        _phoneOwnsMobileAudio = phoneOwnsMobileAudio,
+        _diagnostics = diagnostics {
     recordingState = initialState;
   }
 
   bool _transcriptReady;
   bool _phoneOwnsMobileAudio;
+  final CaptureDiagnostics _diagnostics;
   int phoneStops = 0;
   int phoneStarts = 0;
   int phoneFinalizeCalls = 0;
@@ -337,6 +360,9 @@ class _FakeCaptureProvider extends CaptureProvider {
 
   @override
   bool get phoneCaptureOwnsMobileAudio => _phoneOwnsMobileAudio || recordingState == RecordingState.record;
+
+  @override
+  CaptureDiagnostics get captureDiagnostics => _diagnostics;
 
   void setCaptureState(
     RecordingState state, {

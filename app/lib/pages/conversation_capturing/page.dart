@@ -27,6 +27,19 @@ import 'package:omi/ella/ella_theme.dart';
 
 enum _CaptureStopTarget { none, phone, necklace, systemAudio }
 
+EllaCaptureSource conversationCaptureSource({
+  required RecordingState state,
+  required bool phoneCaptureOwnsMobileAudio,
+  required CaptureDiagnosticSource diagnosticSource,
+  required bool hasRecordingDevice,
+}) {
+  if (state == RecordingState.record || phoneCaptureOwnsMobileAudio) return EllaCaptureSource.phone;
+  if (state == RecordingState.deviceRecord) return EllaCaptureSource.necklace;
+  if (diagnosticSource == CaptureDiagnosticSource.phone) return EllaCaptureSource.phone;
+  if (diagnosticSource == CaptureDiagnosticSource.necklace || hasRecordingDevice) return EllaCaptureSource.necklace;
+  return EllaCaptureSource.phone;
+}
+
 _CaptureStopTarget _captureStopTarget(CaptureProvider provider) {
   if (provider.phoneCaptureOwnsMobileAudio) return _CaptureStopTarget.phone;
   return switch (provider.recordingState) {
@@ -311,15 +324,12 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   }
 
   EllaCaptureSource _captureSource(CaptureProvider provider) {
-    if (provider.recordingState == RecordingState.record || provider.phoneCaptureOwnsMobileAudio) {
-      return EllaCaptureSource.phone;
-    }
-    if (provider.recordingState == RecordingState.deviceRecord ||
-        provider.captureDiagnostics.source == CaptureDiagnosticSource.necklace ||
-        provider.havingRecordingDevice) {
-      return EllaCaptureSource.necklace;
-    }
-    return EllaCaptureSource.phone;
+    return conversationCaptureSource(
+      state: provider.recordingState,
+      phoneCaptureOwnsMobileAudio: provider.phoneCaptureOwnsMobileAudio,
+      diagnosticSource: provider.captureDiagnostics.source,
+      hasRecordingDevice: provider.havingRecordingDevice,
+    );
   }
 
   Future<void> _retryCapture(CaptureProvider provider, DeviceProvider deviceProvider) async {

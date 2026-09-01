@@ -22,6 +22,25 @@ void main() {
     expect(item.toJson()['source_label'], 'David');
   });
 
+  test('failed startup stays bound to its source while active necklace capture permits a phone handoff', () {
+    expect(
+      todaySelectedCaptureSource(
+        state: RecordingState.error,
+        diagnostics: const CaptureDiagnostics(source: CaptureDiagnosticSource.necklace),
+        preferredSource: EllaCaptureSource.phone,
+      ),
+      EllaCaptureSource.necklace,
+    );
+    expect(
+      todaySelectedCaptureSource(
+        state: RecordingState.deviceRecord,
+        diagnostics: const CaptureDiagnostics(source: CaptureDiagnosticSource.necklace),
+        preferredSource: EllaCaptureSource.phone,
+      ),
+      EllaCaptureSource.phone,
+    );
+  });
+
   testWidgets('compact dock distinguishes idle, initialising, and reconnecting states', (tester) async {
     await _pumpRecordControl(tester);
     var l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));

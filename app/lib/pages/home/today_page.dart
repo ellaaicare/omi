@@ -101,6 +101,22 @@ EllaCaptureSource? todayActiveCaptureSource(RecordingState state, CaptureDiagnos
       RecordingState.stop || RecordingState.systemAudioRecord => null,
     };
 
+EllaCaptureSource todaySelectedCaptureSource({
+  required RecordingState state,
+  required CaptureDiagnostics diagnostics,
+  required EllaCaptureSource? preferredSource,
+}) {
+  final activeSource = todayActiveCaptureSource(state, diagnostics);
+  return switch (state) {
+    RecordingState.record => EllaCaptureSource.phone,
+    RecordingState.initialising ||
+    RecordingState.pause ||
+    RecordingState.error =>
+      activeSource ?? preferredSource ?? EllaCaptureSource.phone,
+    _ => preferredSource ?? EllaCaptureSource.phone,
+  };
+}
+
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
 bool canReadDailyNote({required bool loading, required String text}) => !loading && text.trim().isNotEmpty;
@@ -1727,9 +1743,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         DeviceType.omi;
     final capture = context.watch<CaptureProvider>();
     final activeCaptureSource = todayActiveCaptureSource(capture.recordingState, capture.captureDiagnostics);
-    final selectedCaptureSource = activeCaptureSource == EllaCaptureSource.phone
-        ? EllaCaptureSource.phone
-        : _selectedCaptureSource ?? EllaCaptureSource.phone;
+    final selectedCaptureSource = todaySelectedCaptureSource(
+      state: capture.recordingState,
+      diagnostics: capture.captureDiagnostics,
+      preferredSource: _selectedCaptureSource,
+    );
     final conversations = context.watch<ConversationProvider>();
     final visibleConversations = conversations.visibleConversations;
     final orderedMemories = List<ServerConversation>.of(visibleConversations)
