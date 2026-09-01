@@ -45,6 +45,7 @@ from utils.ella.memory_artwork_storage import (
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
 ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
 ARTWORK_QUEUE_SCHEMA_VERSION = "ella.memory_artwork.queue.v1"
+ARTWORK_LIBRARIES_SCHEMA_VERSION = "ella.memory_artwork.libraries.v1"
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
 ARTWORK_PROVIDER_CONTRACT_VERSION = "ella.artwork.service.v1"
 ARTWORK_RECONCILIATION_SCHEMA_VERSION = "ella.memory_artwork.reconciliation.v1"
@@ -129,6 +130,7 @@ TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024
 MAX_BACKFILL_MEMORIES = 10
 BACKFILL_SCAN_LIMIT = 50
+DEFAULT_PREVIEW_DAY_LIMIT = 3
 MAX_BACKFILL_ENRICHMENT_RECOVERIES = 3
 PROVIDER_TIMEOUT_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TIMEOUT_SECONDS"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600.0
@@ -272,6 +274,8 @@ class MemoryArtworkRepository(Protocol):
         cursor_memory_id: Optional[str] = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_ready_artwork_conversations(self, uid: str) -> list[dict[str, Any]]: ...
+
     def reserve_generation(self, uid: str, memory_id: str, **kwargs) -> dict[str, Any]: ...
 
     def claim_generation(self, uid: str, memory_id: str, **kwargs) -> Optional[dict[str, Any]]: ...
@@ -317,6 +321,7 @@ class FirestoreMemoryArtworkRepository:
     list_jobs_for_uid = staticmethod(artwork_db.list_jobs_for_uid)
     get_conversation = staticmethod(artwork_db.get_conversation)
     list_conversations_page = staticmethod(artwork_db.list_conversations_page)
+    list_ready_artwork_conversations = staticmethod(artwork_db.list_ready_artwork_conversations)
     reserve_generation = staticmethod(artwork_db.reserve_generation)
     claim_generation = staticmethod(artwork_db.claim_generation)
     finalize_generation = staticmethod(artwork_db.finalize_generation)
@@ -631,6 +636,15 @@ def _terminal_enrichment(conversation: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _conversation_day(conversation: dict[str, Any]) -> str:
+    for field in ("started_at", "created_at"):
+        value = conversation.get(field)
+        if isinstance(value, datetime):
+            normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            return normalized.astimezone(timezone.utc).date().isoformat()
+    return ""
+
+
 def _source_is_sensitive(conversation: dict[str, Any]) -> bool:
     assessment = conversation.get("internal_assessment") or {}
     signal = conversation.get("ella_signal") or {}
@@ -752,6 +766,48 @@ def _release_artwork(conversation: dict[str, Any]) -> tuple[dict[str, Any], bool
         failure_code = str(current.get("failure_code") or "") if isinstance(current, dict) else ""
         return published, current_status == "generating", failure_code or None
     return current if isinstance(current, dict) else {}, False, None
+
+
+def _inventory_release_artwork(
+    conversation: dict[str, Any],
+    *,
+    preferences: dict[str, Any],
+    authority: ArtworkRuntimeAuthority,
+) -> Optional[dict[str, Any]]:
+    """Return the artwork the signed URL path can serve from this snapshot."""
+
+    if conversation.get("deletion_pending") or conversation.get("discarded") or _source_is_sensitive(conversation):
+        return None
+    artwork, refresh_pending, refresh_failure_code = _release_artwork(conversation)
+    if not isinstance(artwork, dict) or artwork.get("status") != "ready" or not artwork.get("object_key"):
+        return None
+    if (
+        artwork.get("authority_digest") != authority.authority_digest
+        or artwork.get("binding_id") != authority.binding_id
+        or artwork.get("profile_id") != authority.profile_id
+        or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=None if refresh_pending or refresh_failure_code else str(artwork.get("style_version") or ""),
+        )
+    ):
+        return None
+    if refresh_pending or refresh_failure_code:
+        generation_request = conversation.get("artwork") or {}
+        if (
+            not isinstance(generation_request, dict)
+            or generation_request.get("style_version") != preferences.get("style_version")
+            or generation_request.get("enrichment_revision") != artwork.get("enrichment_revision")
+        ):
+            return None
+    enrichment_revision = _terminal_enrichment(conversation)
+    try:
+        _, prompt_sha256 = _prompt_for(conversation, str(artwork.get("style_version") or ""))
+    except MemoryArtworkError:
+        return None
+    if enrichment_revision != artwork.get("enrichment_revision") or prompt_sha256 != artwork.get("prompt_sha256"):
+        return None
+    return artwork
 
 
 def _generation_claim_is_current(
@@ -999,6 +1055,15 @@ class MemoryArtworkService:
             and control.get("style_version") == style_version
             and control.get("state") in {"running", "paused", "cancelled"}
         )
+        if control_is_current and bool(control.get("auto_continue")):
+            update = self.repository.set_backfill_control(
+                uid,
+                expected_generation_id=generation_id,
+                state="paused",
+                auto_continue=False,
+            )
+            if update.get("outcome") == "updated":
+                control = update.get("control") or {}
         state = str(control.get("state")) if control_is_current else "running"
         auto_continue = bool(control.get("auto_continue")) if control_is_current else False
         batch_size = int(control.get("batch_size") or DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE)
@@ -1065,6 +1130,57 @@ class MemoryArtworkService:
             ),
         }
 
+    async def libraries(self, uid: str) -> dict[str, Any]:
+        """Describe artwork objects that are actually available, not historical job totals."""
+
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        selected_style = str(preferences.get("style_version") or "")
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=selected_style,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+
+        memories_by_style: dict[str, set[str]] = {style: set() for style in SUPPORTED_STYLE_VERSIONS}
+        days_by_style: dict[str, set[str]] = {style: set() for style in SUPPORTED_STYLE_VERSIONS}
+        for conversation in self.repository.list_ready_artwork_conversations(uid):
+            memory_id = str(conversation.get("id") or "")
+            if not memory_id:
+                continue
+            day = _conversation_day(conversation)
+            artwork = _inventory_release_artwork(conversation, preferences=preferences, authority=authority)
+            style_version = str((artwork or {}).get("style_version") or "")
+            if style_version not in SUPPORTED_STYLE_VERSIONS:
+                continue
+            memories_by_style[style_version].add(memory_id)
+            if day:
+                days_by_style[style_version].add(day)
+
+        libraries = []
+        for style_version in sorted(SUPPORTED_STYLE_VERSIONS):
+            days = sorted(days_by_style[style_version])
+            libraries.append(
+                {
+                    "style_version": style_version,
+                    "selected": style_version == selected_style,
+                    "ready_memories": len(memories_by_style[style_version]),
+                    "ready_days": len(days),
+                    "oldest_day": days[0] if days else None,
+                    "newest_day": days[-1] if days else None,
+                }
+            )
+        return {
+            "schema_version": ARTWORK_LIBRARIES_SCHEMA_VERSION,
+            "selected_style_version": selected_style,
+            "default_preview_days": DEFAULT_PREVIEW_DAY_LIMIT,
+            "historical_batch_size": DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE,
+            "libraries": libraries,
+        }
+
     async def set_queue_control(
         self,
         uid: str,
@@ -1095,7 +1211,7 @@ class MemoryArtworkService:
             uid,
             expected_generation_id=generation_id,
             state=state,
-            auto_continue=auto_continue if action == "resume" else False,
+            auto_continue=False,
         )
         outcome = str(update.get("outcome") or "")
         if outcome == "deletion_pending":
@@ -1103,7 +1219,7 @@ class MemoryArtworkService:
         if outcome != "updated":
             raise MemoryArtworkError("memory_artwork_queue_generation_stale")
         reconciliation = self.repository.get_reconciliation_job(uid, generation_id)
-        if action == "resume" and (auto_continue or str((reconciliation or {}).get("status") or "") == "failed"):
+        if action == "resume" and str((reconciliation or {}).get("status") or "") == "failed":
             self.repository.create_reconciliation_job(
                 uid,
                 authority_digest=authority.authority_digest,
@@ -1862,6 +1978,7 @@ class MemoryArtworkService:
         memory_ids: list[str] = []
         recovery_memory_ids: list[str] = []
         next_cursor: Optional[str] = None
+        preview_days: set[str] = set()
 
         def page_result() -> dict[str, Any]:
             return {
@@ -1875,6 +1992,8 @@ class MemoryArtworkService:
                 "memory_ids": list(memory_ids),
                 "next_cursor": next_cursor if has_more else None,
                 "has_more": has_more,
+                "preview_day_limit": DEFAULT_PREVIEW_DAY_LIMIT,
+                "preview_days": len(preview_days),
                 "_recovery_memory_ids": list(recovery_memory_ids),
             }
 
@@ -1884,8 +2003,8 @@ class MemoryArtworkService:
             if not memory_id:
                 skipped += 1
                 continue
-            next_cursor = memory_id
             if _terminal_enrichment(conversation) is None:
+                next_cursor = memory_id
                 skipped += 1
                 if (
                     conversation.get("status") == "completed"
@@ -1896,6 +2015,13 @@ class MemoryArtworkService:
                         has_more = has_more or index < len(page) - 1
                         break
                 continue
+            if origin == PREVIEW_BACKFILL_ORIGIN:
+                day = _conversation_day(conversation) or f"unknown:{memory_id}"
+                if day not in preview_days and len(preview_days) >= DEFAULT_PREVIEW_DAY_LIMIT:
+                    has_more = True
+                    break
+                preview_days.add(day)
+            next_cursor = memory_id
             try:
                 result = await self.enqueue(uid, memory_id, origin=origin)
             except MemoryArtworkError as exc:

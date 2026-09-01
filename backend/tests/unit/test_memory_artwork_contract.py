@@ -44,6 +44,7 @@ def _load_service_module():
         "get_conversation",
         "list_conversations_page",
         "list_recent_conversations",
+        "list_ready_artwork_conversations",
         "reserve_generation",
         "claim_generation",
         "finalize_generation",
@@ -165,6 +166,20 @@ def _terminal_memory(memory_id: str, *, created_at: datetime | None = None) -> d
     }
 
 
+def _ready_artwork(memory: dict, *, authority, style_version: str) -> dict:
+    _, prompt_sha256 = artwork._prompt_for(memory, style_version)
+    return {
+        "status": "ready",
+        "style_version": style_version,
+        "object_key": f"private/{memory['id']}.png",
+        "authority_digest": authority.authority_digest,
+        "binding_id": authority.binding_id,
+        "profile_id": authority.profile_id,
+        "enrichment_revision": memory["active_summary_version_id"],
+        "prompt_sha256": prompt_sha256,
+    }
+
+
 class FakeRepository:
     def __init__(self):
         self.preferences_by_uid = {}
@@ -259,6 +274,19 @@ class FakeRepository:
 
     def list_recent_conversations(self, uid, *, limit):
         return self.list_conversations_page(uid, limit=limit)
+
+    def list_ready_artwork_conversations(self, uid):
+        return [
+            copy.deepcopy(value)
+            for (owner, _), value in self.conversations.items()
+            if owner == uid
+            and any(
+                isinstance(value.get(field), dict)
+                and value[field].get("status") == "ready"
+                and value[field].get("object_key")
+                for field in (artwork.artwork_db.ARTWORK_FIELD, artwork.artwork_db.PUBLISHED_ARTWORK_FIELD)
+            )
+        ]
 
     def reserve_generation(
         self,
@@ -1044,7 +1072,7 @@ def test_preview_promotes_recent_existing_historical_work_without_a_duplicate_ge
     assert repository.reserve_writes == 1
 
 
-def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit_opt_in():
+def test_every_resume_restores_only_one_manual_batch_even_for_legacy_automatic_clients():
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
     service = artwork.MemoryArtworkService(
@@ -1076,9 +1104,119 @@ def test_manual_resume_restores_one_batch_and_automatic_resume_requires_explicit
         service.set_queue_control("owner-a", action="resume", generation_id=generation_id, auto_continue=True)
     )
     assert automatic["control_state"] == "running"
-    assert automatic["auto_continue"] is True
-    assert automatic["batch_remaining"] == 0
-    assert repository.reconciliation_jobs
+    assert automatic["auto_continue"] is False
+    assert automatic["batch_remaining"] == 10
+    assert repository.reconciliation_jobs == {}
+
+
+def test_queue_status_pauses_a_persisted_legacy_automatic_run():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    generation_id = artwork.artwork_db.reconciliation_job_id("owner-a", "digest-a", artwork.DEFAULT_STYLE_VERSION)
+    repository.backfill_controls["owner-a"] = {
+        "schema_version": "ella.memory_artwork.queue_control.v1",
+        "generation_id": generation_id,
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "state": "running",
+        "auto_continue": True,
+        "batch_size": 10,
+        "batch_remaining": 0,
+        "pause_reason": "",
+    }
+
+    status = asyncio.run(service.queue_status("owner-a"))
+
+    assert status["control_state"] == "paused"
+    assert status["auto_continue"] is False
+    assert status["batch_remaining"] == 0
+
+
+def test_database_claim_pauses_legacy_automatic_run_before_provider_work():
+    class Snapshot:
+        def __init__(self, payload):
+            self.exists = True
+            self._payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    class Reference:
+        def __init__(self, identifier, payload):
+            self.id = identifier
+            self._snapshot = Snapshot(payload)
+
+        def get(self, transaction=None):
+            return self._snapshot
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+            self.updates = []
+
+        def set(self, reference, payload, merge=False):
+            self.sets.append((reference, copy.deepcopy(payload), merge))
+
+        def update(self, reference, payload):
+            self.updates.append((reference, copy.deepcopy(payload)))
+
+    preferences = _accepted_preferences(_authority())
+    generation_id = artwork_database.reconciliation_job_id(
+        "owner-a",
+        preferences["authority_digest"],
+        preferences["style_version"],
+    )
+    user_ref = Reference(
+        "owner-a",
+        {
+            artwork_database.PREFERENCES_FIELD: preferences,
+            artwork_database.BACKFILL_CONTROL_FIELD: {
+                "schema_version": "ella.memory_artwork.queue_control.v1",
+                "generation_id": generation_id,
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "state": "running",
+                "auto_continue": True,
+                "batch_size": 10,
+                "batch_remaining": 0,
+            },
+        },
+    )
+    job_ref = Reference(
+        "job-a",
+        {
+            "uid": "owner-a",
+            "status": "pending",
+            "available_at": datetime(2026, 8, 30, tzinfo=timezone.utc),
+            "authority_digest": preferences["authority_digest"],
+            "style_version": preferences["style_version"],
+            "origin": artwork_database.HISTORICAL_BACKFILL_ORIGIN,
+        },
+    )
+    transaction = Transaction()
+
+    claimed = artwork_database._claim_job_transaction(
+        transaction,
+        user_ref,
+        job_ref,
+        lease_token="lease-a",
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        lease_seconds=600,
+    )
+
+    assert claimed is None
+    assert transaction.updates == []
+    assert len(transaction.sets) == 1
+    control = transaction.sets[0][1][artwork_database.BACKFILL_CONTROL_FIELD]
+    assert control["state"] == "paused"
+    assert control["auto_continue"] is False
+    assert control["batch_remaining"] == 0
+    assert control["pause_reason"] == "manual_batches_required"
 
 
 def test_manual_resume_restarts_only_a_failed_reconciliation_job():
@@ -2710,6 +2848,112 @@ def test_backfill_advances_past_existing_artwork_with_bounded_cursor(monkeypatch
     retry = asyncio.run(service.backfill("owner-a"))
     assert retry["queued"] == 0
     assert retry["existing"] == 13
+
+
+def test_preview_backfill_is_limited_to_three_recent_memory_days():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    for day in range(5):
+        for item in range(2):
+            memory_id = f"day-{day}-memory-{item}"
+            repository.conversations[("owner-a", memory_id)] = _terminal_memory(
+                memory_id,
+                created_at=datetime(2026, 8, 30 - day, 12, item, tzinfo=timezone.utc),
+            )
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        config=_enabled_config(),
+    )
+
+    preview = asyncio.run(service.backfill("owner-a", origin=artwork.PREVIEW_BACKFILL_ORIGIN))
+    older = asyncio.run(
+        service.backfill(
+            "owner-a",
+            cursor_memory_id=preview["next_cursor"],
+            origin=artwork.HISTORICAL_BACKFILL_ORIGIN,
+        )
+    )
+
+    assert preview["preview_day_limit"] == 3
+    assert preview["preview_days"] == 3
+    assert preview["queued"] == 6
+    assert preview["memory_ids"] == [
+        "day-0-memory-1",
+        "day-0-memory-0",
+        "day-1-memory-1",
+        "day-1-memory-0",
+        "day-2-memory-1",
+        "day-2-memory-0",
+    ]
+    assert preview["has_more"] is True
+    assert older["memory_ids"] == ["day-3-memory-1", "day-3-memory-0", "day-4-memory-1", "day-4-memory-0"]
+
+
+def test_libraries_count_only_ready_owner_bound_objects_by_style_and_day():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    anime = "ella.memory_artwork.style.anime-storybook.v1"
+    memories = [
+        ("memory-1", datetime(2026, 8, 30, 9, tzinfo=timezone.utc), anime),
+        ("memory-2", datetime(2026, 8, 30, 14, tzinfo=timezone.utc), anime),
+        ("memory-3", datetime(2026, 8, 29, 9, tzinfo=timezone.utc), artwork.DEFAULT_STYLE_VERSION),
+    ]
+    for memory_id, created_at, style_version in memories:
+        memory = _terminal_memory(memory_id, created_at=created_at)
+        memory["artwork"] = _ready_artwork(memory, authority=authority, style_version=style_version)
+        repository.conversations[("owner-a", memory_id)] = memory
+    stale = _terminal_memory("memory-stale")
+    stale["artwork"] = _ready_artwork(stale, authority=authority, style_version=anime)
+    stale["artwork"]["authority_digest"] = "other-owner"
+    repository.conversations[("owner-a", "memory-stale")] = stale
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.libraries("owner-a"))
+    by_style = {library["style_version"]: library for library in result["libraries"]}
+
+    assert result["schema_version"] == artwork.ARTWORK_LIBRARIES_SCHEMA_VERSION
+    assert result["default_preview_days"] == 3
+    assert result["historical_batch_size"] == 10
+    assert by_style[anime]["ready_memories"] == 0
+    assert by_style[anime]["ready_days"] == 0
+    assert by_style[artwork.DEFAULT_STYLE_VERSION]["ready_memories"] == 1
+    assert by_style[artwork.DEFAULT_STYLE_VERSION]["ready_days"] == 1
+    assert sum(library["ready_memories"] for library in result["libraries"]) == 1
+
+
+def test_libraries_exclude_retained_ready_objects_that_signed_url_cannot_display():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    memories = {}
+    for suffix in ("ready", "discarded", "deleting", "sensitive", "source-stale"):
+        memory = _terminal_memory(f"memory-{suffix}")
+        memory["artwork"] = _ready_artwork(memory, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION)
+        memories[suffix] = memory
+    memories["discarded"]["discarded"] = True
+    memories["deleting"]["deletion_pending"] = True
+    memories["sensitive"]["ella_tags"] = ["caregiver-private"]
+    memories["source-stale"]["structured"]["overview"] = "The source changed after this artwork was created."
+    for suffix, memory in memories.items():
+        repository.conversations[("owner-a", f"memory-{suffix}")] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.libraries("owner-a"))
+    selected = next(library for library in result["libraries"] if library["selected"])
+
+    assert selected["ready_memories"] == 1
+    assert selected["ready_days"] == 1
 
 
 def test_backfill_limits_enrichment_recovery_candidates_and_rejects_stale_cursor():
@@ -4840,6 +5084,33 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
     response = client.get("/v1/ella/memories/memory-1/artwork")
     assert response.status_code == 401
     assert fake.calls == 0
+
+
+def test_libraries_route_uses_authenticated_owner_and_actual_inventory_service(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_libraries_router_test_module")
+    calls = []
+
+    class Service:
+        async def libraries(self, uid):
+            calls.append(uid)
+            return {
+                "schema_version": artwork.ARTWORK_LIBRARIES_SCHEMA_VERSION,
+                "selected_style_version": artwork.DEFAULT_STYLE_VERSION,
+                "default_preview_days": 3,
+                "historical_batch_size": 10,
+                "libraries": [],
+            }
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    response = TestClient(app).get("/v1/ella/memory-artwork/libraries")
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == artwork.ARTWORK_LIBRARIES_SCHEMA_VERSION
+    assert calls == ["owner-a"]
 
 
 def test_retry_route_queues_missing_terminal_enrichment_once(monkeypatch):
