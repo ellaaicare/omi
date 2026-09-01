@@ -491,6 +491,24 @@ def list_recent_conversations(uid: str, *, limit: int) -> list[dict[str, Any]]:
     return list_conversations_page(uid, limit=limit)
 
 
+def list_ready_artwork_conversations(uid: str) -> list[dict[str, Any]]:
+    """Return only memories that currently retain a displayable artwork object."""
+
+    conversations = db.collection("users").document(uid).collection("conversations")
+    field_paths = [
+        "created_at",
+        "started_at",
+        ARTWORK_FIELD,
+        PUBLISHED_ARTWORK_FIELD,
+    ]
+    snapshots_by_id: dict[str, Any] = {}
+    for artwork_field in (ARTWORK_FIELD, PUBLISHED_ARTWORK_FIELD):
+        query = conversations.where(f"{artwork_field}.status", "==", "ready").select(field_paths)
+        for snapshot in query.stream():
+            snapshots_by_id[snapshot.id] = snapshot
+    return [{**(snapshot.to_dict() or {}), "id": snapshot.id} for snapshot in snapshots_by_id.values()]
+
+
 def _terminal_enrichment_matches(conversation: dict[str, Any], enrichment_revision: str) -> bool:
     enrichment = conversation.get("enrichment_state") or {}
     return bool(
@@ -788,18 +806,36 @@ def _claim_job_transaction(
         auto_continue = bool(control.get("auto_continue"))
         batch_size = int(control.get("batch_size") or DEFAULT_BACKFILL_BATCH_SIZE)
         batch_remaining = int(control.get("batch_remaining", batch_size) or 0)
+        if auto_continue:
+            # Automatic full-history runs are retired. Stop a legacy run at
+            # the claim boundary before another provider request can begin.
+            transaction.set(
+                user_ref,
+                {
+                    BACKFILL_CONTROL_FIELD: {
+                        **control,
+                        "state": "paused",
+                        "auto_continue": False,
+                        "batch_size": batch_size,
+                        "batch_remaining": 0,
+                        "pause_reason": "manual_batches_required",
+                        "updated_at": now,
+                    }
+                },
+                merge=True,
+            )
+            return None
         if batch_size < 1 or (batch_remaining < 1 and not auto_continue):
             return None
-        if not auto_continue:
-            batch_remaining -= 1
-            control = {
-                **control,
-                "batch_size": batch_size,
-                "batch_remaining": batch_remaining,
-                "state": "paused" if batch_remaining == 0 else "running",
-                "pause_reason": "batch_complete" if batch_remaining == 0 else "",
-                "updated_at": now,
-            }
+        batch_remaining -= 1
+        control = {
+            **control,
+            "batch_size": batch_size,
+            "batch_remaining": batch_remaining,
+            "state": "paused" if batch_remaining == 0 else "running",
+            "pause_reason": "batch_complete" if batch_remaining == 0 else "",
+            "updated_at": now,
+        }
         transaction.set(user_ref, {BACKFILL_CONTROL_FIELD: control}, merge=True)
     claimed = {
         **job,

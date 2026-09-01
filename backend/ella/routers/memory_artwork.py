@@ -90,6 +90,14 @@ async def get_memory_artwork_preferences(uid: str = Depends(get_exact_firebase_u
         raise _http_error(exc) from exc
 
 
+@router.get("/memory-artwork/libraries")
+async def get_memory_artwork_libraries(uid: str = Depends(get_exact_firebase_uid)):
+    try:
+        return await MemoryArtworkService().libraries(uid)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
 @router.put("/memory-artwork/preferences")
 async def put_memory_artwork_preferences(
     payload: MemoryArtworkPreferencesUpdate,
