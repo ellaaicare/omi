@@ -213,7 +213,7 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('external phone capture keeps Finish and Transcript reachable after transcript navigation', (
+  testWidgets('external phone capture keeps Stop and Transcript reachable after transcript navigation', (
     tester,
   ) async {
     final harness = await _pumpHome(tester, conversations: const [], initialRecordingState: RecordingState.record);
@@ -221,7 +221,7 @@ void main() {
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
-    expect(find.text('Finish'), findsOneWidget);
+    expect(find.text('Stop'), findsOneWidget);
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-view-live-transcript')));
@@ -235,7 +235,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.byType(ConversationCapturingPage), findsNothing);
-    expect(find.text('Finish'), findsOneWidget);
+    expect(find.text('Stop'), findsOneWidget);
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -416,7 +416,7 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.text('Recording with your necklace'), findsOneWidget);
+    expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
@@ -487,7 +487,7 @@ void main() {
     addTearDown(harness.dispose);
 
     expect(find.byKey(const Key('today-dock-status')), findsOneWidget);
-    expect(find.text('iPhone · Ready'), findsOneWidget);
+    expect(find.text('iPhone recording needs attention'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
@@ -731,7 +731,7 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    expect(find.text('iPhone · Ready'), findsOneWidget);
+    expect(find.text('iPhone recording needs attention'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
@@ -764,7 +764,7 @@ void main() {
     expect(harness.capture.phoneStarts, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.text('Recording with your necklace'), findsOneWidget);
+    expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
   });
 
   testWidgets('day-one state is useful and reduced motion removes capture transitions', (tester) async {
@@ -1622,6 +1622,8 @@ void main() {
     await tester.tap(find.byKey(const Key('home-memory-layout-menu')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('memory-day-memory-1')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('memory-day-memory-1')));
     await tester.pumpAndSettle();

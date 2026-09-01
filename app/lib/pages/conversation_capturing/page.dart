@@ -11,6 +11,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/pages/capture/widgets/widgets.dart';
 import 'package:omi/pages/conversation_detail/widgets/name_speaker_sheet.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -288,25 +289,46 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   }
 
   String _captureStatusLabel(CaptureProvider provider) {
-    if (provider.recordingState == RecordingState.error) return context.l10n.error;
+    final source = _captureSource(provider);
+    final sourceLabel =
+        source == EllaCaptureSource.necklace ? context.l10n.captureStatusNecklace : context.l10n.captureStatusPhone;
+    if (provider.recordingState == RecordingState.error) return '$sourceLabel · ${context.l10n.error}';
     if (provider.recordingState == RecordingState.initialising ||
         (provider.recordingState == RecordingState.stop && provider.phoneCaptureOwnsMobileAudio)) {
-      return context.l10n.initializing;
+      return '$sourceLabel · ${context.l10n.initializing}';
     }
-    if (provider.recordingState == RecordingState.pause) return context.l10n.recordingPaused;
-    if (_isMuted) return context.l10n.muted;
+    if (provider.recordingState == RecordingState.pause) return '$sourceLabel · ${context.l10n.recordingPaused}';
+    if (_isMuted) return '$sourceLabel · ${context.l10n.muted}';
 
     final hasPhysicalCapture = provider.recordingState == RecordingState.record ||
         provider.recordingState == RecordingState.deviceRecord ||
         provider.recordingState == RecordingState.systemAudioRecord;
     if (hasPhysicalCapture && !provider.transcriptServiceReady) {
-      return '${context.l10n.recordingActive} · ${context.l10n.reconnecting}';
+      return '$sourceLabel · ${context.l10n.recordingActive} · ${context.l10n.reconnecting}';
     }
-    if (hasPhysicalCapture) return context.l10n.recordingActive;
-    return context.l10n.liveTranscript;
+    if (hasPhysicalCapture) return '$sourceLabel · ${context.l10n.recordingActive}';
+    return '$sourceLabel · ${context.l10n.liveTranscript}';
   }
 
-  Future<void> _retryPhoneCapture(CaptureProvider provider) async {
+  EllaCaptureSource _captureSource(CaptureProvider provider) {
+    if (provider.recordingState == RecordingState.record || provider.phoneCaptureOwnsMobileAudio) {
+      return EllaCaptureSource.phone;
+    }
+    if (provider.recordingState == RecordingState.deviceRecord ||
+        provider.captureDiagnostics.source == CaptureDiagnosticSource.necklace ||
+        provider.havingRecordingDevice) {
+      return EllaCaptureSource.necklace;
+    }
+    return EllaCaptureSource.phone;
+  }
+
+  Future<void> _retryCapture(CaptureProvider provider, DeviceProvider deviceProvider) async {
+    if (_captureSource(provider) == EllaCaptureSource.necklace) {
+      final reconnected = await deviceProvider.reconnectKnownDeviceForCapture(reason: 'Transcript necklace retry');
+      if (!mounted || reconnected) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+      return;
+    }
     final result = await provider.streamRecording();
     if (!mounted || result == PhoneCaptureStartResult.started) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
@@ -357,7 +379,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                                 provider.segments.isEmpty &&
                                 provider.photos.isEmpty
                             ? _CaptureErrorRecovery(
-                                onRetry: () => _retryPhoneCapture(provider),
+                                source: _captureSource(provider),
+                                onRetry: () => _retryCapture(provider, deviceProvider),
                                 onClose: () => Navigator.of(context).pop(),
                               )
                             : provider.segments.isEmpty && provider.photos.isEmpty
@@ -837,8 +860,9 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
 }
 
 class _CaptureErrorRecovery extends StatelessWidget {
-  const _CaptureErrorRecovery({required this.onRetry, required this.onClose});
+  const _CaptureErrorRecovery({required this.source, required this.onRetry, required this.onClose});
 
+  final EllaCaptureSource source;
   final VoidCallback onRetry;
   final VoidCallback onClose;
 
@@ -863,9 +887,15 @@ class _CaptureErrorRecovery extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 FilledButton.icon(
-                  key: const Key('conversation-capture-retry-phone'),
+                  key: Key(
+                    source == EllaCaptureSource.necklace
+                        ? 'conversation-capture-retry-necklace'
+                        : 'conversation-capture-retry-phone',
+                  ),
                   onPressed: onRetry,
-                  icon: const Icon(Icons.mic_none_rounded),
+                  icon: Icon(
+                    source == EllaCaptureSource.necklace ? Icons.bluetooth_searching_rounded : Icons.mic_none_rounded,
+                  ),
                   label: Text(context.l10n.tryAgain),
                 ),
                 TextButton(

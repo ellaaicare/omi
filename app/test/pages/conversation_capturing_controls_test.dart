@@ -37,19 +37,19 @@ void main() {
     final capture = _FakeCaptureProvider(RecordingState.initialising, transcriptReady: false);
     await _pumpCapturePage(tester, capture);
 
-    expect(_captureStatus(tester), 'Initializing...');
+    expect(_captureStatus(tester), 'iPhone · Initializing...');
 
     capture.setCaptureState(RecordingState.record, transcriptReady: false);
     await tester.pump();
-    expect(_captureStatus(tester), 'Recording Active · Reconnecting...');
+    expect(_captureStatus(tester), 'iPhone · Recording Active · Reconnecting...');
 
     capture.setCaptureState(RecordingState.record, transcriptReady: true);
     await tester.pump();
-    expect(_captureStatus(tester), 'Recording Active');
+    expect(_captureStatus(tester), 'iPhone · Recording Active');
 
     capture.setCaptureState(RecordingState.error, transcriptReady: false);
     await tester.pump();
-    expect(_captureStatus(tester), 'Error');
+    expect(_captureStatus(tester), 'iPhone · Error');
   });
 
   testWidgets('empty transport error offers an in-place iPhone retry instead of a blank page', (tester) async {
@@ -66,7 +66,23 @@ void main() {
     expect(capture.phoneStarts, 1);
     expect(capture.recordingState, RecordingState.record);
     expect(find.byKey(const Key('conversation-capture-retry-phone')), findsNothing);
-    expect(_captureStatus(tester), 'Recording Active');
+    expect(_captureStatus(tester), 'iPhone · Recording Active');
+  });
+
+  testWidgets('necklace transport error stays necklace-bound when Retry is pressed', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final capture = _FakeCaptureProvider(RecordingState.error, transcriptReady: false)..updateRecordingDevice(necklace);
+    final device = _FakeDeviceProvider();
+    await _pumpCapturePage(tester, capture, device: device);
+
+    expect(_captureStatus(tester), 'Necklace · Error');
+    expect(find.byKey(const Key('conversation-capture-retry-necklace')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('conversation-capture-retry-necklace')));
+    await tester.pump();
+
+    expect(device.reconnects, 1);
+    expect(capture.phoneStarts, 0);
   });
 
   testWidgets('empty active capture keeps Stop Recording visible before transcript segments', (tester) async {
@@ -247,16 +263,17 @@ Future<void> _pumpCapturePage(
   WidgetTester tester,
   _FakeCaptureProvider capture, {
   Future<bool> Function()? onProcessNow,
+  DeviceProvider? device,
 }) async {
-  final device = DeviceProvider();
+  final resolvedDevice = device ?? DeviceProvider();
   addTearDown(capture.dispose);
-  addTearDown(device.dispose);
+  addTearDown(resolvedDevice.dispose);
 
   await tester.pumpWidget(
     MultiProvider(
       providers: [
         ChangeNotifierProvider<CaptureProvider>.value(value: capture),
-        ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ChangeNotifierProvider<DeviceProvider>.value(value: resolvedDevice),
       ],
       child: MaterialApp(
         theme: ellaThemeData(),
@@ -283,6 +300,16 @@ Future<void> _pumpCapturePage(
   await tester.tap(find.byKey(const Key('open-capture-page')));
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 400));
+}
+
+class _FakeDeviceProvider extends DeviceProvider {
+  int reconnects = 0;
+
+  @override
+  Future<bool> reconnectKnownDeviceForCapture({required String reason}) async {
+    reconnects++;
+    return true;
+  }
 }
 
 class _FakeCaptureProvider extends CaptureProvider {

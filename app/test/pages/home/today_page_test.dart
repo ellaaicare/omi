@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/action_item.dart';
+import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/ella/widgets/capture_diagnostics_panel.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/home/today_page.dart';
@@ -27,6 +28,8 @@ void main() {
 
     expect(find.text(l10n.todayDockRecord), findsOneWidget);
     expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
+    expect(find.text(l10n.todayDockTranscriptPhone), findsOneWidget);
+    expect(find.byKey(const Key('today-capture-source-selector')), findsOneWidget);
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
     expect(find.byKey(const Key('today-capture-dock')), findsOneWidget);
     expect(find.byKey(const Key('today-capture-proof-panel')), findsNothing);
@@ -34,25 +37,36 @@ void main() {
 
     await _pumpRecordControl(tester, recordingState: RecordingState.initialising);
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
-    expect(find.text(l10n.todayDockStarting), findsOneWidget);
+    expect(find.text(l10n.todayDockPhoneStarting), findsOneWidget);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
 
-    await _pumpRecordControl(tester, necklaceConnecting: true);
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnecting: true,
+    );
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
     expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
     expect(find.text(l10n.todayDockPhoneReady), findsNothing);
-    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
+    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
   });
 
   testWidgets('remembered necklace exposes a direct reconnect action from Home', (tester) async {
     var reconnects = 0;
-    await _pumpRecordControl(tester, hasNecklace: true, onReconnectNecklace: () => reconnects += 1);
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      onTap: () => reconnects += 1,
+    );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.todayDockNecklaceNotConnected), findsOneWidget);
-    expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.refresh_rounded), findsWidgets);
+    expect(find.text(l10n.todayDockReconnect), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
     expect(reconnects, 1);
@@ -60,41 +74,37 @@ void main() {
 
   testWidgets('legacy necklace requires Home confirmation instead of reconnecting implicitly', (tester) async {
     var confirmations = 0;
-    var reconnects = 0;
     await _pumpRecordControl(
       tester,
+      selectedSource: EllaCaptureSource.necklace,
       legacyNecklaceNeedsConfirmation: true,
-      onConfirmLegacyNecklace: () => confirmations += 1,
-      onReconnectNecklace: () => reconnects += 1,
+      onTap: () => confirmations += 1,
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.todayLegacyNecklaceDockStatus), findsOneWidget);
     expect(find.byIcon(Icons.link_rounded), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
     expect(confirmations, 1);
-    expect(reconnects, 0);
   });
 
-  testWidgets('non-Home active capture keeps Finish and Transcript as separate actions', (tester) async {
+  testWidgets('active phone capture shows a red Stop and source-specific transcript', (tester) async {
     var primaryTaps = 0;
-    var finishTaps = 0;
     var transcriptTaps = 0;
     await _pumpRecordControl(
       tester,
       recordingState: RecordingState.record,
       onTap: () => primaryTaps += 1,
-      onFinishExternalCapture: () => finishTaps += 1,
       onViewTranscript: () => transcriptTaps += 1,
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.transcript), findsOneWidget);
+    expect(find.text(l10n.todayDockTranscriptPhone), findsOneWidget);
     expect(find.text(l10n.todayDockRecord), findsNothing);
-    expect(find.text(l10n.todayDockFinish), findsOneWidget);
+    expect(find.text(l10n.todayDockStop), findsOneWidget);
     expect(find.byIcon(Icons.subject_rounded), findsOneWidget);
     expect(find.byKey(const Key('today-view-live-transcript')), findsOneWidget);
     expect(_recordActionSemantics(tester).properties.selected, isTrue);
@@ -102,8 +112,7 @@ void main() {
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
-    expect(primaryTaps, 0);
-    expect(finishTaps, 1);
+    expect(primaryTaps, 1);
 
     await tester.tap(find.byKey(const Key('today-view-live-transcript')));
     await tester.pump();
@@ -111,22 +120,23 @@ void main() {
     expect(transcriptTaps, 1);
   });
 
-  testWidgets('interrupted Home necklace ownership keeps recovery and transcript actions', (tester) async {
+  testWidgets('interrupted necklace capture keeps source-specific retry and transcript actions', (tester) async {
     var processTaps = 0;
     var transcriptTaps = 0;
     await _pumpRecordControl(
       tester,
-      homeCaptureOwned: true,
-      homeCaptureUsesNecklace: true,
+      selectedSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnected: true,
       recordingState: RecordingState.error,
       onTap: () => processTaps += 1,
       onViewTranscript: () => transcriptTaps += 1,
     );
     var l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockFinish), findsOneWidget);
-    expect(find.text(l10n.transcript), findsOneWidget);
-    expect(find.text(l10n.todayDockRecordingNeedsAttention), findsOneWidget);
+    expect(find.text(l10n.todayDockRetry), findsOneWidget);
+    expect(find.text(l10n.todayDockTranscriptNecklace), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceNeedsAttention), findsOneWidget);
     expect(_recordActionSemantics(tester).properties.selected, isFalse);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -136,12 +146,17 @@ void main() {
     expect(processTaps, 1);
     expect(transcriptTaps, 1);
 
-    await _pumpRecordControl(tester, homeCaptureOwned: true, homeCaptureUsesNecklace: true, necklaceConnecting: true);
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnecting: true,
+    );
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockFinish), findsOneWidget);
+    expect(find.text(l10n.todayDockReconnect), findsOneWidget);
     expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
-    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNotNull);
+    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
   });
 
   testWidgets('capture error keeps the iPhone recorder available for recovery', (tester) async {
@@ -155,7 +170,8 @@ void main() {
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockPhoneReady), findsOneWidget);
+    expect(find.text(l10n.todayDockPhoneNeedsAttention), findsOneWidget);
+    expect(find.text(l10n.todayDockRetry), findsOneWidget);
     final actionSemantics = tester.widget<Semantics>(
       find.ancestor(of: find.byKey(const Key('today-record-moment')), matching: find.byType(Semantics)).first,
     );
@@ -166,6 +182,69 @@ void main() {
 
     expect(recordTaps, 1);
     expect(unavailableTaps, 0);
+  });
+
+  testWidgets('idle source selector changes explicit capture intent and locks while recording', (tester) async {
+    EllaCaptureSource? selection;
+    await _pumpRecordControl(
+      tester,
+      hasNecklace: true,
+      onSourceSelected: (source) => selection = source,
+    );
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(selection, EllaCaptureSource.necklace);
+
+    selection = null;
+    await _pumpRecordControl(
+      tester,
+      recordingState: RecordingState.record,
+      onSourceSelected: (source) => selection = source,
+    );
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(selection, isNull);
+  });
+
+  testWidgets('continuous necklace capture exposes Save moment instead of Stop', (tester) async {
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnected: true,
+      recordingState: RecordingState.deviceRecord,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayDockSaveMoment), findsOneWidget);
+    expect(find.text(l10n.todayDockStop), findsNothing);
+    expect(find.text(l10n.todayDockTranscriptNecklace), findsOneWidget);
+  });
+
+  testWidgets('continuous necklace capture allows an explicit iPhone handoff without relabeling its transcript',
+      (tester) async {
+    EllaCaptureSource? selection;
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.phone,
+      activeSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnected: true,
+      recordingState: RecordingState.deviceRecord,
+      onSourceSelected: (source) => selection = source,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayDockNecklaceActivePhoneSelected), findsOneWidget);
+    expect(find.text(l10n.todayDockRecord), findsOneWidget);
+    expect(find.text(l10n.todayDockSaveMoment), findsNothing);
+    expect(find.text(l10n.todayDockTranscriptNecklace), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(selection, EllaCaptureSource.necklace);
   });
 
   testWidgets('compact dock never exposes numeric capture diagnostics', (tester) async {
@@ -226,8 +305,8 @@ Semantics _recordActionSemantics(WidgetTester tester) => tester.widget<Semantics
 
 Future<void> _pumpRecordControl(
   WidgetTester tester, {
-  bool homeCaptureOwned = false,
-  bool homeCaptureUsesNecklace = false,
+  EllaCaptureSource selectedSource = EllaCaptureSource.phone,
+  EllaCaptureSource? activeSource,
   bool starting = false,
   bool hasNecklace = false,
   bool legacyNecklaceNeedsConfirmation = false,
@@ -235,12 +314,9 @@ Future<void> _pumpRecordControl(
   bool necklaceConnecting = false,
   RecordingState recordingState = RecordingState.stop,
   CaptureDiagnostics diagnostics = const CaptureDiagnostics(),
-  bool necklaceContinuouslyRecording = false,
   VoidCallback? onViewTranscript,
-  VoidCallback? onFinishExternalCapture,
+  ValueChanged<EllaCaptureSource>? onSourceSelected,
   VoidCallback? onUnavailable,
-  VoidCallback? onReconnectNecklace,
-  VoidCallback? onConfirmLegacyNecklace,
   VoidCallback? onTap,
 }) {
   return tester.pumpWidget(
@@ -249,8 +325,8 @@ Future<void> _pumpRecordControl(
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: TodayRecordMomentControl(
-          homeCaptureOwned: homeCaptureOwned,
-          homeCaptureUsesNecklace: homeCaptureUsesNecklace,
+          selectedSource: selectedSource,
+          activeSource: activeSource,
           starting: starting,
           hasNecklace: hasNecklace,
           legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
@@ -258,12 +334,9 @@ Future<void> _pumpRecordControl(
           necklaceConnecting: necklaceConnecting,
           recordingState: recordingState,
           diagnostics: diagnostics,
-          necklaceContinuouslyRecording: necklaceContinuouslyRecording,
           onViewTranscript: onViewTranscript ?? () {},
-          onFinishExternalCapture: onFinishExternalCapture ?? () {},
+          onSourceSelected: onSourceSelected ?? (_) {},
           onUnavailable: onUnavailable,
-          onReconnectNecklace: onReconnectNecklace,
-          onConfirmLegacyNecklace: onConfirmLegacyNecklace,
           onTap: onTap ?? () {},
         ),
       ),

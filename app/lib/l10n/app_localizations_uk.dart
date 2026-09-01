@@ -9589,6 +9589,54 @@ class AppLocalizationsUk extends AppLocalizations {
   String get todayDockPhoneReady => 'iPhone · Ready';
 
   @override
+  String get todayCaptureSourceTitle => 'Recording source';
+
+  @override
+  String get todayCaptureSourcePhone => 'iPhone';
+
+  @override
+  String get todayCaptureSourceNecklace => 'Necklace';
+
+  @override
+  String get todayDockPhoneStarting => 'iPhone · Starting…';
+
+  @override
+  String get todayDockPhoneNeedsAttention => 'iPhone recording needs attention';
+
+  @override
+  String get todayDockNecklaceNeedsAttention => 'Necklace recording needs attention';
+
+  @override
+  String get todayDockNecklaceActivePhoneSelected => 'Necklace is recording · iPhone selected';
+
+  @override
+  String get todayDockReconnect => 'Reconnect';
+
+  @override
+  String get todayDockRetry => 'Retry';
+
+  @override
+  String get todayDockStop => 'Stop';
+
+  @override
+  String get todayDockSaveMoment => 'Save moment';
+
+  @override
+  String get todayDockStartNecklace => 'Start';
+
+  @override
+  String get todayDockTranscriptPhone => 'Transcript · iPhone';
+
+  @override
+  String get todayDockTranscriptNecklace => 'Transcript · Necklace';
+
+  @override
+  String get captureStatusPhone => 'iPhone';
+
+  @override
+  String get captureStatusNecklace => 'Necklace';
+
+  @override
   String get memorySortRecent => 'Newest first';
 
   @override
