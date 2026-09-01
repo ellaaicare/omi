@@ -9716,7 +9716,7 @@ class AppLocalizationsMs extends AppLocalizations {
 
   @override
   String memoryArtworkQueueNextBatch(int count) {
-    return 'Generate up to $count';
+    return 'Prepare up to $count older memories';
   }
 
   @override
@@ -9773,4 +9773,57 @@ class AppLocalizationsMs extends AppLocalizations {
   @override
   String get todayLegacyNecklaceConfirmUnavailable =>
       'Ella could not start reconnecting the necklace right now. Please try again.';
+
+  @override
+  String get memoryArtworkLibrariesChecking => 'Checking available artwork…';
+
+  @override
+  String memoryArtworkLibrarySummary(int days, int memories) {
+    String _temp0 = intl.Intl.pluralLogic(
+      days,
+      locale: localeName,
+      other: '$days days ready',
+      one: '1 day ready',
+      zero: 'No days ready yet',
+    );
+    String _temp1 = intl.Intl.pluralLogic(
+      memories,
+      locale: localeName,
+      other: '$memories illustrations',
+      one: '1 illustration',
+      zero: 'no illustrations',
+    );
+    return '$_temp0 · $_temp1';
+  }
+
+  @override
+  String memoryArtworkRecentFirst(int count, int days) {
+    String _temp0 = intl.Intl.pluralLogic(
+      days,
+      locale: localeName,
+      other: '$days days',
+      one: 'day',
+    );
+    return 'New styles start with up to $count memories from your newest $_temp0. Prepare older memories only when you choose.';
+  }
+
+  @override
+  String get memoryArtworkLibraryEmpty => 'No artwork ready in this style';
+
+  @override
+  String memoryArtworkLibraryCount(int days, int memories) {
+    String _temp0 = intl.Intl.pluralLogic(
+      days,
+      locale: localeName,
+      other: '$days days',
+      one: '1 day',
+    );
+    String _temp1 = intl.Intl.pluralLogic(
+      memories,
+      locale: localeName,
+      other: '$memories illustrations',
+      one: '1 illustration',
+    );
+    return '$_temp0 · $_temp1';
+  }
 }

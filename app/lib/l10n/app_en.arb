@@ -10886,7 +10886,7 @@
   "memoryArtworkQueueComplete": "This illustration style is ready.",
   "memoryArtworkQueuePause": "Pause",
   "memoryArtworkQueueResume": "Resume",
-  "memoryArtworkQueueNextBatch": "Generate up to {count}",
+  "memoryArtworkQueueNextBatch": "Prepare up to {count} older memories",
   "@memoryArtworkQueueNextBatch": {
     "placeholders": {
       "count": {
@@ -10921,5 +10921,40 @@
   "todayLegacyNecklaceConfirmTitle": "Reconnect your necklace?",
   "todayLegacyNecklaceConfirmBody": "This necklace was paired with this iPhone before. Confirm it is yours, then Ella will reconnect it for this account.",
   "todayLegacyNecklaceConfirmAction": "Reconnect necklace",
-  "todayLegacyNecklaceConfirmUnavailable": "Ella could not start reconnecting the necklace right now. Please try again."
+  "todayLegacyNecklaceConfirmUnavailable": "Ella could not start reconnecting the necklace right now. Please try again.",
+  "memoryArtworkLibrariesChecking": "Checking available artwork…",
+  "memoryArtworkLibrarySummary": "{days, plural, =0{No days ready yet} =1{1 day ready} other{{days} days ready}} · {memories, plural, =0{no illustrations} =1{1 illustration} other{{memories} illustrations}}",
+  "@memoryArtworkLibrarySummary": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      },
+      "memories": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkRecentFirst": "New styles start with up to {count} memories from your newest {days, plural, =1{day} other{{days} days}}. Prepare older memories only when you choose.",
+  "@memoryArtworkRecentFirst": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryArtworkLibraryEmpty": "No artwork ready in this style",
+  "memoryArtworkLibraryCount": "{days, plural, =1{1 day} other{{days} days}} · {memories, plural, =1{1 illustration} other{{memories} illustrations}}",
+  "@memoryArtworkLibraryCount": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      },
+      "memories": {
+        "type": "int"
+      }
+    }
+  }
 }

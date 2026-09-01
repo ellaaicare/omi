@@ -8,6 +8,7 @@ import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 
 const memoryArtworkSchemaVersion = 'ella.memory_artwork.v1';
+const memoryArtworkLibrariesSchemaVersion = 'ella.memory_artwork.libraries.v1';
 const memoryArtworkDefaultStyle = 'ella.memory_artwork.style.soft-gouache.v1';
 const memoryArtworkPaperCollageStyle = 'ella.memory_artwork.style.paper-collage.v1';
 const memoryArtworkGraphicLandscapeStyle = 'ella.memory_artwork.style.graphic-landscape.v1';
@@ -83,6 +84,45 @@ class MemoryArtworkPreferenceUpdate {
 
   final bool saved;
   final String failureCode;
+}
+
+class MemoryArtworkLibrary {
+  const MemoryArtworkLibrary({
+    required this.styleVersion,
+    required this.selected,
+    required this.readyMemories,
+    required this.readyDays,
+    this.oldestDay,
+    this.newestDay,
+  });
+
+  final String styleVersion;
+  final bool selected;
+  final int readyMemories;
+  final int readyDays;
+  final DateTime? oldestDay;
+  final DateTime? newestDay;
+}
+
+class MemoryArtworkLibraries {
+  const MemoryArtworkLibraries({
+    required this.selectedStyleVersion,
+    required this.defaultPreviewDays,
+    required this.historicalBatchSize,
+    required this.libraries,
+  });
+
+  final String selectedStyleVersion;
+  final int defaultPreviewDays;
+  final int historicalBatchSize;
+  final List<MemoryArtworkLibrary> libraries;
+
+  MemoryArtworkLibrary? forStyle(String styleVersion) {
+    for (final library in libraries) {
+      if (library.styleVersion == styleVersion) return library;
+    }
+    return null;
+  }
 }
 
 class MemoryArtworkBackfillPage {
@@ -337,6 +377,45 @@ class MemoryArtworkApi {
     return const MemoryArtworkPreferenceUpdate(saved: true);
   }
 
+  Future<MemoryArtworkLibraries?> libraries() async {
+    final authority = _authorityProvider();
+    if (authority == null) return null;
+    final response = await _call(
+      authority,
+      method: 'GET',
+      path: 'v1/ella/memory-artwork/libraries',
+      timeout: const Duration(seconds: 30),
+    );
+    if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
+    final payload = _jsonObject(response!.body);
+    if (payload == null || payload['schema_version'] != memoryArtworkLibrariesSchemaVersion) return null;
+    final rawLibraries = payload['libraries'];
+    if (rawLibraries is! List) return null;
+    final libraries = <MemoryArtworkLibrary>[];
+    for (final rawLibrary in rawLibraries) {
+      if (rawLibrary is! Map) return null;
+      final library = Map<String, dynamic>.from(rawLibrary);
+      final styleVersion = library['style_version']?.toString().trim() ?? '';
+      if (!_supportedStyles.contains(styleVersion)) continue;
+      libraries.add(
+        MemoryArtworkLibrary(
+          styleVersion: styleVersion,
+          selected: library['selected'] == true,
+          readyMemories: _nonNegativeInt(library['ready_memories']),
+          readyDays: _nonNegativeInt(library['ready_days']),
+          oldestDay: _dateOnly(library['oldest_day']),
+          newestDay: _dateOnly(library['newest_day']),
+        ),
+      );
+    }
+    return MemoryArtworkLibraries(
+      selectedStyleVersion: payload['selected_style_version']?.toString().trim() ?? '',
+      defaultPreviewDays: _nonNegativeInt(payload['default_preview_days']),
+      historicalBatchSize: _nonNegativeInt(payload['historical_batch_size']),
+      libraries: libraries,
+    );
+  }
+
   Future<MemoryArtworkBackfillPage?> backfillNext({
     String? cursor,
     MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
@@ -457,6 +536,11 @@ class MemoryArtworkApi {
   }
 
   static int _nonNegativeInt(Object? value) => value is int && value >= 0 ? value : 0;
+
+  static DateTime? _dateOnly(Object? value) {
+    final parsed = DateTime.tryParse(value?.toString() ?? '');
+    return parsed == null ? null : DateTime.utc(parsed.year, parsed.month, parsed.day);
+  }
 
   static MemoryArtworkQueueStatus? _queueStatusFromPayload(Map<String, dynamic>? payload) {
     if (payload == null || payload['schema_version'] != 'ella.memory_artwork.queue.v1') return null;

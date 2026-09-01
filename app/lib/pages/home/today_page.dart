@@ -53,6 +53,7 @@ typedef _HomeArtworkAuthoritySnapshot = ({
 });
 typedef _ArtworkStudioSnapshot = ({
   MemoryArtworkPreferences preferences,
+  MemoryArtworkLibraries? libraries,
   _ArtworkBackfillUiState backfillState,
   _ArtworkQueueLoadState queueLoadState,
   bool styleSaving,
@@ -218,11 +219,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   int _homeArtworkStyleOperationGeneration = 0;
   int _homeArtworkQueueOperationGeneration = 0;
   int _homeArtworkQueueRefreshSequence = 0;
+  int _homeArtworkLibrariesRefreshSequence = 0;
   int _homeArtworkDisplayEpoch = 0;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
   MemoryArtworkPreferences? _homeArtworkPreferences;
+  MemoryArtworkLibraries? _homeArtworkLibraries;
   MemoryArtworkQueueStatus? _homeArtworkQueueStatus;
   BtDevice? _resumeNecklaceAfterPhoneCapture;
 
@@ -455,6 +458,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         ? null
         : (
             preferences: preferences,
+            libraries: _homeArtworkLibraries,
             backfillState: _homeArtworkBackfillState,
             queueLoadState: _homeArtworkQueueLoadState,
             styleSaving: _homeArtworkStyleSaving,
@@ -469,6 +473,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (mounted && (_homeArtworkPreferences != null || _homeArtworkStyleSaving)) {
         setState(() {
           _homeArtworkPreferences = null;
+          _homeArtworkLibraries = null;
           _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
           _homeArtworkStyleSaving = false;
           _homeArtworkQueueControlBusy = false;
@@ -495,6 +500,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _publishHomeArtworkStudioState();
     if (preferences?.releaseEnabled == true) {
       unawaited(_refreshHomeArtworkQueueStatus());
+      unawaited(_refreshHomeArtworkLibraries());
       final savedCursor = SharedPreferencesUtil().memoryArtworkBackfillCursor(
         preferences!.styleVersion,
         expectedUid: authority.uid,
@@ -506,6 +512,28 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       // reloads must not silently reset or extend the bounded batch.
       if (savedCursor.isEmpty) unawaited(_advanceHomeArtworkBackfill());
     }
+  }
+
+  Future<void> _refreshHomeArtworkLibraries() async {
+    final authority = _captureHomeArtworkAuthority();
+    if (authority == null || _homeArtworkPreferences?.releaseEnabled != true) return;
+    final refreshSequence = ++_homeArtworkLibrariesRefreshSequence;
+    MemoryArtworkLibraries? libraries;
+    try {
+      libraries = await _memoryArtworkApi.libraries();
+    } on ExactAccountAuthorityChangedException {
+      _scheduleHomeArtworkReload();
+      return;
+    } catch (_) {
+      libraries = null;
+    }
+    if (!mounted ||
+        !_isHomeArtworkAuthorityCurrent(authority) ||
+        refreshSequence != _homeArtworkLibrariesRefreshSequence) {
+      return;
+    }
+    setState(() => _homeArtworkLibraries = libraries);
+    _publishHomeArtworkStudioState();
   }
 
   _ArtworkBackfillUiState _queueUiState(MemoryArtworkQueueStatus status) {
@@ -570,6 +598,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (refreshVisibleArtwork) _homeArtworkDisplayEpoch++;
     });
     _publishHomeArtworkStudioState();
+    if (refreshVisibleArtwork) unawaited(_refreshHomeArtworkLibraries());
     if (_shouldPollHomeArtworkQueue(status)) {
       _scheduleHomeArtworkQueuePoll();
     } else {
@@ -643,7 +672,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         unawaited(
           _advanceHomeArtworkBackfill(
             restart: restartPreview || autoContinue,
-            mode: autoContinue ? MemoryArtworkBackfillMode.all : MemoryArtworkBackfillMode.preview,
+            mode: autoContinue || !restartPreview ? MemoryArtworkBackfillMode.all : MemoryArtworkBackfillMode.preview,
+            waitForActive: !restartPreview && !autoContinue,
           ),
         );
       }
@@ -698,6 +728,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<MemoryArtworkBackfillPage?> _advanceHomeArtworkBackfill({
     bool restart = false,
     MemoryArtworkBackfillMode mode = MemoryArtworkBackfillMode.preview,
+    bool waitForActive = false,
   }) async {
     while (true) {
       final preferences = _homeArtworkPreferences;
@@ -710,7 +741,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return _startHomeArtworkBackfill(preferences: preferences, authority: authority, restart: restart, mode: mode);
       }
       final activeAuthority = _homeArtworkBackfillAuthority;
-      if (!restart && activeAuthority != null && _isHomeArtworkAuthorityCurrent(activeAuthority)) return null;
+      if (!restart && !waitForActive && activeAuthority != null && _isHomeArtworkAuthorityCurrent(activeAuthority)) {
+        return null;
+      }
       await active;
     }
   }
@@ -869,11 +902,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       // The saved style starts a new generation; never let a paused/stopped
       // status from the previous style suppress its first reconciliation.
       _homeArtworkQueueStatus = null;
+      _homeArtworkLibraries = null;
       _homeArtworkQueueLoadState = _ArtworkQueueLoadState.loading;
     });
     _publishHomeArtworkStudioState();
     _showHomeMessage(context.l10n.memoryArtworkStyleUpdated);
     unawaited(_refreshHomeArtworkQueueStatus());
+    unawaited(_refreshHomeArtworkLibraries());
     unawaited(_advanceHomeArtworkBackfill(restart: true));
   }
 
@@ -883,6 +918,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
+    unawaited(_refreshHomeArtworkLibraries());
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -902,6 +938,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           final current = snapshot;
           return _ArtworkStudioSheet(
             preferences: current.preferences,
+            libraries: current.libraries,
             backfillState: current.backfillState,
             queueLoadState: current.queueLoadState,
             styleSaving: current.styleSaving,
@@ -912,14 +949,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               if (current.queueStatus == null) {
                 unawaited(_advanceHomeArtworkBackfill(restart: true));
               } else {
-                unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, restartPreview: true));
+                unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume));
               }
             },
             onRetryStatus: () => unawaited(_refreshHomeArtworkQueueStatus()),
             onPause: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.pause)),
             onResume: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume)),
-            onAutoResume: () =>
-                unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, autoContinue: true)),
             onStop: () => unawaited(_confirmStopHomeArtworkQueue()),
           );
         },
@@ -2124,6 +2159,7 @@ class _HomeMemoryToolbar extends StatelessWidget {
 class _ArtworkStudioSheet extends StatelessWidget {
   const _ArtworkStudioSheet({
     required this.preferences,
+    required this.libraries,
     required this.backfillState,
     required this.queueLoadState,
     required this.styleSaving,
@@ -2134,11 +2170,11 @@ class _ArtworkStudioSheet extends StatelessWidget {
     required this.onRetryStatus,
     required this.onPause,
     required this.onResume,
-    required this.onAutoResume,
     required this.onStop,
   });
 
   final MemoryArtworkPreferences preferences;
+  final MemoryArtworkLibraries? libraries;
   final _ArtworkBackfillUiState backfillState;
   final _ArtworkQueueLoadState queueLoadState;
   final bool styleSaving;
@@ -2149,7 +2185,6 @@ class _ArtworkStudioSheet extends StatelessWidget {
   final VoidCallback onRetryStatus;
   final VoidCallback onPause;
   final VoidCallback onResume;
-  final VoidCallback onAutoResume;
   final VoidCallback onStop;
 
   @override
@@ -2181,6 +2216,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
     };
     final queue = queueStatus;
     final progress = queue == null ? 0.0 : _previewProgress(queue);
+    final selectedLibrary = libraries?.forStyle(preferences.styleVersion);
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -2203,6 +2239,27 @@ class _ArtworkStudioSheet extends StatelessWidget {
               context.l10n.memoryArtworkStudioDetail,
               style: EllaTextStyles.secondary.copyWith(color: EllaColors.inkSoft),
             ),
+            const SizedBox(height: 8),
+            Text(
+              libraries == null
+                  ? context.l10n.memoryArtworkLibrariesChecking
+                  : context.l10n.memoryArtworkLibrarySummary(
+                      selectedLibrary?.readyDays ?? 0,
+                      selectedLibrary?.readyMemories ?? 0,
+                    ),
+              key: const Key('home-artwork-library-summary'),
+              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+            ),
+            if (libraries != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                context.l10n.memoryArtworkRecentFirst(
+                  libraries!.historicalBatchSize,
+                  libraries!.defaultPreviewDays,
+                ),
+                style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+              ),
+            ],
             const SizedBox(height: 16),
             EllaCardSurface(
               child: Padding(
@@ -2286,17 +2343,6 @@ class _ArtworkStudioSheet extends StatelessWidget {
                               label: Text(context.l10n.memoryArtworkQueuePause),
                             ),
                           if (queue.canResume)
-                            OutlinedButton.icon(
-                              key: const Key('home-artwork-start-preview'),
-                              onPressed: queueControlBusy ? null : onContinue,
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: EllaColors.tealDeep,
-                                side: const BorderSide(color: EllaColors.tealDeep),
-                              ),
-                              icon: const Icon(Icons.photo_library_outlined),
-                              label: Text(context.l10n.memoryArtworkCheckMissing),
-                            ),
-                          if (queue.canResume)
                             FilledButton.icon(
                               key: const Key('home-artwork-resume'),
                               onPressed: queueControlBusy ? null : onResume,
@@ -2306,17 +2352,6 @@ class _ArtworkStudioSheet extends StatelessWidget {
                               ),
                               icon: const Icon(Icons.play_arrow_rounded),
                               label: Text(context.l10n.memoryArtworkQueueNextBatch(queue.batchSize)),
-                            ),
-                          if (queue.canResume)
-                            OutlinedButton.icon(
-                              key: const Key('home-artwork-auto-resume'),
-                              onPressed: queueControlBusy ? null : onAutoResume,
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: EllaColors.tealDeep,
-                                side: const BorderSide(color: EllaColors.tealDeep),
-                              ),
-                              icon: const Icon(Icons.all_inclusive_rounded),
-                              label: Text(context.l10n.memoryArtworkQueueGenerateAll),
                             ),
                           if (queue.canCancel)
                             TextButton.icon(
@@ -2358,6 +2393,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
             ...styles.map((style) {
               final selected = preferences.styleVersion == style.$1;
               final enabled = !styleSaving && !queueControlBusy;
+              final library = libraries?.forStyle(style.$1);
               return ListTile(
                 key: Key('home-artwork-style-${style.$1}'),
                 contentPadding: EdgeInsets.zero,
@@ -2371,7 +2407,14 @@ class _ArtworkStudioSheet extends StatelessWidget {
                   color: selected ? EllaColors.tealDeep : EllaColors.inkSoft,
                 ),
                 title: Text(style.$2, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
-                subtitle: null,
+                subtitle: Text(
+                  libraries == null
+                      ? context.l10n.memoryArtworkLibrariesChecking
+                      : library == null || library.readyMemories == 0
+                          ? context.l10n.memoryArtworkLibraryEmpty
+                          : context.l10n.memoryArtworkLibraryCount(library.readyDays, library.readyMemories),
+                  style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                ),
                 selected: selected,
                 selectedColor: EllaColors.tealDeep,
                 onTap: enabled ? () => onStyleSelected(style.$1) : null,
