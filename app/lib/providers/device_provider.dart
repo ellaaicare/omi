@@ -819,10 +819,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
     try {
       final activeDevice = connectedDevice;
-      if (isConnected && activeDevice?.id == stored.id) {
-        await _onDeviceConnected(activeDevice!, generation, explicitlyAuthorized: true);
+      if (isConnected && activeDevice != null) {
+        if (activeDevice.id != stored.id) return false;
+        await _onDeviceConnected(activeDevice, generation, explicitlyAuthorized: true);
       } else {
-        if (isConnected && activeDevice?.id != stored.id) return false;
         await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: true);
       }
     } catch (error) {

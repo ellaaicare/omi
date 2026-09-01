@@ -2852,7 +2852,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                                 ? context.l10n.todayDockNecklaceConnecting
                                 : legacyNecklaceNeedsConfirmation
                                     ? context.l10n.todayLegacyNecklaceDockStatus
-                                    : hasNecklace && !necklaceConnected
+                                    : !necklaceConnected
                                         ? context.l10n.todayDockNecklaceNotConnected
                                         : context.l10n.todayDockNecklaceReady
                         : recordingState == RecordingState.error

@@ -91,6 +91,24 @@ void main() {
     expect(reconnects, 1);
   });
 
+  testWidgets('missing necklace is unavailable instead of being labelled ready', (tester) async {
+    var starts = 0;
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      onTap: () => starts += 1,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayDockNecklaceNotConnected), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceReady), findsNothing);
+    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')), warnIfMissed: false);
+    await tester.pump();
+    expect(starts, 0);
+  });
+
   testWidgets('legacy necklace requires Home confirmation instead of reconnecting implicitly', (tester) async {
     var confirmations = 0;
     await _pumpRecordControl(

@@ -29,6 +29,7 @@ class _FakeDeviceService implements IDeviceService {
   _FakeDeviceService([this.status = DeviceServiceStatus.init]);
 
   DeviceServiceStatus status;
+  int ensureConnectionCalls = 0;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -54,7 +55,10 @@ class _FakeDeviceService implements IDeviceService {
   Future<void> discover({String? desirableDeviceId, int timeout = 5}) async {}
 
   @override
-  Future<DeviceConnection?> ensureConnection(String deviceId, {bool force = false}) async => null;
+  Future<DeviceConnection?> ensureConnection(String deviceId, {bool force = false}) async {
+    ensureConnectionCalls++;
+    return null;
+  }
 
   @override
   void subscribe(IDeviceServiceSubsciption subscription, Object context) {
@@ -247,6 +251,29 @@ void main() {
     expect(capture.deviceStarts, 1);
     expect(capture.recordingState, RecordingState.deviceRecord);
     expect(provider.presentationConnectedDevice?.id, necklace.id);
+  });
+
+  test('Home reconnect attempts to hydrate a stale connected session before failing', () async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'bound-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.error);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final provider = DeviceProvider(
+      deviceService: service,
+      storageListResolver: (_) async => const [],
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+
+    final ready = await provider.reconnectKnownDeviceForCapture(reason: 'Home stale session test');
+
+    expect(ready, isFalse);
+    expect(service.ensureConnectionCalls, 1, reason: 'a stale BLE flag must not bypass the recovery attempt');
+    expect(capture.deviceStarts, 0);
   });
 
   test('Home reconnect awaits connection and necklace capture before reporting success', () async {
