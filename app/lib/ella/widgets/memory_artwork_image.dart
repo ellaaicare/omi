@@ -27,6 +27,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.retryDelay = const Duration(seconds: 5),
     this.maxAuthorityUnavailableRetries = 3,
     this.maxTransientRetries = 3,
+    this.maxImageDownloadRetries = 2,
     this.refreshEpoch = 0,
     this.authorityEpoch = 0,
     this.enqueueIfMissing = false,
@@ -48,6 +49,12 @@ class MemoryArtworkImage extends StatefulWidget {
   /// transport failure gets only this many follow-up reads before the parent
   /// queue revision or an explicit refresh must ask again.
   final int maxTransientRetries;
+
+  /// A failed signed URL or corrupted cached image gets a small number of
+  /// recovery reads. Further failures wait for a parent queue refresh or a new
+  /// account authority instead of continuously fetching artwork the user
+  /// cannot display.
+  final int maxImageDownloadRetries;
 
   /// A parent-owned queue completion revision. It refreshes visible cards after
   /// the server finishes a batch without letting scrolling create new jobs.
@@ -77,6 +84,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   int? _transientRetryBudgetEpoch;
   int? _transientRetryBudgetRefreshEpoch;
   String? _transientRetryBudgetMemoryId;
+  int _imageDownloadRetries = 0;
+  int? _imageRetryBudgetAuthorityEpoch;
+  int? _imageRetryBudgetRefreshEpoch;
+  String? _imageRetryBudgetMemoryId;
 
   @override
   void initState() {
@@ -106,6 +117,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   void _refreshRequest({bool invalidateCachedArtwork = false}) {
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
+    _resetImageRetryBudgetIfNeeded();
     // A persistent authority failure remains quiet until its authority changes.
     // Once the final bounded retry succeeds, however, later queue revisions
     // are valid and must be allowed to refresh the card.
@@ -156,6 +168,19 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _transientRetryBudgetRefreshEpoch = widget.refreshEpoch;
     _transientRetryBudgetMemoryId = memoryId;
     _transientRetries = 0;
+  }
+
+  void _resetImageRetryBudgetIfNeeded() {
+    final memoryId = widget.conversation.id;
+    if (_imageRetryBudgetAuthorityEpoch == widget.authorityEpoch &&
+        _imageRetryBudgetRefreshEpoch == widget.refreshEpoch &&
+        _imageRetryBudgetMemoryId == memoryId) {
+      return;
+    }
+    _imageRetryBudgetAuthorityEpoch = widget.authorityEpoch;
+    _imageRetryBudgetRefreshEpoch = widget.refreshEpoch;
+    _imageRetryBudgetMemoryId = memoryId;
+    _imageDownloadRetries = 0;
   }
 
   Future<void> _loadCachedFile(String cacheKey, int generation) async {
@@ -234,6 +259,17 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
     if (!mounted || generation != _requestGeneration || _imageRetryScheduled) return;
+    if (_imageDownloadRetries >= widget.maxImageDownloadRetries) {
+      setState(() {
+        _cachedFile = null;
+        _remoteResult = const MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: 'memory_artwork_download_unavailable',
+        );
+      });
+      return;
+    }
+    _imageDownloadRetries++;
     _imageRetryScheduled = true;
     unawaited(_recoverImageDownload(api, artwork, generation, cacheKey));
   }

@@ -873,6 +873,61 @@ void main() {
     expect(api.loadCalls, 3, reason: 'a failed image download must obtain a fresh signed URL');
   });
 
+  testWidgets('bounds repeated signed image recovery without enqueuing artwork work', (tester) async {
+    final api = _RefreshingArtworkApi();
+    final evictedKeys = <String>[];
+    final conversation = ServerConversation(
+      id: 'memory-repeated-signed-url-failure',
+      createdAt: DateTime(2026, 8, 31),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+          maxImageDownloadRetries: 2,
+          retryDelay: const Duration(milliseconds: 10),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    Future<void> failSignedImage() async {
+      final image = tester.widget<CachedNetworkImage>(
+        find.byKey(const Key('memory-generated-artwork-network-memory-repeated-signed-url-failure-0')),
+      );
+      image.errorListener!(Exception('expired signed URL'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pump();
+    }
+
+    await failSignedImage();
+    await failSignedImage();
+
+    final exhaustedImage = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-network-memory-repeated-signed-url-failure-0')),
+    );
+    exhaustedImage.errorListener!(Exception('expired signed URL again'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(api.loadCalls, 4, reason: 'initial readiness plus two bounded signed-URL recovery reads');
+    expect(api.lastEnqueueIfMissing, isFalse);
+    expect(evictedKeys, hasLength(2));
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+  });
+
   testWidgets('does not poll a terminal enrichment result until the parent publishes a new revision', (tester) async {
     final api = _RecoveringEnrichmentArtworkApi();
     final conversation = ServerConversation(
