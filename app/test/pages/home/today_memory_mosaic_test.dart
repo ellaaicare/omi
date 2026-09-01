@@ -1144,29 +1144,65 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Ella is preparing artwork. You can leave this screen.'), findsOneWidget);
-    expect(
-      find.byKey(const Key('home-artwork-queue-progress-label')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const Key('home-artwork-queue-progress-label')), findsOneWidget);
     expect(find.text('35 of 166 illustrations ready'), findsNothing);
     expect(find.text('35 ready · 131 left'), findsNothing);
     expect(find.text('10 ready · 10 left'), findsNothing);
-    final indicator = tester.widget<LinearProgressIndicator>(
-      find.byKey(const Key('home-artwork-queue-progress-bar')),
-    );
+    final indicator = tester.widget<LinearProgressIndicator>(find.byKey(const Key('home-artwork-queue-progress-bar')));
     expect(indicator.value, closeTo(3 / 10, 0.0001));
+  });
+
+  testWidgets('Artwork Studio reports actual ready days for each illustration library', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      libraryInventory: const MemoryArtworkLibraries(
+        selectedStyleVersion: memoryArtworkDefaultStyle,
+        defaultPreviewDays: 3,
+        historicalBatchSize: 10,
+        libraries: [
+          MemoryArtworkLibrary(
+            styleVersion: memoryArtworkDefaultStyle,
+            selected: true,
+            readyMemories: 12,
+            readyDays: 3,
+          ),
+          MemoryArtworkLibrary(
+            styleVersion: memoryArtworkAnimeStorybookStyle,
+            selected: false,
+            readyMemories: 4,
+            readyDays: 2,
+          ),
+        ],
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('3 days ready · 12 illustrations'), findsOneWidget);
+    expect(
+      find.text(
+        'New styles start with up to 10 memories from your newest 3 days. Prepare older memories only when you choose.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('2 days · 4 illustrations'), findsOneWidget);
+    expect(find.text('No artwork ready in this style'), findsNWidgets(4));
   });
 
   testWidgets('Artwork Studio keeps an automatic history run indeterminate', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
-      queue: _artworkQueueStatus(
-        ready: 527,
-        active: 1,
-        queued: 35,
-        autoContinue: true,
-        batchRemaining: 0,
-      ),
+      queue: _artworkQueueStatus(ready: 527, active: 1, queued: 35, autoContinue: true, batchRemaining: 0),
     );
     final harness = await _pumpHome(
       tester,
@@ -1182,20 +1218,14 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    final indicator = tester.widget<LinearProgressIndicator>(
-      find.byKey(const Key('home-artwork-queue-progress-bar')),
-    );
+    final indicator = tester.widget<LinearProgressIndicator>(find.byKey(const Key('home-artwork-queue-progress-bar')));
     expect(indicator.value, isNull, reason: 'ongoing history has no truthful fixed denominator');
   });
 
   testWidgets('Artwork Studio marks a completed automatic history run complete', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
-      queue: _artworkQueueStatus(
-        ready: 563,
-        autoContinue: true,
-        batchRemaining: 0,
-      ),
+      queue: _artworkQueueStatus(ready: 563, autoContinue: true, batchRemaining: 0),
     );
     final harness = await _pumpHome(
       tester,
@@ -1211,9 +1241,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    final indicator = tester.widget<LinearProgressIndicator>(
-      find.byKey(const Key('home-artwork-queue-progress-bar')),
-    );
+    final indicator = tester.widget<LinearProgressIndicator>(find.byKey(const Key('home-artwork-queue-progress-bar')));
     expect(indicator.value, 1);
     expect(find.text('This illustration style is ready.'), findsOneWidget);
     expect(find.byKey(const Key('home-artwork-queue-detail')), findsNothing);
@@ -1222,9 +1250,7 @@ void main() {
 
   testWidgets('Artwork Studio pauses, stops, and resumes the exact artwork generation', (tester) async {
     final authority = await _installArtworkAuthority();
-    final artwork = _FakeMemoryArtworkApi(
-      queue: _artworkQueueStatus(ready: 35, active: 1, queued: 128, retrying: 2),
-    );
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 35, active: 1, queued: 128, retrying: 2));
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.manyMemories(),
@@ -1259,17 +1285,34 @@ void main() {
     await tester.tap(find.byKey(const Key('home-artwork-resume')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-    expect(
-      artwork.queueActions,
-      [MemoryArtworkQueueAction.pause, MemoryArtworkQueueAction.cancel, MemoryArtworkQueueAction.resume],
-    );
+    expect(artwork.queueActions, [
+      MemoryArtworkQueueAction.pause,
+      MemoryArtworkQueueAction.cancel,
+      MemoryArtworkQueueAction.resume,
+    ]);
     expect(artwork.queueAutoContinue, [false, false, false]);
     expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
   });
 
-  testWidgets('Artwork Studio requires explicit opt-in before generating the whole historical backlog', (tester) async {
+  testWidgets('Artwork Studio advances older history only in a manual bounded batch', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
+      backfillPages: const [
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'older-artwork-page',
+        ),
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: false,
+          mode: MemoryArtworkBackfillMode.all,
+        ),
+      ],
       queue: _artworkQueueStatus(
         ready: 10,
         queued: 20,
@@ -1292,18 +1335,18 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byKey(const Key('home-artwork-queue-progress-label')), findsOneWidget);
-    expect(find.text('Generate up to 10'), findsOneWidget);
-    expect(find.text('Generate all automatically'), findsOneWidget);
+    expect(find.text('Prepare up to 10 older memories'), findsOneWidget);
+    expect(find.text('Generate all automatically'), findsNothing);
     expect(find.byKey(const Key('home-artwork-continue')), findsNothing);
 
-    await tester.tap(find.byKey(const Key('home-artwork-auto-resume')));
+    await tester.tap(find.byKey(const Key('home-artwork-resume')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(artwork.queueActions, [MemoryArtworkQueueAction.resume]);
-    expect(artwork.queueAutoContinue, [true]);
-    expect(artwork.backfillModes.last, MemoryArtworkBackfillMode.all);
-    expect(find.textContaining('Automatic generation is on.'), findsOneWidget);
+    expect(artwork.queueAutoContinue, [false]);
+    expect(artwork.backfillModes.where((mode) => mode == MemoryArtworkBackfillMode.all), hasLength(1));
+    expect(find.textContaining('Automatic generation is on.'), findsNothing);
   });
 
   testWidgets('a transient queue status failure keeps polling the last known running queue', (tester) async {
@@ -1374,10 +1417,7 @@ void main() {
 
   testWidgets('a failed queue control restores polling for the retained running queue', (tester) async {
     final authority = await _installArtworkAuthority();
-    final artwork = _FakeMemoryArtworkApi(
-      queue: _artworkQueueStatus(ready: 2, queued: 8),
-      failQueueControls: true,
-    );
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 2, queued: 8), failQueueControls: true);
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.manyMemories(),
@@ -1403,10 +1443,7 @@ void main() {
 
   testWidgets('a failed style update restores polling for the retained running queue', (tester) async {
     final authority = await _installArtworkAuthority();
-    final artwork = _FakeMemoryArtworkApi(
-      queue: _artworkQueueStatus(ready: 2, queued: 8),
-      failStyleUpdates: true,
-    );
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 2, queued: 8), failStyleUpdates: true);
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.manyMemories(),
@@ -1541,8 +1578,9 @@ void main() {
 
     secondStyleGate.complete();
     await tester.pumpAndSettle();
-    final completedTile =
-        tester.widget<ListTile>(find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')));
+    final completedTile = tester.widget<ListTile>(
+      find.byKey(const Key('home-artwork-style-$memoryArtworkDefaultStyle')),
+    );
     expect(completedTile.onTap, isNotNull);
   });
 
@@ -1799,6 +1837,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     this.failQueueControls = false,
     this.failStyleUpdates = false,
     this.queue,
+    this.libraryInventory,
   })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
         _authorityThrowRequests = Set<int>.of(authorityThrowRequests),
         _failedBackfillRequests = Set<int>.of(failedBackfillRequests),
@@ -1822,6 +1861,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final bool failQueueControls;
   final bool failStyleUpdates;
   MemoryArtworkQueueStatus? queue;
+  final MemoryArtworkLibraries? libraryInventory;
   final List<MemoryArtworkQueueAction> queueActions = [];
   final List<bool> queueAutoContinue = [];
   int _backfillRequests = 0;
@@ -1845,6 +1885,9 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
       releaseEnabled: true,
     );
   }
+
+  @override
+  Future<MemoryArtworkLibraries?> libraries() async => libraryInventory;
 
   @override
   Future<MemoryArtworkBackfillPage?> backfillNext({

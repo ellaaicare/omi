@@ -18006,7 +18006,7 @@ abstract class AppLocalizations {
   /// No description provided for @memoryArtworkQueueNextBatch.
   ///
   /// In en, this message translates to:
-  /// **'Generate up to {count}'**
+  /// **'Prepare up to {count} older memories'**
   String memoryArtworkQueueNextBatch(int count);
 
   /// No description provided for @memoryArtworkQueueGenerateAll.
@@ -18092,6 +18092,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella could not start reconnecting the necklace right now. Please try again.'**
   String get todayLegacyNecklaceConfirmUnavailable;
+
+  /// No description provided for @memoryArtworkLibrariesChecking.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking available artwork…'**
+  String get memoryArtworkLibrariesChecking;
+
+  /// No description provided for @memoryArtworkLibrarySummary.
+  ///
+  /// In en, this message translates to:
+  /// **'{days, plural, =0{No days ready yet} =1{1 day ready} other{{days} days ready}} · {memories, plural, =0{no illustrations} =1{1 illustration} other{{memories} illustrations}}'**
+  String memoryArtworkLibrarySummary(int days, int memories);
+
+  /// No description provided for @memoryArtworkRecentFirst.
+  ///
+  /// In en, this message translates to:
+  /// **'New styles start with up to {count} memories from your newest {days, plural, =1{day} other{{days} days}}. Prepare older memories only when you choose.'**
+  String memoryArtworkRecentFirst(int count, int days);
+
+  /// No description provided for @memoryArtworkLibraryEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No artwork ready in this style'**
+  String get memoryArtworkLibraryEmpty;
+
+  /// No description provided for @memoryArtworkLibraryCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{days, plural, =1{1 day} other{{days} days}} · {memories, plural, =1{1 illustration} other{{memories} illustrations}}'**
+  String memoryArtworkLibraryCount(int days, int memories);
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

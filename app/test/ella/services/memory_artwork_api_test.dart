@@ -478,6 +478,58 @@ void main() {
     expect(result.failureCode, 'memory_artwork_consent_required');
   });
 
+  test('artwork libraries report only server-confirmed ready days and illustrations', () async {
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        expect(url, 'https://api.example/v1/ella/memory-artwork/libraries');
+        expect(method, 'GET');
+        expect(timeout, const Duration(seconds: 30));
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkLibrariesSchemaVersion,
+            'selected_style_version': memoryArtworkAnimeStorybookStyle,
+            'default_preview_days': 3,
+            'historical_batch_size': 10,
+            'libraries': [
+              {
+                'style_version': memoryArtworkAnimeStorybookStyle,
+                'selected': true,
+                'ready_memories': 18,
+                'ready_days': 4,
+                'oldest_day': '2026-08-27',
+                'newest_day': '2026-08-30',
+              },
+              {'style_version': memoryArtworkDefaultStyle, 'selected': false, 'ready_memories': 0, 'ready_days': 0},
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.libraries();
+
+    expect(result?.selectedStyleVersion, memoryArtworkAnimeStorybookStyle);
+    expect(result?.defaultPreviewDays, 3);
+    expect(result?.historicalBatchSize, 10);
+    expect(result?.forStyle(memoryArtworkAnimeStorybookStyle)?.readyMemories, 18);
+    expect(result?.forStyle(memoryArtworkAnimeStorybookStyle)?.readyDays, 4);
+    expect(result?.forStyle(memoryArtworkAnimeStorybookStyle)?.newestDay, DateTime.utc(2026, 8, 30));
+    expect(result?.forStyle(memoryArtworkDefaultStyle)?.readyMemories, 0);
+  });
+
   test('preview backfill validates and forwards the opaque cursor', () async {
     var requestBody = '';
     final api = MemoryArtworkApi(
