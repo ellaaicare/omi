@@ -35,6 +35,7 @@ class EllaMemoriesPage extends StatefulWidget {
 }
 
 class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
+  static const _maxArtworkPreferenceUnavailableRetries = 3;
   final ScrollController _scrollController = ScrollController();
   late final MemoryArtworkApi _artworkApi = widget.artworkApi ?? MemoryArtworkApi();
   MemoryArtworkPreferences? _artworkPreferences;
@@ -43,10 +44,21 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   bool _showBackToRecent = false;
   bool _artworkBackfillInFlight = false;
   bool _artworkBackfillRestartPending = false;
+  MemoryArtworkQueueStatus? _artworkQueueStatus;
+  Timer? _artworkQueuePollTimer;
+  Timer? _artworkPreferencesRetryTimer;
+  int _artworkQueueRefreshSequence = 0;
+  int _artworkPreferenceLoadSequence = 0;
+  int _artworkDisplayEpoch = 0;
+  int _artworkAuthorityEpoch = 0;
+  int _artworkPreferenceUnavailableRetries = 0;
+  late final Listenable _artworkAuthorityChanges;
 
   @override
   void initState() {
     super.initState();
+    _artworkAuthorityChanges = SharedPreferencesUtil.aiConsentAuthorityChanges;
+    _artworkAuthorityChanges.addListener(_handleArtworkAuthorityChanged);
     _scrollController.addListener(_handleScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -58,10 +70,31 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   @override
   void dispose() {
+    _artworkAuthorityChanges.removeListener(_handleArtworkAuthorityChanged);
+    _artworkQueuePollTimer?.cancel();
+    _artworkPreferencesRetryTimer?.cancel();
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
     super.dispose();
+  }
+
+  void _handleArtworkAuthorityChanged() {
+    // Queue totals and signed artwork bytes belong to the exact account/profile.
+    // Never let a same-UID profile change inherit either while the new page loads.
+    _artworkQueueRefreshSequence++;
+    _artworkQueuePollTimer?.cancel();
+    _artworkPreferencesRetryTimer?.cancel();
+    _artworkPreferenceUnavailableRetries = 0;
+    if (mounted) {
+      setState(() {
+        _artworkPreferences = null;
+        _artworkQueueStatus = null;
+        _artworkAuthorityEpoch++;
+        _artworkDisplayEpoch++;
+      });
+    }
+    unawaited(_loadArtworkPreferences(retryOnUnavailable: true));
   }
 
   void _handleScroll() {
@@ -100,11 +133,65 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     }
     await context.read<ConversationProvider>().getInitialConversations();
     await _loadArtworkPreferences();
+    await _refreshArtworkQueueStatus();
   }
 
-  Future<void> _loadArtworkPreferences() async {
+  Future<void> _loadArtworkPreferences({bool retryOnUnavailable = false}) async {
+    final loadSequence = ++_artworkPreferenceLoadSequence;
     final preferences = await _artworkApi.preferences();
+    if (!mounted || loadSequence != _artworkPreferenceLoadSequence) return;
+    if (preferences == null) {
+      if (retryOnUnavailable) _scheduleArtworkPreferencesRetry(loadSequence);
+      return;
+    }
+    _artworkPreferenceUnavailableRetries = 0;
     if (mounted) setState(() => _artworkPreferences = preferences);
+    if (preferences.releaseEnabled) unawaited(_refreshArtworkQueueStatus());
+  }
+
+  void _scheduleArtworkPreferencesRetry(int loadSequence) {
+    if (_artworkPreferenceUnavailableRetries >= _maxArtworkPreferenceUnavailableRetries) return;
+    _artworkPreferenceUnavailableRetries++;
+    _artworkPreferencesRetryTimer?.cancel();
+    _artworkPreferencesRetryTimer = Timer(const Duration(seconds: 1), () {
+      if (!mounted || loadSequence != _artworkPreferenceLoadSequence) return;
+      unawaited(_loadArtworkPreferences(retryOnUnavailable: true));
+    });
+  }
+
+  bool _shouldPollArtworkQueue(MemoryArtworkQueueStatus status) {
+    return status.controlState == MemoryArtworkQueueState.running &&
+        (status.remaining > 0 || status.scanStatus != 'completed');
+  }
+
+  Future<void> _refreshArtworkQueueStatus() async {
+    if (!mounted || _artworkPreferences?.releaseEnabled != true) return;
+    final refreshSequence = ++_artworkQueueRefreshSequence;
+    MemoryArtworkQueueStatus? status;
+    try {
+      status = await _artworkApi.queueStatus();
+    } on ExactAccountAuthorityChangedException {
+      return;
+    } catch (_) {
+      return;
+    }
+    if (!mounted || refreshSequence != _artworkQueueRefreshSequence || status == null) return;
+    final previous = _artworkQueueStatus;
+    final refreshVisibleArtwork = previous == null ||
+        status.styleVersion != previous.styleVersion ||
+        status.generationId != previous.generationId ||
+        status.ready > previous.ready ||
+        (status.state == MemoryArtworkQueueState.completed && previous.state != MemoryArtworkQueueState.completed);
+    setState(() {
+      _artworkQueueStatus = status;
+      if (refreshVisibleArtwork) _artworkDisplayEpoch++;
+    });
+    _artworkQueuePollTimer?.cancel();
+    if (_shouldPollArtworkQueue(status)) {
+      _artworkQueuePollTimer = Timer(const Duration(seconds: 4), () {
+        if (mounted) unawaited(_refreshArtworkQueueStatus());
+      });
+    }
   }
 
   /// Gallery browsing must never spend image allowance. A deliberate style
@@ -116,7 +203,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     _artworkBackfillRestartPending = false;
     _artworkBackfillInFlight = true;
     try {
-      return await _artworkApi.backfillNext();
+      final page = await _artworkApi.backfillNext();
+      if (page != null && mounted) unawaited(_refreshArtworkQueueStatus());
+      return page;
     } finally {
       _artworkBackfillInFlight = false;
       if (_artworkBackfillRestartPending && mounted) {
@@ -137,14 +226,18 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    setState(
-      () => _artworkPreferences = MemoryArtworkPreferences(
+    setState(() {
+      _artworkPreferences = MemoryArtworkPreferences(
         consent: 'accepted',
         consentVersion: preferences.consentVersion,
         styleVersion: styleVersion,
         releaseEnabled: preferences.releaseEnabled,
-      ),
-    );
+      );
+      // A prior style can have a larger ready count. Resetting its queue
+      // snapshot makes the new style's first status authoritative.
+      _artworkQueueStatus = null;
+      _artworkDisplayEpoch++;
+    });
     _showMessage(context.l10n.memoryArtworkStyleUpdated);
     unawaited(_startArtworkPreview(restart: true));
   }
@@ -399,12 +492,16 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               dayLabel: entry.key,
               memories: entry.value,
               artworkApi: _artworkApi,
+              artworkRefreshEpoch: _artworkDisplayEpoch,
+              artworkAuthorityEpoch: _artworkAuthorityEpoch,
               onOpen: () => Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => EllaMemoryDayPage(
                     dayLabel: entry.key,
                     memories: entry.value,
                     artworkApi: _artworkApi,
+                    artworkRefreshEpoch: _artworkDisplayEpoch,
+                    artworkAuthorityEpoch: _artworkAuthorityEpoch,
                     exactAuthority: WalOwnerAuthority.active(),
                     authorityChanges: SharedPreferencesUtil.aiConsentAuthorityChanges,
                     onDelete: _deleteMemory,
@@ -458,6 +555,9 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Widget _memoryCard(ServerConversation conversation) => MemoryGalleryCard(
         conversation: conversation,
         layout: _layout,
+        artworkApi: _artworkApi,
+        artworkRefreshEpoch: _artworkDisplayEpoch,
+        artworkAuthorityEpoch: _artworkAuthorityEpoch,
         onOpen: () => _openMemory(conversation),
         onDelete: () => _deleteMemory(conversation),
       );
@@ -499,12 +599,16 @@ class MemoryDayGalleryCard extends StatelessWidget {
     required this.memories,
     required this.onOpen,
     this.artworkApi,
+    this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
   });
 
   final String dayLabel;
   final List<ServerConversation> memories;
   final VoidCallback onOpen;
   final MemoryArtworkApi? artworkApi;
+  final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
   @override
   Widget build(BuildContext context) {
@@ -528,7 +632,12 @@ class MemoryDayGalleryCard extends StatelessWidget {
             children: [
               AspectRatio(
                 aspectRatio: 1.75,
-                child: _MemoryDayArtworkCollage(memories: memories, artworkApi: artworkApi),
+                child: _MemoryDayArtworkCollage(
+                  memories: memories,
+                  artworkApi: artworkApi,
+                  artworkRefreshEpoch: artworkRefreshEpoch,
+                  artworkAuthorityEpoch: artworkAuthorityEpoch,
+                ),
               ),
               Padding(
                 padding: const EdgeInsets.all(16),
@@ -562,12 +671,24 @@ class MemoryDayGalleryCard extends StatelessWidget {
 }
 
 class _MemoryDayArtworkCollage extends StatelessWidget {
-  const _MemoryDayArtworkCollage({required this.memories, this.artworkApi});
+  const _MemoryDayArtworkCollage({
+    required this.memories,
+    this.artworkApi,
+    this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
+  });
 
   final List<ServerConversation> memories;
   final MemoryArtworkApi? artworkApi;
+  final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
-  Widget _art(ServerConversation memory) => MemoryArtworkImage(conversation: memory, api: artworkApi);
+  Widget _art(ServerConversation memory) => MemoryArtworkImage(
+        conversation: memory,
+        api: artworkApi,
+        refreshEpoch: artworkRefreshEpoch,
+        authorityEpoch: artworkAuthorityEpoch,
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -619,6 +740,8 @@ class EllaMemoryDayPage extends StatefulWidget {
     this.artworkApi,
     this.exactAuthority,
     this.authorityChanges,
+    this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
   });
 
   final String dayLabel;
@@ -627,6 +750,8 @@ class EllaMemoryDayPage extends StatefulWidget {
   final MemoryArtworkApi? artworkApi;
   final ExactAccountAuthorityVerifier? exactAuthority;
   final Listenable? authorityChanges;
+  final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
   @override
   State<EllaMemoryDayPage> createState() => _EllaMemoryDayPageState();
@@ -686,6 +811,9 @@ class _EllaMemoryDayPageState extends State<EllaMemoryDayPage> {
           return MemoryGalleryCard(
             conversation: memory,
             layout: MemoryGalleryLayout.journal,
+            artworkApi: widget.artworkApi,
+            artworkRefreshEpoch: widget.artworkRefreshEpoch,
+            artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
             onOpen: () => Navigator.of(
               context,
             ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: memory))),
@@ -779,6 +907,9 @@ class MemoryGalleryCard extends StatelessWidget {
     required this.onOpen,
     this.displayTitle,
     this.onDelete,
+    this.artworkApi,
+    this.artworkRefreshEpoch = 0,
+    this.artworkAuthorityEpoch = 0,
   });
 
   final ServerConversation conversation;
@@ -786,6 +917,9 @@ class MemoryGalleryCard extends StatelessWidget {
   final VoidCallback onOpen;
   final String? displayTitle;
   final Future<bool> Function()? onDelete;
+  final MemoryArtworkApi? artworkApi;
+  final int artworkRefreshEpoch;
+  final int artworkAuthorityEpoch;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -796,7 +930,16 @@ class MemoryGalleryCard extends StatelessWidget {
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SizedBox(width: 112, height: 112, child: MemoryArtworkImage(conversation: conversation)),
+              SizedBox(
+                width: 112,
+                height: 112,
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: artworkApi,
+                  refreshEpoch: artworkRefreshEpoch,
+                  authorityEpoch: artworkAuthorityEpoch,
+                ),
+              ),
               Expanded(
                 child: Padding(padding: const EdgeInsets.all(14), child: details),
               ),
@@ -807,7 +950,12 @@ class MemoryGalleryCard extends StatelessWidget {
             children: [
               AspectRatio(
                 aspectRatio: layout == MemoryGalleryLayout.journal ? 2.1 : 1.45,
-                child: MemoryArtworkImage(conversation: conversation),
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: artworkApi,
+                  refreshEpoch: artworkRefreshEpoch,
+                  authorityEpoch: artworkAuthorityEpoch,
+                ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),
             ],

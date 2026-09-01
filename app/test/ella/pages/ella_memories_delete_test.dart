@@ -33,14 +33,24 @@ class _MutableAuthority implements AccountCommitAuthority {
 }
 
 class _FakeArtworkApi extends MemoryArtworkApi {
-  _FakeArtworkApi({this.releaseEnabled = true})
-      : super(baseUrl: 'https://api.example.test', authorityProvider: () => null);
+  _FakeArtworkApi({
+    this.releaseEnabled = true,
+    List<MemoryArtworkResult>? displayResults,
+    List<MemoryArtworkQueueStatus?>? queueStatuses,
+  })  : _displayResults = List<MemoryArtworkResult>.of(displayResults ?? const []),
+        _queueStatuses = List<MemoryArtworkQueueStatus?>.of(queueStatuses ?? const []),
+        super(baseUrl: 'https://api.example.test', authorityProvider: () => null);
 
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
   int backfillCalls = 0;
   final List<String?> backfillCursors = [];
   final List<MemoryArtworkBackfillMode> backfillModes = [];
+  final List<MemoryArtworkResult> _displayResults;
+  final List<MemoryArtworkQueueStatus?> _queueStatuses;
+  final List<bool> displayEnqueueRequests = [];
+  int displayRequests = 0;
+  int queueStatusRequests = 0;
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async => MemoryArtworkPreferences(
@@ -67,6 +77,72 @@ class _FakeArtworkApi extends MemoryArtworkApi {
     backfillModes.add(mode);
     return const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false);
   }
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    displayEnqueueRequests.add(enqueueIfMissing);
+    final request = displayRequests++;
+    if (_displayResults.isEmpty) {
+      return const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable);
+    }
+    return _displayResults[request < _displayResults.length ? request : _displayResults.length - 1];
+  }
+
+  @override
+  Future<MemoryArtworkQueueStatus?> queueStatus() async {
+    final request = queueStatusRequests++;
+    if (_queueStatuses.isEmpty) return null;
+    return _queueStatuses[request < _queueStatuses.length ? request : _queueStatuses.length - 1];
+  }
+}
+
+MemoryArtworkQueueStatus _queueStatus({
+  required int ready,
+  required int active,
+  required int queued,
+  String styleVersion = memoryArtworkDefaultStyle,
+  String generationId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+}) {
+  final remaining = active + queued;
+  final state = remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running;
+  return MemoryArtworkQueueStatus(
+    generationId: generationId,
+    styleVersion: styleVersion,
+    state: state,
+    controlState: state,
+    scanStatus: 'completed',
+    scanned: ready + remaining,
+    pagesProcessed: 1,
+    autoContinue: false,
+    batchSize: 10,
+    batchRemaining: remaining,
+    pauseReason: '',
+    ready: ready,
+    active: active,
+    queued: queued,
+    retrying: 0,
+    failed: 0,
+    total: ready + remaining,
+    remaining: remaining,
+    styles: [
+      MemoryArtworkStyleProgress(
+        styleVersion: styleVersion,
+        state: state,
+        ready: ready,
+        active: active,
+        queued: queued,
+        retrying: 0,
+        failed: 0,
+        total: ready + remaining,
+        remaining: remaining,
+      ),
+    ],
+  );
 }
 
 class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
@@ -82,6 +158,16 @@ class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
     backfillModes.add(mode);
     if (backfillCalls == 1) return firstBackfill.future;
     return Future.value(const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false));
+  }
+}
+
+class _UnavailablePreferencesArtworkApi extends _FakeArtworkApi {
+  int preferenceRequests = 0;
+
+  @override
+  Future<MemoryArtworkPreferences?> preferences() async {
+    preferenceRequests += 1;
+    return null;
   }
 }
 
@@ -378,8 +464,126 @@ void main() {
     expect(find.textContaining('Illustration style saved'), findsOneWidget);
   });
 
-  testWidgets('a second explicit style change restarts one cursorless preview after the active preview finishes',
-      (tester) async {
+  testWidgets('unavailable artwork preferences stop retrying until a later authority epoch', (tester) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-preferences-unavailable')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _UnavailablePreferencesArtworkApi();
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    expect(artworkApi.preferenceRequests, 1, reason: 'first page load has no authority retry loop');
+
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    await tester.pump();
+    expect(artworkApi.preferenceRequests, 2, reason: 'a new authority epoch performs one fresh read');
+
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 10));
+    expect(artworkApi.preferenceRequests, 5, reason: 'the authority retry budget is finite');
+
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    await tester.pump();
+    expect(artworkApi.preferenceRequests, 6, reason: 'a later explicit authority epoch can recover');
+  });
+
+  testWidgets('completed artwork queue refreshes visible gallery cards without scheduling artwork from rendering', (
+    tester,
+  ) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-visible-artwork')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi(
+      displayResults: [
+        const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable),
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://cdn.example.test/memory-visible-artwork.png'),
+          cacheKey: 'visible-artwork-v1',
+        ),
+      ],
+      queueStatuses: [_queueStatus(ready: 0, active: 1, queued: 0), _queueStatus(ready: 1, active: 0, queued: 0)],
+    );
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    // The gallery can build a visible card again while its preferences settle.
+    // Capture that baseline; the assertion below is about the completed queue
+    // advancing the display result, not a particular first-frame count.
+    final initialDisplayRequests = artworkApi.displayRequests;
+    expect(initialDisplayRequests, greaterThanOrEqualTo(1));
+    expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+
+    expect(artworkApi.queueStatusRequests, greaterThanOrEqualTo(2));
+    expect(
+      artworkApi.displayRequests,
+      greaterThan(initialDisplayRequests),
+      reason: 'completed queue progress refreshes the visible gallery card',
+    );
+    expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
+  });
+
+  testWidgets('a new style queue invalidates visible cards even when its ready count resets below the prior style', (
+    tester,
+  ) async {
+    final provider = ConversationProvider()
+      ..conversations = [memory('memory-style-reset')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    final artworkApi = _FakeArtworkApi(
+      displayResults: [
+        const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating),
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://cdn.example.test/memory-style-reset.png'),
+          cacheKey: 'memory-style-reset-paper',
+        ),
+      ],
+      queueStatuses: [
+        _queueStatus(ready: 527, active: 0, queued: 0),
+        _queueStatus(
+          ready: 0,
+          active: 1,
+          queued: 0,
+          styleVersion: memoryArtworkPaperCollageStyle,
+          generationId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        ),
+      ],
+    );
+    addTearDown(provider.dispose);
+
+    await pumpPage(tester, provider, artworkApi: artworkApi);
+    final requestsBeforeStyleChange = artworkApi.displayRequests;
+
+    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paper collage'));
+    await tester.pumpAndSettle();
+
+    expect(artworkApi.queueStatusRequests, greaterThanOrEqualTo(2));
+    expect(
+      artworkApi.displayRequests,
+      greaterThan(requestsBeforeStyleChange),
+      reason: 'the new style must not inherit the previous style\'s ready total',
+    );
+    expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
+  });
+
+  testWidgets('a second explicit style change restarts one cursorless preview after the active preview finishes', (
+    tester,
+  ) async {
     final provider = ConversationProvider()
       ..conversations = [memory('memory-style-restart')]
       ..hasLoadedConversations = true
@@ -431,10 +635,7 @@ void main() {
 
     expect(artworkApi.backfillCalls, 2, reason: 'the second explicit style starts after the active request completes');
     expect(artworkApi.backfillCursors, [null, null]);
-    expect(
-      artworkApi.backfillModes,
-      [MemoryArtworkBackfillMode.preview, MemoryArtworkBackfillMode.preview],
-    );
+    expect(artworkApi.backfillModes, [MemoryArtworkBackfillMode.preview, MemoryArtworkBackfillMode.preview]);
   });
 
   testWidgets('days layout groups a local day into one comic-style tile', (tester) async {

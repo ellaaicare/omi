@@ -34,7 +34,10 @@ import 'package:omi/providers/memories_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/devices.dart';
+import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/devices/discovery/device_discoverer.dart';
+import 'package:omi/services/devices/omi_connection.dart';
+import 'package:omi/services/devices/transports/device_transport.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
@@ -1097,6 +1100,42 @@ void main() {
     await service.stop();
 
     expect(await service.ensureConnection('necklace-1', force: true), isNull);
+  });
+
+  test('late first-connection disconnect cannot reach subscribers after a same-device reconnect', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-session-fence', type: DeviceType.omi, rssi: -30);
+    await SharedPreferencesUtil().btDeviceSet(necklace);
+    final first = _LateDisconnectConnection(necklace, _LateDisconnectTransport(necklace.id));
+    final second = _LateDisconnectConnection(necklace, _LateDisconnectTransport(necklace.id));
+    final pendingConnections = <DeviceConnection>[first, second];
+    final service = DeviceService(
+      discoverers: [],
+      connectionCreator: (_) => pendingConnections.removeAt(0),
+    );
+    final deviceProviderSubscriber = _RecordingDeviceSubscription();
+    final onboardingSubscriber = _RecordingDeviceSubscription();
+    final speechProfileSubscriber = _RecordingDeviceSubscription();
+    service
+      ..subscribe(deviceProviderSubscriber, deviceProviderSubscriber)
+      ..subscribe(onboardingSubscriber, onboardingSubscriber)
+      ..subscribe(speechProfileSubscriber, speechProfileSubscriber)
+      ..start();
+
+    expect(await service.ensureConnection(necklace.id), same(first));
+    await service.disconnectDevice();
+    expect(await service.ensureConnection(necklace.id), same(second));
+
+    first.releaseLateDisconnect();
+    await _quiesce();
+
+    for (final subscriber in [deviceProviderSubscriber, onboardingSubscriber, speechProfileSubscriber]) {
+      expect(
+        subscriber.connectionStates,
+        [DeviceConnectionState.connected, DeviceConnectionState.connected],
+        reason: 'the production connection callback must reject session one after session two is active',
+      );
+    }
+    await service.stop();
   });
 
   test('mobile mic transition waits for an in-flight start and suppresses its late callback', () async {
@@ -2210,7 +2249,11 @@ class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
   final List<DeviceConnectionState> connectionStates = [];
 
   @override
-  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state) {
+  void onDeviceConnectionStateChanged(
+    String deviceId,
+    DeviceConnectionState state, {
+    int? connectionGeneration,
+  }) {
     connectionStates.add(state);
   }
 
@@ -2221,6 +2264,69 @@ class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
 
   @override
   void onStatusChanged(DeviceServiceStatus status) => statuses.add(status);
+}
+
+class _LateDisconnectConnection extends OmiDeviceConnection {
+  _LateDisconnectConnection(BtDevice device, this._lateTransport) : super(device, _lateTransport);
+
+  final _LateDisconnectTransport _lateTransport;
+
+  @override
+  Future<void> disconnect() async {
+    // Model a native transport that reports its terminal callback after the
+    // service has started a replacement session.
+    connectionState = DeviceConnectionState.disconnected;
+  }
+
+  void releaseLateDisconnect() => _lateTransport.emitDisconnected();
+}
+
+class _LateDisconnectTransport implements DeviceTransport {
+  _LateDisconnectTransport(this.deviceId);
+
+  final StreamController<DeviceTransportState> _states = StreamController<DeviceTransportState>.broadcast(sync: true);
+  bool _connected = false;
+
+  @override
+  final String deviceId;
+
+  @override
+  Stream<DeviceTransportState> get connectionStateStream => _states.stream;
+
+  @override
+  Future<void> connect() async {
+    _connected = true;
+    _states.add(DeviceTransportState.connected);
+  }
+
+  @override
+  Future<void> disconnect() async {
+    _connected = false;
+    _states.add(DeviceTransportState.disconnected);
+  }
+
+  void emitDisconnected() {
+    _connected = false;
+    _states.add(DeviceTransportState.disconnected);
+  }
+
+  @override
+  Future<void> dispose() async => _states.close();
+
+  @override
+  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) => const Stream.empty();
+
+  @override
+  Future<bool> isConnected() async => _connected;
+
+  @override
+  Future<bool> ping() async => _connected;
+
+  @override
+  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async => const [];
+
+  @override
+  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
 }
 
 class _DelayedRecorderRunner implements IBackgroundRecorderRunner {

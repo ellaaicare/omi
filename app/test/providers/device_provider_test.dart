@@ -38,6 +38,16 @@ class _FakeDeviceService implements IDeviceService {
     }
   }
 
+  void publishConnection(String deviceId, DeviceConnectionState state, {required int connectionGeneration}) {
+    for (final subscriber in _subscriptions.values.toList()) {
+      subscriber.onDeviceConnectionStateChanged(
+        deviceId,
+        state,
+        connectionGeneration: connectionGeneration,
+      );
+    }
+  }
+
   @override
   void start() => publish(DeviceServiceStatus.ready);
 
@@ -70,12 +80,7 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({
-    this.startGate,
-    this.disconnectGate,
-    this.failuresBeforeStart = 0,
-    this.onDeviceStart,
-  });
+  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.failuresBeforeStart = 0, this.onDeviceStart});
 
   final Completer<void>? startGate;
   final Completer<void>? disconnectGate;
@@ -105,6 +110,18 @@ class _RecordingCaptureProvider extends CaptureProvider {
   }
 }
 
+Future<void> bindRememberedDeviceForCurrentTestAuthority(
+  BtDevice device, {
+  String uid = 'test-user',
+  String profileBindingId = 'test-profile',
+}) async {
+  await SharedPreferencesUtil.init();
+  final preferences = SharedPreferencesUtil()..uid = uid;
+  await preferences.saveString('aiConsentProfileBindingId', profileBindingId);
+  await preferences.btDeviceSet(device);
+  await preferences.btDeviceOwnerBindingSet('$uid\u001f$profileBindingId');
+}
+
 void main() {
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
@@ -128,6 +145,30 @@ void main() {
     );
   });
 
+  setUp(() async {
+    await SharedPreferencesUtil.init();
+    SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+    final preferences = SharedPreferencesUtil()..uid = '';
+    await preferences.saveString('aiConsentProfileBindingId', '');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+  });
+
+  test('empty remembered-device sentinels never present as a paired necklace', () async {
+    final provider = DeviceProvider(deviceService: _FakeDeviceService(DeviceServiceStatus.ready));
+    addTearDown(provider.dispose);
+
+    provider.pairedDevice = BtDevice.empty();
+    provider.connectedDevice = BtDevice.empty();
+
+    expect(provider.presentationPairedDevice, isNull);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(provider.presentationIsConnected, isFalse);
+
+    await provider.getDeviceInfo();
+    expect(provider.pairedDevice, isNull, reason: 'storage sentinels are not Home presentation state');
+  });
+
   group('battery throttling', () {
     late DeviceProvider provider;
     late int notifyCount;
@@ -137,6 +178,8 @@ void main() {
       notifyCount = 0;
       provider.addListener(() => notifyCount++);
     });
+
+    tearDown(() => provider.dispose());
 
     test('notifies on first battery reading', () {
       final result = provider.updateBatteryLevelForTesting(50);
@@ -154,10 +197,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Small change (2%) within 15 minutes - should NOT notify
-      final result = provider.updateBatteryLevelForTesting(
-        52,
-        now: now.add(const Duration(minutes: 5)),
-      );
+      final result = provider.updateBatteryLevelForTesting(52, now: now.add(const Duration(minutes: 5)));
 
       expect(result, false);
       expect(notifyCount, 1); // No additional notification
@@ -172,10 +212,7 @@ void main() {
       expect(notifyCount, 1);
 
       // 5% change - should notify
-      final result = provider.updateBatteryLevelForTesting(
-        45,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(45, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -189,10 +226,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Small change but 15 minutes elapsed - should notify
-      final result = provider.updateBatteryLevelForTesting(
-        51,
-        now: now.add(const Duration(minutes: 15)),
-      );
+      final result = provider.updateBatteryLevelForTesting(51, now: now.add(const Duration(minutes: 15)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -206,10 +240,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Cross below 20% (only 6% change, but crosses threshold)
-      final result = provider.updateBatteryLevelForTesting(
-        19,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(19, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -223,10 +254,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Cross above 20% (only 6% change, but crosses threshold)
-      final result = provider.updateBatteryLevelForTesting(
-        21,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(21, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -240,10 +268,7 @@ void main() {
       expect(notifyCount, 1);
 
       // Small change staying above 20% - should NOT notify
-      final result = provider.updateBatteryLevelForTesting(
-        23,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(23, now: now.add(const Duration(minutes: 1)));
 
       expect(result, false);
       expect(notifyCount, 1);
@@ -260,10 +285,7 @@ void main() {
       provider.resetBatteryThrottlingForTesting();
 
       // Now same value should trigger notification again (as if first reading)
-      final result = provider.updateBatteryLevelForTesting(
-        50,
-        now: now.add(const Duration(minutes: 1)),
-      );
+      final result = provider.updateBatteryLevelForTesting(50, now: now.add(const Duration(minutes: 1)));
 
       expect(result, true);
       expect(notifyCount, 2);
@@ -317,7 +339,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected, connectionGeneration: 1);
     service.publish(DeviceServiceStatus.stop);
     await Future<void>.delayed(const Duration(milliseconds: 150));
 
@@ -326,18 +348,135 @@ void main() {
     expect(provider.presentationIsConnected, isFalse);
   });
 
+  test('an unowned necklace callback cannot attach or start capture for the current account', () async {
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil()..uid = '';
+    await preferences.saveString('aiConsentProfileBindingId', '');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+    var resolverCalls = 0;
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async {
+        resolverCalls++;
+        return BtDevice(name: 'Ella', id: 'legacy-necklace', type: DeviceType.omi, rssi: -30);
+      },
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged('legacy-necklace', DeviceConnectionState.connected,
+        connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(resolverCalls, 0);
+    expect(capture.deviceStarts, 0);
+    expect(provider.connectedDevice, isNull);
+    expect(SharedPreferencesUtil().btDevice.id, isEmpty);
+  });
+
+  test('a same-owner authority refresh preserves the active necklace capture', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'same-owner-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(capture.recordingState, RecordingState.deviceRecord);
+
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
+
+    expect(provider.connectedDevice?.id, necklace.id);
+    expect(provider.presentationIsConnected, isTrue);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('authority reconciliation cannot notify after the device provider is disposed', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'dispose-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    );
+    var notificationsAfterInvalidation = 0;
+    provider.addListener(() => notificationsAfterInvalidation++);
+
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    provider.dispose();
+    await pumpEventQueue();
+
+    expect(notificationsAfterInvalidation, 0);
+  });
+
+  test('a stale disconnect session cannot tear down a later reconnect to the same necklace', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'shared-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace, uid: 'account-a', profileBindingId: 'profile-a');
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    service.publishConnection(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(provider.presentationIsConnected, isTrue);
+
+    final preferences = SharedPreferencesUtil()..uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('account-b\u001fprofile-b');
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    await pumpEventQueue();
+
+    await provider.confirmConnectedDeviceForCurrentAuthority(necklace);
+    service.publishConnection(necklace.id, DeviceConnectionState.connected, connectionGeneration: 2);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    final disconnectsBeforeStaleCallback = capture.disconnectedDeviceIds.length;
+    expect(provider.presentationIsConnected, isTrue);
+
+    service.publishConnection(necklace.id, DeviceConnectionState.disconnected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isTrue);
+    expect(capture.disconnectedDeviceIds, hasLength(disconnectsBeforeStaleCallback));
+  });
+
   test('device connection cannot start necklace capture while phone owns audio', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
     final provider = DeviceProvider(
       deviceService: service,
       connectionResolver: (_) async => necklace,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -348,17 +487,19 @@ void main() {
 
   test('necklace capture resumes when phone releases audio without reconnecting', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
     final provider = DeviceProvider(
       deviceService: service,
       connectionResolver: (_) async => necklace,
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
     expect(capture.deviceStarts, 0);
@@ -373,6 +514,7 @@ void main() {
 
   test('necklace retry re-defers when phone reacquires audio', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     late final _RecordingCaptureProvider capture;
     capture = _RecordingCaptureProvider(
@@ -385,11 +527,12 @@ void main() {
       deviceService: service,
       connectionResolver: (_) async => necklace,
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -406,6 +549,8 @@ void main() {
 
   test('in-flight connected resolution cannot repopulate after stop', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final resolution = Completer<BtDevice?>();
     final resolverEntered = Completer<void>();
     final capture = _RecordingCaptureProvider();
@@ -415,14 +560,15 @@ void main() {
         resolverEntered.complete();
         return resolution.future;
       },
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged('necklace-1', DeviceConnectionState.connected, connectionGeneration: 1);
     await resolverEntered.future;
     service.publish(DeviceServiceStatus.stop);
-    resolution.complete(BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30));
+    resolution.complete(necklace);
     await pumpEventQueue();
 
     expect(capture.deviceStarts, 0);
@@ -537,8 +683,14 @@ void main() {
   test('foreground resume immediately retries an exhausted saved necklace', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
-    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
+    final preferences = SharedPreferencesUtil()..uid = 'resume-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'resume-profile');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+    addTearDown(() async {
+      await preferences.btDeviceSet(BtDevice.empty());
+      await preferences.btDeviceOwnerBindingSet('');
+    });
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     var scanCalls = 0;
     final provider = DeviceProvider(
@@ -558,7 +710,8 @@ void main() {
     }
     expect(provider.automaticReconnectExhausted, isTrue);
 
-    await SharedPreferencesUtil().btDeviceSet(necklace);
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('resume-user\u001fresume-profile');
     provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
     for (var attempt = 0; attempt < 100 && !provider.presentationIsConnected; attempt++) {
       await Future<void>.delayed(const Duration(milliseconds: 2));
@@ -632,6 +785,7 @@ void main() {
   test('connected callback publishes device and connection atomically before reconnect scan failure', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final scanEntered = Completer<void>();
     final scanResult = Completer<BtDevice?>();
     final storageEntered = Completer<void>();
@@ -650,6 +804,7 @@ void main() {
       },
       reconnectionInterval: const Duration(milliseconds: 2),
       maxAutomaticReconnectAttempts: 3,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -657,7 +812,7 @@ void main() {
     await provider.periodicConnect('test callback publication ordering');
     await scanEntered.future;
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await storageEntered.future.timeout(const Duration(seconds: 1));
 
     expect(provider.connectedDevice, same(necklace));
@@ -681,17 +836,19 @@ void main() {
   test('connected callback retries necklace capture and ignores optional setup failure', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final capture = _RecordingCaptureProvider(failuresBeforeStart: 1);
     final provider = DeviceProvider(
       deviceService: service,
       connectionResolver: (_) async => necklace,
       storageListResolver: (_) => throw StateError('synthetic optional storage failure'),
       deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await pumpEventQueue();
 
@@ -702,11 +859,185 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test('a connected necklace is persisted before optional metadata work so startup can reconnect it', () async {
+    await SharedPreferencesUtil.init();
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+    addTearDown(() => SharedPreferencesUtil().btDeviceSet(BtDevice.empty()));
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'remembered-necklace-1',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(SharedPreferencesUtil().btDevice.id, necklace.id);
+    expect(provider.presentationPairedDevice?.id, necklace.id);
+  });
+
+  test('a delayed remembered-necklace write cannot restore account A after account B takes authority', () async {
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil()..uid = 'account-a';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    await preferences.btDeviceSet(BtDevice.empty());
+    addTearDown(() => preferences.btDeviceSet(BtDevice.empty()));
+    final writeStarted = Completer<void>();
+    final allowWrite = Completer<void>();
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'account-a-necklace',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      rememberedDeviceWriter: (device) async {
+        if (device.id == necklace.id && !writeStarted.isCompleted) {
+          writeStarted.complete();
+          await allowWrite.future;
+        }
+        await preferences.btDeviceSet(device);
+      },
+    );
+    addTearDown(provider.dispose);
+
+    unawaited(provider.confirmConnectedDeviceForCurrentAuthority(necklace));
+    await writeStarted.future.timeout(const Duration(seconds: 1));
+
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    await preferences.btDeviceSet(BtDevice.empty());
+    allowWrite.complete();
+    await pumpEventQueue();
+
+    expect(
+      preferences.btDevice.id,
+      isEmpty,
+      reason: 'a stale account callback must not repopulate the replacement account',
+    );
+  });
+
+  test('an account transition quiesces an in-flight remembered reconnect before it can start capture for B', () async {
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil()..uid = 'account-a';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'account-a-necklace',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    await preferences.btDeviceSet(necklace);
+    await preferences.btDeviceOwnerBindingSet('account-a\u001fprofile-a');
+    addTearDown(() async {
+      await preferences.btDeviceSet(BtDevice.empty());
+      await preferences.btDeviceOwnerBindingSet('');
+    });
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
+    final scanStarted = Completer<void>();
+    final allowScanResult = Completer<BtDevice?>();
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        if (!scanStarted.isCompleted) scanStarted.complete();
+        return allowScanResult.future;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 1),
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    service.publish(DeviceServiceStatus.ready);
+    await scanStarted.future.timeout(const Duration(seconds: 1));
+
+    preferences.uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    allowScanResult.complete(necklace);
+    await pumpEventQueue();
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.connectedDevice, isNull);
+    expect(
+      capture.deviceStarts,
+      0,
+      reason: 'audio captured under account A must not begin after account B takes authority',
+    );
+  });
+
+  test('a persisted necklace reconnects after an app-provider restart without revisiting Settings', () async {
+    await SharedPreferencesUtil.init();
+    final necklace = BtDevice(
+      name: 'Ella necklace',
+      id: 'restart-necklace',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '1.0.0',
+    );
+    final preferences = SharedPreferencesUtil()..uid = 'restart-user';
+    await preferences.saveString('aiConsentProfileBindingId', 'restart-profile');
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+    final firstProvider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+    );
+    await firstProvider.confirmConnectedDeviceForCurrentAuthority(necklace);
+    expect(SharedPreferencesUtil().btDevice.id, necklace.id);
+    firstProvider.dispose();
+
+    var reconnectScans = 0;
+    final restartedProvider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async {
+        reconnectScans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 2),
+    );
+    addTearDown(restartedProvider.dispose);
+    for (var attempt = 0; attempt < 100 && !restartedProvider.presentationIsConnected; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(reconnectScans, greaterThanOrEqualTo(1));
+    expect(restartedProvider.presentationConnectedDevice?.id, necklace.id);
+  });
+
   test('device service restart waits for exact necklace capture teardown', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(necklace);
-    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
     final disconnectGate = Completer<void>();
     final capture = _RecordingCaptureProvider(disconnectGate: disconnectGate);
     var reconnectScans = 0;
@@ -740,7 +1071,7 @@ void main() {
   test('only a later ready generation reconnects the retained bound device', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await SharedPreferencesUtil.init();
-    await SharedPreferencesUtil().btDeviceSet(necklace);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final service = _FakeDeviceService(DeviceServiceStatus.init);
     var scanCalls = 0;
     final startGate = Completer<void>();
@@ -756,7 +1087,7 @@ void main() {
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     expect(scanCalls, 0);
     expect(capture.deviceStarts, 0);
@@ -766,7 +1097,7 @@ void main() {
     expect(scanCalls, 1);
     expect(provider.pairedDevice?.id, necklace.id);
 
-    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected);
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 2);
     await Future<void>.delayed(const Duration(milliseconds: 150));
     expect(capture.deviceStarts, 1);
 

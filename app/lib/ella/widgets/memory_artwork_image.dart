@@ -25,6 +25,12 @@ class MemoryArtworkImage extends StatefulWidget {
     this.cacheEvictor,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
+    this.maxAuthorityUnavailableRetries = 3,
+    this.maxTransientRetries = 3,
+    this.maxImageDownloadRetries = 2,
+    this.refreshEpoch = 0,
+    this.authorityEpoch = 0,
+    this.enqueueIfMissing = false,
   });
 
   final ServerConversation conversation;
@@ -33,6 +39,31 @@ class MemoryArtworkImage extends StatefulWidget {
   final MemoryArtworkCacheEvictor? cacheEvictor;
   final BoxFit fit;
   final Duration retryDelay;
+
+  /// A replacement authority can take a moment to persist after its notifier
+  /// fires. Retry that narrow race a few times, then wait for the next parent
+  /// refresh instead of polling a failing authenticated endpoint forever.
+  final int maxAuthorityUnavailableRetries;
+
+  /// Display reads never create artwork. A visible in-progress result or a
+  /// transport failure gets only this many follow-up reads before the parent
+  /// queue revision or an explicit refresh must ask again.
+  final int maxTransientRetries;
+
+  /// A failed signed URL or corrupted cached image gets a small number of
+  /// recovery reads. Further failures wait for a parent queue refresh or a new
+  /// account authority instead of continuously fetching artwork the user
+  /// cannot display.
+  final int maxImageDownloadRetries;
+
+  /// A parent-owned queue completion revision. It refreshes visible cards after
+  /// the server finishes a batch without letting scrolling create new jobs.
+  final int refreshEpoch;
+
+  /// An account/profile change invalidates signed URLs and disk bytes even if
+  /// a memory id happens to collide across authorities.
+  final int authorityEpoch;
+  final bool enqueueIfMissing;
 
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
@@ -45,6 +76,18 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   int _requestGeneration = 0;
   Timer? _retryTimer;
   bool _imageRetryScheduled = false;
+  int _authorityUnavailableRetries = 0;
+  int? _authorityRetryBudgetEpoch;
+  String? _authorityRetryBudgetMemoryId;
+  bool _authorityRetryBudgetExhausted = false;
+  int _transientRetries = 0;
+  int? _transientRetryBudgetEpoch;
+  int? _transientRetryBudgetRefreshEpoch;
+  String? _transientRetryBudgetMemoryId;
+  int _imageDownloadRetries = 0;
+  int? _imageRetryBudgetAuthorityEpoch;
+  int? _imageRetryBudgetRefreshEpoch;
+  String? _imageRetryBudgetMemoryId;
 
   @override
   void initState() {
@@ -58,8 +101,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (oldWidget.conversation.id != widget.conversation.id ||
         oldWidget.conversation.artwork?.enrichmentRevision != widget.conversation.artwork?.enrichmentRevision ||
         oldWidget.conversation.artwork?.status != widget.conversation.artwork?.status ||
-        oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion) {
-      _refreshRequest();
+        oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion ||
+        oldWidget.refreshEpoch != widget.refreshEpoch ||
+        oldWidget.authorityEpoch != widget.authorityEpoch) {
+      _refreshRequest(invalidateCachedArtwork: oldWidget.authorityEpoch != widget.authorityEpoch);
     }
   }
 
@@ -69,7 +114,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     super.dispose();
   }
 
-  void _refreshRequest() {
+  void _refreshRequest({bool invalidateCachedArtwork = false}) {
+    _resetAuthorityRetryBudgetIfNeeded();
+    _resetTransientRetryBudgetIfNeeded();
+    _resetImageRetryBudgetIfNeeded();
+    // A persistent authority failure remains quiet until its authority changes.
+    // Once the final bounded retry succeeds, however, later queue revisions
+    // are valid and must be allowed to refresh the card.
+    if (_authorityRetryBudgetExhausted && _isAuthorityUnavailable(_remoteResult)) return;
     _retryTimer?.cancel();
     _retryTimer = null;
     _imageRetryScheduled = false;
@@ -82,14 +134,53 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       enrichmentRevision: artwork?.enrichmentRevision ?? '',
     );
     _remoteResult = null;
-    if (_cacheKey != cacheKey) {
+    if (_cacheKey != cacheKey || invalidateCachedArtwork) {
       _cacheKey = cacheKey;
       _cachedFile = null;
+    }
+    if (invalidateCachedArtwork && cacheKey.isNotEmpty) {
+      unawaited(_evictThenLoadRemote(api, artwork, generation, cacheKey));
+      return;
     }
     if (cacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(cacheKey, generation));
     }
     unawaited(_loadRemoteResult(api, artwork, generation));
+  }
+
+  void _resetAuthorityRetryBudgetIfNeeded() {
+    final memoryId = widget.conversation.id;
+    if (_authorityRetryBudgetEpoch == widget.authorityEpoch && _authorityRetryBudgetMemoryId == memoryId) return;
+    _authorityRetryBudgetEpoch = widget.authorityEpoch;
+    _authorityRetryBudgetMemoryId = memoryId;
+    _authorityUnavailableRetries = 0;
+    _authorityRetryBudgetExhausted = false;
+  }
+
+  void _resetTransientRetryBudgetIfNeeded() {
+    final memoryId = widget.conversation.id;
+    if (_transientRetryBudgetEpoch == widget.authorityEpoch &&
+        _transientRetryBudgetRefreshEpoch == widget.refreshEpoch &&
+        _transientRetryBudgetMemoryId == memoryId) {
+      return;
+    }
+    _transientRetryBudgetEpoch = widget.authorityEpoch;
+    _transientRetryBudgetRefreshEpoch = widget.refreshEpoch;
+    _transientRetryBudgetMemoryId = memoryId;
+    _transientRetries = 0;
+  }
+
+  void _resetImageRetryBudgetIfNeeded() {
+    final memoryId = widget.conversation.id;
+    if (_imageRetryBudgetAuthorityEpoch == widget.authorityEpoch &&
+        _imageRetryBudgetRefreshEpoch == widget.refreshEpoch &&
+        _imageRetryBudgetMemoryId == memoryId) {
+      return;
+    }
+    _imageRetryBudgetAuthorityEpoch = widget.authorityEpoch;
+    _imageRetryBudgetRefreshEpoch = widget.refreshEpoch;
+    _imageRetryBudgetMemoryId = memoryId;
+    _imageDownloadRetries = 0;
   }
 
   Future<void> _loadCachedFile(String cacheKey, int generation) async {
@@ -109,12 +200,46 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return info?.file;
   }
 
-  Future<void> _loadRemoteResult(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) async {
+  Future<void> _evictThenLoadRemote(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation,
+    String cacheKey,
+  ) async {
+    try {
+      await (widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile)(cacheKey);
+    } catch (_) {
+      // A stale local file is never authority for a replacement account.
+    }
+    if (!mounted || generation != _requestGeneration) return;
+    await _loadRemoteResult(api, artwork, generation, loadCachedFile: false);
+  }
+
+  Future<void> _loadRemoteResult(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation, {
+    bool loadCachedFile = true,
+  }) async {
     MemoryArtworkResult result;
     try {
-      result = await api.loadForDisplay(widget.conversation.id, enqueueIfMissing: true);
+      // Queue ownership is the source of truth for generation. A card only
+      // reads its current state once; it must not multiply GET traffic by
+      // doing a private 30-second poll for every visible memory.
+      result = await api.loadForDisplay(
+        widget.conversation.id,
+        enqueueIfMissing: widget.enqueueIfMissing,
+        pollAttempts: 0,
+      );
     } catch (_) {
-      _scheduleRetry(api, artwork, generation);
+      if (!mounted || generation != _requestGeneration) return;
+      setState(() {
+        _remoteResult = const MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: 'memory_artwork_transport_unavailable',
+        );
+      });
+      _scheduleRetry(api, artwork, generation, transientTransportFailure: true);
       return;
     }
     if (!mounted || generation != _requestGeneration) return;
@@ -126,14 +251,25 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         _cachedFile = null;
       }
     });
-    if (readyCacheKey.isNotEmpty) {
+    if (loadCachedFile && readyCacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(readyCacheKey, generation));
     }
-    if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation);
+    if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
   }
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
     if (!mounted || generation != _requestGeneration || _imageRetryScheduled) return;
+    if (_imageDownloadRetries >= widget.maxImageDownloadRetries) {
+      setState(() {
+        _cachedFile = null;
+        _remoteResult = const MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: 'memory_artwork_download_unavailable',
+        );
+      });
+      return;
+    }
+    _imageDownloadRetries++;
     _imageRetryScheduled = true;
     unawaited(_recoverImageDownload(api, artwork, generation, cacheKey));
   }
@@ -165,26 +301,40 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   bool _shouldRetry(MemoryArtworkResult result) {
-    if (result.refreshPending) return true;
-    if (result.status == MemoryArtworkResultStatus.generating) return true;
-    if (result.status != MemoryArtworkResultStatus.unavailable) return false;
-    return const {
-      'memory_artwork_unavailable',
-      'memory_artwork_not_found',
-      'memory_artwork_generation_not_queued',
-      'memory_artwork_enrichment_not_terminal',
-      'memory_artwork_provider_unavailable',
-      'memory_artwork_provider_failed',
-      'memory_artwork_runtime_authority_unavailable',
-      'memory_artwork_worker_failed',
-      'memory_artwork_finalize_conflict',
-      'memory_artwork_object_missing',
-      'memory_artwork_storage_failed',
-    }.contains(result.failureCode);
+    return result.refreshPending ||
+        result.status == MemoryArtworkResultStatus.generating ||
+        _isAuthorityUnavailable(result);
   }
 
-  void _scheduleRetry(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation) {
+  bool _isAuthorityUnavailable(MemoryArtworkResult? result) {
+    return const {
+      'memory_artwork_authority_unavailable',
+      'memory_artwork_runtime_authority_unavailable',
+    }.contains(result?.failureCode);
+  }
+
+  void _scheduleRetry(
+    MemoryArtworkApi api,
+    MemoryArtworkState? artwork,
+    int generation, {
+    MemoryArtworkResult? result,
+    bool transientTransportFailure = false,
+  }) {
     if (!mounted || generation != _requestGeneration || _retryTimer?.isActive == true) return;
+    if (_isAuthorityUnavailable(result)) {
+      if (_authorityUnavailableRetries >= widget.maxAuthorityUnavailableRetries) {
+        _authorityRetryBudgetExhausted = true;
+        return;
+      }
+      _authorityUnavailableRetries++;
+    } else if (transientTransportFailure ||
+        result?.refreshPending == true ||
+        result?.status == MemoryArtworkResultStatus.generating) {
+      if (_transientRetries >= widget.maxTransientRetries) return;
+      _transientRetries++;
+    } else {
+      return;
+    }
     _retryTimer = Timer(widget.retryDelay, () {
       _retryTimer = null;
       if (!mounted || generation != _requestGeneration) return;
@@ -214,29 +364,31 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return Semantics(
         image: true,
         label: context.l10n.memoryGeneratedArtworkLabel,
-        child: CachedNetworkImage(
-          imageUrl: result!.url.toString(),
+        child: KeyedSubtree(
           key: Key('memory-generated-artwork-${widget.conversation.id}'),
-          cacheKey: result.cacheKey,
-          cacheManager: MemoryArtworkCache.manager,
-          fit: widget.fit,
-          useOldImageOnUrlChange: true,
-          placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
-          errorListener: (_) => _handleImageLoadFailure(
-            widget.api ?? MemoryArtworkApi(),
-            widget.conversation.artwork,
-            _requestGeneration,
-            result.cacheKey,
+          child: CachedNetworkImage(
+            imageUrl: result!.url.toString(),
+            key: Key('memory-generated-artwork-network-${widget.conversation.id}-${widget.authorityEpoch}'),
+            cacheKey: result.cacheKey,
+            cacheManager: MemoryArtworkCache.manager,
+            fit: widget.fit,
+            useOldImageOnUrlChange: true,
+            placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+            errorListener: (_) => _handleImageLoadFailure(
+              widget.api ?? MemoryArtworkApi(),
+              widget.conversation.artwork,
+              _requestGeneration,
+              result.cacheKey,
+            ),
+            errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
           ),
-          errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
         ),
       );
     }
-    final fallbackKind = result == null ||
-            result.status == MemoryArtworkResultStatus.generating ||
-            result.status == MemoryArtworkResultStatus.unavailable
-        ? _MemoryArtworkFallbackKind.preparing
-        : _MemoryArtworkFallbackKind.unavailable;
+    final fallbackKind =
+        result == null || result.status == MemoryArtworkResultStatus.generating || result.refreshPending
+            ? _MemoryArtworkFallbackKind.preparing
+            : _MemoryArtworkFallbackKind.unavailable;
     return _cachedArtworkOrFallback(context, kind: fallbackKind);
   }
 

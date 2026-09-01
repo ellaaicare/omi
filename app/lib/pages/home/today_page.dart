@@ -218,6 +218,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   int _homeArtworkStyleOperationGeneration = 0;
   int _homeArtworkQueueOperationGeneration = 0;
   int _homeArtworkQueueRefreshSequence = 0;
+  int _homeArtworkDisplayEpoch = 0;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
@@ -240,7 +241,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _scrollController.addListener(_handleHomeScroll);
     _loadHomeMemoryLayout();
     _todayCardController = TodayCardController(
-      repository: widget.todayCardRepository ??
+      repository:
+          widget.todayCardRepository ??
           (SharedPreferencesUtil.isTodayDesignPreviewEnabled
               ? const _DemoTodayCardRepository()
               : HttpTodayCardRepository()),
@@ -283,15 +285,17 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     const isPreview = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
     final uid = widget.todayCardUidOverride ?? (isPreview ? 'today-card-preview' : SharedPreferencesUtil().uid);
     final authority = isPreview || widget.todayCardUidOverride != null ? null : WalOwnerAuthority.active();
-    final authorityKey = widget.todayCardAuthorityKeyOverride ??
+    final authorityKey =
+        widget.todayCardAuthorityKeyOverride ??
         (widget.todayCardUidOverride != null
             ? 'test-authority:$uid'
             : isPreview
-                ? 'today-card-preview'
-                : authority?.uid == uid
-                    ? TodayPage.cacheAuthorityKey(authority!)
-                    : '');
-    final isReady = widget.todayCardReadyOverride ??
+            ? 'today-card-preview'
+            : authority?.uid == uid
+            ? TodayPage.cacheAuthorityKey(authority!)
+            : '');
+    final isReady =
+        widget.todayCardReadyOverride ??
         (isPreview || (_provisioningProvider?.isOperational == true && authority?.uid == uid));
     return (uid: uid, authorityKey: authorityKey, isProvisioningReady: isReady);
   }
@@ -354,6 +358,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeArtworkQueueControlBusy = false;
         _homeArtworkQueueLoadState = _ArtworkQueueLoadState.idle;
         _homeArtworkQueueStatus = null;
+        _homeArtworkDisplayEpoch++;
       });
       _publishHomeArtworkStudioState();
     }
@@ -487,8 +492,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     setState(() {
       _homeArtworkPreferences = preferences;
-      _homeArtworkBackfillState =
-          preferences == null ? _ArtworkBackfillUiState.idle : _storedHomeArtworkBackfillState(preferences, authority);
+      _homeArtworkBackfillState = preferences == null
+          ? _ArtworkBackfillUiState.idle
+          : _storedHomeArtworkBackfillState(preferences, authority);
     });
     _publishHomeArtworkStudioState();
     if (preferences?.releaseEnabled == true) {
@@ -555,10 +561,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       }
       return;
     }
+    final previous = _homeArtworkQueueStatus;
+    final refreshVisibleArtwork =
+        previous == null ||
+        status.styleVersion != previous.styleVersion ||
+        status.generationId != previous.generationId ||
+        status.ready > previous.ready ||
+        (status.state == MemoryArtworkQueueState.completed && previous.state != MemoryArtworkQueueState.completed);
     setState(() {
       _homeArtworkQueueStatus = status;
       _homeArtworkQueueLoadState = _ArtworkQueueLoadState.loaded;
       _homeArtworkBackfillState = _queueUiState(status!);
+      if (refreshVisibleArtwork) _homeArtworkDisplayEpoch++;
     });
     _publishHomeArtworkStudioState();
     if (_shouldPollHomeArtworkQueue(status)) {
@@ -723,32 +737,34 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       mode: mode,
     );
     late final Future<MemoryArtworkBackfillPage?> operation;
-    operation = rawOperation.then((page) {
-      if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
-        final storedState = _storedHomeArtworkBackfillState(preferences, authority);
-        setState(() {
-          _homeArtworkBackfillState = storedState == _ArtworkBackfillUiState.complete
-              ? storedState
-              : page == null
+    operation = rawOperation
+        .then((page) {
+          if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+            final storedState = _storedHomeArtworkBackfillState(preferences, authority);
+            setState(() {
+              _homeArtworkBackfillState = storedState == _ArtworkBackfillUiState.complete
+                  ? storedState
+                  : page == null
                   ? _ArtworkBackfillUiState.needsAttention
                   : _ArtworkBackfillUiState.idle;
+            });
+            _publishHomeArtworkStudioState();
+            unawaited(_refreshHomeArtworkQueueStatus());
+            // Each call queues one bounded preview. Older history advances only
+            // after a deliberate user action, never from a background timer.
+            _homeArtworkBackfillPollTimer?.cancel();
+          } else if (mounted && identical(_homeArtworkBackfillInFlight, operation)) {
+            setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.idle);
+            _publishHomeArtworkStudioState();
+          }
+          return page;
+        })
+        .whenComplete(() {
+          if (identical(_homeArtworkBackfillInFlight, operation)) {
+            _homeArtworkBackfillInFlight = null;
+            _homeArtworkBackfillAuthority = null;
+          }
         });
-        _publishHomeArtworkStudioState();
-        unawaited(_refreshHomeArtworkQueueStatus());
-        // Each call queues one bounded preview. Older history advances only
-        // after a deliberate user action, never from a background timer.
-        _homeArtworkBackfillPollTimer?.cancel();
-      } else if (mounted && identical(_homeArtworkBackfillInFlight, operation)) {
-        setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.idle);
-        _publishHomeArtworkStudioState();
-      }
-      return page;
-    }).whenComplete(() {
-      if (identical(_homeArtworkBackfillInFlight, operation)) {
-        _homeArtworkBackfillInFlight = null;
-        _homeArtworkBackfillAuthority = null;
-      }
-    });
     _homeArtworkBackfillAuthority = authority;
     _homeArtworkBackfillInFlight = operation;
     return operation;
@@ -778,10 +794,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         expectedAuthorityGeneration: authority.generation,
       );
       if (savedCursor == _artworkBackfillComplete) return null;
-      final page = await _memoryArtworkApi.backfillNext(
-        cursor: savedCursor.isEmpty ? null : savedCursor,
-        mode: mode,
-      );
+      final page = await _memoryArtworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor, mode: mode);
       if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
       if (page == null) {
         if (savedCursor.isNotEmpty) {
@@ -906,20 +919,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               if (current.queueStatus == null) {
                 unawaited(_advanceHomeArtworkBackfill(restart: true));
               } else {
-                unawaited(
-                  _controlHomeArtworkQueue(
-                    MemoryArtworkQueueAction.resume,
-                    restartPreview: true,
-                  ),
-                );
+                unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, restartPreview: true));
               }
             },
             onRetryStatus: () => unawaited(_refreshHomeArtworkQueueStatus()),
             onPause: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.pause)),
             onResume: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume)),
-            onAutoResume: () => unawaited(
-              _controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, autoContinue: true),
-            ),
+            onAutoResume: () =>
+                unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, autoContinue: true)),
             onStop: () => unawaited(_confirmStopHomeArtworkQueue()),
           );
         },
@@ -1176,15 +1183,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
-        PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
-        PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
-        PhoneCaptureStartResult.accountNotReady ||
-        PhoneCaptureStartResult.consentUnavailable ||
-        PhoneCaptureStartResult.recorderUnavailable ||
-        PhoneCaptureStartResult.cancelled =>
-          context.l10n.todayRecordingUnavailable,
-        PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
-      };
+    PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
+    PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+    PhoneCaptureStartResult.accountNotReady ||
+    PhoneCaptureStartResult.consentUnavailable ||
+    PhoneCaptureStartResult.recorderUnavailable ||
+    PhoneCaptureStartResult.cancelled => context.l10n.todayRecordingUnavailable,
+    PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
+  };
 
   Future<bool> _finalizeHomeMoment(CaptureProvider capture, {bool Function()? isCurrent}) async {
     final finalized = capture.recordingState == RecordingState.deviceRecord
@@ -1392,7 +1398,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _finishExternalCapture(CaptureProvider capture) async {
     if (!mounted || _homeCaptureStarting) return;
     final existingSource = _externalCaptureFinalizationSource;
-    final source = existingSource ??
+    final source =
+        existingSource ??
         switch (capture.recordingState) {
           RecordingState.record => _ExternalCaptureSource.phone,
           RecordingState.deviceRecord => _ExternalCaptureSource.necklace,
@@ -1506,6 +1513,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     required int batteryLevel,
     required DeviceType deviceType,
     required bool showGuardianSurfaces,
+    required VoidCallback onReconnectNecklace,
   }) async {
     await showModalBottomSheet<void>(
       context: context,
@@ -1535,6 +1543,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           Navigator.of(sheetContext).pop();
           Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage()));
         },
+        onReconnectNecklace: onReconnectNecklace,
       ),
     );
   }
@@ -1567,7 +1576,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final homeCaptureOwned =
         _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
     final externalCaptureFinalizationPending = _externalCaptureFinalizationSource != null;
-    final homeCaptureUsesNecklace = _homeCaptureSource == _HomeCaptureSource.necklaceOwned ||
+    final homeCaptureUsesNecklace =
+        _homeCaptureSource == _HomeCaptureSource.necklaceOwned ||
         _homeCaptureSource == _HomeCaptureSource.necklaceContinuous;
     final dockClearance = todayDockScrollClearance(
       textScale: MediaQuery.textScalerOf(context).scale(1),
@@ -1576,15 +1586,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _scheduleHomeMemoryPrefetch();
 
     void openControls() => unawaited(
-          _showHomeControls(
-            hasNecklace: hasNecklace,
-            necklaceConnected: deviceConnected,
-            necklaceConnecting: device.isConnecting,
-            batteryLevel: device.presentationBatteryLevel,
-            deviceType: deviceType,
-            showGuardianSurfaces: showGuardianSurfaces,
-          ),
-        );
+      _showHomeControls(
+        hasNecklace: hasNecklace,
+        necklaceConnected: deviceConnected,
+        necklaceConnecting: device.isConnecting,
+        batteryLevel: device.presentationBatteryLevel,
+        deviceType: deviceType,
+        showGuardianSurfaces: showGuardianSurfaces,
+        onReconnectNecklace: () => unawaited(device.resumeKnownDeviceConnection(reason: 'Home reconnect')),
+      ),
+    );
     return SafeArea(
       bottom: false,
       child: Stack(
@@ -1632,12 +1643,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     sliver: SliverToBoxAdapter(
                       child: heroMemory == null
                           ? memoriesHydrating
-                              ? const _MemoryJournalLoadingState()
-                              : const _MemoryJournalEmptyState()
+                                ? const _MemoryJournalLoadingState()
+                                : const _MemoryJournalEmptyState()
                           : MemoryGalleryCard(
                               conversation: heroMemory,
                               layout: MemoryGalleryLayout.journal,
                               displayTitle: homeMemoryDisplayTitle(heroMemory, context.l10n.untitledConversation),
+                              artworkApi: _memoryArtworkApi,
+                              artworkRefreshEpoch: _homeArtworkDisplayEpoch,
+                              artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                               onOpen: () => _openMemoryDetail(heroMemory),
                               onDelete: () => _deleteMemory(heroMemory),
                             ),
@@ -1730,6 +1744,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               onUnavailable: () => ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
+              onReconnectNecklace: () => unawaited(device.resumeKnownDeviceConnection(reason: 'Home reconnect')),
               onTap: () => _toggleHomeCapture(
                 capture: capture,
                 isActive: homeCaptureOwned,
@@ -1760,6 +1775,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 dayLabel: entry.key,
                 memories: entry.value,
                 artworkApi: _memoryArtworkApi,
+                artworkRefreshEpoch: _homeArtworkDisplayEpoch,
+                artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                 onOpen: () {
                   final authority = _memoryArtworkAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
@@ -1771,6 +1788,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                         dayLabel: entry.key,
                         memories: entry.value,
                         artworkApi: _memoryArtworkApi,
+                        artworkRefreshEpoch: _homeArtworkDisplayEpoch,
+                        artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                         exactAuthority: authority,
                         authorityChanges: _todayCardAuthorityChanges,
                         onDelete: _deleteMemory,
@@ -1815,17 +1834,21 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Widget _homeMemoryCard(ServerConversation conversation) => MemoryGalleryCard(
-        conversation: conversation,
-        layout: _homeMemoryLayout,
-        displayTitle: homeMemoryDisplayTitle(conversation, context.l10n.untitledConversation),
-        onOpen: () => _openMemoryDetail(conversation),
-        onDelete: () => _deleteMemory(conversation),
-      );
+    conversation: conversation,
+    layout: _homeMemoryLayout,
+    displayTitle: homeMemoryDisplayTitle(conversation, context.l10n.untitledConversation),
+    artworkApi: _memoryArtworkApi,
+    artworkRefreshEpoch: _homeArtworkDisplayEpoch,
+    artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
+    onOpen: () => _openMemoryDetail(conversation),
+    onDelete: () => _deleteMemory(conversation),
+  );
 
   Future<bool> _deleteMemory(ServerConversation conversation) async {
     final l10n = context.l10n;
     final provider = context.read<ConversationProvider>();
-    final confirmed = await showDialog<bool>(
+    final confirmed =
+        await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             title: Text(l10n.deleteConversationTitle),
@@ -1946,8 +1969,8 @@ class _TodayHeader extends StatelessWidget {
     final greeting = now.hour < 12
         ? context.l10n.todayGreetingMorning(firstName)
         : now.hour < 17
-            ? context.l10n.todayGreetingAfternoon(firstName)
-            : context.l10n.todayGreetingEvening(firstName);
+        ? context.l10n.todayGreetingAfternoon(firstName)
+        : context.l10n.todayGreetingEvening(firstName);
     final locale = Localizations.localeOf(context).toLanguageTag();
     final date = context.l10n
         .todayDateEyebrow(DateFormat('EEEE', locale).format(now), DateFormat('MMMM d', locale).format(now))
@@ -2166,7 +2189,8 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                     backfillState == _ArtworkBackfillUiState.needsAttention
                                 ? Icons.info_outline_rounded
                                 : Icons.auto_awesome_rounded,
-                            color: queueLoadState == _ArtworkQueueLoadState.failed ||
+                            color:
+                                queueLoadState == _ArtworkQueueLoadState.failed ||
                                     backfillState == _ArtworkBackfillUiState.needsAttention
                                 ? EllaColors.warning
                                 : EllaColors.tealDeep,
@@ -2430,6 +2454,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     required this.onViewTranscript,
     required this.onFinishExternalCapture,
     this.onUnavailable,
+    this.onReconnectNecklace,
     required this.onTap,
   });
 
@@ -2452,6 +2477,7 @@ class TodayRecordMomentControl extends StatelessWidget {
   final VoidCallback onViewTranscript;
   final VoidCallback onFinishExternalCapture;
   final VoidCallback? onUnavailable;
+  final VoidCallback? onReconnectNecklace;
   final VoidCallback onTap;
 
   @override
@@ -2460,7 +2486,8 @@ class TodayRecordMomentControl extends StatelessWidget {
     final phoneRecording = recordingState == RecordingState.record;
     final necklaceRecording = recordingState == RecordingState.deviceRecord;
     final active = homeCaptureOwned && (phoneRecording || necklaceRecording);
-    final usesNecklace = homeCaptureUsesNecklace ||
+    final usesNecklace =
+        homeCaptureUsesNecklace ||
         externalCaptureUsesNecklace ||
         necklaceRecording ||
         (initialising && diagnostics.source == CaptureDiagnosticSource.necklace) ||
@@ -2472,7 +2499,12 @@ class TodayRecordMomentControl extends StatelessWidget {
       necklaceRecording: necklaceRecording,
       usesNecklace: usesNecklace,
       externalCaptureFinalizationPending: externalCaptureFinalizationPending,
+      hasNecklace: hasNecklace,
+      necklaceConnected: necklaceConnected,
+      necklaceConnecting: necklaceConnecting,
     );
+    final canReconnectNecklace =
+        hasNecklace && !necklaceConnected && !necklaceConnecting && onReconnectNecklace != null;
 
     return Material(
       key: const Key('today-capture-dock'),
@@ -2493,7 +2525,7 @@ class TodayRecordMomentControl extends StatelessWidget {
             children: [
               InkWell(
                 key: const Key('today-dock-status'),
-                onTap: onOpenControls,
+                onTap: canReconnectNecklace ? onReconnectNecklace : onOpenControls,
                 borderRadius: BorderRadius.circular(16),
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
@@ -2522,6 +2554,8 @@ class TodayRecordMomentControl extends StatelessWidget {
                             ),
                           ),
                         ),
+                        if (canReconnectNecklace)
+                          const Icon(Icons.refresh_rounded, color: EllaColors.tealDeep, semanticLabel: ''),
                       ],
                     ),
                   ),
@@ -2578,23 +2612,32 @@ class TodayRecordMomentControl extends StatelessWidget {
     required bool necklaceRecording,
     required bool usesNecklace,
     required bool externalCaptureFinalizationPending,
+    required bool hasNecklace,
+    required bool necklaceConnected,
+    required bool necklaceConnecting,
   }) {
+    final idleStatus = necklaceConnecting
+        ? context.l10n.todayDockNecklaceConnecting
+        : hasNecklace && !necklaceConnected
+        ? context.l10n.todayDockNecklaceNotConnected
+        : context.l10n.todayDockPhoneReady;
     final status = initialising
         ? context.l10n.todayDockStarting
         : externalCaptureFinalizationPending
-            ? context.l10n.todayDockRecordingNeedsAttention
-            : recordingState == RecordingState.error
-                ? homeCaptureOwned
-                    ? context.l10n.todayDockRecordingNeedsAttention
-                    : context.l10n.todayDockPhoneReady
-                : homeCaptureOwned && usesNecklace && necklaceConnecting
-                    ? context.l10n.todayDockNecklaceConnecting
-                    : phoneRecording
-                        ? context.l10n.todayDockRecordingPhone
-                        : necklaceRecording || (homeCaptureOwned && usesNecklace)
-                            ? context.l10n.todayDockRecordingNecklace
-                            : context.l10n.todayDockPhoneReady;
-    final externalCaptureActive = !homeCaptureOwned &&
+        ? context.l10n.todayDockRecordingNeedsAttention
+        : recordingState == RecordingState.error
+        ? homeCaptureOwned
+              ? context.l10n.todayDockRecordingNeedsAttention
+              : idleStatus
+        : homeCaptureOwned && usesNecklace && necklaceConnecting
+        ? context.l10n.todayDockNecklaceConnecting
+        : phoneRecording
+        ? context.l10n.todayDockRecordingPhone
+        : necklaceRecording || (homeCaptureOwned && usesNecklace)
+        ? context.l10n.todayDockRecordingNecklace
+        : idleStatus;
+    final externalCaptureActive =
+        !homeCaptureOwned &&
         (externalCaptureFinalizationPending || phoneRecording || (necklaceRecording && !necklaceContinuouslyRecording));
     if (initialising) {
       return TodayCaptureDockPresentation(
@@ -2696,8 +2739,8 @@ class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerPro
     final foreground = widget.emphasized
         ? EllaColors.paper
         : widget.selected
-            ? EllaColors.tealDeep
-            : EllaColors.inkSoft;
+        ? EllaColors.tealDeep
+        : EllaColors.inkSoft;
     return Semantics(
       button: true,
       enabled: widget.enabled,
@@ -2725,8 +2768,8 @@ class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerPro
           color: widget.emphasized
               ? EllaColors.error
               : widget.selected
-                  ? const Color(0xFFD0E4DE)
-                  : EllaColors.paper,
+              ? const Color(0xFFD0E4DE)
+              : EllaColors.paper,
           borderRadius: BorderRadius.circular(16),
           child: InkWell(
             key: widget.actionKey,
@@ -2777,6 +2820,7 @@ class _HomeControlsSheet extends StatelessWidget {
     required this.onWhispersChanged,
     required this.onWhispersHistory,
     required this.onManageNecklace,
+    required this.onReconnectNecklace,
   });
 
   final bool hasNecklace;
@@ -2791,6 +2835,7 @@ class _HomeControlsSheet extends StatelessWidget {
   final ValueChanged<bool> onWhispersChanged;
   final VoidCallback onWhispersHistory;
   final VoidCallback onManageNecklace;
+  final VoidCallback onReconnectNecklace;
 
   String _recordingSource(BuildContext context) {
     return context.l10n.todayRecordOnPhone;
@@ -2820,6 +2865,19 @@ class _HomeControlsSheet extends StatelessWidget {
           const SizedBox(height: 20),
           Text(context.l10n.todayControlsTitle, style: EllaTextStyles.noteBody.copyWith(fontSize: 28)),
           const SizedBox(height: 18),
+          if (hasNecklace && !necklaceConnected) ...[
+            FilledButton.icon(
+              key: const Key('today-reconnect-known-necklace'),
+              onPressed: necklaceConnecting ? null : onReconnectNecklace,
+              icon: necklaceConnecting
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.bluetooth_searching_rounded),
+              label: Text(
+                necklaceConnecting ? context.l10n.todayDockNecklaceConnecting : context.l10n.todayNecklaceOffReconnect,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           EllaCardSurface(
             child: Column(
               children: [
@@ -2847,8 +2905,8 @@ class _HomeControlsSheet extends StatelessWidget {
                               necklaceConnecting
                                   ? context.l10n.todayStripReconnecting
                                   : hasNecklace && !necklaceConnected
-                                      ? context.l10n.todayNecklaceOffReconnect
-                                      : context.l10n.todayManageNecklace,
+                                  ? context.l10n.todayNecklaceOffReconnect
+                                  : context.l10n.todayManageNecklace,
                               style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
                             ),
                           ),
@@ -2999,8 +3057,8 @@ class TodayStatusStrip extends StatelessWidget {
   Color get _necklaceDot => necklaceConnecting
       ? EllaColors.warning
       : necklaceConnected
-          ? (batteryLevel >= 0 && batteryLevel < 20 ? EllaColors.warning : EllaColors.teal)
-          : EllaColors.inkSoft;
+      ? (batteryLevel >= 0 && batteryLevel < 20 ? EllaColors.warning : EllaColors.teal)
+      : EllaColors.inkSoft;
 
   String _necklaceLabel(BuildContext context) {
     if (!hasNecklace) return context.l10n.todayPhoneOnly;
