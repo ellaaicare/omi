@@ -495,15 +495,11 @@ def list_ready_artwork_conversations(uid: str) -> list[dict[str, Any]]:
     """Return only memories that currently retain a displayable artwork object."""
 
     conversations = db.collection("users").document(uid).collection("conversations")
-    field_paths = [
-        "created_at",
-        "started_at",
-        ARTWORK_FIELD,
-        PUBLISHED_ARTWORK_FIELD,
-    ]
     snapshots_by_id: dict[str, Any] = {}
     for artwork_field in (ARTWORK_FIELD, PUBLISHED_ARTWORK_FIELD):
-        query = conversations.where(f"{artwork_field}.status", "==", "ready").select(field_paths)
+        # Inventory must re-evaluate the same source/enrichment gates as the
+        # signed URL path, which requires the complete memory snapshot.
+        query = conversations.where(f"{artwork_field}.status", "==", "ready")
         for snapshot in query.stream():
             snapshots_by_id[snapshot.id] = snapshot
     return [{**(snapshot.to_dict() or {}), "id": snapshot.id} for snapshot in snapshots_by_id.values()]

@@ -768,6 +768,48 @@ def _release_artwork(conversation: dict[str, Any]) -> tuple[dict[str, Any], bool
     return current if isinstance(current, dict) else {}, False, None
 
 
+def _inventory_release_artwork(
+    conversation: dict[str, Any],
+    *,
+    preferences: dict[str, Any],
+    authority: ArtworkRuntimeAuthority,
+) -> Optional[dict[str, Any]]:
+    """Return the artwork the signed URL path can serve from this snapshot."""
+
+    if conversation.get("deletion_pending") or conversation.get("discarded") or _source_is_sensitive(conversation):
+        return None
+    artwork, refresh_pending, refresh_failure_code = _release_artwork(conversation)
+    if not isinstance(artwork, dict) or artwork.get("status") != "ready" or not artwork.get("object_key"):
+        return None
+    if (
+        artwork.get("authority_digest") != authority.authority_digest
+        or artwork.get("binding_id") != authority.binding_id
+        or artwork.get("profile_id") != authority.profile_id
+        or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=None if refresh_pending or refresh_failure_code else str(artwork.get("style_version") or ""),
+        )
+    ):
+        return None
+    if refresh_pending or refresh_failure_code:
+        generation_request = conversation.get("artwork") or {}
+        if (
+            not isinstance(generation_request, dict)
+            or generation_request.get("style_version") != preferences.get("style_version")
+            or generation_request.get("enrichment_revision") != artwork.get("enrichment_revision")
+        ):
+            return None
+    enrichment_revision = _terminal_enrichment(conversation)
+    try:
+        _, prompt_sha256 = _prompt_for(conversation, str(artwork.get("style_version") or ""))
+    except MemoryArtworkError:
+        return None
+    if enrichment_revision != artwork.get("enrichment_revision") or prompt_sha256 != artwork.get("prompt_sha256"):
+        return None
+    return artwork
+
+
 def _generation_claim_is_current(
     conversation: dict[str, Any],
     *,
@@ -1110,22 +1152,13 @@ class MemoryArtworkService:
             if not memory_id:
                 continue
             day = _conversation_day(conversation)
-            for field in (artwork_db.ARTWORK_FIELD, artwork_db.PUBLISHED_ARTWORK_FIELD):
-                artwork = conversation.get(field) or {}
-                if not isinstance(artwork, dict) or artwork.get("status") != "ready" or not artwork.get("object_key"):
-                    continue
-                if (
-                    artwork.get("authority_digest") != authority.authority_digest
-                    or artwork.get("binding_id") != authority.binding_id
-                    or artwork.get("profile_id") != authority.profile_id
-                ):
-                    continue
-                style_version = str(artwork.get("style_version") or "")
-                if style_version not in SUPPORTED_STYLE_VERSIONS:
-                    continue
-                memories_by_style[style_version].add(memory_id)
-                if day:
-                    days_by_style[style_version].add(day)
+            artwork = _inventory_release_artwork(conversation, preferences=preferences, authority=authority)
+            style_version = str((artwork or {}).get("style_version") or "")
+            if style_version not in SUPPORTED_STYLE_VERSIONS:
+                continue
+            memories_by_style[style_version].add(memory_id)
+            if day:
+                days_by_style[style_version].add(day)
 
         libraries = []
         for style_version in sorted(SUPPORTED_STYLE_VERSIONS):

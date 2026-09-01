@@ -166,6 +166,20 @@ def _terminal_memory(memory_id: str, *, created_at: datetime | None = None) -> d
     }
 
 
+def _ready_artwork(memory: dict, *, authority, style_version: str) -> dict:
+    _, prompt_sha256 = artwork._prompt_for(memory, style_version)
+    return {
+        "status": "ready",
+        "style_version": style_version,
+        "object_key": f"private/{memory['id']}.png",
+        "authority_digest": authority.authority_digest,
+        "binding_id": authority.binding_id,
+        "profile_id": authority.profile_id,
+        "enrichment_revision": memory["active_summary_version_id"],
+        "prompt_sha256": prompt_sha256,
+    }
+
+
 class FakeRepository:
     def __init__(self):
         self.preferences_by_uid = {}
@@ -2889,24 +2903,11 @@ def test_libraries_count_only_ready_owner_bound_objects_by_style_and_day():
     ]
     for memory_id, created_at, style_version in memories:
         memory = _terminal_memory(memory_id, created_at=created_at)
-        memory["artwork"] = {
-            "status": "ready",
-            "style_version": style_version,
-            "object_key": f"private/{memory_id}.png",
-            "authority_digest": authority.authority_digest,
-            "binding_id": authority.binding_id,
-            "profile_id": authority.profile_id,
-        }
+        memory["artwork"] = _ready_artwork(memory, authority=authority, style_version=style_version)
         repository.conversations[("owner-a", memory_id)] = memory
     stale = _terminal_memory("memory-stale")
-    stale["artwork"] = {
-        "status": "ready",
-        "style_version": anime,
-        "object_key": "private/stale.png",
-        "authority_digest": "other-owner",
-        "binding_id": authority.binding_id,
-        "profile_id": authority.profile_id,
-    }
+    stale["artwork"] = _ready_artwork(stale, authority=authority, style_version=anime)
+    stale["artwork"]["authority_digest"] = "other-owner"
     repository.conversations[("owner-a", "memory-stale")] = stale
     service = artwork.MemoryArtworkService(
         repository=repository,
@@ -2920,11 +2921,39 @@ def test_libraries_count_only_ready_owner_bound_objects_by_style_and_day():
     assert result["schema_version"] == artwork.ARTWORK_LIBRARIES_SCHEMA_VERSION
     assert result["default_preview_days"] == 3
     assert result["historical_batch_size"] == 10
-    assert by_style[anime]["ready_memories"] == 2
-    assert by_style[anime]["ready_days"] == 1
+    assert by_style[anime]["ready_memories"] == 0
+    assert by_style[anime]["ready_days"] == 0
     assert by_style[artwork.DEFAULT_STYLE_VERSION]["ready_memories"] == 1
     assert by_style[artwork.DEFAULT_STYLE_VERSION]["ready_days"] == 1
-    assert sum(library["ready_memories"] for library in result["libraries"]) == 3
+    assert sum(library["ready_memories"] for library in result["libraries"]) == 1
+
+
+def test_libraries_exclude_retained_ready_objects_that_signed_url_cannot_display():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    memories = {}
+    for suffix in ("ready", "discarded", "deleting", "sensitive", "source-stale"):
+        memory = _terminal_memory(f"memory-{suffix}")
+        memory["artwork"] = _ready_artwork(memory, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION)
+        memories[suffix] = memory
+    memories["discarded"]["discarded"] = True
+    memories["deleting"]["deletion_pending"] = True
+    memories["sensitive"]["ella_tags"] = ["caregiver-private"]
+    memories["source-stale"]["structured"]["overview"] = "The source changed after this artwork was created."
+    for suffix, memory in memories.items():
+        repository.conversations[("owner-a", f"memory-{suffix}")] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.libraries("owner-a"))
+    selected = next(library for library in result["libraries"] if library["selected"])
+
+    assert selected["ready_memories"] == 1
+    assert selected["ready_days"] == 1
 
 
 def test_backfill_limits_enrichment_recovery_candidates_and_rejects_stale_cursor():
