@@ -18062,6 +18062,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella couldn\'t update illustration work right now.'**
   String get memoryArtworkQueueControlFailed;
+
+  /// No description provided for @todayLegacyNecklaceDockStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnect your necklace'**
+  String get todayLegacyNecklaceDockStatus;
+
+  /// No description provided for @todayLegacyNecklaceConfirmTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnect your necklace?'**
+  String get todayLegacyNecklaceConfirmTitle;
+
+  /// No description provided for @todayLegacyNecklaceConfirmBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This necklace was paired with this iPhone before. Confirm it is yours, then Ella will reconnect it for this account.'**
+  String get todayLegacyNecklaceConfirmBody;
+
+  /// No description provided for @todayLegacyNecklaceConfirmAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnect necklace'**
+  String get todayLegacyNecklaceConfirmAction;
+
+  /// No description provided for @todayLegacyNecklaceConfirmUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not start reconnecting the necklace right now. Please try again.'**
+  String get todayLegacyNecklaceConfirmUnavailable;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

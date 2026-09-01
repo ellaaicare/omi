@@ -9750,4 +9750,21 @@ class AppLocalizationsLv extends AppLocalizations {
 
   @override
   String get memoryArtworkQueueControlFailed => 'Ella couldn\'t update illustration work right now.';
+
+  @override
+  String get todayLegacyNecklaceDockStatus => 'Reconnect your necklace';
+
+  @override
+  String get todayLegacyNecklaceConfirmTitle => 'Reconnect your necklace?';
+
+  @override
+  String get todayLegacyNecklaceConfirmBody =>
+      'This necklace was paired with this iPhone before. Confirm it is yours, then Ella will reconnect it for this account.';
+
+  @override
+  String get todayLegacyNecklaceConfirmAction => 'Reconnect necklace';
+
+  @override
+  String get todayLegacyNecklaceConfirmUnavailable =>
+      'Ella could not start reconnecting the necklace right now. Please try again.';
 }
