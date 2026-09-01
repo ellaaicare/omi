@@ -258,8 +258,7 @@ class SharedPreferencesUtil {
       return '';
     }
     final receiptId = aiConsentReceiptId;
-    final persistedGrant =
-        getBool('aiConsentAccepted', defaultValue: false) &&
+    final persistedGrant = getBool('aiConsentAccepted', defaultValue: false) &&
         aiConsentContractVersion == currentAiConsentContractVersion &&
         aiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
         uid.isNotEmpty &&
@@ -276,8 +275,7 @@ class SharedPreferencesUtil {
     if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return false;
     }
-    final accepted =
-        getBool('aiConsentAccepted', defaultValue: false) &&
+    final accepted = getBool('aiConsentAccepted', defaultValue: false) &&
         aiConsentContractVersion == currentAiConsentContractVersion &&
         aiConsentProcessorSetHash == currentAiConsentProcessorSetHash;
     if (!accepted ||
@@ -797,6 +795,16 @@ class SharedPreferencesUtil {
   Future<bool> saveMemoryArchiveGalleryLayout(String layout) async {
     final key = _accountProfileScopedKey('ellaMemoryArchiveGalleryLayout');
     return key != null && await saveString(key, layout);
+  }
+
+  String get ellaCaptureSource {
+    final key = _accountProfileScopedKey('ellaCaptureSource');
+    return key == null ? '' : getString(key);
+  }
+
+  Future<bool> saveEllaCaptureSource(String source) async {
+    final key = _accountProfileScopedKey('ellaCaptureSource');
+    return key != null && await saveString(key, source);
   }
 
   String? _memoryArtworkBackfillKey(

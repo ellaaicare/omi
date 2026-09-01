@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/home/today_page.dart';
 import 'package:omi/utils/enums.dart';
@@ -39,15 +40,13 @@ void main() {
         supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(
           body: TodayRecordMomentControl(
-            homeCaptureOwned: false,
-            homeCaptureUsesNecklace: false,
+            selectedSource: EllaCaptureSource.phone,
             starting: false,
             necklaceConnected: false,
             necklaceConnecting: false,
             recordingState: RecordingState.stop,
-            necklaceContinuouslyRecording: false,
             onViewTranscript: () {},
-            onFinishExternalCapture: () {},
+            onSourceSelected: (_) {},
             onTap: () {},
           ),
         ),
@@ -55,7 +54,7 @@ void main() {
     );
 
     expect(find.text('Record'), findsOneWidget);
-    expect(find.text('Transcript'), findsOneWidget);
+    expect(find.text('Transcript · iPhone'), findsOneWidget);
     expect(find.text('iPhone · Ready'), findsOneWidget);
     expect(find.text('Necklace · Ready'), findsNothing);
   });

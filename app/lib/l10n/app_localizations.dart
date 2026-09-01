@@ -17811,6 +17811,102 @@ abstract class AppLocalizations {
   /// **'iPhone · Ready'**
   String get todayDockPhoneReady;
 
+  /// No description provided for @todayCaptureSourceTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording source'**
+  String get todayCaptureSourceTitle;
+
+  /// No description provided for @todayCaptureSourcePhone.
+  ///
+  /// In en, this message translates to:
+  /// **'iPhone'**
+  String get todayCaptureSourcePhone;
+
+  /// No description provided for @todayCaptureSourceNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace'**
+  String get todayCaptureSourceNecklace;
+
+  /// No description provided for @todayDockPhoneStarting.
+  ///
+  /// In en, this message translates to:
+  /// **'iPhone · Starting…'**
+  String get todayDockPhoneStarting;
+
+  /// No description provided for @todayDockPhoneNeedsAttention.
+  ///
+  /// In en, this message translates to:
+  /// **'iPhone recording needs attention'**
+  String get todayDockPhoneNeedsAttention;
+
+  /// No description provided for @todayDockNecklaceNeedsAttention.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace recording needs attention'**
+  String get todayDockNecklaceNeedsAttention;
+
+  /// No description provided for @todayDockNecklaceActivePhoneSelected.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace is recording · iPhone selected'**
+  String get todayDockNecklaceActivePhoneSelected;
+
+  /// No description provided for @todayDockReconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnect'**
+  String get todayDockReconnect;
+
+  /// No description provided for @todayDockRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Retry'**
+  String get todayDockRetry;
+
+  /// No description provided for @todayDockStop.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop'**
+  String get todayDockStop;
+
+  /// No description provided for @todayDockSaveMoment.
+  ///
+  /// In en, this message translates to:
+  /// **'Save moment'**
+  String get todayDockSaveMoment;
+
+  /// No description provided for @todayDockStartNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Start'**
+  String get todayDockStartNecklace;
+
+  /// No description provided for @todayDockTranscriptPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Transcript · iPhone'**
+  String get todayDockTranscriptPhone;
+
+  /// No description provided for @todayDockTranscriptNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Transcript · Necklace'**
+  String get todayDockTranscriptNecklace;
+
+  /// No description provided for @captureStatusPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'iPhone'**
+  String get captureStatusPhone;
+
+  /// No description provided for @captureStatusNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace'**
+  String get captureStatusNecklace;
+
   /// No description provided for @memorySortRecent.
   ///
   /// In en, this message translates to:

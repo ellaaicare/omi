@@ -12,6 +12,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/demo/today_card_fixtures.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/hardware/ella_hardware_artwork.dart';
+import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
@@ -77,7 +78,6 @@ class TodayCaptureDockPresentation {
     required this.status,
     required this.primaryLabel,
     required this.primaryIcon,
-    required this.finishesExternalCapture,
     required this.primaryEnabled,
   });
 
@@ -85,10 +85,36 @@ class TodayCaptureDockPresentation {
   final String status;
   final String primaryLabel;
   final IconData primaryIcon;
-  final bool finishesExternalCapture;
   final bool primaryEnabled;
 
   bool get emphasized => mode == TodayCaptureDockMode.recording;
+}
+
+EllaCaptureSource? todayActiveCaptureSource(RecordingState state, CaptureDiagnostics diagnostics) => switch (state) {
+      RecordingState.record => EllaCaptureSource.phone,
+      RecordingState.deviceRecord => EllaCaptureSource.necklace,
+      RecordingState.initialising || RecordingState.pause || RecordingState.error => switch (diagnostics.source) {
+          CaptureDiagnosticSource.phone => EllaCaptureSource.phone,
+          CaptureDiagnosticSource.necklace => EllaCaptureSource.necklace,
+          _ => null,
+        },
+      RecordingState.stop || RecordingState.systemAudioRecord => null,
+    };
+
+EllaCaptureSource todaySelectedCaptureSource({
+  required RecordingState state,
+  required CaptureDiagnostics diagnostics,
+  required EllaCaptureSource? preferredSource,
+}) {
+  final activeSource = todayActiveCaptureSource(state, diagnostics);
+  return switch (state) {
+    RecordingState.record => EllaCaptureSource.phone,
+    RecordingState.initialising ||
+    RecordingState.pause ||
+    RecordingState.error =>
+      activeSource ?? preferredSource ?? EllaCaptureSource.phone,
+    _ => preferredSource ?? EllaCaptureSource.phone,
+  };
 }
 
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
@@ -228,6 +254,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   MemoryArtworkLibraries? _homeArtworkLibraries;
   MemoryArtworkQueueStatus? _homeArtworkQueueStatus;
   BtDevice? _resumeNecklaceAfterPhoneCapture;
+  EllaCaptureSource? _selectedCaptureSource;
 
   static const _artworkBackfillComplete = '__complete__';
 
@@ -260,6 +287,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (!mounted) return;
       unawaited(context.read<ConversationProvider>().ensureFreshConversations());
       unawaited(_loadHomeArtworkPreferences());
+      _loadCaptureSourcePreference();
     });
   }
 
@@ -359,6 +387,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeArtworkQueueLoadState = _ArtworkQueueLoadState.idle;
         _homeArtworkQueueStatus = null;
         _homeArtworkDisplayEpoch++;
+        _selectedCaptureSource = null;
       });
       _publishHomeArtworkStudioState();
     }
@@ -366,6 +395,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return;
       final layout = _savedHomeMemoryLayout();
       if (layout != _homeMemoryLayout) setState(() => _homeMemoryLayout = layout);
+      _loadCaptureSourcePreference();
     });
     if (_guardianAvailable) unawaited(_loadWhisperState());
     unawaited(_loadHomeArtworkPreferences());
@@ -1474,6 +1504,90 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
   }
 
+  void _loadCaptureSourcePreference() {
+    final saved = EllaCaptureSource.fromStorage(SharedPreferencesUtil().ellaCaptureSource);
+    if (!mounted || saved == null || saved == _selectedCaptureSource) return;
+    setState(() => _selectedCaptureSource = saved);
+  }
+
+  void _selectCaptureSource(EllaCaptureSource source) {
+    if (_selectedCaptureSource == source) return;
+    setState(() => _selectedCaptureSource = source);
+    unawaited(SharedPreferencesUtil().saveEllaCaptureSource(source.name));
+  }
+
+  Future<void> _reconnectNecklaceCapture(DeviceProvider device) async {
+    if (_homeCaptureStarting) return;
+    setState(() => _homeCaptureStarting = true);
+    try {
+      final started = await device.reconnectKnownDeviceForCapture(reason: 'Home necklace capture');
+      if (!started && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+    } finally {
+      if (mounted) setState(() => _homeCaptureStarting = false);
+    }
+  }
+
+  Future<void> _saveNecklaceMoment(CaptureProvider capture) async {
+    if (_homeCaptureStarting) return;
+    setState(() => _homeCaptureStarting = true);
+    try {
+      final saved = await capture.finalizeCurrentDeviceConversationAndContinue();
+      if (!saved && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+    } finally {
+      if (mounted) setState(() => _homeCaptureStarting = false);
+    }
+  }
+
+  Future<void> _handleCapturePrimaryAction({
+    required EllaCaptureSource selectedSource,
+    required CaptureProvider capture,
+    required DeviceProvider device,
+    required bool homeCaptureOwned,
+    required bool legacyNecklaceNeedsConfirmation,
+  }) async {
+    if (_homeCaptureStarting || capture.recordingState == RecordingState.initialising) return;
+    if (_externalCaptureFinalizationSource != null) {
+      await _finishExternalCapture(capture);
+      return;
+    }
+    if (capture.recordingState == RecordingState.record) {
+      if (homeCaptureOwned) {
+        await _finishHomeCapture(capture);
+      } else {
+        await _finishExternalCapture(capture);
+      }
+      return;
+    }
+    if (capture.recordingState == RecordingState.deviceRecord && selectedSource == EllaCaptureSource.necklace) {
+      await _saveNecklaceMoment(capture);
+      return;
+    }
+    if (selectedSource == EllaCaptureSource.phone) {
+      await _toggleHomeCapture(
+        capture: capture,
+        isActive: homeCaptureOwned,
+        necklaceConnected: device.presentationIsConnected,
+        connectedDevice: device.presentationConnectedDevice,
+      );
+      return;
+    }
+    if (legacyNecklaceNeedsConfirmation) {
+      await _confirmLegacyNecklace(device);
+      return;
+    }
+    await _reconnectNecklaceCapture(device);
+  }
+
   Future<void> _toggleHomeCapture({
     required CaptureProvider capture,
     required bool isActive,
@@ -1628,6 +1742,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         device.legacyUntrustedDeviceCandidate?.type ??
         DeviceType.omi;
     final capture = context.watch<CaptureProvider>();
+    final activeCaptureSource = todayActiveCaptureSource(capture.recordingState, capture.captureDiagnostics);
+    final selectedCaptureSource = todaySelectedCaptureSource(
+      state: capture.recordingState,
+      diagnostics: capture.captureDiagnostics,
+      preferredSource: _selectedCaptureSource,
+    );
     final conversations = context.watch<ConversationProvider>();
     final visibleConversations = conversations.visibleConversations;
     final orderedMemories = List<ServerConversation>.of(visibleConversations)
@@ -1644,8 +1764,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final homeCaptureOwned =
         _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
     final externalCaptureFinalizationPending = _externalCaptureFinalizationSource != null;
-    final homeCaptureUsesNecklace = _homeCaptureSource == _HomeCaptureSource.necklaceOwned ||
-        _homeCaptureSource == _HomeCaptureSource.necklaceContinuous;
     final dockClearance = todayDockScrollClearance(
       textScale: MediaQuery.textScalerOf(context).scale(1),
       safeBottom: MediaQuery.paddingOf(context).bottom,
@@ -1661,7 +1779,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             batteryLevel: device.presentationBatteryLevel,
             deviceType: deviceType,
             showGuardianSurfaces: showGuardianSurfaces,
-            onReconnectNecklace: () => unawaited(device.resumeKnownDeviceConnection(reason: 'Home reconnect')),
+            onReconnectNecklace: () => unawaited(_reconnectNecklaceCapture(device)),
             onConfirmLegacyNecklace: () => unawaited(_confirmLegacyNecklace(device)),
           ),
         );
@@ -1790,10 +1908,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             right: 14,
             bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
             child: TodayRecordMomentControl(
-              homeCaptureOwned: homeCaptureOwned,
-              homeCaptureUsesNecklace: homeCaptureUsesNecklace,
+              selectedSource: selectedCaptureSource,
+              activeSource: activeCaptureSource,
               externalCaptureFinalizationPending: externalCaptureFinalizationPending,
-              externalCaptureUsesNecklace: _externalCaptureFinalizationSource == _ExternalCaptureSource.necklace,
               starting: _homeCaptureStarting,
               hasNecklace: hasNecklace,
               legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
@@ -1801,8 +1918,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               necklaceConnecting: device.isConnecting,
               recordingState: capture.recordingState,
               diagnostics: capture.captureDiagnostics,
-              necklaceContinuouslyRecording:
-                  deviceConnected && capture.recordingState == RecordingState.deviceRecord && !homeCaptureOwned,
               showWhispers: showGuardianSurfaces,
               whispersEnabled: _whispersOn,
               whispersVerified: _whispersVerified,
@@ -1810,17 +1925,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               onOpenWhispers: () =>
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
               onViewTranscript: () => _openLiveTranscript(capture),
-              onFinishExternalCapture: () => _finishExternalCapture(capture),
+              onSourceSelected: _selectCaptureSource,
               onUnavailable: () => ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
-              onReconnectNecklace: () => unawaited(device.resumeKnownDeviceConnection(reason: 'Home reconnect')),
-              onConfirmLegacyNecklace: () => unawaited(_confirmLegacyNecklace(device)),
-              onTap: () => _toggleHomeCapture(
+              onTap: () => _handleCapturePrimaryAction(
+                selectedSource: selectedCaptureSource,
                 capture: capture,
-                isActive: homeCaptureOwned,
-                necklaceConnected: deviceConnected,
-                connectedDevice: connectedDevice,
+                device: device,
+                homeCaptureOwned: homeCaptureOwned,
+                legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
               ),
             ),
           ),
@@ -1944,7 +2058,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 }
 
 double todayDockScrollClearance({required double textScale, required double safeBottom}) =>
-    EllaSizes.navBarHeight + safeBottom + 156 * textScale.clamp(1.0, 2.0) + 24;
+    EllaSizes.navBarHeight + safeBottom + 190 * textScale.clamp(1.0, 2.0) + 24;
 
 class _DemoTodayCardRepository implements TodayCardRepository {
   const _DemoTodayCardRepository();
@@ -2512,10 +2626,9 @@ class _ArtworkStudioSheet extends StatelessWidget {
 class TodayRecordMomentControl extends StatelessWidget {
   const TodayRecordMomentControl({
     super.key,
-    required this.homeCaptureOwned,
-    required this.homeCaptureUsesNecklace,
+    required this.selectedSource,
+    this.activeSource,
     this.externalCaptureFinalizationPending = false,
-    this.externalCaptureUsesNecklace = false,
     required this.starting,
     this.hasNecklace = false,
     this.legacyNecklaceNeedsConfirmation = false,
@@ -2523,24 +2636,20 @@ class TodayRecordMomentControl extends StatelessWidget {
     required this.necklaceConnecting,
     required this.recordingState,
     this.diagnostics = const CaptureDiagnostics(),
-    required this.necklaceContinuouslyRecording,
     this.showWhispers = false,
     this.whispersEnabled = false,
     this.whispersVerified = false,
     this.onOpenControls,
     this.onOpenWhispers,
     required this.onViewTranscript,
-    required this.onFinishExternalCapture,
+    required this.onSourceSelected,
     this.onUnavailable,
-    this.onReconnectNecklace,
-    this.onConfirmLegacyNecklace,
     required this.onTap,
   });
 
-  final bool homeCaptureOwned;
-  final bool homeCaptureUsesNecklace;
+  final EllaCaptureSource selectedSource;
+  final EllaCaptureSource? activeSource;
   final bool externalCaptureFinalizationPending;
-  final bool externalCaptureUsesNecklace;
   final bool starting;
   final bool hasNecklace;
   final bool legacyNecklaceNeedsConfirmation;
@@ -2548,17 +2657,14 @@ class TodayRecordMomentControl extends StatelessWidget {
   final bool necklaceConnecting;
   final RecordingState recordingState;
   final CaptureDiagnostics diagnostics;
-  final bool necklaceContinuouslyRecording;
   final bool showWhispers;
   final bool whispersEnabled;
   final bool whispersVerified;
   final VoidCallback? onOpenControls;
   final VoidCallback? onOpenWhispers;
   final VoidCallback onViewTranscript;
-  final VoidCallback onFinishExternalCapture;
+  final ValueChanged<EllaCaptureSource> onSourceSelected;
   final VoidCallback? onUnavailable;
-  final VoidCallback? onReconnectNecklace;
-  final VoidCallback? onConfirmLegacyNecklace;
   final VoidCallback onTap;
 
   @override
@@ -2566,29 +2672,19 @@ class TodayRecordMomentControl extends StatelessWidget {
     final initialising = starting || recordingState == RecordingState.initialising;
     final phoneRecording = recordingState == RecordingState.record;
     final necklaceRecording = recordingState == RecordingState.deviceRecord;
-    final active = homeCaptureOwned && (phoneRecording || necklaceRecording);
-    final usesNecklace = homeCaptureUsesNecklace ||
-        externalCaptureUsesNecklace ||
-        necklaceRecording ||
-        (initialising && diagnostics.source == CaptureDiagnosticSource.necklace) ||
-        (!phoneRecording && !initialising && necklaceConnected);
+    final active = phoneRecording || necklaceRecording;
+    final sourceLocked = phoneRecording || initialising || externalCaptureFinalizationPending;
     final presentation = _presentation(
       context,
       initialising: initialising,
       phoneRecording: phoneRecording,
       necklaceRecording: necklaceRecording,
-      usesNecklace: usesNecklace,
       externalCaptureFinalizationPending: externalCaptureFinalizationPending,
       hasNecklace: hasNecklace,
       legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
       necklaceConnected: necklaceConnected,
       necklaceConnecting: necklaceConnecting,
     );
-    final canReconnectNecklace =
-        hasNecklace && !necklaceConnected && !necklaceConnecting && onReconnectNecklace != null;
-    final canConfirmLegacyNecklace =
-        legacyNecklaceNeedsConfirmation && !necklaceConnecting && onConfirmLegacyNecklace != null;
-
     return Material(
       key: const Key('today-capture-dock'),
       elevation: 12,
@@ -2606,13 +2702,40 @@ class TodayRecordMomentControl extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Semantics(
+                label: context.l10n.todayCaptureSourceTitle,
+                container: true,
+                child: Row(
+                  key: const Key('today-capture-source-selector'),
+                  children: [
+                    Expanded(
+                      child: _TodayCaptureSourceButton(
+                        buttonKey: const Key('today-capture-source-phone'),
+                        icon: Icons.smartphone_rounded,
+                        label: context.l10n.todayCaptureSourcePhone,
+                        selected: selectedSource == EllaCaptureSource.phone,
+                        enabled: !sourceLocked,
+                        onTap: () => onSourceSelected(EllaCaptureSource.phone),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _TodayCaptureSourceButton(
+                        buttonKey: const Key('today-capture-source-necklace'),
+                        icon: Icons.bluetooth_rounded,
+                        label: context.l10n.todayCaptureSourceNecklace,
+                        selected: selectedSource == EllaCaptureSource.necklace,
+                        enabled: !sourceLocked,
+                        onTap: () => onSourceSelected(EllaCaptureSource.necklace),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
               InkWell(
                 key: const Key('today-dock-status'),
-                onTap: canConfirmLegacyNecklace
-                    ? onConfirmLegacyNecklace
-                    : canReconnectNecklace
-                        ? onReconnectNecklace
-                        : onOpenControls,
+                onTap: onOpenControls,
                 borderRadius: BorderRadius.circular(16),
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
@@ -2621,8 +2744,8 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: Row(
                       children: [
                         EllaBreathingDot(
-                          active: active || necklaceContinuouslyRecording,
-                          live: active,
+                          active: active,
+                          live: active && diagnostics.hasPhysicalAudio,
                           activeColor: active ? EllaColors.error : EllaColors.teal,
                         ),
                         const SizedBox(width: 10),
@@ -2641,10 +2764,12 @@ class TodayRecordMomentControl extends StatelessWidget {
                             ),
                           ),
                         ),
-                        if (canConfirmLegacyNecklace)
-                          const Icon(Icons.link_rounded, color: EllaColors.tealDeep, semanticLabel: '')
-                        else if (canReconnectNecklace)
-                          const Icon(Icons.refresh_rounded, color: EllaColors.tealDeep, semanticLabel: ''),
+                        if (selectedSource == EllaCaptureSource.necklace && !necklaceConnected)
+                          Icon(
+                            legacyNecklaceNeedsConfirmation ? Icons.link_rounded : Icons.refresh_rounded,
+                            color: EllaColors.tealDeep,
+                            semanticLabel: '',
+                          ),
                       ],
                     ),
                   ),
@@ -2661,7 +2786,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                       emphasized: presentation.emphasized,
                       enabled: presentation.primaryEnabled,
                       onDisabledTap: presentation.mode == TodayCaptureDockMode.unavailable ? onUnavailable : null,
-                      onTap: presentation.finishesExternalCapture ? onFinishExternalCapture : onTap,
+                      onTap: onTap,
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -2669,7 +2794,9 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: _TodayDockAction(
                       actionKey: const Key('today-view-live-transcript'),
                       icon: Icons.subject_rounded,
-                      label: context.l10n.transcript,
+                      label: (activeSource ?? selectedSource) == EllaCaptureSource.necklace
+                          ? context.l10n.todayDockTranscriptNecklace
+                          : context.l10n.todayDockTranscriptPhone,
                       onTap: onViewTranscript,
                     ),
                   ),
@@ -2699,76 +2826,154 @@ class TodayRecordMomentControl extends StatelessWidget {
     required bool initialising,
     required bool phoneRecording,
     required bool necklaceRecording,
-    required bool usesNecklace,
     required bool externalCaptureFinalizationPending,
     required bool hasNecklace,
     required bool legacyNecklaceNeedsConfirmation,
     required bool necklaceConnected,
     required bool necklaceConnecting,
   }) {
-    final idleStatus = necklaceConnecting
-        ? context.l10n.todayDockNecklaceConnecting
-        : legacyNecklaceNeedsConfirmation
-            ? context.l10n.todayLegacyNecklaceDockStatus
-            : hasNecklace && !necklaceConnected
-                ? context.l10n.todayDockNecklaceNotConnected
-                : context.l10n.todayDockPhoneReady;
-    final status = initialising
-        ? context.l10n.todayDockStarting
-        : externalCaptureFinalizationPending
-            ? context.l10n.todayDockRecordingNeedsAttention
-            : recordingState == RecordingState.error
-                ? homeCaptureOwned
-                    ? context.l10n.todayDockRecordingNeedsAttention
-                    : idleStatus
-                : homeCaptureOwned && usesNecklace && necklaceConnecting
-                    ? context.l10n.todayDockNecklaceConnecting
-                    : phoneRecording
-                        ? context.l10n.todayDockRecordingPhone
-                        : necklaceRecording || (homeCaptureOwned && usesNecklace)
-                            ? context.l10n.todayDockRecordingNecklace
-                            : idleStatus;
-    final externalCaptureActive = !homeCaptureOwned &&
-        (externalCaptureFinalizationPending || phoneRecording || (necklaceRecording && !necklaceContinuouslyRecording));
+    final sourceIsNecklace = selectedSource == EllaCaptureSource.necklace;
+    final status = externalCaptureFinalizationPending
+        ? context.l10n.todayDockRecordingNeedsAttention
+        : phoneRecording
+            ? context.l10n.todayDockRecordingPhone
+            : necklaceRecording
+                ? sourceIsNecklace
+                    ? context.l10n.todayDockRecordingNecklace
+                    : context.l10n.todayDockNecklaceActivePhoneSelected
+                : initialising
+                    ? sourceIsNecklace
+                        ? context.l10n.todayDockNecklaceConnecting
+                        : context.l10n.todayDockPhoneStarting
+                    : sourceIsNecklace
+                        ? recordingState == RecordingState.error
+                            ? context.l10n.todayDockNecklaceNeedsAttention
+                            : necklaceConnecting
+                                ? context.l10n.todayDockNecklaceConnecting
+                                : legacyNecklaceNeedsConfirmation
+                                    ? context.l10n.todayLegacyNecklaceDockStatus
+                                    : !necklaceConnected
+                                        ? context.l10n.todayDockNecklaceNotConnected
+                                        : context.l10n.todayDockNecklaceReady
+                        : recordingState == RecordingState.error
+                            ? context.l10n.todayDockPhoneNeedsAttention
+                            : context.l10n.todayDockPhoneReady;
     if (initialising) {
       return TodayCaptureDockPresentation(
         mode: TodayCaptureDockMode.starting,
         status: status,
-        primaryLabel: context.l10n.todayDockRecord,
-        primaryIcon: Icons.mic_none_rounded,
-        finishesExternalCapture: false,
+        primaryLabel: sourceIsNecklace ? context.l10n.todayDockStartNecklace : context.l10n.todayDockRecord,
+        primaryIcon: sourceIsNecklace ? Icons.bluetooth_searching_rounded : Icons.mic_none_rounded,
         primaryEnabled: false,
       );
     }
-    if (externalCaptureActive) {
+    if (externalCaptureFinalizationPending) {
       return TodayCaptureDockPresentation(
-        mode: externalCaptureFinalizationPending ? TodayCaptureDockMode.finishing : TodayCaptureDockMode.recording,
+        mode: TodayCaptureDockMode.finishing,
         status: status,
         primaryLabel: context.l10n.todayDockFinish,
         primaryIcon: Icons.stop_rounded,
-        finishesExternalCapture: true,
         primaryEnabled: true,
       );
     }
-    if (homeCaptureOwned) {
+    if (phoneRecording) {
       return TodayCaptureDockPresentation(
-        mode: phoneRecording || necklaceRecording ? TodayCaptureDockMode.recording : TodayCaptureDockMode.finishing,
+        mode: TodayCaptureDockMode.recording,
         status: status,
-        primaryLabel: context.l10n.todayDockFinish,
+        primaryLabel: context.l10n.todayDockStop,
         primaryIcon: Icons.stop_rounded,
-        finishesExternalCapture: false,
         primaryEnabled: true,
+      );
+    }
+    if (necklaceRecording && sourceIsNecklace) {
+      return TodayCaptureDockPresentation(
+        mode: TodayCaptureDockMode.recording,
+        status: status,
+        primaryLabel: context.l10n.todayDockSaveMoment,
+        primaryIcon: Icons.bookmark_add_rounded,
+        primaryEnabled: true,
+      );
+    }
+    if (sourceIsNecklace) {
+      final needsReconnect = legacyNecklaceNeedsConfirmation || (hasNecklace && !necklaceConnected);
+      return TodayCaptureDockPresentation(
+        mode: recordingState == RecordingState.error ? TodayCaptureDockMode.unavailable : TodayCaptureDockMode.ready,
+        status: status,
+        primaryLabel: recordingState == RecordingState.error
+            ? context.l10n.todayDockRetry
+            : needsReconnect
+                ? context.l10n.todayDockReconnect
+                : context.l10n.todayDockStartNecklace,
+        primaryIcon:
+            needsReconnect || recordingState == RecordingState.error ? Icons.refresh_rounded : Icons.mic_none_rounded,
+        primaryEnabled: !necklaceConnecting && (necklaceConnected || hasNecklace || legacyNecklaceNeedsConfirmation),
       );
     }
     return TodayCaptureDockPresentation(
-      mode: TodayCaptureDockMode.ready,
+      mode: recordingState == RecordingState.error ? TodayCaptureDockMode.unavailable : TodayCaptureDockMode.ready,
       status: status,
-      primaryLabel: context.l10n.todayDockRecord,
+      primaryLabel: recordingState == RecordingState.error ? context.l10n.todayDockRetry : context.l10n.todayDockRecord,
       primaryIcon: Icons.mic_none_rounded,
-      finishesExternalCapture: false,
       primaryEnabled: true,
     );
   }
+}
+
+class _TodayCaptureSourceButton extends StatelessWidget {
+  const _TodayCaptureSourceButton({
+    required this.buttonKey,
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final Key buttonKey;
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        enabled: enabled,
+        label: label,
+        excludeSemantics: true,
+        child: Material(
+          color: selected ? const Color(0xFFD0E4DE) : EllaColors.paper,
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            key: buttonKey,
+            onTap: enabled ? onTap : null,
+            borderRadius: BorderRadius.circular(14),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 42),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 18, color: selected ? EllaColors.tealDeep : EllaColors.inkSoft),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: EllaTextStyles.caption.copyWith(
+                        color: selected ? EllaColors.tealDeep : EllaColors.inkSoft,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 class _TodayDockAction extends StatefulWidget {

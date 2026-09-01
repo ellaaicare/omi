@@ -799,6 +799,48 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
+  /// Reconnects the exact account/profile-bound necklace and waits until its
+  /// capture transport is active. Unlike the background watchdog, this is a
+  /// user-initiated operation and also repairs a connected BLE session whose
+  /// audio capture failed to start.
+  Future<bool> reconnectKnownDeviceForCapture({required String reason}) async {
+    if (!_deviceServiceReady) return false;
+    final stored = _rememberedDeviceForCurrentAuthority();
+    if (stored == null) return false;
+
+    await _captureTeardown;
+    if (!_deviceServiceReady || !_isCurrentOwnerBoundDevice(stored.id)) return false;
+
+    final generation = ++_deviceOperationGeneration;
+    pairedDevice = stored;
+    _automaticReconnectCooldownUntil = null;
+    _automaticReconnectExhausted = false;
+    updateConnectingStatus(true);
+
+    try {
+      final activeDevice = connectedDevice;
+      if (isConnected && activeDevice != null) {
+        if (activeDevice.id != stored.id) return false;
+        await _onDeviceConnected(activeDevice, generation, explicitlyAuthorized: true);
+      } else {
+        await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: true);
+      }
+    } catch (error) {
+      Logger.debug('User-initiated necklace reconnect failed ($reason): $error');
+    } finally {
+      if (_isDeviceOperationCurrent(generation)) updateConnectingStatus(false);
+    }
+
+    if (!_isDeviceOperationCurrent(generation) || !_isCurrentOwnerBoundDevice(stored.id)) return false;
+    final captureReady = isConnected &&
+        connectedDevice?.id == stored.id &&
+        captureProvider?.recordingState == RecordingState.deviceRecord;
+    if (!captureReady && !isConnected) {
+      unawaited(periodicConnect('$reason follow-up', boundDeviceOnly: true, operationGeneration: generation));
+    }
+    return captureReady;
+  }
+
   /// Commits the one explicit Home confirmation for a device saved by builds
   /// that predate owner binding. This is deliberately separate from normal
   /// resume so a new account can never inherit or capture through a legacy
