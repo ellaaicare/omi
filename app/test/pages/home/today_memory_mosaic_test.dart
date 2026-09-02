@@ -494,6 +494,11 @@ void main() {
     expect(harness.capture.phoneStarts, 1);
     expect(harness.capture.recordingState, RecordingState.record);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStarts, 0, reason: 'an abandoned necklace startup must not resume after phone use');
   });
 
   testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {

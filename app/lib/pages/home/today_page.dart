@@ -1627,7 +1627,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       final necklaceTransportOwned =
           necklaceTransportState && (capture.havingRecordingDevice || necklaceConnected || connectedDevice != null);
       if (necklaceTransportOwned) {
-        if (necklaceConnected && connectedDevice != null) {
+        final shouldResumeAmbient =
+            capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause;
+        if (shouldResumeAmbient && necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
@@ -2868,7 +2870,8 @@ class TodayRecordMomentControl extends StatelessWidget {
     required bool necklaceConnecting,
   }) {
     final sourceIsNecklace = selectedSource == EllaCaptureSource.necklace;
-    final switchingAwayFromStartup = initialising && activeSource != null && activeSource != selectedSource;
+    final switchingAwayFromStartup =
+        initialising && activeSource == EllaCaptureSource.necklace && selectedSource == EllaCaptureSource.phone;
     final status = externalCaptureFinalizationPending
         ? context.l10n.todayDockRecordingNeedsAttention
         : phoneRecording

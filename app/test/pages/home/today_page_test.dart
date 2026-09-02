@@ -264,6 +264,20 @@ void main() {
     selection = null;
     await _pumpRecordControl(
       tester,
+      selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.phone,
+      starting: true,
+      hasNecklace: true,
+      onSourceSelected: (source) => selection = source,
+    );
+    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
+    expect(selection, isNull, reason: 'a phone startup must stay locked even when a stale preference names necklace');
+
+    selection = null;
+    await _pumpRecordControl(
+      tester,
       recordingState: RecordingState.record,
       onSourceSelected: (source) => selection = source,
     );
