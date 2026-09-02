@@ -27,6 +27,10 @@ class MemoryArtworkCache {
         Config('ellaMemoryArtworkCacheV1', stalePeriod: const Duration(days: 30), maxNrOfCacheObjects: 1000),
       );
 
+  static bool isNetworkOnlyDisplayCacheKey(String cacheKey) {
+    return cacheKey.contains('-network-only-v1-$_networkOnlyCacheNamespace-');
+  }
+
   /// Resolves stale conversation-list metadata to the authoritative cache key
   /// returned by the artwork endpoint. Sliver recycling must not make an
   /// already-downloaded image wait for that endpoint again.
@@ -55,7 +59,7 @@ class MemoryArtworkCache {
       // authenticated URL can still render under a collision-resistant key.
       // The key is intentionally not trusted for later persistent reads.
       final networkOnlyCacheKey =
-          '$authoritativeCacheKey-network-$_networkOnlyCacheNamespace-${++_nextRecoveryCacheGeneration}';
+          '$authoritativeCacheKey-network-only-v1-$_networkOnlyCacheNamespace-${++_nextRecoveryCacheGeneration}';
       return isAuthorityCurrent() ? networkOnlyCacheKey : null;
     }
     final cacheKeys = {authoritativeCacheKey, if (provisionalCacheKey.isNotEmpty) provisionalCacheKey};

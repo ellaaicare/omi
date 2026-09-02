@@ -434,22 +434,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         label: context.l10n.memoryGeneratedArtworkLabel,
         child: KeyedSubtree(
           key: Key('memory-generated-artwork-${widget.conversation.id}'),
-          child: CachedNetworkImage(
-            imageUrl: result!.url.toString(),
-            key: Key('memory-generated-artwork-network-${widget.conversation.id}-${widget.authorityEpoch}'),
-            cacheKey: _cacheKey,
-            cacheManager: MemoryArtworkCache.manager,
-            fit: widget.fit,
-            useOldImageOnUrlChange: true,
-            placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
-            errorListener: (_) => _handleImageLoadFailure(
-              widget.api ?? MemoryArtworkApi(),
-              widget.conversation.artwork,
-              _requestGeneration,
-              _cacheKey,
-            ),
-            errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
-          ),
+          child: _readyNetworkArtwork(context, result!),
         ),
       );
     }
@@ -458,6 +443,48 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             ? _MemoryArtworkFallbackKind.preparing
             : _MemoryArtworkFallbackKind.unavailable;
     return _cachedArtworkOrFallback(context, kind: fallbackKind);
+  }
+
+  Widget _readyNetworkArtwork(BuildContext context, MemoryArtworkResult result) {
+    final imageKey = Key('memory-generated-artwork-network-${widget.conversation.id}-${widget.authorityEpoch}');
+    if (MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(_cacheKey)) {
+      final generation = _requestGeneration;
+      return Image.network(
+        result.url.toString(),
+        key: imageKey,
+        fit: widget.fit,
+        gaplessPlayback: true,
+        frameBuilder: (_, child, frame, __) =>
+            frame == null ? _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing) : child,
+        errorBuilder: (_, __, ___) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _handleImageLoadFailure(
+              widget.api ?? MemoryArtworkApi(),
+              widget.conversation.artwork,
+              generation,
+              _cacheKey,
+            );
+          });
+          return _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing);
+        },
+      );
+    }
+    return CachedNetworkImage(
+      imageUrl: result.url.toString(),
+      key: imageKey,
+      cacheKey: _cacheKey,
+      cacheManager: MemoryArtworkCache.manager,
+      fit: widget.fit,
+      useOldImageOnUrlChange: true,
+      placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+      errorListener: (_) => _handleImageLoadFailure(
+        widget.api ?? MemoryArtworkApi(),
+        widget.conversation.artwork,
+        _requestGeneration,
+        _cacheKey,
+      ),
+      errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+    );
   }
 
   bool _mustSuppressCachedArtwork(MemoryArtworkResult? result) {

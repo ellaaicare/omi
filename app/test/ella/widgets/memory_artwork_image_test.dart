@@ -571,14 +571,20 @@ void main() {
     await tester.pump();
 
     expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsOneWidget);
-    final image = tester.widget<CachedNetworkImage>(
-      find.byKey(const Key('memory-generated-artwork-network-memory-after-suppression-capacity-0')),
+    final networkImageFinder = find.byKey(
+      const Key('memory-generated-artwork-network-memory-after-suppression-capacity-0'),
     );
-    expect(image.imageUrl, 'https://private-storage.example/authority-1.png');
-    expect(image.cacheKey, isNotEmpty);
-    expect(image.cacheKey, isNot('authority-artwork-cache-key'));
+    expect(networkImageFinder, findsOneWidget);
     expect(
-      MemoryArtworkCache.resolveDisplayCacheKey(image.cacheKey!),
+      find.descendant(of: networkImageFinder, matching: find.byType(CachedNetworkImage)),
+      findsNothing,
+      reason: 'overflow recovery must not write private artwork to the persistent cache manager',
+    );
+    final image = tester.widget<Image>(networkImageFinder);
+    expect(image.image, isA<NetworkImage>());
+    expect((image.image as NetworkImage).url, 'https://private-storage.example/authority-1.png');
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey('authority-artwork-cache-key'),
       isEmpty,
       reason: 'overflow mode must keep persistent cache reads fail-closed',
     );
