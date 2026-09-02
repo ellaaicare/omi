@@ -1631,7 +1631,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
-          await capture.stopStreamDeviceRecordingAndFinalize();
+          final hadCapturableContent = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
+          final finalized = await capture.stopStreamDeviceRecordingAndFinalize();
+          if (hadCapturableContent && !finalized) {
+            if (!mounted) return;
+            setState(() {
+              _homeCaptureActive = false;
+              _homeCaptureFinalizationPending = true;
+              _homeCaptureSource = _HomeCaptureSource.necklaceOwned;
+            });
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+            return;
+          }
         } else {
           await capture.stopStreamDeviceRecording();
         }
@@ -1782,7 +1795,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final showGuardianSurfaces = _guardianAvailable;
     final homeCaptureOwned =
         _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
-    final externalCaptureFinalizationPending = _externalCaptureFinalizationSource != null;
+    final captureFinalizationPending = _homeCaptureFinalizationPending || _externalCaptureFinalizationSource != null;
     final dockClearance = todayDockScrollClearance(
       textScale: MediaQuery.textScalerOf(context).scale(1),
       safeBottom: MediaQuery.paddingOf(context).bottom,
@@ -1929,7 +1942,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             child: TodayRecordMomentControl(
               selectedSource: selectedCaptureSource,
               activeSource: activeCaptureSource,
-              externalCaptureFinalizationPending: externalCaptureFinalizationPending,
+              externalCaptureFinalizationPending: captureFinalizationPending,
               starting: _homeCaptureStarting,
               hasNecklace: hasNecklace,
               legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
