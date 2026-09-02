@@ -259,6 +259,7 @@ class _AuthorityRefreshArtworkApi extends MemoryArtworkApi {
   _AuthorityRefreshArtworkApi() : super(authorityProvider: () => null);
 
   int loadCalls = 0;
+  bool terminal = false;
 
   @override
   String cacheKeyForDisplay({
@@ -276,6 +277,7 @@ class _AuthorityRefreshArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) async {
     loadCalls += 1;
+    if (terminal) return const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined);
     return MemoryArtworkResult(
       status: MemoryArtworkResultStatus.ready,
       url: Uri.parse('https://private-storage.example/authority-$loadCalls.png'),
@@ -507,6 +509,121 @@ void main() {
     );
     expect(trustedKey, cacheKey);
   }
+
+  test('a superseded source key stays untrusted after alias pressure evicts its replacement mapping', () async {
+    const staleCacheKey = 'stale-ready-cache-key';
+    const replacementCacheKey = 'replacement-ready-cache-key';
+    await trustDisplayKey(staleCacheKey);
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: staleCacheKey,
+        authoritativeCacheKey: replacementCacheKey,
+        isAuthorityCurrent: () => true,
+      ),
+      replacementCacheKey,
+    );
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(staleCacheKey), replacementCacheKey);
+
+    for (var index = 0; index < 501; index++) {
+      final provisionalCacheKey = 'pressure-provisional-$index';
+      final authoritativeCacheKey = 'pressure-authoritative-$index';
+      MemoryArtworkCache.suppressDisplayCacheKeys({provisionalCacheKey, authoritativeCacheKey});
+      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+        {provisionalCacheKey, authoritativeCacheKey},
+        (_) async {},
+      );
+      expect(
+        await MemoryArtworkCache.rememberDisplayCacheKey(
+          provisionalCacheKey: provisionalCacheKey,
+          authoritativeCacheKey: authoritativeCacheKey,
+          isAuthorityCurrent: () => true,
+        ),
+        isNotNull,
+      );
+    }
+
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey(staleCacheKey),
+      isEmpty,
+      reason: 'alias eviction must not revive the superseded persistent disk key',
+    );
+  });
+
+  testWidgets('overflow recovery stays memory-only and disappears on a terminal response', (tester) async {
+    for (var index = 0; index <= 4096; index++) {
+      MemoryArtworkCache.suppressDisplayCacheKeys({'terminal-capacity-$index'});
+    }
+    expect(MemoryArtworkCache.resolveDisplayCacheKey('terminal-capacity-0'), isEmpty);
+
+    final api = _AuthorityRefreshArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-after-suppression-capacity',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+    var persistentCacheLookups = 0;
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            refreshEpoch: refreshEpoch,
+            cachedFileLookup: (_) async {
+              persistentCacheLookups += 1;
+              return null;
+            },
+            retryDelay: const Duration(milliseconds: 10),
+            maxImageDownloadRetries: 1,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsOneWidget);
+    final networkImageFinder = find.byKey(
+      const Key('memory-generated-artwork-network-memory-after-suppression-capacity-0'),
+    );
+    expect(networkImageFinder, findsOneWidget);
+    expect(
+      find.descendant(of: networkImageFinder, matching: find.byType(CachedNetworkImage)),
+      findsNothing,
+      reason: 'overflow recovery must not write private artwork to the persistent cache manager',
+    );
+    final image = tester.widget<Image>(networkImageFinder);
+    expect(image.image, isA<NetworkImage>());
+    expect((image.image as NetworkImage).url, 'https://private-storage.example/authority-1.png');
+    expect(persistentCacheLookups, 0, reason: 'overflow recovery must not read or write the persistent cache');
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey('authority-artwork-cache-key'),
+      isEmpty,
+      reason: 'overflow mode must keep persistent cache reads fail-closed',
+    );
+
+    image.errorBuilder!(tester.element(networkImageFinder), Exception('network unavailable'), StackTrace.empty);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
+    expect(api.loadCalls, 2, reason: 'network-only download recovery must remain bounded and fetch fresh authority');
+    expect(find.byType(CachedNetworkImage), findsNothing);
+
+    api.terminal = true;
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsNothing);
+    expect(find.byType(CachedNetworkImage), findsNothing);
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(persistentCacheLookups, 0, reason: 'terminal cleanup cannot expose a disk artifact that was never written');
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
+  });
 
   test('a new terminal tombstone remains fail-closed while older evictions are pending', () async {
     final releases = List.generate(1000, (_) => Completer<void>());
