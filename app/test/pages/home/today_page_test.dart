@@ -237,6 +237,7 @@ void main() {
     await _pumpRecordControl(
       tester,
       selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.necklace,
       hasNecklace: true,
       necklaceConnected: true,
       recordingState: RecordingState.initialising,
@@ -246,6 +247,19 @@ void main() {
     await tester.tap(find.byKey(const Key('today-capture-source-phone')));
     await tester.pump();
     expect(selection, EllaCaptureSource.phone, reason: 'a stuck necklace start must never trap the source selector');
+
+    selection = null;
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.phone,
+      activeSource: EllaCaptureSource.phone,
+      starting: true,
+      hasNecklace: true,
+      onSourceSelected: (source) => selection = source,
+    );
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(selection, isNull, reason: 'normal phone startup must not rewrite the next capture source');
 
     selection = null;
     await _pumpRecordControl(

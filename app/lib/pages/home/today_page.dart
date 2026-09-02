@@ -2692,7 +2692,10 @@ class TodayRecordMomentControl extends StatelessWidget {
     final phoneRecording = recordingState == RecordingState.record;
     final necklaceRecording = recordingState == RecordingState.deviceRecord;
     final active = phoneRecording || necklaceRecording;
-    final sourceLocked = phoneRecording || externalCaptureFinalizationPending;
+    final canEscapeNecklaceStartup =
+        initialising && activeSource == EllaCaptureSource.necklace && selectedSource == EllaCaptureSource.necklace;
+    final sourceLocked =
+        phoneRecording || externalCaptureFinalizationPending || (initialising && !canEscapeNecklaceStartup);
     final presentation = _presentation(
       context,
       initialising: initialising,
