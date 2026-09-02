@@ -129,11 +129,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     final generation = ++_requestGeneration;
     final api = widget.api ?? MemoryArtworkApi();
     final artwork = widget.conversation.artwork;
-    final cacheKey = api.cacheKeyForDisplay(
-      memoryId: widget.conversation.id,
-      styleVersion: artwork?.styleVersion ?? '',
-      enrichmentRevision: artwork?.enrichmentRevision ?? '',
-    );
+    final cacheKey = _cacheKeyForDisplay(api, artwork);
     final previousDisplayCacheKey = _displayCacheKey;
     if (invalidateCachedArtwork) {
       MemoryArtworkCache.forgetDisplayCacheKey(previousDisplayCacheKey);
@@ -154,6 +150,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(resolvedCacheKey, generation));
     }
     unawaited(_loadRemoteResult(api, artwork, generation));
+  }
+
+  String _cacheKeyForDisplay(MemoryArtworkApi api, MemoryArtworkState? artwork) {
+    return api.cacheKeyForDisplay(
+      memoryId: widget.conversation.id,
+      styleVersion: artwork?.styleVersion ?? '',
+      enrichmentRevision: artwork?.enrichmentRevision ?? '',
+    );
   }
 
   void _resetAuthorityRetryBudgetIfNeeded() {
@@ -251,6 +255,16 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
     if (!mounted || generation != _requestGeneration) return;
+    if (!result.isAuthorityCurrent) {
+      setState(() {
+        _remoteResult = const MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: 'memory_artwork_authority_changed',
+        );
+        _cachedFile = null;
+      });
+      return;
+    }
     if (_mustSuppressCachedArtwork(result)) {
       final suppressedCacheKeys = {_displayCacheKey, _cacheKey}..removeWhere((cacheKey) => cacheKey.isEmpty);
       MemoryArtworkCache.suppressDisplayCacheKeys(suppressedCacheKeys);
@@ -263,22 +277,45 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
     final readyCacheKey = result.isReady ? result.cacheKey : '';
+    var publishedReadyCacheKey = readyCacheKey;
     if (readyCacheKey.isNotEmpty) {
-      final canPublishReadyArtwork = await MemoryArtworkCache.rememberDisplayCacheKey(
-        provisionalCacheKey: _displayCacheKey,
-        authoritativeCacheKey: readyCacheKey,
+      final recoveredDisplayCacheKey = _cacheKeyForDisplay(api, artwork);
+      final provisionalCacheKey = recoveredDisplayCacheKey.isNotEmpty ? recoveredDisplayCacheKey : _displayCacheKey;
+      final readyCacheKeys = {provisionalCacheKey, readyCacheKey}..removeWhere((cacheKey) => cacheKey.isEmpty);
+      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+        readyCacheKeys,
+        widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile,
       );
-      if (!mounted || generation != _requestGeneration || !canPublishReadyArtwork) return;
+      if (!mounted || generation != _requestGeneration || !result.isAuthorityCurrent) return;
+      final rememberedCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: provisionalCacheKey,
+        authoritativeCacheKey: readyCacheKey,
+        isAuthorityCurrent: () => result.isAuthorityCurrent,
+      );
+      if (!mounted || generation != _requestGeneration || !result.isAuthorityCurrent) return;
+      if (rememberedCacheKey == null) {
+        setState(() {
+          _remoteResult = const MemoryArtworkResult(
+            status: MemoryArtworkResultStatus.unavailable,
+            failureCode: 'memory_artwork_cache_cleanup_unavailable',
+          );
+          _cachedFile = null;
+        });
+        _scheduleRetry(api, artwork, generation, transientTransportFailure: true);
+        return;
+      }
+      publishedReadyCacheKey = rememberedCacheKey;
+      _displayCacheKey = provisionalCacheKey;
     }
     setState(() {
       _remoteResult = result;
-      if (readyCacheKey.isNotEmpty && readyCacheKey != _cacheKey) {
-        _cacheKey = readyCacheKey;
+      if (publishedReadyCacheKey.isNotEmpty && publishedReadyCacheKey != _cacheKey) {
+        _cacheKey = publishedReadyCacheKey;
         _cachedFile = null;
       }
     });
-    if (loadCachedFile && readyCacheKey.isNotEmpty) {
-      unawaited(_loadCachedFile(readyCacheKey, generation));
+    if (loadCachedFile && publishedReadyCacheKey.isNotEmpty) {
+      unawaited(_loadCachedFile(publishedReadyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
   }
@@ -400,7 +437,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           child: CachedNetworkImage(
             imageUrl: result!.url.toString(),
             key: Key('memory-generated-artwork-network-${widget.conversation.id}-${widget.authorityEpoch}'),
-            cacheKey: result.cacheKey,
+            cacheKey: _cacheKey,
             cacheManager: MemoryArtworkCache.manager,
             fit: widget.fit,
             useOldImageOnUrlChange: true,
@@ -409,7 +446,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               widget.api ?? MemoryArtworkApi(),
               widget.conversation.artwork,
               _requestGeneration,
-              result.cacheKey,
+              _cacheKey,
             ),
             errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
           ),

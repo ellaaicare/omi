@@ -8,8 +8,10 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/ella/services/memory_artwork_cache.dart';
 import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 class _DelayedArtworkApi extends MemoryArtworkApi {
   _DelayedArtworkApi() : super(authorityProvider: () => null);
@@ -317,6 +319,121 @@ class _AuthorityBecomesReadyArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _RecoveredAuthorityRecycledArtworkApi extends MemoryArtworkApi {
+  _RecoveredAuthorityRecycledArtworkApi() : super(authorityProvider: () => null);
+
+  final recycledResult = Completer<MemoryArtworkResult>();
+  bool authorityAvailable = false;
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      authorityAvailable ? 'recovered-authority-provisional-cache-key' : '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) {
+    loadCalls += 1;
+    if (loadCalls == 1) {
+      authorityAvailable = true;
+      return Future.value(
+        const MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: 'memory_artwork_authority_unavailable',
+        ),
+      );
+    }
+    if (loadCalls == 2) {
+      return Future.value(
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://private-storage.example/recovered-authority.png'),
+          cacheKey: 'recovered-authority-authoritative-cache-key',
+        ),
+      );
+    }
+    return recycledResult.future;
+  }
+}
+
+class _MutableArtworkAuthority implements ExactAccountAuthorityVerifier {
+  _MutableArtworkAuthority();
+
+  bool current = true;
+
+  @override
+  String get uid => 'test-user';
+
+  @override
+  bool isExactCurrent() => current;
+}
+
+class _AuthorityDriftDuringCachePublishApi extends MemoryArtworkApi {
+  _AuthorityDriftDuringCachePublishApi(this.authority) : super(authorityProvider: () => null);
+
+  final _MutableArtworkAuthority authority;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      authority.current ? 'drift-provisional-cache-key' : '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/drift.png'),
+      cacheKey: 'drift-authoritative-cache-key',
+      authority: authority,
+    );
+  }
+}
+
+class _RetryingReadyArtworkApi extends MemoryArtworkApi {
+  _RetryingReadyArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      'retrying-ready-cache-key';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/retrying-ready.png'),
+      cacheKey: 'retrying-ready-cache-key',
+    );
+  }
+}
+
 class _PersistentlyUnavailableAuthorityArtworkApi extends MemoryArtworkApi {
   _PersistentlyUnavailableAuthorityArtworkApi(this.failureCode) : super(authorityProvider: () => null);
 
@@ -379,6 +496,139 @@ class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
 }
 
 void main() {
+  setUp(MemoryArtworkCache.resetRuntimeTrustForTesting);
+  tearDown(MemoryArtworkCache.resetRuntimeTrustForTesting);
+
+  Future<void> trustDisplayKey(String cacheKey) async {
+    final trustedKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: () => true,
+    );
+    expect(trustedKey, cacheKey);
+  }
+
+  test('a new terminal tombstone remains fail-closed while older evictions are pending', () async {
+    final releases = List.generate(1000, (_) => Completer<void>());
+    final pendingEvictions = <Future<void>>[];
+
+    for (var index = 0; index < releases.length; index++) {
+      final cacheKey = 'pending-terminal-$index';
+      MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
+      pendingEvictions.add(
+        MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) => releases[index].future),
+      );
+    }
+
+    const newestKey = 'new-terminal-key';
+    MemoryArtworkCache.suppressDisplayCacheKeys({newestKey});
+
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(newestKey), isEmpty);
+
+    for (final release in releases) {
+      release.complete();
+    }
+    await Future.wait(pendingEvictions);
+  });
+
+  test('failed cleanup stays fail-closed through later suppression pressure and can be retried', () async {
+    const failedKey = 'failed-terminal-key';
+    MemoryArtworkCache.suppressDisplayCacheKeys({failedKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({failedKey}, (_) async => throw Exception('disk busy'));
+
+    for (var index = 0; index <= 1000; index++) {
+      final cacheKey = 'later-terminal-$index';
+      MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
+      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) async {});
+    }
+
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(failedKey), isEmpty);
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: failedKey,
+        authoritativeCacheKey: failedKey,
+        isAuthorityCurrent: () => true,
+      ),
+      isNull,
+    );
+
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({failedKey}, (_) async {});
+    final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: failedKey,
+      authoritativeCacheKey: failedKey,
+      isAuthorityCurrent: () => true,
+    );
+    expect(recoveredCacheKey, isNotNull);
+    expect(recoveredCacheKey, isNot(failedKey));
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(failedKey), recoveredCacheKey);
+  });
+
+  test('a terminal key never becomes readable again after a stale download rewrites it or the app restarts', () async {
+    const provisionalKey = 'terminal-provisional-key';
+    const authoritativeKey = 'terminal-authoritative-key';
+    MemoryArtworkCache.suppressDisplayCacheKeys({provisionalKey, authoritativeKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {provisionalKey, authoritativeKey},
+      (_) async {},
+    );
+
+    final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: provisionalKey,
+      authoritativeCacheKey: authoritativeKey,
+      isAuthorityCurrent: () => true,
+    );
+
+    expect(recoveredCacheKey, isNotNull);
+    expect(recoveredCacheKey, isNot(authoritativeKey));
+    // An old image request may still write the terminal keys after deletion.
+    // Resolution must continue to bypass those keys for the new ready image.
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), recoveredCacheKey);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(authoritativeKey), recoveredCacheKey);
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), isEmpty);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(authoritativeKey), isEmpty);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(recoveredCacheKey!), isEmpty);
+  });
+
+  test('a timed-out eviction stays serialized until the underlying deletion finishes', () async {
+    const cacheKey = 'hung-terminal-key';
+    final release = Completer<void>();
+    var evictionCalls = 0;
+    MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
+
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {cacheKey},
+      (_) {
+        evictionCalls += 1;
+        return release.future;
+      },
+      waitTimeout: Duration.zero,
+    );
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {cacheKey},
+      (_) {
+        evictionCalls += 1;
+        return Future.value();
+      },
+      waitTimeout: Duration.zero,
+    );
+
+    expect(evictionCalls, 1);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(cacheKey), isEmpty);
+
+    release.complete();
+    await Future<void>.delayed(Duration.zero);
+    final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: () => true,
+    );
+    expect(recoveredCacheKey, isNotNull);
+    expect(evictionCalls, 1);
+  });
+
   testWidgets('recycled cards use the authoritative disk key before a repeated metadata request completes', (
     tester,
   ) async {
@@ -425,6 +675,7 @@ void main() {
     final api = _DelayedArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
     final requestedKeys = <String>[];
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
     final conversation = ServerConversation(
       id: 'memory-cached',
       createdAt: DateTime(2026, 8, 25),
@@ -473,6 +724,7 @@ void main() {
   testWidgets('keeps cached artwork visible through a transient refresh failure', (tester) async {
     final api = _DelayedArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
     final conversation = ServerConversation(
       id: 'memory-transient',
       createdAt: DateTime(2026, 8, 25),
@@ -488,7 +740,11 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => cachedFile),
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+        ),
       ),
     );
     await tester.pump();
@@ -532,6 +788,7 @@ void main() {
   testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
     final api = _DelayedArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
     final conversation = ServerConversation(
       id: 'memory-declined',
       createdAt: DateTime(2026, 8, 25),
@@ -547,7 +804,12 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => cachedFile),
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+          cacheEvictor: (_) async {},
+        ),
       ),
     );
     await tester.pump();
@@ -822,6 +1084,146 @@ void main() {
 
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-settling-authority')), findsOneWidget);
+  });
+
+  testWidgets('recovered authority retains its disk alias after the card is recycled', (tester) async {
+    final api = _RecoveredAuthorityRecycledArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    final requestedKeys = <String>[];
+    final conversation = ServerConversation(
+      id: 'memory-recovered-authority-recycled',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'revision-a',
+      ),
+    );
+
+    Widget buildArtwork() => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            retryDelay: const Duration(milliseconds: 10),
+            authorityEpoch: 1,
+            cachedFileLookup: (cacheKey) async {
+              requestedKeys.add(cacheKey);
+              return cacheKey == 'recovered-authority-authoritative-cache-key' ? cachedFile : null;
+            },
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork());
+    await tester.pump();
+    expect(api.loadCalls, 1);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-recovered-authority-recycled')), findsOneWidget);
+
+    requestedKeys.clear();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(buildArtwork());
+    await tester.pump();
+
+    expect(api.loadCalls, 3);
+    expect(api.recycledResult.isCompleted, isFalse);
+    expect(requestedKeys, ['recovered-authority-authoritative-cache-key']);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-recovered-authority-recycled')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-recovered-authority-recycled')), findsNothing);
+  });
+
+  testWidgets('authority drift during cache cleanup cannot publish or render the stale ready response', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    final api = _AuthorityDriftDuringCachePublishApi(authority);
+    final evictionRelease = Completer<void>();
+    var evictionCalls = 0;
+    const provisionalKey = 'drift-provisional-cache-key';
+    const authoritativeKey = 'drift-authoritative-cache-key';
+    MemoryArtworkCache.suppressDisplayCacheKeys({provisionalKey, authoritativeKey});
+    final conversation = ServerConversation(
+      id: 'memory-authority-drift-during-cache-publish',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'revision-a',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          cacheEvictor: (_) {
+            evictionCalls += 1;
+            return evictionRelease.future;
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(evictionCalls, 2);
+
+    authority.current = false;
+    evictionRelease.complete();
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-generated-artwork-memory-authority-drift-during-cache-publish')), findsNothing);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), isEmpty);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(authoritativeKey), isEmpty);
+  });
+
+  testWidgets('a failed terminal-cache cleanup retries before publishing ready artwork', (tester) async {
+    final api = _RetryingReadyArtworkApi();
+    var evictionCalls = 0;
+    const cacheKey = 'retrying-ready-cache-key';
+    MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
+    final conversation = ServerConversation(
+      id: 'memory-retrying-ready-cache-cleanup',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'revision-a',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          retryDelay: const Duration(milliseconds: 10),
+          cachedFileLookup: (_) async => null,
+          cacheEvictor: (_) async {
+            evictionCalls += 1;
+            if (evictionCalls == 1) throw Exception('disk busy');
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('memory-generated-artwork-memory-retrying-ready-cache-cleanup')), findsNothing);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(evictionCalls, 2);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-retrying-ready-cache-cleanup')), findsOneWidget);
   });
 
   testWidgets('bounds replacement-authority retries instead of polling a failing endpoint indefinitely', (
