@@ -1620,14 +1620,17 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       // Home's explicit Record action always owns the iPhone microphone. If
       // ambient necklace capture is active (or failed mid-session), close that
       // exact transport first and restore it only after the phone moment ends.
-      if (necklaceConnected &&
-          connectedDevice != null &&
-          (capture.recordingState == RecordingState.deviceRecord ||
-              capture.recordingState == RecordingState.initialising ||
-              capture.recordingState == RecordingState.pause ||
-              capture.recordingState == RecordingState.error)) {
-        _resumeNecklaceAfterPhoneCapture = connectedDevice;
-        if (capture.recordingState == RecordingState.deviceRecord) {
+      final necklaceTransportState = capture.recordingState == RecordingState.deviceRecord ||
+          capture.recordingState == RecordingState.initialising ||
+          capture.recordingState == RecordingState.pause ||
+          capture.recordingState == RecordingState.error;
+      final necklaceTransportOwned =
+          necklaceTransportState && (capture.havingRecordingDevice || necklaceConnected || connectedDevice != null);
+      if (necklaceTransportOwned) {
+        if (necklaceConnected && connectedDevice != null) {
+          _resumeNecklaceAfterPhoneCapture = connectedDevice;
+        }
+        if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
           await capture.stopStreamDeviceRecordingAndFinalize();
         } else {
           await capture.stopStreamDeviceRecording();

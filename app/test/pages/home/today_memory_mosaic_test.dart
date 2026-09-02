@@ -770,6 +770,48 @@ void main() {
     expect(find.text('Recording on this iPhone'), findsOneWidget);
   });
 
+  testWidgets('stale necklace startup is cancelled even when device presentation has disconnected', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()..pairedDevice = necklace;
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.initialising);
+    await tester.pump();
+
+    expect(find.text('iPhone · Ready'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+  });
+
+  testWidgets('switching a paused necklace session finalizes it before iPhone capture', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.pause);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 1, reason: 'paused necklace content must be preserved');
+    expect(harness.capture.finishes, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+  });
+
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
