@@ -74,6 +74,42 @@ class _RecycledArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _ReadyThenSuppressedArtworkApi extends MemoryArtworkApi {
+  _ReadyThenSuppressedArtworkApi() : super(authorityProvider: () => null);
+
+  final remountedResult = Completer<MemoryArtworkResult>();
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      'suppressed-provisional-cache-key';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) {
+    loadCalls += 1;
+    if (loadCalls == 1) {
+      return Future.value(
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://private-storage.example/suppressed.png'),
+          cacheKey: 'suppressed-authoritative-cache-key',
+        ),
+      );
+    }
+    if (loadCalls == 2) return Future.value(const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined));
+    return remountedResult.future;
+  }
+}
+
 class _RefreshingArtworkApi extends MemoryArtworkApi {
   _RefreshingArtworkApi() : super(authorityProvider: () => null);
 
@@ -518,6 +554,56 @@ void main() {
 
     expect(find.byKey(const Key('memory-cached-artwork-memory-declined')), findsNothing);
     expect(find.text('Illustration unavailable'), findsOneWidget);
+  });
+
+  testWidgets('terminal suppression removes the authoritative alias before the card is recycled', (tester) async {
+    final api = _ReadyThenSuppressedArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    final requestedKeys = <String>[];
+    final evictedKeys = <String>[];
+    final conversation = ServerConversation(
+      id: 'memory-recycled-suppression',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A cached memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            refreshEpoch: refreshEpoch,
+            cachedFileLookup: (cacheKey) async {
+              requestedKeys.add(cacheKey);
+              return cacheKey == 'suppressed-authoritative-cache-key' ? cachedFile : null;
+            },
+            cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    expect(api.loadCalls, 1);
+
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+    await tester.pump();
+    expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-recycled-suppression')), findsNothing);
+    expect(evictedKeys, contains('suppressed-authoritative-cache-key'));
+
+    requestedKeys.clear();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(api.loadCalls, 3);
+    expect(api.remountedResult.isCompleted, isFalse);
+    expect(requestedKeys, contains('suppressed-provisional-cache-key'));
+    expect(requestedKeys, isNot(contains('suppressed-authoritative-cache-key')));
+    expect(find.byKey(const Key('memory-cached-artwork-memory-recycled-suppression')), findsNothing);
   });
 
   testWidgets('shows a friendly preparing state while artwork is being generated', (tester) async {
