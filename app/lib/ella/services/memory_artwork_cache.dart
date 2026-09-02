@@ -44,8 +44,10 @@ class MemoryArtworkCache {
     if (cacheKeys.any((cacheKey) => (_suppressionGenerations[cacheKey] ?? 0) != suppressionSnapshot[cacheKey])) {
       return false;
     }
-    if (provisionalCacheKey.isNotEmpty) _suppressedDisplayKeys.remove(provisionalCacheKey);
-    _suppressedDisplayKeys.remove(authoritativeCacheKey);
+    for (final cacheKey in cacheKeys) {
+      _suppressedDisplayKeys.remove(cacheKey);
+      _suppressionGenerations.remove(cacheKey);
+    }
     if (provisionalCacheKey.isNotEmpty) {
       _displayAliases.remove(provisionalCacheKey);
       _displayAliases[provisionalCacheKey] = authoritativeCacheKey;
