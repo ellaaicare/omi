@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
@@ -19,6 +20,7 @@ class MemoryArtworkCache {
   static final Map<String, Future<bool>> _pendingEvictions = {};
   static int _nextSuppressionGeneration = 0;
   static int _nextRecoveryCacheGeneration = 0;
+  static final String _networkOnlyCacheNamespace = _createNetworkOnlyCacheNamespace();
   static bool _diskReadsDisabled = false;
 
   static CacheManager get manager => _manager ??= CacheManager(
@@ -47,7 +49,15 @@ class MemoryArtworkCache {
     required String authoritativeCacheKey,
     required bool Function() isAuthorityCurrent,
   }) async {
-    if (authoritativeCacheKey.isEmpty || _diskReadsDisabled || !isAuthorityCurrent()) return null;
+    if (authoritativeCacheKey.isEmpty || !isAuthorityCurrent()) return null;
+    if (_diskReadsDisabled) {
+      // Suppression overflow discards per-key disk authority, but a newly
+      // authenticated URL can still render under a collision-resistant key.
+      // The key is intentionally not trusted for later persistent reads.
+      final networkOnlyCacheKey =
+          '$authoritativeCacheKey-network-$_networkOnlyCacheNamespace-${++_nextRecoveryCacheGeneration}';
+      return isAuthorityCurrent() ? networkOnlyCacheKey : null;
+    }
     final cacheKeys = {authoritativeCacheKey, if (provisionalCacheKey.isNotEmpty) provisionalCacheKey};
     final suppressionSnapshot = {
       for (final cacheKey in cacheKeys) cacheKey: _suppressionGenerations[cacheKey] ?? 0,
@@ -82,6 +92,7 @@ class MemoryArtworkCache {
 
     for (final cacheKey in cacheKeys) {
       if (cacheKey == publishedCacheKey) continue;
+      _trustedDisplayKeys.remove(cacheKey);
       _displayAliases.remove(cacheKey);
       _displayAliases[cacheKey] = publishedCacheKey;
     }
@@ -183,6 +194,14 @@ class MemoryArtworkCache {
       _trustedDisplayKeys.remove(_trustedDisplayKeys.first);
     }
     return true;
+  }
+
+  static String _createNetworkOnlyCacheNamespace() {
+    final random = Random.secure();
+    return List.generate(
+      8,
+      (_) => random.nextInt(1 << 16).toRadixString(16).padLeft(4, '0'),
+    ).join();
   }
 
   /// Simulates a process restart without deleting persistent cache files.

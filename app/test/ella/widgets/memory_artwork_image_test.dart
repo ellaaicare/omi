@@ -508,6 +508,82 @@ void main() {
     expect(trustedKey, cacheKey);
   }
 
+  test('a superseded source key stays untrusted after alias pressure evicts its replacement mapping', () async {
+    const staleCacheKey = 'stale-ready-cache-key';
+    const replacementCacheKey = 'replacement-ready-cache-key';
+    await trustDisplayKey(staleCacheKey);
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: staleCacheKey,
+        authoritativeCacheKey: replacementCacheKey,
+        isAuthorityCurrent: () => true,
+      ),
+      replacementCacheKey,
+    );
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(staleCacheKey), replacementCacheKey);
+
+    for (var index = 0; index < 501; index++) {
+      final provisionalCacheKey = 'pressure-provisional-$index';
+      final authoritativeCacheKey = 'pressure-authoritative-$index';
+      MemoryArtworkCache.suppressDisplayCacheKeys({provisionalCacheKey, authoritativeCacheKey});
+      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+        {provisionalCacheKey, authoritativeCacheKey},
+        (_) async {},
+      );
+      expect(
+        await MemoryArtworkCache.rememberDisplayCacheKey(
+          provisionalCacheKey: provisionalCacheKey,
+          authoritativeCacheKey: authoritativeCacheKey,
+          isAuthorityCurrent: () => true,
+        ),
+        isNotNull,
+      );
+    }
+
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey(staleCacheKey),
+      isEmpty,
+      reason: 'alias eviction must not revive the superseded persistent disk key',
+    );
+  });
+
+  testWidgets('verified network artwork remains publishable after suppression capacity is exceeded', (tester) async {
+    for (var index = 0; index <= 4096; index++) {
+      MemoryArtworkCache.suppressDisplayCacheKeys({'terminal-capacity-$index'});
+    }
+    expect(MemoryArtworkCache.resolveDisplayCacheKey('terminal-capacity-0'), isEmpty);
+
+    final api = _AuthorityRefreshArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-after-suppression-capacity',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => null),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsOneWidget);
+    final image = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-network-memory-after-suppression-capacity-0')),
+    );
+    expect(image.imageUrl, 'https://private-storage.example/authority-1.png');
+    expect(image.cacheKey, isNotEmpty);
+    expect(image.cacheKey, isNot('authority-artwork-cache-key'));
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey(image.cacheKey!),
+      isEmpty,
+      reason: 'overflow mode must keep persistent cache reads fail-closed',
+    );
+  });
+
   test('a new terminal tombstone remains fail-closed while older evictions are pending', () async {
     final releases = List.generate(1000, (_) => Completer<void>());
     final pendingEvictions = <Future<void>>[];
