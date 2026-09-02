@@ -561,6 +561,7 @@ void main() {
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
     final requestedKeys = <String>[];
     final evictedKeys = <String>[];
+    final evictionRelease = Completer<void>();
     final conversation = ServerConversation(
       id: 'memory-recycled-suppression',
       createdAt: DateTime(2026, 9, 2),
@@ -579,7 +580,10 @@ void main() {
               requestedKeys.add(cacheKey);
               return cacheKey == 'suppressed-authoritative-cache-key' ? cachedFile : null;
             },
-            cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+            cacheEvictor: (cacheKey) async {
+              evictedKeys.add(cacheKey);
+              await evictionRelease.future;
+            },
           ),
         );
 
@@ -592,7 +596,7 @@ void main() {
     await tester.pump();
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-cached-artwork-memory-recycled-suppression')), findsNothing);
-    expect(evictedKeys, contains('suppressed-authoritative-cache-key'));
+    expect(evictedKeys, isNotEmpty);
 
     requestedKeys.clear();
     await tester.pumpWidget(const SizedBox.shrink());
@@ -601,9 +605,14 @@ void main() {
 
     expect(api.loadCalls, 3);
     expect(api.remountedResult.isCompleted, isFalse);
-    expect(requestedKeys, contains('suppressed-provisional-cache-key'));
-    expect(requestedKeys, isNot(contains('suppressed-authoritative-cache-key')));
+    expect(requestedKeys, isEmpty, reason: 'terminal tombstones must block disk reads before async eviction finishes');
     expect(find.byKey(const Key('memory-cached-artwork-memory-recycled-suppression')), findsNothing);
+
+    evictionRelease.complete();
+    api.remountedResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined));
+    await tester.pump();
+    await tester.pump();
+    expect(evictedKeys, containsAll({'suppressed-provisional-cache-key', 'suppressed-authoritative-cache-key'}));
   });
 
   testWidgets('shows a friendly preparing state while artwork is being generated', (tester) async {

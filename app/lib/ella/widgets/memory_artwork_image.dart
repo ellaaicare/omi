@@ -253,7 +253,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (!mounted || generation != _requestGeneration) return;
     if (_mustSuppressCachedArtwork(result)) {
       final suppressedCacheKeys = {_displayCacheKey, _cacheKey}..removeWhere((cacheKey) => cacheKey.isEmpty);
-      MemoryArtworkCache.forgetDisplayCacheKey(_displayCacheKey);
+      MemoryArtworkCache.suppressDisplayCacheKeys(suppressedCacheKeys);
       setState(() {
         _remoteResult = result;
         _cachedFile = null;
