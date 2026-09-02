@@ -372,11 +372,8 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
     assert result.client_interaction_id == request.client_interaction_id
     terminal_enrichment_handler.assert_awaited_once_with("synthetic-user", "conversation-a")
 
-
-def test_artwork_enqueue_failure_does_not_roll_back_confirmed_enrichment():
-    conversation = _conversation()
-    terminal_enrichment_handler = AsyncMock(side_effect=RuntimeError("synthetic artwork failure"))
-    service = HermesCloudEnrichmentService(
+    failing_terminal_handler = AsyncMock(side_effect=RuntimeError("synthetic artwork failure"))
+    failing_service = HermesCloudEnrichmentService(
         repository=SimpleNamespace(),
         event_store=SimpleNamespace(),
         runtime_service_factory=lambda allow_shadow: FakeRuntimeService(),
@@ -387,14 +384,14 @@ def test_artwork_enqueue_failure_does_not_roll_back_confirmed_enrichment():
                 "canonical_confirmed": True,
             }
         ),
-        terminal_enrichment_handler=terminal_enrichment_handler,
+        terminal_enrichment_handler=failing_terminal_handler,
     )
-    service._runtime = AsyncMock(return_value=_runtime())
+    failing_service._runtime = AsyncMock(return_value=_runtime())
 
-    result = asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
+    failing_result = asyncio.run(failing_service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
 
-    assert result.active_summary_version_id == "version-enriched"
-    terminal_enrichment_handler.assert_awaited_once_with("synthetic-user", "conversation-a")
+    assert failing_result.active_summary_version_id == "version-enriched"
+    failing_terminal_handler.assert_awaited_once_with("synthetic-user", "conversation-a")
 
 
 def test_enrichment_rejects_transcript_change_before_writeback():
